@@ -1,0 +1,599 @@
+version: "1.0"
+updated_at: "2024-12-24T00:00:00Z"
+
+tools:
+  nmap:
+    name: nmap
+    version: "7.94"
+    description: "Network scanner for port discovery, service detection, and OS fingerprinting"
+    image: "ghcr.io/silicon-works/mcp-tools-nmap:latest"
+    image_size_mb: 150
+
+    capabilities:
+      - port_scanning
+      - service_detection
+      - os_fingerprinting
+      - vulnerability_scanning
+      - host_discovery
+
+    phases:
+      - reconnaissance
+      - enumeration
+
+    requirements:
+      network: true
+      privileged: true
+      privileged_reason: "Raw socket access for SYN scans, OS detection, and packet manipulation"
+
+    resources:
+      memory_mb: 256
+      cpu: 0.5
+
+    methods:
+      port_scan:
+        description: "Scan for open ports on a target"
+        when_to_use: "Initial reconnaissance to discover open ports and services"
+        requires_privileged:
+          tcp_connect: false
+          syn: true
+          udp: true
+          ack: true
+        params:
+          target:
+            type: string
+            required: true
+            description: "IP address, hostname, or CIDR range"
+          ports:
+            type: string
+            default: "1-1000"
+            description: "Port range (e.g., '22,80,443' or '1-1000')"
+          scan_type:
+            type: enum
+            values: [tcp_connect, syn, udp, ack]
+            default: tcp_connect
+            description: "Type of port scan"
+          timing:
+            type: enum
+            values: [paranoid, sneaky, polite, normal, aggressive, insane]
+            default: normal
+            description: "Scan timing template (T0-T5)"
+        returns:
+          open_ports:
+            type: array
+            description: "List of open port numbers"
+          services:
+            type: array
+            description: "Service information for each port"
+
+      service_scan:
+        description: "Identify service versions on open ports"
+        when_to_use: "After port scan to enumerate service versions for vulnerability research"
+        requires_privileged: true
+        params:
+          target:
+            type: string
+            required: true
+            description: "IP address or hostname"
+          ports:
+            type: string
+            required: true
+            description: "Ports to scan (from previous port_scan results)"
+        returns:
+          services:
+            type: array
+            description: "Detailed service and version information"
+
+      os_detection:
+        description: "Detect operating system of target"
+        when_to_use: "After port scan to identify target OS for targeted exploitation"
+        requires_privileged: true
+        params:
+          target:
+            type: string
+            required: true
+            description: "IP address or hostname"
+        returns:
+          os_matches:
+            type: array
+            description: "Possible OS matches with confidence scores"
+
+      vuln_scan:
+        description: "Run NSE vulnerability scripts against target"
+        when_to_use: "After service detection to identify known vulnerabilities"
+        requires_privileged: true
+        params:
+          target:
+            type: string
+            required: true
+            description: "IP address or hostname"
+          ports:
+            type: string
+            required: true
+            description: "Ports to scan"
+          scripts:
+            type: string
+            default: "vuln"
+            description: "NSE script category or specific scripts"
+        returns:
+          vulnerabilities:
+            type: array
+            description: "Discovered vulnerabilities with CVE references"
+
+  gobuster:
+    name: gobuster
+    version: "3.6"
+    description: "Directory and DNS bruteforcing tool for web enumeration"
+    image: "ghcr.io/silicon-works/mcp-tools-gobuster:latest"
+    image_size_mb: 80
+
+    capabilities:
+      - directory_bruteforce
+      - dns_bruteforce
+      - vhost_discovery
+      - s3_bucket_enumeration
+
+    phases:
+      - enumeration
+
+    requirements:
+      network: true
+      privileged: false
+      privileged_reason: null
+
+    resources:
+      memory_mb: 512
+      cpu: 1.0
+
+    methods:
+      dir_scan:
+        description: "Bruteforce directories and files on a web server"
+        when_to_use: "After discovering HTTP/HTTPS service to find hidden paths"
+        requires_privileged: false
+        params:
+          url:
+            type: string
+            required: true
+            description: "Target URL (e.g., http://target.com)"
+          wordlist:
+            type: string
+            default: "/usr/share/wordlists/dirb/common.txt"
+            description: "Path to wordlist file"
+          extensions:
+            type: string
+            description: "File extensions to search (e.g., 'php,html,txt')"
+          threads:
+            type: integer
+            default: 10
+            description: "Number of concurrent threads"
+          status_codes:
+            type: string
+            default: "200,204,301,302,307,401,403"
+            description: "Status codes to consider as found"
+        returns:
+          paths:
+            type: array
+            description: "Discovered paths with status codes"
+
+      dns_scan:
+        description: "Bruteforce DNS subdomains"
+        when_to_use: "To discover subdomains of a target domain"
+        params:
+          domain:
+            type: string
+            required: true
+            description: "Target domain (e.g., example.com)"
+          wordlist:
+            type: string
+            default: "/usr/share/wordlists/dns/subdomains-top1million-5000.txt"
+            description: "Path to subdomain wordlist"
+          threads:
+            type: integer
+            default: 10
+            description: "Number of concurrent threads"
+        returns:
+          subdomains:
+            type: array
+            description: "Discovered subdomains with IP addresses"
+
+      vhost_scan:
+        description: "Bruteforce virtual hosts"
+        when_to_use: "To discover virtual hosts on a web server"
+        params:
+          url:
+            type: string
+            required: true
+            description: "Target URL"
+          wordlist:
+            type: string
+            required: true
+            description: "Path to vhost wordlist"
+        returns:
+          vhosts:
+            type: array
+            description: "Discovered virtual hosts"
+
+  sqlmap:
+    name: sqlmap
+    version: "1.8"
+    description: "Automatic SQL injection and database takeover tool"
+    image: "ghcr.io/silicon-works/mcp-tools-sqlmap:latest"
+    image_size_mb: 150
+
+    capabilities:
+      - sql_injection
+      - database_enumeration
+      - data_extraction
+      - os_shell
+
+    phases:
+      - exploitation
+
+    requirements:
+      network: true
+      privileged: false
+
+    resources:
+      memory_mb: 512
+      cpu: 0.5
+
+    methods:
+      test_injection:
+        description: "Test a URL parameter for SQL injection vulnerabilities"
+        when_to_use: "When a potential SQL injection point is identified"
+        params:
+          url:
+            type: string
+            required: true
+            description: "Target URL with injectable parameter (use * to mark injection point)"
+          data:
+            type: string
+            description: "POST data (for POST requests)"
+          cookie:
+            type: string
+            description: "HTTP cookie header value"
+          level:
+            type: integer
+            default: 1
+            description: "Level of tests (1-5)"
+          risk:
+            type: integer
+            default: 1
+            description: "Risk of tests (1-3)"
+          technique:
+            type: string
+            default: "BEUSTQ"
+            description: "SQL injection techniques to use"
+        returns:
+          vulnerable:
+            type: boolean
+            description: "Whether target is vulnerable"
+          injection_type:
+            type: string
+            description: "Type of SQL injection found"
+          dbms:
+            type: string
+            description: "Detected database management system"
+
+      enumerate_dbs:
+        description: "Enumerate databases on a confirmed vulnerable target"
+        when_to_use: "After confirming SQL injection to list available databases"
+        params:
+          url:
+            type: string
+            required: true
+            description: "Target URL (previously confirmed vulnerable)"
+        returns:
+          databases:
+            type: array
+            description: "List of database names"
+
+      dump_table:
+        description: "Dump contents of a database table"
+        when_to_use: "To extract data from a specific table"
+        params:
+          url:
+            type: string
+            required: true
+            description: "Target URL"
+          database:
+            type: string
+            required: true
+            description: "Database name"
+          table:
+            type: string
+            required: true
+            description: "Table name"
+          columns:
+            type: string
+            description: "Specific columns to dump (comma-separated)"
+        returns:
+          data:
+            type: array
+            description: "Table contents"
+
+  nikto:
+    name: nikto
+    version: "2.5"
+    description: "Web server vulnerability scanner"
+    image: "ghcr.io/silicon-works/mcp-tools-nikto:latest"
+    image_size_mb: 120
+
+    capabilities:
+      - web_vulnerability_scanning
+      - server_misconfiguration
+      - outdated_software_detection
+
+    phases:
+      - enumeration
+
+    requirements:
+      network: true
+      privileged: false
+
+    resources:
+      memory_mb: 256
+      cpu: 0.5
+
+    methods:
+      scan:
+        description: "Scan a web server for vulnerabilities and misconfigurations"
+        when_to_use: "After discovering HTTP/HTTPS service to identify web vulnerabilities"
+        params:
+          target:
+            type: string
+            required: true
+            description: "Target URL or IP:port"
+          tuning:
+            type: string
+            description: "Scan tuning options (1-9, a-c)"
+          ssl:
+            type: boolean
+            default: false
+            description: "Force SSL/TLS connection"
+        returns:
+          findings:
+            type: array
+            description: "Vulnerabilities and interesting findings"
+
+  hydra:
+    name: hydra
+    version: "9.5"
+    description: "Network authentication brute-forcing tool"
+    image: "ghcr.io/silicon-works/mcp-tools-hydra:latest"
+    image_size_mb: 100
+
+    capabilities:
+      - password_bruteforce
+      - credential_testing
+
+    phases:
+      - exploitation
+
+    requirements:
+      network: true
+      privileged: false
+
+    resources:
+      memory_mb: 256
+      cpu: 1.0
+
+    methods:
+      bruteforce:
+        description: "Brute-force login credentials for a service"
+        when_to_use: "When default/weak credentials are suspected on a service"
+        params:
+          target:
+            type: string
+            required: true
+            description: "Target IP or hostname"
+          service:
+            type: enum
+            required: true
+            values: [ssh, ftp, http-get, http-post, smb, rdp, mysql, postgres, vnc, telnet]
+            description: "Service protocol to attack"
+          username:
+            type: string
+            description: "Single username to test"
+          userlist:
+            type: string
+            description: "Path to username wordlist"
+          password:
+            type: string
+            description: "Single password to test"
+          passlist:
+            type: string
+            default: "/usr/share/wordlists/rockyou.txt"
+            description: "Path to password wordlist"
+          threads:
+            type: integer
+            default: 16
+            description: "Number of parallel connections"
+          port:
+            type: integer
+            description: "Service port (uses default if not specified)"
+        returns:
+          credentials:
+            type: array
+            description: "Valid username:password combinations found"
+
+  ffuf:
+    name: ffuf
+    version: "2.1"
+    description: "Fast web fuzzer for directory discovery and parameter fuzzing"
+    image: "ghcr.io/silicon-works/mcp-tools-ffuf:latest"
+    image_size_mb: 70
+
+    capabilities:
+      - directory_bruteforce
+      - parameter_fuzzing
+      - vhost_discovery
+
+    phases:
+      - enumeration
+
+    requirements:
+      network: true
+      privileged: false
+
+    resources:
+      memory_mb: 512
+      cpu: 1.0
+
+    methods:
+      fuzz:
+        description: "Fuzz a URL with a wordlist"
+        when_to_use: "Fast alternative to gobuster for directory/parameter fuzzing"
+        params:
+          url:
+            type: string
+            required: true
+            description: "Target URL with FUZZ keyword for injection point"
+          wordlist:
+            type: string
+            required: true
+            description: "Path to wordlist"
+          method:
+            type: enum
+            default: GET
+            values: [GET, POST, PUT, DELETE]
+            description: "HTTP method"
+          headers:
+            type: object
+            description: "Custom HTTP headers"
+          data:
+            type: string
+            description: "POST data (use FUZZ for injection point)"
+          filter_status:
+            type: string
+            description: "Filter by status codes (e.g., '200,301')"
+          filter_size:
+            type: string
+            description: "Filter by response size"
+          threads:
+            type: integer
+            default: 40
+            description: "Number of concurrent threads"
+        returns:
+          results:
+            type: array
+            description: "Successful fuzzing hits"
+
+  whatweb:
+    name: whatweb
+    version: "0.5"
+    description: "Web technology fingerprinting tool"
+    image: "ghcr.io/silicon-works/mcp-tools-whatweb:latest"
+    image_size_mb: 100
+
+    capabilities:
+      - web_fingerprinting
+      - technology_detection
+      - cms_detection
+
+    phases:
+      - reconnaissance
+      - enumeration
+
+    requirements:
+      network: true
+      privileged: false
+
+    resources:
+      memory_mb: 256
+      cpu: 0.5
+
+    methods:
+      scan:
+        description: "Identify web technologies used by a target"
+        when_to_use: "Early reconnaissance to identify CMS, frameworks, and technologies"
+        params:
+          target:
+            type: string
+            required: true
+            description: "Target URL"
+          aggression:
+            type: enum
+            default: stealthy
+            values: [stealthy, passive, polite, aggressive, heavy]
+            description: "Scan aggression level"
+        returns:
+          technologies:
+            type: array
+            description: "Identified technologies with versions"
+
+  linpeas:
+    name: linpeas
+    version: "latest"
+    description: "Linux privilege escalation enumeration script"
+    image: "ghcr.io/silicon-works/mcp-tools-linpeas:latest"
+    image_size_mb: 50
+
+    capabilities:
+      - privilege_escalation_enumeration
+      - linux_enumeration
+      - credential_hunting
+
+    phases:
+      - post-exploitation
+
+    requirements:
+      network: false
+      privileged: false
+
+    resources:
+      memory_mb: 128
+      cpu: 0.5
+
+    methods:
+      enumerate:
+        description: "Run privilege escalation enumeration on a Linux target"
+        when_to_use: "After gaining initial access to find privilege escalation vectors"
+        params:
+          intensity:
+            type: enum
+            default: normal
+            values: [quiet, normal, thorough]
+            description: "Scan intensity level"
+          checks:
+            type: array
+            description: "Specific checks to run (e.g., ['sudo', 'suid', 'cron'])"
+        returns:
+          findings:
+            type: array
+            description: "Potential privilege escalation vectors"
+
+  winpeas:
+    name: winpeas
+    version: "latest"
+    description: "Windows privilege escalation enumeration script"
+    image: "ghcr.io/silicon-works/mcp-tools-winpeas:latest"
+    image_size_mb: 50
+
+    capabilities:
+      - privilege_escalation_enumeration
+      - windows_enumeration
+      - credential_hunting
+
+    phases:
+      - post-exploitation
+
+    requirements:
+      network: false
+      privileged: false
+
+    resources:
+      memory_mb: 128
+      cpu: 0.5
+
+    methods:
+      enumerate:
+        description: "Run privilege escalation enumeration on a Windows target"
+        when_to_use: "After gaining initial access to find Windows privesc vectors"
+        params:
+          checks:
+            type: array
+            description: "Specific checks to run"
+        returns:
+          findings:
+            type: array
+            description: "Potential privilege escalation vectors"

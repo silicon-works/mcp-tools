@@ -1,0 +1,144 @@
+name: Publish Registry
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'registry.yaml'
+  workflow_dispatch:
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install pyyaml jsonschema
+
+      - name: Validate registry schema
+        run: |
+          python << 'EOF'
+          import yaml
+          import sys
+
+          # Load registry
+          with open('registry.yaml', 'r') as f:
+              registry = yaml.safe_load(f)
+
+          # Basic validation
+          errors = []
+
+          if 'version' not in registry:
+              errors.append("Missing 'version' field")
+
+          if 'updated_at' not in registry:
+              errors.append("Missing 'updated_at' field")
+
+          if 'tools' not in registry:
+              errors.append("Missing 'tools' field")
+          else:
+              for tool_name, tool in registry['tools'].items():
+                  prefix = f"tools.{tool_name}"
+
+                  if 'name' not in tool:
+                      errors.append(f"{prefix}: missing 'name'")
+                  if 'description' not in tool:
+                      errors.append(f"{prefix}: missing 'description'")
+                  if 'image' not in tool:
+                      errors.append(f"{prefix}: missing 'image'")
+                  if 'capabilities' not in tool:
+                      errors.append(f"{prefix}: missing 'capabilities'")
+                  if 'phases' not in tool:
+                      errors.append(f"{prefix}: missing 'phases'")
+                  if 'methods' not in tool:
+                      errors.append(f"{prefix}: missing 'methods'")
+                  else:
+                      for method_name, method in tool['methods'].items():
+                          method_prefix = f"{prefix}.methods.{method_name}"
+                          if 'description' not in method:
+                              errors.append(f"{method_prefix}: missing 'description'")
+                          if 'params' not in method:
+                              errors.append(f"{method_prefix}: missing 'params'")
+
+          if errors:
+              print("Registry validation failed:")
+              for error in errors:
+                  print(f"  - {error}")
+              sys.exit(1)
+          else:
+              print(f"Registry validation passed: {len(registry['tools'])} tools defined")
+
+          EOF
+
+      - name: Output registry summary
+        run: |
+          echo "### Registry Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          python << 'EOF' >> $GITHUB_STEP_SUMMARY
+          import yaml
+
+          with open('registry.yaml', 'r') as f:
+              registry = yaml.safe_load(f)
+
+          print(f"**Version:** {registry['version']}")
+          print(f"**Updated:** {registry['updated_at']}")
+          print(f"**Tools:** {len(registry['tools'])}")
+          print("")
+          print("| Tool | Version | Phases | Methods |")
+          print("|------|---------|--------|---------|")
+
+          for name, tool in registry['tools'].items():
+              version = tool.get('version', 'latest')
+              phases = ', '.join(tool.get('phases', []))
+              methods = len(tool.get('methods', {}))
+              print(f"| {name} | {version} | {phases} | {methods} |")
+
+          EOF
+
+  publish:
+    needs: validate
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Upload to opensploit.ai
+        env:
+          REGISTRY_UPLOAD_TOKEN: ${{ secrets.REGISTRY_UPLOAD_TOKEN }}
+          REGISTRY_UPLOAD_URL: ${{ vars.REGISTRY_UPLOAD_URL }}
+        run: |
+          if [ -z "$REGISTRY_UPLOAD_URL" ]; then
+            echo "REGISTRY_UPLOAD_URL not configured, skipping upload"
+            echo "::notice::Registry upload skipped - configure REGISTRY_UPLOAD_URL variable"
+            exit 0
+          fi
+
+          # Upload registry.yaml
+          curl -X PUT \
+            -H "Authorization: Bearer $REGISTRY_UPLOAD_TOKEN" \
+            -H "Content-Type: application/x-yaml" \
+            --data-binary @registry.yaml \
+            "$REGISTRY_UPLOAD_URL" \
+            --fail-with-body
+
+          echo "Registry published to opensploit.ai"
+
+      - name: Create release artifact
+        run: |
+          # Create artifact with registry and version info
+          mkdir -p dist
+          cp registry.yaml dist/
+          echo "${{ github.sha }}" > dist/version.txt
+          echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > dist/published_at.txt
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: registry-${{ github.sha }}
+          path: dist/
+          retention-days: 90
