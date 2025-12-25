@@ -1920,25 +1920,22 @@ tools:
         description: "Suggest privilege escalation exploits based on system info"
         when_to_use: "To get exploit suggestions for the target system"
         params:
-          kernel:
+          kernel_version:
             type: string
             description: "Kernel version (from uname -r)"
-          os:
+          distro:
             type: string
-            description: "OS version (from /etc/os-release)"
-          services:
+            description: "Distribution info (from /etc/os-release)"
+          installed_software:
             type: array
-            description: "Running services with versions"
+            description: "List of installed software with versions (e.g., ['netdata 1.45.2', 'sudo 1.8.31'])"
         returns:
-          kernel_exploits:
+          suggestions:
             type: array
-            description: "Kernel exploits that may work"
-          service_exploits:
-            type: array
-            description: "Service-based exploits"
-          cves:
-            type: array
-            description: "Relevant CVEs"
+            description: "Suggested exploits with CVE references"
+          count:
+            type: integer
+            description: "Number of suggestions found"
 
       get_linpeas:
         description: "Get linpeas.sh script content"
@@ -2131,3 +2128,409 @@ tools:
           decoded:
             type: string
             description: "Decoded payload"
+
+  # =============================================================================
+  # TUNNELING / PIVOTING
+  # =============================================================================
+
+  tunnel:
+    name: tunnel
+    version: "1.0"
+    description: "SSH tunnel and SOCKS proxy for accessing remote localhost services"
+    image: "ghcr.io/silicon-works/mcp-tools-tunnel:latest"
+    image_size_mb: 100
+
+    capabilities:
+      - port_forwarding
+      - socks_proxy
+      - pivoting
+      - tunnel_management
+
+    phases:
+      - post-exploitation
+
+    requirements:
+      network: true
+      privileged: false
+      network_mode: host
+      network_mode_reason: "Tunnels must be accessible from other containers"
+
+    resources:
+      memory_mb: 128
+      cpu: 0.25
+
+    methods:
+      forward:
+        description: "Create SSH local port forward (access remote service via local port)"
+        when_to_use: "To access localhost-only services on remote host (e.g., MySQL on 127.0.0.1:3306)"
+        params:
+          ssh_host:
+            type: string
+            required: true
+            description: "SSH server hostname or IP"
+          ssh_user:
+            type: string
+            required: true
+            description: "SSH username"
+          ssh_password:
+            type: string
+            description: "SSH password"
+          ssh_key:
+            type: string
+            description: "SSH private key content"
+          ssh_port:
+            type: integer
+            default: 22
+            description: "SSH server port"
+          remote_host:
+            type: string
+            default: "127.0.0.1"
+            description: "Remote host to forward to (default: localhost on SSH server)"
+          remote_port:
+            type: integer
+            required: true
+            description: "Remote port to forward"
+          local_port:
+            type: integer
+            default: 0
+            description: "Local port to listen on (0 = auto-assign)"
+        returns:
+          tunnel_id:
+            type: string
+            description: "Unique tunnel identifier"
+          local_port:
+            type: integer
+            description: "Local port the tunnel is listening on"
+          connect_to:
+            type: string
+            description: "Address to connect to (e.g., 127.0.0.1:9999)"
+
+      socks:
+        description: "Create SOCKS5 proxy through SSH (dynamic port forwarding)"
+        when_to_use: "To proxy all traffic through the SSH server for pivoting"
+        params:
+          ssh_host:
+            type: string
+            required: true
+            description: "SSH server hostname or IP"
+          ssh_user:
+            type: string
+            required: true
+            description: "SSH username"
+          ssh_password:
+            type: string
+            description: "SSH password"
+          ssh_key:
+            type: string
+            description: "SSH private key content"
+          ssh_port:
+            type: integer
+            default: 22
+            description: "SSH server port"
+          local_port:
+            type: integer
+            default: 1080
+            description: "Local SOCKS port"
+        returns:
+          tunnel_id:
+            type: string
+            description: "Unique tunnel identifier"
+          proxy_url:
+            type: string
+            description: "SOCKS5 proxy URL (e.g., socks5://127.0.0.1:1080)"
+
+      list:
+        description: "List active tunnels"
+        when_to_use: "To see all active SSH tunnels and their status"
+        params: {}
+        returns:
+          tunnels:
+            type: array
+            description: "List of active tunnels with details"
+          count:
+            type: integer
+            description: "Number of active tunnels"
+
+      close:
+        description: "Close a specific tunnel"
+        when_to_use: "To close a tunnel that is no longer needed"
+        params:
+          tunnel_id:
+            type: string
+            required: true
+            description: "Tunnel ID to close"
+        returns:
+          tunnel_id:
+            type: string
+            description: "Closed tunnel ID"
+
+      close_all:
+        description: "Close all tunnels"
+        when_to_use: "Cleanup all tunnels at end of engagement"
+        params: {}
+        returns:
+          closed:
+            type: array
+            description: "List of closed tunnel IDs"
+
+  # =============================================================================
+  # WEB FINGERPRINTING
+  # =============================================================================
+
+  web-fingerprint:
+    name: web-fingerprint
+    version: "1.0"
+    description: "Web technology fingerprinting for identifying CMS, frameworks, and servers"
+    image: "ghcr.io/silicon-works/mcp-tools-web-fingerprint:latest"
+    image_size_mb: 100
+
+    capabilities:
+      - technology_detection
+      - cms_identification
+      - framework_detection
+      - server_fingerprinting
+      - security_header_analysis
+
+    phases:
+      - reconnaissance
+      - enumeration
+
+    requirements:
+      network: true
+      privileged: false
+
+    resources:
+      memory_mb: 128
+      cpu: 0.25
+
+    methods:
+      fingerprint:
+        description: "Fingerprint web technologies on a target URL"
+        when_to_use: "Initial reconnaissance to identify technology stack"
+        params:
+          url:
+            type: string
+            required: true
+            description: "Target URL to fingerprint"
+          follow_redirects:
+            type: boolean
+            default: true
+            description: "Follow HTTP redirects"
+          timeout:
+            type: integer
+            default: 30
+            description: "Request timeout in seconds"
+          user_agent:
+            type: string
+            description: "Custom User-Agent header"
+        returns:
+          technologies:
+            type: array
+            description: "Detected technologies with confidence scores"
+          server:
+            type: string
+            description: "Server header value"
+          title:
+            type: string
+            description: "Page title"
+          interesting_paths:
+            type: array
+            description: "Extracted paths from HTML"
+
+      headers:
+        description: "Extract and analyze HTTP headers"
+        when_to_use: "To analyze server configuration and security headers"
+        params:
+          url:
+            type: string
+            required: true
+            description: "Target URL"
+          timeout:
+            type: integer
+            default: 30
+            description: "Request timeout in seconds"
+        returns:
+          security_headers:
+            type: object
+            description: "Security-related headers"
+          server_headers:
+            type: object
+            description: "Server information headers"
+
+      security_headers:
+        description: "Check for security headers and misconfigurations"
+        when_to_use: "To assess security header configuration"
+        params:
+          url:
+            type: string
+            required: true
+            description: "Target URL"
+          timeout:
+            type: integer
+            default: 30
+            description: "Request timeout in seconds"
+        returns:
+          missing_headers:
+            type: array
+            description: "Missing security headers"
+          present_headers:
+            type: array
+            description: "Present security headers"
+          issues:
+            type: array
+            description: "Security issues found"
+          score:
+            type: string
+            description: "Security header score"
+
+      favicon_hash:
+        description: "Calculate favicon hash for Shodan lookup"
+        when_to_use: "To find similar servers via Shodan favicon search"
+        params:
+          url:
+            type: string
+            required: true
+            description: "Target URL"
+          timeout:
+            type: integer
+            default: 30
+            description: "Request timeout"
+        returns:
+          md5:
+            type: string
+            description: "Favicon MD5 hash"
+          shodan_query:
+            type: string
+            description: "Shodan search query"
+
+  # =============================================================================
+  # CVE LOOKUP
+  # =============================================================================
+
+  cve-lookup:
+    name: cve-lookup
+    version: "1.0"
+    description: "CVE lookup and vulnerability research using NVD API"
+    image: "ghcr.io/silicon-works/mcp-tools-cve-lookup:latest"
+    image_size_mb: 100
+
+    capabilities:
+      - cve_lookup
+      - vulnerability_search
+      - exploit_research
+      - cvss_scoring
+
+    phases:
+      - enumeration
+      - exploitation
+
+    requirements:
+      network: true
+      privileged: false
+
+    resources:
+      memory_mb: 128
+      cpu: 0.25
+
+    environment:
+      NVD_API_KEY:
+        description: "Optional NVD API key for higher rate limits"
+        required: false
+
+    methods:
+      lookup:
+        description: "Look up a specific CVE by ID"
+        when_to_use: "When you have a CVE ID and need full details"
+        params:
+          cve_id:
+            type: string
+            required: true
+            description: "CVE ID (e.g., CVE-2024-32019)"
+        returns:
+          cve_id:
+            type: string
+            description: "CVE identifier"
+          description:
+            type: string
+            description: "Vulnerability description"
+          cvss_score:
+            type: number
+            description: "CVSS base score"
+          cvss_severity:
+            type: string
+            description: "Severity level (LOW, MEDIUM, HIGH, CRITICAL)"
+          affected_products:
+            type: array
+            description: "Affected products and versions"
+          references:
+            type: array
+            description: "Reference URLs"
+
+      search:
+        description: "Search CVEs by product/keyword"
+        when_to_use: "After fingerprinting to find vulnerabilities for detected software"
+        params:
+          keyword:
+            type: string
+            required: true
+            description: "Search keyword (product name)"
+          version:
+            type: string
+            description: "Product version to filter"
+          severity:
+            type: enum
+            values: [LOW, MEDIUM, HIGH, CRITICAL]
+            description: "Filter by severity"
+          limit:
+            type: integer
+            default: 20
+            description: "Maximum results"
+          year:
+            type: integer
+            description: "Filter by year"
+        returns:
+          cves:
+            type: array
+            description: "Matching CVEs with scores and descriptions"
+          total_results:
+            type: integer
+            description: "Total matching CVEs in NVD"
+
+      recent:
+        description: "Get recent CVEs from last 7 days"
+        when_to_use: "To find newly disclosed vulnerabilities"
+        params:
+          severity:
+            type: enum
+            values: [LOW, MEDIUM, HIGH, CRITICAL]
+            description: "Filter by severity"
+          limit:
+            type: integer
+            default: 20
+            description: "Maximum results"
+        returns:
+          cves:
+            type: array
+            description: "Recent CVEs"
+
+      exploits:
+        description: "Find known exploits for a CVE"
+        when_to_use: "After finding relevant CVE to check for public exploits"
+        params:
+          cve_id:
+            type: string
+            required: true
+            description: "CVE ID to search exploits for"
+        returns:
+          exploit_references:
+            type: array
+            description: "URLs to exploit code or PoCs"
+          exploit_sources:
+            type: array
+            description: "Sources with exploits (ExploitDB, GitHub, etc.)"
+          searchsploit_query:
+            type: string
+            description: "Query for searchsploit tool"
+          metasploit_search:
+            type: string
+            description: "Metasploit search command"
