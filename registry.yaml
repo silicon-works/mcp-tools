@@ -1153,3 +1153,322 @@ tools:
           possible_formats:
             type: array
             description: "Possible hash formats"
+
+  # =============================================================================
+  # NETWORK ACCESS / SHELLS
+  # =============================================================================
+
+  netcat:
+    name: netcat
+    version: "1.0"
+    description: "Network utility for reverse shells, bind shells, and port testing"
+    image: "ghcr.io/silicon-works/mcp-tools-netcat:latest"
+    image_size_mb: 100
+
+    capabilities:
+      - reverse_shell_listener
+      - bind_shell_connection
+      - port_checking
+      - network_debugging
+
+    phases:
+      - exploitation
+      - post-exploitation
+
+    requirements:
+      network: true
+      privileged: false
+
+    resources:
+      memory_mb: 128
+      cpu: 0.25
+
+    methods:
+      listen:
+        description: "Start a listener for incoming connections (reverse shells)"
+        when_to_use: "Before triggering a reverse shell payload to catch the connection"
+        params:
+          port:
+            type: integer
+            required: true
+            description: "Port to listen on"
+          timeout:
+            type: integer
+            default: 300
+            description: "Listener timeout in seconds"
+        returns:
+          port:
+            type: integer
+            description: "Port listening on"
+          pid:
+            type: integer
+            description: "Process ID of listener"
+          status:
+            type: string
+            description: "Listener status"
+
+      exec:
+        description: "Execute a command on a listening port and return output (one-shot)"
+        when_to_use: "One-shot reverse shell execution - listen, wait for connection, capture output"
+        params:
+          port:
+            type: integer
+            required: true
+            description: "Port to listen on"
+          timeout:
+            type: integer
+            default: 60
+            description: "Timeout waiting for connection and command output"
+        returns:
+          output:
+            type: string
+            description: "Captured output from connection"
+
+      connect:
+        description: "Connect to a remote host (bind shell or service)"
+        when_to_use: "To connect to a bind shell or interact with a network service"
+        params:
+          host:
+            type: string
+            required: true
+            description: "Target host"
+          port:
+            type: integer
+            required: true
+            description: "Target port"
+          data:
+            type: string
+            description: "Data to send after connecting"
+          timeout:
+            type: integer
+            default: 30
+            description: "Connection timeout in seconds"
+        returns:
+          output:
+            type: string
+            description: "Response from remote host"
+
+      check_port:
+        description: "Check if a port is open on a host"
+        when_to_use: "Quick port connectivity check"
+        params:
+          host:
+            type: string
+            required: true
+            description: "Target host"
+          port:
+            type: integer
+            required: true
+            description: "Target port"
+          timeout:
+            type: integer
+            default: 5
+            description: "Connection timeout in seconds"
+        returns:
+          open:
+            type: boolean
+            description: "Whether port is open"
+
+      get_interfaces:
+        description: "Get network interfaces and their IP addresses (for LHOST)"
+        when_to_use: "To determine LHOST for reverse shell payloads"
+        params: {}
+        returns:
+          interfaces:
+            type: array
+            description: "Network interfaces with IP addresses"
+
+      stop_listener:
+        description: "Stop an active listener"
+        when_to_use: "To clean up listeners that are no longer needed"
+        params:
+          port:
+            type: integer
+            required: true
+            description: "Port of the listener to stop"
+        returns:
+          status:
+            type: string
+            description: "Stop status"
+
+  ssh:
+    name: ssh
+    version: "1.0"
+    description: "SSH client for remote shell access with password or key authentication"
+    image: "ghcr.io/silicon-works/mcp-tools-ssh:latest"
+    image_size_mb: 100
+
+    capabilities:
+      - remote_shell_access
+      - command_execution
+      - file_transfer
+      - credential_based_access
+
+    phases:
+      - exploitation
+      - post-exploitation
+
+    requirements:
+      network: true
+      privileged: false
+
+    resources:
+      memory_mb: 128
+      cpu: 0.25
+
+    methods:
+      exec:
+        description: "Execute a command on a remote host via SSH"
+        when_to_use: "When you have valid SSH credentials and need to run commands"
+        params:
+          host:
+            type: string
+            required: true
+            description: "Target hostname or IP"
+          username:
+            type: string
+            required: true
+            description: "SSH username"
+          password:
+            type: string
+            description: "SSH password (use sshpass)"
+          key:
+            type: string
+            description: "Private key content (PEM format)"
+          command:
+            type: string
+            required: true
+            description: "Command to execute"
+          port:
+            type: integer
+            default: 22
+            description: "SSH port"
+          timeout:
+            type: integer
+            default: 30
+            description: "Connection timeout in seconds"
+        returns:
+          exit_code:
+            type: integer
+            description: "Command exit code"
+          stdout:
+            type: string
+            description: "Command standard output"
+          stderr:
+            type: string
+            description: "Command standard error"
+
+      shell:
+        description: "Execute multiple commands in sequence on a remote host"
+        when_to_use: "To run a series of commands via SSH"
+        params:
+          host:
+            type: string
+            required: true
+            description: "Target hostname or IP"
+          username:
+            type: string
+            required: true
+            description: "SSH username"
+          password:
+            type: string
+            description: "SSH password"
+          key:
+            type: string
+            description: "Private key content (PEM format)"
+          commands:
+            type: array
+            required: true
+            description: "List of commands to execute"
+          port:
+            type: integer
+            default: 22
+            description: "SSH port"
+          timeout:
+            type: integer
+            default: 60
+            description: "Total timeout for all commands"
+        returns:
+          exit_code:
+            type: integer
+            description: "Exit code of command chain"
+          stdout:
+            type: string
+            description: "Combined output"
+
+      copy_from:
+        description: "Download a file from remote host via SCP"
+        when_to_use: "To retrieve files after gaining SSH access"
+        params:
+          host:
+            type: string
+            required: true
+            description: "Target hostname or IP"
+          username:
+            type: string
+            required: true
+            description: "SSH username"
+          password:
+            type: string
+            description: "SSH password"
+          key:
+            type: string
+            description: "Private key content (PEM format)"
+          remote_path:
+            type: string
+            required: true
+            description: "Path to file on remote host"
+          port:
+            type: integer
+            default: 22
+            description: "SSH port"
+          timeout:
+            type: integer
+            default: 60
+            description: "Transfer timeout in seconds"
+        returns:
+          content:
+            type: string
+            description: "File contents"
+          size:
+            type: integer
+            description: "File size in bytes"
+
+      copy_to:
+        description: "Upload content to remote host via SCP"
+        when_to_use: "To upload tools or scripts after gaining SSH access"
+        params:
+          host:
+            type: string
+            required: true
+            description: "Target hostname or IP"
+          username:
+            type: string
+            required: true
+            description: "SSH username"
+          password:
+            type: string
+            description: "SSH password"
+          key:
+            type: string
+            description: "Private key content (PEM format)"
+          content:
+            type: string
+            required: true
+            description: "Content to upload"
+          remote_path:
+            type: string
+            required: true
+            description: "Destination path on remote host"
+          port:
+            type: integer
+            default: 22
+            description: "SSH port"
+          timeout:
+            type: integer
+            default: 60
+            description: "Transfer timeout in seconds"
+        returns:
+          size:
+            type: integer
+            description: "Uploaded file size"
