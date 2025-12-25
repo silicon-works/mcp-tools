@@ -111,6 +111,63 @@ tools:
             type: string
             description: "File contents as base64"
 
+      inject:
+        description: "Send a payload to a web RCE endpoint and extract output"
+        when_to_use: "For web RCE exploitation with automatic payload encoding and output extraction"
+        params:
+          url:
+            type: string
+            required: true
+            description: "Target URL (use {PAYLOAD} as placeholder for command)"
+          command:
+            type: string
+            required: true
+            description: "Command to execute"
+          method:
+            type: enum
+            values: [GET, POST]
+            default: GET
+            description: "HTTP method"
+          encoding:
+            type: enum
+            values: [url, double-url, base64, none]
+            default: url
+            description: "Payload encoding method"
+          output_markers:
+            type: object
+            description: "Start/end markers to extract output: {start: str, end: str}"
+          strip_html:
+            type: boolean
+            default: true
+            description: "Strip HTML tags from output"
+          headers:
+            type: object
+            description: "Custom headers as key-value pairs"
+          data:
+            type: string
+            description: "POST body (use {PAYLOAD} as placeholder)"
+          cookie:
+            type: string
+            description: "Cookie header value"
+          timeout:
+            type: integer
+            default: 30
+            description: "Request timeout in seconds"
+          insecure:
+            type: boolean
+            default: false
+            description: "Skip SSL certificate verification"
+        returns:
+          output:
+            type: string
+            description: "Extracted command output"
+          status_code:
+            type: integer
+            description: "HTTP response status code"
+          raw_body_length:
+            type: integer
+            description: "Length of raw response body"
+
   playwright-mcp:
     name: playwright-mcp
     version: "latest"
@@ -1472,3 +1529,605 @@ tools:
           size:
             type: integer
             description: "Uploaded file size"
+
+      upload_binary:
+        description: "Upload binary content via base64 chunking"
+        when_to_use: "To upload compiled binaries, exploits, or other non-text files"
+        params:
+          host:
+            type: string
+            required: true
+            description: "Target hostname or IP"
+          username:
+            type: string
+            required: true
+            description: "SSH username"
+          password:
+            type: string
+            description: "SSH password"
+          key:
+            type: string
+            description: "Private key content (PEM format)"
+          content_base64:
+            type: string
+            required: true
+            description: "Binary content as base64"
+          remote_path:
+            type: string
+            required: true
+            description: "Destination path on remote host"
+          executable:
+            type: boolean
+            default: true
+            description: "Make file executable after upload"
+          port:
+            type: integer
+            default: 22
+            description: "SSH port"
+          timeout:
+            type: integer
+            default: 300
+            description: "Transfer timeout in seconds"
+        returns:
+          size:
+            type: integer
+            description: "Uploaded file size in bytes"
+          verified:
+            type: boolean
+            description: "Whether file was verified after upload"
+
+      run_script:
+        description: "Upload and execute a script on remote host"
+        when_to_use: "To run multi-line scripts or enumeration tools"
+        params:
+          host:
+            type: string
+            required: true
+            description: "Target hostname or IP"
+          username:
+            type: string
+            required: true
+            description: "SSH username"
+          password:
+            type: string
+            description: "SSH password"
+          key:
+            type: string
+            description: "Private key content (PEM format)"
+          script:
+            type: string
+            required: true
+            description: "Script content to execute"
+          interpreter:
+            type: string
+            default: "/bin/bash"
+            description: "Script interpreter"
+          port:
+            type: integer
+            default: 22
+            description: "SSH port"
+          timeout:
+            type: integer
+            default: 300
+            description: "Execution timeout in seconds"
+        returns:
+          exit_code:
+            type: integer
+            description: "Script exit code"
+          stdout:
+            type: string
+            description: "Script output"
+          stderr:
+            type: string
+            description: "Script error output"
+
+  # =============================================================================
+  # DATABASE
+  # =============================================================================
+
+  mysql:
+    name: mysql
+    version: "8.0"
+    description: "MySQL client for database enumeration and credential extraction"
+    image: "ghcr.io/silicon-works/mcp-tools-mysql:latest"
+    image_size_mb: 300
+
+    capabilities:
+      - database_enumeration
+      - sql_query_execution
+      - credential_extraction
+      - data_exfiltration
+
+    phases:
+      - enumeration
+      - post-exploitation
+
+    requirements:
+      network: true
+      privileged: false
+
+    resources:
+      memory_mb: 256
+      cpu: 0.5
+
+    methods:
+      query:
+        description: "Execute a SQL query on a MySQL database"
+        when_to_use: "When you have MySQL credentials and need to query the database"
+        params:
+          host:
+            type: string
+            required: true
+            description: "MySQL server hostname or IP"
+          username:
+            type: string
+            required: true
+            description: "MySQL username"
+          password:
+            type: string
+            description: "MySQL password"
+          database:
+            type: string
+            description: "Database to use"
+          query:
+            type: string
+            required: true
+            description: "SQL query to execute"
+          port:
+            type: integer
+            default: 3306
+            description: "MySQL port"
+          timeout:
+            type: integer
+            default: 30
+            description: "Query timeout in seconds"
+        returns:
+          rows:
+            type: array
+            description: "Query results as array of objects"
+          row_count:
+            type: integer
+            description: "Number of rows returned"
+
+      list_databases:
+        description: "List all databases on the server"
+        when_to_use: "Initial enumeration after gaining MySQL access"
+        params:
+          host:
+            type: string
+            required: true
+            description: "MySQL server hostname or IP"
+          username:
+            type: string
+            required: true
+            description: "MySQL username"
+          password:
+            type: string
+            description: "MySQL password"
+          port:
+            type: integer
+            default: 3306
+            description: "MySQL port"
+        returns:
+          databases:
+            type: array
+            description: "List of database names"
+
+      list_tables:
+        description: "List all tables in a database"
+        when_to_use: "To enumerate tables after identifying interesting databases"
+        params:
+          host:
+            type: string
+            required: true
+            description: "MySQL server hostname or IP"
+          username:
+            type: string
+            required: true
+            description: "MySQL username"
+          password:
+            type: string
+            description: "MySQL password"
+          database:
+            type: string
+            required: true
+            description: "Database name"
+          port:
+            type: integer
+            default: 3306
+            description: "MySQL port"
+        returns:
+          tables:
+            type: array
+            description: "List of table names"
+
+      dump_table:
+        description: "Dump contents of a table"
+        when_to_use: "To extract data from a table"
+        params:
+          host:
+            type: string
+            required: true
+            description: "MySQL server hostname or IP"
+          username:
+            type: string
+            required: true
+            description: "MySQL username"
+          password:
+            type: string
+            description: "MySQL password"
+          database:
+            type: string
+            required: true
+            description: "Database name"
+          table:
+            type: string
+            required: true
+            description: "Table name"
+          columns:
+            type: array
+            description: "Specific columns to dump"
+          limit:
+            type: integer
+            default: 100
+            description: "Maximum rows to return"
+          port:
+            type: integer
+            default: 3306
+            description: "MySQL port"
+        returns:
+          data:
+            type: array
+            description: "Table contents"
+          row_count:
+            type: integer
+            description: "Number of rows returned"
+
+      find_credentials:
+        description: "Search for credential-related tables and data"
+        when_to_use: "To find usernames and passwords in the database"
+        params:
+          host:
+            type: string
+            required: true
+            description: "MySQL server hostname or IP"
+          username:
+            type: string
+            required: true
+            description: "MySQL username"
+          password:
+            type: string
+            description: "MySQL password"
+          database:
+            type: string
+            description: "Database to search (searches all if not specified)"
+          port:
+            type: integer
+            default: 3306
+            description: "MySQL port"
+        returns:
+          tables:
+            type: array
+            description: "Tables that may contain credentials"
+          credentials:
+            type: array
+            description: "Found credentials (username, password/hash)"
+
+  # =============================================================================
+  # PRIVILEGE ESCALATION
+  # =============================================================================
+
+  privesc:
+    name: privesc
+    version: "1.0"
+    description: "Privilege escalation enumeration and exploit suggestion"
+    image: "ghcr.io/silicon-works/mcp-tools-privesc:latest"
+    image_size_mb: 200
+
+    capabilities:
+      - privilege_escalation_enumeration
+      - suid_analysis
+      - sudo_analysis
+      - capability_analysis
+      - cve_lookup
+
+    phases:
+      - post-exploitation
+
+    requirements:
+      network: false
+      privileged: false
+
+    resources:
+      memory_mb: 256
+      cpu: 0.5
+
+    methods:
+      enumerate:
+        description: "Run comprehensive privilege escalation enumeration"
+        when_to_use: "After gaining initial access to find privilege escalation paths"
+        params:
+          checks:
+            type: array
+            description: "Specific checks to run (default: all)"
+          quick:
+            type: boolean
+            default: false
+            description: "Run quick enumeration only"
+        returns:
+          suid_binaries:
+            type: array
+            description: "SUID binaries found"
+          sudo_rights:
+            type: array
+            description: "Sudo permissions"
+          capabilities:
+            type: array
+            description: "Files with capabilities"
+          writable_paths:
+            type: array
+            description: "Writable sensitive paths"
+          cron_jobs:
+            type: array
+            description: "Cron jobs found"
+
+      check_suid:
+        description: "Find SUID/SGID binaries"
+        when_to_use: "To find binaries that may allow privilege escalation"
+        params: {}
+        returns:
+          suid_binaries:
+            type: array
+            description: "SUID binaries with GTFOBins status"
+
+      check_sudo:
+        description: "Check sudo permissions"
+        when_to_use: "To find sudo misconfigurations"
+        params: {}
+        returns:
+          sudo_rights:
+            type: array
+            description: "Sudo permissions and exploit potential"
+
+      check_capabilities:
+        description: "Find files with special capabilities"
+        when_to_use: "To find capability-based privilege escalation"
+        params: {}
+        returns:
+          capabilities:
+            type: array
+            description: "Files with capabilities"
+
+      check_cron:
+        description: "Enumerate cron jobs"
+        when_to_use: "To find cron-based privilege escalation"
+        params: {}
+        returns:
+          cron_jobs:
+            type: array
+            description: "Cron jobs with analysis"
+
+      check_writable:
+        description: "Find writable sensitive paths"
+        when_to_use: "To find writable files that may allow privilege escalation"
+        params: {}
+        returns:
+          writable_paths:
+            type: array
+            description: "Writable sensitive files and directories"
+
+      suggest_exploits:
+        description: "Suggest privilege escalation exploits based on system info"
+        when_to_use: "To get exploit suggestions for the target system"
+        params:
+          kernel:
+            type: string
+            description: "Kernel version (from uname -r)"
+          os:
+            type: string
+            description: "OS version (from /etc/os-release)"
+          services:
+            type: array
+            description: "Running services with versions"
+        returns:
+          kernel_exploits:
+            type: array
+            description: "Kernel exploits that may work"
+          service_exploits:
+            type: array
+            description: "Service-based exploits"
+          cves:
+            type: array
+            description: "Relevant CVEs"
+
+      get_linpeas:
+        description: "Get linpeas.sh script content"
+        when_to_use: "To run comprehensive Linux enumeration"
+        params: {}
+        returns:
+          script:
+            type: string
+            description: "linpeas.sh script content"
+          size:
+            type: integer
+            description: "Script size in bytes"
+
+      get_lse:
+        description: "Get linux-smart-enumeration script content"
+        when_to_use: "To run targeted Linux enumeration"
+        params: {}
+        returns:
+          script:
+            type: string
+            description: "lse.sh script content"
+          size:
+            type: integer
+            description: "Script size in bytes"
+
+  # =============================================================================
+  # PAYLOAD GENERATION
+  # =============================================================================
+
+  payload:
+    name: payload
+    version: "1.0"
+    description: "Payload compiler and generator for reverse shells, SUID binaries, and encoding"
+    image: "ghcr.io/silicon-works/mcp-tools-payload:latest"
+    image_size_mb: 400
+
+    capabilities:
+      - binary_compilation
+      - reverse_shell_generation
+      - payload_encoding
+      - suid_binary_creation
+
+    phases:
+      - exploitation
+      - post-exploitation
+
+    requirements:
+      network: false
+      privileged: false
+
+    resources:
+      memory_mb: 512
+      cpu: 1.0
+
+    methods:
+      compile_c:
+        description: "Compile C source code to an ELF binary"
+        when_to_use: "To compile custom exploits or SUID binaries"
+        params:
+          source:
+            type: string
+            required: true
+            description: "C source code to compile"
+          arch:
+            type: enum
+            values: [x64, x86, arm]
+            default: x64
+            description: "Target architecture"
+          static:
+            type: boolean
+            default: false
+            description: "Compile statically linked binary"
+          strip:
+            type: boolean
+            default: true
+            description: "Strip symbols from binary"
+          output_format:
+            type: enum
+            values: [base64, hex]
+            default: base64
+            description: "Output encoding format"
+        returns:
+          binary:
+            type: string
+            description: "Compiled binary in specified format"
+          size_bytes:
+            type: integer
+            description: "Binary size in bytes"
+
+      suid_shell:
+        description: "Generate a SUID shell binary"
+        when_to_use: "To create a binary that runs commands as root when SUID is set"
+        params:
+          command:
+            type: string
+            default: "/bin/bash"
+            description: "Command to execute"
+          arch:
+            type: enum
+            values: [x64, x86]
+            default: x64
+            description: "Target architecture"
+          output_format:
+            type: enum
+            values: [base64, hex]
+            default: base64
+            description: "Output encoding format"
+        returns:
+          binary:
+            type: string
+            description: "SUID shell binary in specified format"
+          size_bytes:
+            type: integer
+            description: "Binary size in bytes"
+
+      revshell:
+        description: "Generate a reverse shell payload"
+        when_to_use: "To create reverse shell one-liners for various languages"
+        params:
+          lhost:
+            type: string
+            required: true
+            description: "Listener IP address"
+          lport:
+            type: integer
+            required: true
+            description: "Listener port"
+          type:
+            type: enum
+            values: [bash, python, nc, php, perl, ruby, powershell, socat]
+            default: bash
+            description: "Reverse shell type"
+          variant:
+            type: string
+            description: "Variant of the shell type (e.g., 'tcp', 'pty', 'mkfifo')"
+          encode:
+            type: enum
+            values: [none, base64, url, double-url]
+            default: none
+            description: "Encoding to apply"
+        returns:
+          payload:
+            type: string
+            description: "Reverse shell payload"
+          raw_payload:
+            type: string
+            description: "Unencoded payload (if encoding applied)"
+
+      list_shells:
+        description: "List available reverse shell types and variants"
+        when_to_use: "To see available reverse shell options"
+        params: {}
+        returns:
+          shells:
+            type: object
+            description: "Available shell types and their variants"
+
+      encode:
+        description: "Encode a payload"
+        when_to_use: "To encode payloads for evasion or transport"
+        params:
+          payload:
+            type: string
+            required: true
+            description: "Payload to encode"
+          encoding:
+            type: enum
+            values: [base64, url, double-url, hex, unicode]
+            required: true
+            description: "Encoding method"
+        returns:
+          encoded:
+            type: string
+            description: "Encoded payload"
+
+      decode:
+        description: "Decode an encoded payload"
+        when_to_use: "To decode payloads for analysis"
+        params:
+          payload:
+            type: string
+            required: true
+            description: "Payload to decode"
+          encoding:
+            type: enum
+            values: [base64, url, hex]
+            required: true
+            description: "Encoding to reverse"
+        returns:
+          decoded:
+            type: string
+            description: "Decoded payload"
