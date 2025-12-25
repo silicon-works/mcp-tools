@@ -8,6 +8,7 @@ SSH client for remote shell access with password or key authentication.
 import asyncio
 import base64
 import os
+import subprocess
 import tempfile
 from typing import Optional
 
@@ -295,6 +296,70 @@ class SSHServer(BaseMCPServer):
             handler=self.run_script,
         )
 
+    def _convert_openssh_to_pem(self, key_content: str) -> str:
+        """Convert OpenSSH format key to PEM format if needed.
+
+        OpenSSH keys start with '-----BEGIN OPENSSH PRIVATE KEY-----'
+        PEM keys start with '-----BEGIN RSA PRIVATE KEY-----' (or DSA, EC, etc.)
+
+        Returns the key content in PEM format.
+        """
+        # Check if already PEM format
+        if "BEGIN RSA PRIVATE KEY" in key_content or \
+           "BEGIN DSA PRIVATE KEY" in key_content or \
+           "BEGIN EC PRIVATE KEY" in key_content or \
+           "BEGIN PRIVATE KEY" in key_content:
+            return key_content
+
+        # Check if OpenSSH format that needs conversion
+        if "BEGIN OPENSSH PRIVATE KEY" not in key_content:
+            # Unknown format, return as-is and let SSH handle it
+            return key_content
+
+        self.logger.info("Converting OpenSSH key format to PEM")
+
+        # Write key to temp file
+        fd, temp_key = tempfile.mkstemp(prefix="ssh_key_convert_")
+        try:
+            os.write(fd, key_content.encode())
+            os.close(fd)
+            os.chmod(temp_key, 0o600)
+
+            # Convert using ssh-keygen
+            # -p: change passphrase (but we use empty passphrase)
+            # -m PEM: convert to PEM format
+            # -f: key file
+            # -N "": new passphrase (empty)
+            # -P "": old passphrase (empty, assuming unencrypted key)
+            result = subprocess.run(
+                ["ssh-keygen", "-p", "-m", "PEM", "-f", temp_key, "-N", "", "-P", ""],
+                capture_output=True,
+                text=True,
+            )
+
+            if result.returncode != 0:
+                self.logger.warning(f"Key conversion failed: {result.stderr}")
+                # Return original key and hope for the best
+                return key_content
+
+            # Read converted key
+            with open(temp_key, "r") as f:
+                converted_key = f.read()
+
+            self.logger.info("Key converted to PEM format successfully")
+            return converted_key
+
+        except Exception as e:
+            self.logger.warning(f"Key conversion error: {e}")
+            return key_content
+        finally:
+            if os.path.exists(temp_key):
+                os.unlink(temp_key)
+            # Also remove the .pub file that ssh-keygen might create
+            pub_file = temp_key + ".pub"
+            if os.path.exists(pub_file):
+                os.unlink(pub_file)
+
     def _build_ssh_args(
         self,
         host: str,
@@ -342,8 +407,10 @@ class SSHServer(BaseMCPServer):
         try:
             # Write key to temp file if provided
             if key:
+                # Convert OpenSSH format to PEM if needed
+                key_content = self._convert_openssh_to_pem(key)
                 fd, key_file = tempfile.mkstemp(prefix="ssh_key_")
-                os.write(fd, key.encode())
+                os.write(fd, key_content.encode())
                 os.close(fd)
                 os.chmod(key_file, 0o600)
 
@@ -447,8 +514,10 @@ class SSHServer(BaseMCPServer):
         try:
             # Write key to temp file if provided
             if key:
+                # Convert OpenSSH format to PEM if needed
+                key_content = self._convert_openssh_to_pem(key)
                 fd, key_file = tempfile.mkstemp(prefix="ssh_key_")
-                os.write(fd, key.encode())
+                os.write(fd, key_content.encode())
                 os.close(fd)
                 os.chmod(key_file, 0o600)
 
@@ -548,8 +617,10 @@ class SSHServer(BaseMCPServer):
         try:
             # Write key to temp file if provided
             if key:
+                # Convert OpenSSH format to PEM if needed
+                key_content = self._convert_openssh_to_pem(key)
                 fd, key_file = tempfile.mkstemp(prefix="ssh_key_")
-                os.write(fd, key.encode())
+                os.write(fd, key_content.encode())
                 os.close(fd)
                 os.chmod(key_file, 0o600)
 
