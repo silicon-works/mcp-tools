@@ -25,7 +25,7 @@ class NucleiServer(BaseMCPServer):
 
         self.register_method(
             name="scan",
-            description="Scan a target using nuclei templates",
+            description="Full scan using nuclei templates (can take several minutes)",
             params={
                 "target": {
                     "type": "string",
@@ -51,11 +51,53 @@ class NucleiServer(BaseMCPServer):
                 },
                 "timeout": {
                     "type": "integer",
-                    "default": 300,
-                    "description": "Timeout in seconds",
+                    "default": 600,
+                    "description": "Timeout in seconds (default 10 minutes)",
                 },
             },
             handler=self.scan,
+        )
+
+        self.register_method(
+            name="quick_scan",
+            description="Quick scan for critical/high severity vulnerabilities only",
+            params={
+                "target": {
+                    "type": "string",
+                    "required": True,
+                    "description": "Target URL or IP",
+                },
+                "focus": {
+                    "type": "string",
+                    "enum": ["cve", "rce", "lfi", "sqli", "xss", "ssrf", "auth-bypass", "default-login"],
+                    "default": "cve",
+                    "description": "Focus area for quick scan",
+                },
+                "timeout": {
+                    "type": "integer",
+                    "default": 120,
+                    "description": "Timeout in seconds",
+                },
+            },
+            handler=self.quick_scan,
+        )
+
+        self.register_method(
+            name="tech_detect",
+            description="Detect technologies used by target (fast)",
+            params={
+                "target": {
+                    "type": "string",
+                    "required": True,
+                    "description": "Target URL or IP",
+                },
+                "timeout": {
+                    "type": "integer",
+                    "default": 60,
+                    "description": "Timeout in seconds",
+                },
+            },
+            handler=self.tech_detect,
         )
 
     def _parse_jsonl_output(self, output: str) -> List[Dict[str, Any]]:
@@ -135,6 +177,92 @@ class NucleiServer(BaseMCPServer):
                     "total_findings": len(findings),
                     "by_severity": {k: len(v) for k, v in by_severity.items()},
                     "findings": findings,
+                },
+                raw_output=sanitize_output(result.stdout + result.stderr),
+            )
+
+        except ToolError as e:
+            return ToolResult(
+                success=False,
+                data={},
+                error=str(e),
+            )
+
+    async def quick_scan(
+        self,
+        target: str,
+        focus: str = "cve",
+        timeout: int = 120,
+    ) -> ToolResult:
+        """Quick scan for critical/high severity vulnerabilities only."""
+        self.logger.info(f"Starting quick nuclei scan on {target} (focus: {focus})")
+
+        args = [
+            "nuclei",
+            "-u", target,
+            "-jsonl",
+            "-silent",
+            "-rate-limit", "200",
+            "-severity", "critical,high",
+            "-tags", focus,
+        ]
+
+        try:
+            result = await self.run_command(args, timeout=timeout)
+            findings = self._parse_jsonl_output(result.stdout)
+
+            return ToolResult(
+                success=True,
+                data={
+                    "target": target,
+                    "focus": focus,
+                    "total_findings": len(findings),
+                    "findings": findings,
+                },
+                raw_output=sanitize_output(result.stdout + result.stderr),
+            )
+
+        except ToolError as e:
+            return ToolResult(
+                success=False,
+                data={},
+                error=str(e),
+            )
+
+    async def tech_detect(
+        self,
+        target: str,
+        timeout: int = 60,
+    ) -> ToolResult:
+        """Detect technologies used by target."""
+        self.logger.info(f"Detecting technologies on {target}")
+
+        args = [
+            "nuclei",
+            "-u", target,
+            "-jsonl",
+            "-silent",
+            "-tags", "tech",
+            "-rate-limit", "100",
+        ]
+
+        try:
+            result = await self.run_command(args, timeout=timeout)
+            findings = self._parse_jsonl_output(result.stdout)
+
+            # Extract technology names
+            technologies = []
+            for finding in findings:
+                tech_name = finding.get("name", "")
+                if tech_name and tech_name not in technologies:
+                    technologies.append(tech_name)
+
+            return ToolResult(
+                success=True,
+                data={
+                    "target": target,
+                    "technologies": technologies,
+                    "details": findings,
                 },
                 raw_output=sanitize_output(result.stdout + result.stderr),
             )

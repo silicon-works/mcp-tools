@@ -148,20 +148,48 @@ class SearchsploitServer(BaseMCPServer):
         """Get the content of a specific exploit."""
         self.logger.info(f"Fetching exploit: {exploit_id}")
 
-        # searchsploit -x shows exploit content
-        args = ["searchsploit", "-x", exploit_id]
-
         try:
-            result = await self.run_command(args, timeout=30)
-            output = result.stdout
+            # If exploit_id looks like a path, use it directly
+            if exploit_id.startswith("/"):
+                exploit_path = exploit_id
+            else:
+                # Use searchsploit -p to get the full path
+                path_args = ["searchsploit", "-p", exploit_id]
+                path_result = await self.run_command(path_args, timeout=30)
+
+                # Parse the path from output (format: "Exploit: /path/to/exploit")
+                path_output = path_result.stdout
+                path_match = re.search(r'Exploit:\s*(/[^\s\n]+)', path_output)
+                if not path_match:
+                    # Try alternate format for shellcodes
+                    path_match = re.search(r'Shellcode:\s*(/[^\s\n]+)', path_output)
+                if not path_match:
+                    # Try just finding any path
+                    path_match = re.search(r'(/usr/share/exploitdb/[^\s\n]+)', path_output)
+
+                if not path_match:
+                    return ToolResult(
+                        success=False,
+                        data={"exploit_id": exploit_id},
+                        error=f"Could not find exploit path for ID: {exploit_id}",
+                        raw_output=sanitize_output(path_output),
+                    )
+
+                exploit_path = path_match.group(1)
+
+            # Read the exploit file directly
+            cat_args = ["cat", exploit_path]
+            result = await self.run_command(cat_args, timeout=30)
+            content = result.stdout
 
             return ToolResult(
                 success=True,
                 data={
                     "exploit_id": exploit_id,
-                    "content": output,
+                    "path": exploit_path,
+                    "content": content,
                 },
-                raw_output=sanitize_output(output),
+                raw_output=sanitize_output(content),
             )
 
         except ToolError as e:
