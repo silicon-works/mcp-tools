@@ -1211,6 +1211,118 @@ tools:
             type: array
             description: "Possible hash formats"
 
+  hash-lookup:
+    name: hash-lookup
+    version: "1.0"
+    description: "Online hash lookup via public databases (hashes.com, nitrxgen, hashtoolkit)"
+    image: "ghcr.io/silicon-works/mcp-tools-hash-lookup:latest"
+    image_size_mb: 100
+
+    capabilities:
+      - hash_lookup
+      - hash_identification
+      - online_cracking
+
+    phases:
+      - post-exploitation
+
+    requirements:
+      network: true
+      privileged: false
+
+    resources:
+      memory_mb: 128
+      cpu: 0.25
+
+    methods:
+      lookup:
+        description: "Look up a hash in online databases"
+        when_to_use: "To quickly check if a hash has already been cracked online"
+        params:
+          hash:
+            type: string
+            required: true
+            description: "Hash value to look up"
+          hash_type:
+            type: enum
+            values: [auto, md5, sha1, sha256, ntlm]
+            default: auto
+            description: "Hash type (auto-detect if not specified)"
+        returns:
+          hash:
+            type: string
+            description: "The hash that was looked up"
+          plaintext:
+            type: string
+            description: "Cracked plaintext if found"
+          source:
+            type: string
+            description: "Source that returned the result"
+          cracked:
+            type: boolean
+            description: "Whether the hash was cracked"
+
+      lookup_batch:
+        description: "Look up multiple hashes at once"
+        when_to_use: "To check multiple hashes quickly"
+        params:
+          hashes:
+            type: array
+            required: true
+            description: "List of hashes to look up"
+          hash_type:
+            type: enum
+            values: [auto, md5, sha1, sha256, ntlm]
+            default: auto
+            description: "Hash type for all hashes"
+        returns:
+          results:
+            type: array
+            description: "Results for each hash"
+          cracked_count:
+            type: integer
+            description: "Number of hashes cracked"
+          not_found_count:
+            type: integer
+            description: "Number of hashes not found"
+
+      identify:
+        description: "Identify the type of a hash"
+        when_to_use: "When unsure what type of hash was extracted"
+        params:
+          hash:
+            type: string
+            required: true
+            description: "Hash to identify"
+        returns:
+          possible_types:
+            type: array
+            description: "Possible hash types"
+          descriptions:
+            type: array
+            description: "Descriptions of each type"
+
+      generate:
+        description: "Generate hash from plaintext (for testing/comparison)"
+        when_to_use: "To generate test hashes or verify cracked passwords"
+        params:
+          plaintext:
+            type: string
+            required: true
+            description: "Text to hash"
+          hash_type:
+            type: enum
+            values: [md5, sha1, sha256, sha512, ntlm]
+            default: md5
+            description: "Hash algorithm to use"
+        returns:
+          plaintext:
+            type: string
+            description: "Original plaintext"
+          hash:
+            type: string
+            description: "Generated hash"
+
   # =============================================================================
   # NETWORK ACCESS / SHELLS
   # =============================================================================
@@ -1391,7 +1503,7 @@ tools:
             description: "SSH password (use sshpass)"
           key:
             type: string
-            description: "Private key content (PEM format)"
+            description: "Private key content (PEM or OpenSSH format, auto-converted)"
           command:
             type: string
             required: true
@@ -1432,7 +1544,7 @@ tools:
             description: "SSH password"
           key:
             type: string
-            description: "Private key content (PEM format)"
+            description: "Private key content (PEM or OpenSSH format, auto-converted)"
           commands:
             type: array
             required: true
@@ -1470,7 +1582,7 @@ tools:
             description: "SSH password"
           key:
             type: string
-            description: "Private key content (PEM format)"
+            description: "Private key content (PEM or OpenSSH format, auto-converted)"
           remote_path:
             type: string
             required: true
@@ -1508,7 +1620,7 @@ tools:
             description: "SSH password"
           key:
             type: string
-            description: "Private key content (PEM format)"
+            description: "Private key content (PEM or OpenSSH format, auto-converted)"
           content:
             type: string
             required: true
@@ -1547,7 +1659,7 @@ tools:
             description: "SSH password"
           key:
             type: string
-            description: "Private key content (PEM format)"
+            description: "Private key content (PEM or OpenSSH format, auto-converted)"
           content_base64:
             type: string
             required: true
@@ -1593,7 +1705,7 @@ tools:
             description: "SSH password"
           key:
             type: string
-            description: "Private key content (PEM format)"
+            description: "Private key content (PEM or OpenSSH format, auto-converted)"
           script:
             type: string
             required: true
@@ -1812,6 +1924,183 @@ tools:
           credentials:
             type: array
             description: "Found credentials (username, password/hash)"
+
+  sqlite:
+    name: sqlite
+    version: "1.0"
+    description: "SQLite database client for extracting data from SQLite database files"
+    image: "ghcr.io/silicon-works/mcp-tools-sqlite:latest"
+    image_size_mb: 100
+
+    capabilities:
+      - database_extraction
+      - credential_extraction
+      - data_analysis
+
+    phases:
+      - post-exploitation
+
+    requirements:
+      network: false
+      privileged: false
+
+    resources:
+      memory_mb: 128
+      cpu: 0.25
+
+    methods:
+      query:
+        description: "Execute a SQL query on a SQLite database"
+        when_to_use: "When you have access to a SQLite database file and need to extract data"
+        params:
+          database:
+            type: string
+            required: true
+            description: "Path to SQLite database file, or base64-encoded database content"
+          query:
+            type: string
+            required: true
+            description: "SQL query to execute"
+          is_base64:
+            type: boolean
+            default: false
+            description: "If true, database parameter is base64-encoded file content"
+          limit:
+            type: integer
+            default: 1000
+            description: "Maximum rows to return"
+        returns:
+          columns:
+            type: array
+            description: "Column names"
+          rows:
+            type: array
+            description: "Query results"
+          row_count:
+            type: integer
+            description: "Number of rows returned"
+
+      list_tables:
+        description: "List all tables in a SQLite database"
+        when_to_use: "Initial enumeration of a SQLite database"
+        params:
+          database:
+            type: string
+            required: true
+            description: "Path to SQLite database file, or base64-encoded content"
+          is_base64:
+            type: boolean
+            default: false
+            description: "If true, database parameter is base64-encoded file content"
+        returns:
+          tables:
+            type: array
+            description: "List of tables with row counts"
+          count:
+            type: integer
+            description: "Number of tables"
+
+      describe_table:
+        description: "Get schema/structure of a table"
+        when_to_use: "To understand table structure before querying"
+        params:
+          database:
+            type: string
+            required: true
+            description: "Path to SQLite database file"
+          table:
+            type: string
+            required: true
+            description: "Table name to describe"
+          is_base64:
+            type: boolean
+            default: false
+            description: "If true, database parameter is base64-encoded"
+        returns:
+          columns:
+            type: array
+            description: "Column definitions with types"
+          row_count:
+            type: integer
+            description: "Number of rows in table"
+
+      dump_table:
+        description: "Dump all rows from a table"
+        when_to_use: "To extract all data from a specific table"
+        params:
+          database:
+            type: string
+            required: true
+            description: "Path to SQLite database file"
+          table:
+            type: string
+            required: true
+            description: "Table name to dump"
+          columns:
+            type: array
+            description: "Specific columns to select (default: all)"
+          limit:
+            type: integer
+            default: 100
+            description: "Maximum rows to return"
+          is_base64:
+            type: boolean
+            default: false
+            description: "If true, database parameter is base64-encoded"
+        returns:
+          rows:
+            type: array
+            description: "Table contents"
+          row_count:
+            type: integer
+            description: "Number of rows returned"
+
+      find_credentials:
+        description: "Search for credential-related tables and extract potential usernames/passwords"
+        when_to_use: "To quickly find and extract credentials from a SQLite database"
+        params:
+          database:
+            type: string
+            required: true
+            description: "Path to SQLite database file"
+          is_base64:
+            type: boolean
+            default: false
+            description: "If true, database parameter is base64-encoded"
+          limit:
+            type: integer
+            default: 100
+            description: "Maximum rows to return per table"
+        returns:
+          credential_tables:
+            type: array
+            description: "Tables that may contain credentials"
+          credentials:
+            type: array
+            description: "Extracted username/password pairs"
+          count:
+            type: integer
+            description: "Number of credentials found"
+
+      schema:
+        description: "Get full database schema (all tables and columns)"
+        when_to_use: "To get complete overview of database structure"
+        params:
+          database:
+            type: string
+            required: true
+            description: "Path to SQLite database file"
+          is_base64:
+            type: boolean
+            default: false
+            description: "If true, database parameter is base64-encoded"
+        returns:
+          tables:
+            type: object
+            description: "All tables with their columns and row counts"
+          table_count:
+            type: integer
+            description: "Number of tables"
 
   # =============================================================================
   # PRIVILEGE ESCALATION
