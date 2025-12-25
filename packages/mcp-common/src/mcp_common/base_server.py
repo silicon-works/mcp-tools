@@ -124,15 +124,29 @@ class BaseMCPServer(ABC):
         required = []
 
         for param_name, param_def in params.items():
-            prop = {
-                "type": param_def.get("type", "string"),
-                "description": param_def.get("description", ""),
-            }
+            param_type = param_def.get("type", "string")
+
+            # Handle enum type - JSON Schema uses type: "string" with enum array
+            if param_type == "enum":
+                prop = {
+                    "type": "string",
+                    "description": param_def.get("description", ""),
+                }
+                # Support both "values" (our convention) and "enum" keys
+                if "values" in param_def:
+                    prop["enum"] = param_def["values"]
+                elif "enum" in param_def:
+                    prop["enum"] = param_def["enum"]
+            else:
+                prop = {
+                    "type": param_type,
+                    "description": param_def.get("description", ""),
+                }
+                if "enum" in param_def:
+                    prop["enum"] = param_def["enum"]
 
             if "default" in param_def:
                 prop["default"] = param_def["default"]
-            if "enum" in param_def:
-                prop["enum"] = param_def["enum"]
             if "items" in param_def:
                 prop["items"] = param_def["items"]
 
