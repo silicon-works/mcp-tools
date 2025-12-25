@@ -6,6 +6,7 @@ SSH client for remote shell access with password or key authentication.
 """
 
 import asyncio
+import base64
 import os
 import tempfile
 from typing import Optional
@@ -190,6 +191,108 @@ class SSHServer(BaseMCPServer):
                 },
             },
             handler=self.copy_to,
+        )
+
+        self.register_method(
+            name="upload_binary",
+            description="Upload a binary file via base64 chunking (for large files/exploits)",
+            params={
+                "host": {
+                    "type": "string",
+                    "required": True,
+                    "description": "Target hostname or IP",
+                },
+                "username": {
+                    "type": "string",
+                    "required": True,
+                    "description": "SSH username",
+                },
+                "password": {
+                    "type": "string",
+                    "description": "SSH password",
+                },
+                "key": {
+                    "type": "string",
+                    "description": "Private key content (PEM format)",
+                },
+                "content_base64": {
+                    "type": "string",
+                    "required": True,
+                    "description": "Base64-encoded binary content",
+                },
+                "remote_path": {
+                    "type": "string",
+                    "required": True,
+                    "description": "Destination path on remote host",
+                },
+                "executable": {
+                    "type": "boolean",
+                    "default": True,
+                    "description": "Make the file executable after upload",
+                },
+                "port": {
+                    "type": "integer",
+                    "default": 22,
+                    "description": "SSH port",
+                },
+                "chunk_size": {
+                    "type": "integer",
+                    "default": 50000,
+                    "description": "Chunk size for transfer (bytes before base64)",
+                },
+                "timeout": {
+                    "type": "integer",
+                    "default": 300,
+                    "description": "Total timeout in seconds",
+                },
+            },
+            handler=self.upload_binary,
+        )
+
+        self.register_method(
+            name="run_script",
+            description="Upload and execute a script, return output",
+            params={
+                "host": {
+                    "type": "string",
+                    "required": True,
+                    "description": "Target hostname or IP",
+                },
+                "username": {
+                    "type": "string",
+                    "required": True,
+                    "description": "SSH username",
+                },
+                "password": {
+                    "type": "string",
+                    "description": "SSH password",
+                },
+                "key": {
+                    "type": "string",
+                    "description": "Private key content (PEM format)",
+                },
+                "script": {
+                    "type": "string",
+                    "required": True,
+                    "description": "Script content to run",
+                },
+                "interpreter": {
+                    "type": "string",
+                    "default": "/bin/bash",
+                    "description": "Interpreter to use (bash, python3, etc)",
+                },
+                "port": {
+                    "type": "integer",
+                    "default": 22,
+                    "description": "SSH port",
+                },
+                "timeout": {
+                    "type": "integer",
+                    "default": 120,
+                    "description": "Execution timeout in seconds",
+                },
+            },
+            handler=self.run_script,
         )
 
     def _build_ssh_args(
@@ -522,6 +625,161 @@ class SSHServer(BaseMCPServer):
                 os.unlink(key_file)
             if local_file and os.path.exists(local_file):
                 os.unlink(local_file)
+
+
+    async def upload_binary(
+        self,
+        host: str,
+        username: str,
+        content_base64: str,
+        remote_path: str,
+        password: Optional[str] = None,
+        key: Optional[str] = None,
+        executable: bool = True,
+        port: int = 22,
+        chunk_size: int = 50000,
+        timeout: int = 300,
+    ) -> ToolResult:
+        """Upload binary content via base64 chunking."""
+        self.logger.info(f"Uploading binary to {remote_path} on {username}@{host}")
+
+        try:
+            # Decode the base64 content
+            binary_data = base64.b64decode(content_base64)
+            total_size = len(binary_data)
+
+            self.logger.info(f"Binary size: {total_size} bytes")
+
+            # Clear any existing file
+            await self.exec_command(
+                host=host,
+                username=username,
+                password=password,
+                key=key,
+                command=f"rm -f {remote_path}",
+                port=port,
+                timeout=30,
+            )
+
+            # Split into chunks and upload
+            chunks = []
+            for i in range(0, total_size, chunk_size):
+                chunk = binary_data[i:i + chunk_size]
+                chunks.append(base64.b64encode(chunk).decode())
+
+            self.logger.info(f"Uploading in {len(chunks)} chunks")
+
+            for i, chunk_b64 in enumerate(chunks):
+                result = await self.exec_command(
+                    host=host,
+                    username=username,
+                    password=password,
+                    key=key,
+                    command=f"echo '{chunk_b64}' | base64 -d >> {remote_path}",
+                    port=port,
+                    timeout=60,
+                )
+                if not result.success:
+                    return ToolResult(
+                        success=False,
+                        data={"host": host, "remote_path": remote_path, "chunk": i},
+                        error=f"Failed uploading chunk {i}: {result.error}",
+                    )
+
+            # Make executable if requested
+            if executable:
+                await self.exec_command(
+                    host=host,
+                    username=username,
+                    password=password,
+                    key=key,
+                    command=f"chmod +x {remote_path}",
+                    port=port,
+                    timeout=30,
+                )
+
+            # Verify upload
+            verify_result = await self.exec_command(
+                host=host,
+                username=username,
+                password=password,
+                key=key,
+                command=f"ls -la {remote_path} && file {remote_path}",
+                port=port,
+                timeout=30,
+            )
+
+            return ToolResult(
+                success=True,
+                data={
+                    "host": host,
+                    "remote_path": remote_path,
+                    "size": total_size,
+                    "chunks": len(chunks),
+                    "executable": executable,
+                    "verification": verify_result.data.get("stdout", ""),
+                },
+                raw_output=f"Uploaded {total_size} bytes to {remote_path}",
+            )
+
+        except Exception as e:
+            return ToolResult(
+                success=False,
+                data={"host": host, "remote_path": remote_path},
+                error=str(e),
+            )
+
+    async def run_script(
+        self,
+        host: str,
+        username: str,
+        script: str,
+        password: Optional[str] = None,
+        key: Optional[str] = None,
+        interpreter: str = "/bin/bash",
+        port: int = 22,
+        timeout: int = 120,
+    ) -> ToolResult:
+        """Upload and execute a script."""
+        self.logger.info(f"Running script on {username}@{host}")
+
+        try:
+            # Upload script to temp file
+            remote_script = f"/tmp/script_{os.urandom(4).hex()}.sh"
+
+            upload_result = await self.copy_to(
+                host=host,
+                username=username,
+                password=password,
+                key=key,
+                content=script,
+                remote_path=remote_script,
+                port=port,
+                timeout=60,
+            )
+
+            if not upload_result.success:
+                return upload_result
+
+            # Make executable and run
+            result = await self.exec_command(
+                host=host,
+                username=username,
+                password=password,
+                key=key,
+                command=f"chmod +x {remote_script} && {interpreter} {remote_script}; rm -f {remote_script}",
+                port=port,
+                timeout=timeout,
+            )
+
+            return result
+
+        except Exception as e:
+            return ToolResult(
+                success=False,
+                data={"host": host},
+                error=str(e),
+            )
 
 
 if __name__ == "__main__":

@@ -5,10 +5,13 @@ OpenSploit MCP Server: curl
 HTTP client for making web requests, testing exploits, and downloading files.
 """
 
+import asyncio
 import base64
+import html
 import json
+import re
 from typing import Any, Dict, List, Optional
-from urllib.parse import urlparse
+from urllib.parse import urlparse, quote as url_quote
 
 from mcp_common import BaseMCPServer, ToolResult, ToolError, sanitize_output
 
@@ -75,6 +78,67 @@ class CurlServer(BaseMCPServer):
                 },
             },
             handler=self.request,
+        )
+
+        self.register_method(
+            name="inject",
+            description="Send a payload to a web RCE endpoint and extract output",
+            params={
+                "url": {
+                    "type": "string",
+                    "required": True,
+                    "description": "Target URL (use {PAYLOAD} as placeholder for command)",
+                },
+                "command": {
+                    "type": "string",
+                    "required": True,
+                    "description": "Command to execute",
+                },
+                "method": {
+                    "type": "string",
+                    "enum": ["GET", "POST"],
+                    "default": "GET",
+                    "description": "HTTP method",
+                },
+                "encoding": {
+                    "type": "string",
+                    "enum": ["url", "double-url", "base64", "none"],
+                    "default": "url",
+                    "description": "Payload encoding method",
+                },
+                "output_markers": {
+                    "type": "object",
+                    "description": "Start/end markers to extract output: {start: str, end: str}",
+                },
+                "strip_html": {
+                    "type": "boolean",
+                    "default": True,
+                    "description": "Strip HTML tags from output",
+                },
+                "headers": {
+                    "type": "object",
+                    "description": "Custom headers as key-value pairs",
+                },
+                "data": {
+                    "type": "string",
+                    "description": "POST body (use {PAYLOAD} as placeholder)",
+                },
+                "cookie": {
+                    "type": "string",
+                    "description": "Cookie header value",
+                },
+                "timeout": {
+                    "type": "integer",
+                    "default": 30,
+                    "description": "Request timeout in seconds",
+                },
+                "insecure": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": "Skip SSL certificate verification",
+                },
+            },
+            handler=self.inject,
         )
 
         self.register_method(
@@ -203,6 +267,111 @@ class CurlServer(BaseMCPServer):
                 data={"url": url, "method": method},
                 error=str(e),
             )
+
+    def _encode_payload(self, payload: str, encoding: str) -> str:
+        """Encode payload using specified method."""
+        if encoding == "url":
+            return url_quote(payload, safe="")
+        elif encoding == "double-url":
+            return url_quote(url_quote(payload, safe=""), safe="")
+        elif encoding == "base64":
+            return base64.b64encode(payload.encode()).decode()
+        else:  # none
+            return payload
+
+    def _extract_output(
+        self,
+        body: str,
+        markers: Optional[Dict[str, str]] = None,
+        strip_html: bool = True,
+    ) -> str:
+        """Extract command output from response body."""
+        output = body
+
+        # Extract between markers if provided
+        if markers:
+            start = markers.get("start", "")
+            end = markers.get("end", "")
+            if start and end:
+                pattern = re.escape(start) + r"(.*?)" + re.escape(end)
+                match = re.search(pattern, output, re.DOTALL)
+                if match:
+                    output = match.group(1)
+            elif start:
+                idx = output.find(start)
+                if idx != -1:
+                    output = output[idx + len(start):]
+            elif end:
+                idx = output.find(end)
+                if idx != -1:
+                    output = output[:idx]
+
+        # Strip HTML tags if requested
+        if strip_html:
+            # Decode HTML entities
+            output = html.unescape(output)
+            # Remove HTML tags
+            output = re.sub(r"<[^>]+>", "", output)
+            # Normalize whitespace
+            output = re.sub(r"\s+", " ", output).strip()
+
+        return output
+
+    async def inject(
+        self,
+        url: str,
+        command: str,
+        method: str = "GET",
+        encoding: str = "url",
+        output_markers: Optional[Dict[str, str]] = None,
+        strip_html: bool = True,
+        headers: Optional[Dict[str, str]] = None,
+        data: Optional[str] = None,
+        cookie: Optional[str] = None,
+        timeout: int = 30,
+        insecure: bool = False,
+    ) -> ToolResult:
+        """Send a payload to a web RCE endpoint and extract output."""
+        self.logger.info(f"Injecting command via {method} to {url}")
+
+        # Encode the payload
+        encoded_payload = self._encode_payload(command, encoding)
+
+        # Replace {PAYLOAD} placeholder in URL and data
+        final_url = url.replace("{PAYLOAD}", encoded_payload)
+        final_data = data.replace("{PAYLOAD}", encoded_payload) if data else None
+
+        # Make the request
+        result = await self.request(
+            url=final_url,
+            method=method,
+            headers=headers,
+            data=final_data,
+            follow_redirects=True,
+            timeout=timeout,
+            insecure=insecure,
+            cookie=cookie,
+        )
+
+        if not result.success:
+            return result
+
+        # Extract output from response
+        body = result.data.get("body", "")
+        extracted = self._extract_output(body, output_markers, strip_html)
+
+        return ToolResult(
+            success=True,
+            data={
+                "url": final_url,
+                "command": command,
+                "encoding": encoding,
+                "status_code": result.data.get("status_code"),
+                "output": extracted,
+                "raw_body_length": len(body),
+            },
+            raw_output=extracted,
+        )
 
     async def download(
         self,
