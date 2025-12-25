@@ -109,6 +109,13 @@ class NmapServer(BaseMCPServer):
             handler=self.vuln_scan,
         )
 
+        self.register_method(
+            name="get_interfaces",
+            description="Get local network interfaces and IP addresses (useful for LHOST)",
+            params={},
+            handler=self.get_interfaces,
+        )
+
     def _get_timing_flag(self, timing: str) -> str:
         """Convert timing name to nmap flag."""
         timing_map = {
@@ -347,6 +354,73 @@ class NmapServer(BaseMCPServer):
             result.data["vuln_count"] = len(vulns)
 
         return result
+
+    async def get_interfaces(self) -> ToolResult:
+        """
+        Get local network interfaces and IP addresses.
+
+        Useful for determining LHOST for reverse shells.
+
+        Returns:
+            ToolResult with interface information
+        """
+        self.logger.info("Getting local network interfaces")
+
+        try:
+            # Use ip addr to get interface info
+            result = await self.run_command(["ip", "-j", "addr"], timeout=10)
+            output = result.stdout
+
+            import json as json_module
+            import re
+
+            interfaces = []
+            try:
+                # Parse JSON output from ip -j addr
+                data = json_module.loads(output)
+                for iface in data:
+                    iface_info = {
+                        "name": iface.get("ifname", ""),
+                        "state": iface.get("operstate", ""),
+                        "mac": iface.get("address", ""),
+                        "ipv4": [],
+                        "ipv6": [],
+                    }
+                    for addr_info in iface.get("addr_info", []):
+                        if addr_info.get("family") == "inet":
+                            iface_info["ipv4"].append(addr_info.get("local", ""))
+                        elif addr_info.get("family") == "inet6":
+                            iface_info["ipv6"].append(addr_info.get("local", ""))
+
+                    # Only include interfaces with IP addresses
+                    if iface_info["ipv4"] or iface_info["ipv6"]:
+                        interfaces.append(iface_info)
+            except json_module.JSONDecodeError:
+                # Fallback: parse text output
+                pass
+
+            # Find the best LHOST candidate (first non-loopback IPv4)
+            lhost = None
+            for iface in interfaces:
+                if iface["name"] != "lo" and iface["ipv4"]:
+                    lhost = iface["ipv4"][0]
+                    break
+
+            return ToolResult(
+                success=True,
+                data={
+                    "interfaces": interfaces,
+                    "recommended_lhost": lhost,
+                },
+                raw_output=sanitize_output(output),
+            )
+
+        except ToolError as e:
+            return ToolResult(
+                success=False,
+                data={},
+                error=str(e),
+            )
 
 
 if __name__ == "__main__":

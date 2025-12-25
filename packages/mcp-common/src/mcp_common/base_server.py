@@ -35,7 +35,11 @@ class ToolResult:
     def to_content(self) -> List[TextContent]:
         """Convert result to MCP TextContent."""
         if self.success:
-            return [TextContent(type="text", text=json.dumps(self.data, indent=2))]
+            # Include raw_output in successful results when present
+            result_data = dict(self.data)
+            if self.raw_output:
+                result_data["raw_output"] = self.raw_output
+            return [TextContent(type="text", text=json.dumps(result_data, indent=2))]
         else:
             return [TextContent(type="text", text=f"Error: {self.error}\n\nRaw output:\n{self.raw_output}")]
 

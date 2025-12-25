@@ -7,10 +7,11 @@ LABEL org.opencontainers.image.source="https://github.com/silicon-works/mcp-tool
 LABEL org.opencontainers.image.description="nmap MCP server for OpenSploit"
 LABEL org.opencontainers.image.licenses="MIT"
 
-# Install nmap and Python
+# Install nmap, iproute2 (for ip command), and Python
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
         nmap \
+        iproute2 \
         python3 \
         python3-pip \
         python3-venv && \

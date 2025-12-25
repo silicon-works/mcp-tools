@@ -1,28 +1,22 @@
-# OpenSploit MCP Server: nuclei
-# Template-based vulnerability scanner
+# OpenSploit MCP Server: curl
+# HTTP client for web requests, exploit testing, and file downloads
 
 FROM kalilinux/kali-rolling
 
 LABEL org.opencontainers.image.source="https://github.com/silicon-works/mcp-tools"
-LABEL org.opencontainers.image.description="nuclei MCP server for OpenSploit"
+LABEL org.opencontainers.image.description="curl MCP server for OpenSploit"
 LABEL org.opencontainers.image.licenses="MIT"
 
-# Install nuclei and Python
+# Install curl and Python
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
-        nuclei \
+        curl \
+        ca-certificates \
         python3 \
         python3-pip \
         python3-venv && \
     rm -rf /var/lib/apt/lists/* && \
     apt-get clean
-
-# Download nuclei templates with retry and verification
-RUN mkdir -p /root/nuclei-templates && \
-    for i in 1 2 3; do \
-        nuclei -update-templates && break || sleep 5; \
-    done && \
-    ls /root/nuclei-templates/ | head -5
 
 # Create app directory
 WORKDIR /app
@@ -36,11 +30,11 @@ COPY packages/mcp-common /app/packages/mcp-common
 RUN pip install --no-cache-dir /app/packages/mcp-common
 
 # Install tool-specific dependencies
-COPY tools/nuclei/requirements.txt .
+COPY tools/curl/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy MCP server code
-COPY tools/nuclei/mcp-server.py .
+COPY tools/curl/mcp-server.py .
 
 # MCP servers communicate via stdio
 CMD ["python3", "mcp-server.py"]

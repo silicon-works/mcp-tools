@@ -160,6 +160,38 @@ class MetasploitServer(BaseMCPServer):
             handler=self.run_exploit,
         )
 
+        self.register_method(
+            name="exec_command",
+            description="Execute a command on target using an exploit with cmd/unix/generic payload",
+            params={
+                "module": {
+                    "type": "string",
+                    "required": True,
+                    "description": "Exploit module path that supports command execution",
+                },
+                "rhosts": {
+                    "type": "string",
+                    "required": True,
+                    "description": "Target host(s)",
+                },
+                "command": {
+                    "type": "string",
+                    "required": True,
+                    "description": "Command to execute on the target",
+                },
+                "options": {
+                    "type": "object",
+                    "description": "Additional module options (e.g., RPORT, TARGETURI)",
+                },
+                "timeout": {
+                    "type": "integer",
+                    "default": 120,
+                    "description": "Timeout in seconds",
+                },
+            },
+            handler=self.exec_command,
+        )
+
     def _resolve_payload(self, payload: str) -> str:
         """Resolve payload shortcut to full name."""
         return self.COMMON_PAYLOADS.get(payload, payload)
@@ -401,6 +433,84 @@ class MetasploitServer(BaseMCPServer):
                     "target": rhosts,
                     "exploit_success": success,
                     "session_opened": session_opened,
+                },
+                raw_output=sanitize_output(output),
+            )
+
+        except ToolError as e:
+            return ToolResult(
+                success=False,
+                data={},
+                error=str(e),
+            )
+
+    async def exec_command(
+        self,
+        module: str,
+        rhosts: str,
+        command: str,
+        options: Optional[Dict[str, Any]] = None,
+        timeout: int = 120,
+    ) -> ToolResult:
+        """Execute a command on target using an exploit with cmd payload."""
+        self.logger.info(f"Executing command via {module} on {rhosts}: {command}")
+
+        # Build msfconsole commands - use cmd/unix/generic for command execution
+        commands = [
+            f"use {module}",
+            f"set RHOSTS {rhosts}",
+            "set PAYLOAD cmd/unix/generic",
+            f'set CMD {command}',
+        ]
+
+        if options:
+            for key, value in options.items():
+                commands.append(f"set {key} {value}")
+
+        # Use 'run' instead of 'exploit -z' to see output directly
+        commands.extend(["run", "exit"])
+
+        args = [
+            "msfconsole",
+            "-q",
+            "-x", "; ".join(commands),
+        ]
+
+        try:
+            result = await self.run_command(args, timeout=timeout)
+            output = result.stdout + result.stderr
+
+            # Parse the output to extract command results
+            # Look for output after the exploit runs
+            command_output = ""
+            exploit_success = False
+
+            # Check for success indicators
+            if "exploit completed" in output.lower() or "command executed" in output.lower():
+                exploit_success = True
+
+            # Try to extract command output from the full output
+            # The output typically appears after "[*]" markers
+            lines = output.split("\n")
+            capture = False
+            for line in lines:
+                # Skip metasploit UI lines
+                if line.startswith("[*]") or line.startswith("[+]") or line.startswith("[-]"):
+                    if "executing" in line.lower() or "command" in line.lower():
+                        capture = True
+                        exploit_success = True
+                    continue
+                if capture and line.strip():
+                    command_output += line + "\n"
+
+            return ToolResult(
+                success=True,
+                data={
+                    "module": module,
+                    "target": rhosts,
+                    "command": command,
+                    "exploit_success": exploit_success,
+                    "command_output": command_output.strip() if command_output else None,
                 },
                 raw_output=sanitize_output(output),
             )
