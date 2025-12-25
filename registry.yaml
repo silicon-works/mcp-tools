@@ -1,7 +1,11 @@
 version: "1.0"
-updated_at: "2024-12-24T00:00:00Z"
+updated_at: "2024-12-25T00:00:00Z"
 
 tools:
+  # =============================================================================
+  # RECONNAISSANCE
+  # =============================================================================
+
   nmap:
     name: nmap
     version: "7.94"
@@ -119,6 +123,414 @@ tools:
             type: array
             description: "Discovered vulnerabilities with CVE references"
 
+  # =============================================================================
+  # ENUMERATION
+  # =============================================================================
+
+  ffuf:
+    name: ffuf
+    version: "2.1"
+    description: "Fast web fuzzer for directory discovery, parameter fuzzing, and vhost enumeration"
+    image: "ghcr.io/silicon-works/mcp-tools-ffuf:latest"
+    image_size_mb: 200
+
+    capabilities:
+      - directory_bruteforce
+      - parameter_fuzzing
+      - vhost_discovery
+
+    phases:
+      - enumeration
+
+    requirements:
+      network: true
+      privileged: false
+
+    resources:
+      memory_mb: 512
+      cpu: 1.0
+
+    methods:
+      dir_fuzz:
+        description: "Fuzz directories and files on a web server"
+        when_to_use: "After discovering HTTP/HTTPS service to find hidden paths and files"
+        params:
+          url:
+            type: string
+            required: true
+            description: "Target URL (FUZZ keyword added automatically if missing)"
+          wordlist:
+            type: string
+            default: "common"
+            description: "Wordlist name (common, big, dirbuster-small, dirbuster-medium) or path"
+          extensions:
+            type: string
+            description: "File extensions to append (e.g., 'php,html,txt')"
+          threads:
+            type: integer
+            default: 40
+            description: "Number of concurrent threads"
+          filter_status:
+            type: string
+            description: "Match these status codes (default: 200,204,301,302,307,401,403,405)"
+          filter_size:
+            type: string
+            description: "Filter out responses of this size"
+          timeout:
+            type: integer
+            default: 10
+            description: "HTTP request timeout in seconds"
+        returns:
+          results:
+            type: array
+            description: "Discovered paths with status codes and sizes"
+          summary:
+            type: object
+            description: "Summary with target, wordlist, and found paths"
+
+      param_fuzz:
+        description: "Fuzz GET or POST parameters"
+        when_to_use: "To discover valid parameter values or test for injection points"
+        params:
+          url:
+            type: string
+            required: true
+            description: "Target URL with FUZZ keyword in parameter"
+          wordlist:
+            type: string
+            default: "common"
+            description: "Wordlist name or path"
+          method:
+            type: enum
+            default: GET
+            values: [GET, POST]
+            description: "HTTP method"
+          data:
+            type: string
+            description: "POST data with FUZZ keyword (e.g., 'username=admin&password=FUZZ')"
+          threads:
+            type: integer
+            default: 40
+            description: "Number of concurrent threads"
+          filter_status:
+            type: string
+            description: "Match these status codes"
+          filter_size:
+            type: string
+            description: "Filter out responses of this size"
+        returns:
+          results:
+            type: array
+            description: "Matching parameter values with responses"
+
+      vhost_fuzz:
+        description: "Fuzz virtual hosts on a web server"
+        when_to_use: "To discover virtual hosts when targeting an IP with multiple sites"
+        params:
+          url:
+            type: string
+            required: true
+            description: "Target URL (IP address or hostname)"
+          domain:
+            type: string
+            required: true
+            description: "Base domain for vhost fuzzing (e.g., 'target.htb')"
+          wordlist:
+            type: string
+            default: "common"
+            description: "Wordlist for subdomain prefixes"
+          threads:
+            type: integer
+            default: 40
+            description: "Number of concurrent threads"
+          filter_size:
+            type: string
+            description: "Filter out default response size"
+        returns:
+          vhosts:
+            type: array
+            description: "Discovered virtual hosts"
+          summary:
+            type: object
+            description: "Summary with target domain and found vhosts"
+
+  nikto:
+    name: nikto
+    version: "2.5"
+    description: "Web server vulnerability scanner"
+    image: "ghcr.io/silicon-works/mcp-tools-nikto:latest"
+    image_size_mb: 150
+
+    capabilities:
+      - web_vulnerability_scanning
+      - server_misconfiguration
+      - outdated_software_detection
+      - technology_detection
+
+    phases:
+      - enumeration
+
+    requirements:
+      network: true
+      privileged: false
+
+    resources:
+      memory_mb: 256
+      cpu: 0.5
+
+    methods:
+      scan:
+        description: "Scan a web server for vulnerabilities and misconfigurations"
+        when_to_use: "After discovering HTTP/HTTPS service to identify web vulnerabilities"
+        params:
+          target:
+            type: string
+            required: true
+            description: "Target URL or IP:port"
+          tuning:
+            type: string
+            description: "Scan tuning options (1-9, a-c)"
+          ssl:
+            type: boolean
+            default: false
+            description: "Force SSL/TLS connection"
+          timeout:
+            type: integer
+            default: 300
+            description: "Scan timeout in seconds"
+          max_time:
+            type: integer
+            default: 600
+            description: "Maximum scan duration in seconds"
+        returns:
+          findings:
+            type: array
+            description: "Vulnerabilities and interesting findings"
+          server_info:
+            type: object
+            description: "Server information (version, headers)"
+
+  nuclei:
+    name: nuclei
+    version: "3.0"
+    description: "Template-based vulnerability scanner with extensive CVE coverage"
+    image: "ghcr.io/silicon-works/mcp-tools-nuclei:latest"
+    image_size_mb: 500
+
+    capabilities:
+      - vulnerability_scanning
+      - cve_detection
+      - technology_detection
+      - misconfiguration_detection
+
+    phases:
+      - enumeration
+
+    requirements:
+      network: true
+      privileged: false
+
+    resources:
+      memory_mb: 512
+      cpu: 1.0
+
+    methods:
+      scan:
+        description: "Scan a target using nuclei templates"
+        when_to_use: "After discovering services to check for known CVEs and misconfigurations"
+        params:
+          target:
+            type: string
+            required: true
+            description: "Target URL or IP"
+          templates:
+            type: string
+            description: "Specific template or directory (e.g., 'cves/', 'vulnerabilities/')"
+          tags:
+            type: string
+            description: "Filter by tags (e.g., 'cve,rce,sqli')"
+          severity:
+            type: string
+            description: "Filter by severity (info,low,medium,high,critical)"
+          rate_limit:
+            type: integer
+            default: 150
+            description: "Maximum requests per second"
+          timeout:
+            type: integer
+            default: 300
+            description: "Timeout in seconds"
+        returns:
+          findings:
+            type: array
+            description: "Detected vulnerabilities with template details"
+          by_severity:
+            type: object
+            description: "Count of findings grouped by severity"
+
+  enum4linux-ng:
+    name: enum4linux-ng
+    version: "1.3"
+    description: "SMB/Windows enumeration tool for shares, users, and groups"
+    image: "ghcr.io/silicon-works/mcp-tools-enum4linux-ng:latest"
+    image_size_mb: 150
+
+    capabilities:
+      - smb_enumeration
+      - user_enumeration
+      - share_enumeration
+      - group_enumeration
+
+    phases:
+      - enumeration
+
+    requirements:
+      network: true
+      privileged: false
+
+    resources:
+      memory_mb: 256
+      cpu: 0.5
+
+    methods:
+      enumerate:
+        description: "Enumerate SMB shares, users, groups, and more from a Windows/Samba target"
+        when_to_use: "After discovering SMB service (445/139) to enumerate Windows/Samba information"
+        params:
+          target:
+            type: string
+            required: true
+            description: "Target IP or hostname"
+          username:
+            type: string
+            description: "Username for authenticated enumeration"
+          password:
+            type: string
+            description: "Password for authenticated enumeration"
+          shares:
+            type: boolean
+            default: true
+            description: "Enumerate shares"
+          users:
+            type: boolean
+            default: true
+            description: "Enumerate users via RID cycling"
+          groups:
+            type: boolean
+            default: true
+            description: "Enumerate groups"
+          timeout:
+            type: integer
+            default: 300
+            description: "Timeout in seconds"
+        returns:
+          shares:
+            type: array
+            description: "Discovered SMB shares"
+          users:
+            type: array
+            description: "Discovered users"
+          groups:
+            type: array
+            description: "Discovered groups"
+          os_info:
+            type: object
+            description: "Operating system information"
+
+  wpscan:
+    name: wpscan
+    version: "3.8"
+    description: "WordPress vulnerability scanner for plugins, themes, and users"
+    image: "ghcr.io/silicon-works/mcp-tools-wpscan:latest"
+    image_size_mb: 300
+
+    capabilities:
+      - wordpress_scanning
+      - plugin_detection
+      - theme_detection
+      - user_enumeration
+      - password_bruteforce
+
+    phases:
+      - enumeration
+      - exploitation
+
+    requirements:
+      network: true
+      privileged: false
+
+    resources:
+      memory_mb: 512
+      cpu: 0.5
+
+    methods:
+      scan:
+        description: "Scan a WordPress site for vulnerabilities"
+        when_to_use: "After identifying a WordPress installation to find vulnerable plugins/themes"
+        params:
+          url:
+            type: string
+            required: true
+            description: "Target WordPress URL"
+          enumerate:
+            type: string
+            default: "vp,vt,u"
+            description: "Enumeration options: vp (plugins), vt (themes), u (users), ap (all plugins)"
+          plugins_detection:
+            type: enum
+            values: [passive, aggressive, mixed]
+            default: mixed
+            description: "Plugin detection mode"
+          api_token:
+            type: string
+            description: "WPVulnDB API token for vulnerability data"
+          timeout:
+            type: integer
+            default: 300
+            description: "Timeout in seconds"
+        returns:
+          wordpress_version:
+            type: string
+            description: "Detected WordPress version"
+          plugins:
+            type: array
+            description: "Detected plugins with vulnerabilities"
+          themes:
+            type: array
+            description: "Detected themes"
+          users:
+            type: array
+            description: "Enumerated users"
+
+      bruteforce:
+        description: "Brute-force WordPress login"
+        when_to_use: "After enumerating users to test for weak passwords"
+        params:
+          url:
+            type: string
+            required: true
+            description: "Target WordPress URL"
+          username:
+            type: string
+            required: true
+            description: "Username to brute-force"
+          wordlist:
+            type: string
+            default: "/usr/share/wordlists/rockyou.txt"
+            description: "Password wordlist path"
+          timeout:
+            type: integer
+            default: 600
+            description: "Timeout in seconds"
+        returns:
+          password_found:
+            type: object
+            description: "Username and password if found"
+
+  # =============================================================================
+  # EXPLOITATION
+  # =============================================================================
+
   sqlmap:
     name: sqlmap
     version: "1.8"
@@ -170,6 +582,10 @@ tools:
             type: string
             default: "BEUSTQ"
             description: "SQL injection techniques to use"
+          timeout:
+            type: integer
+            default: 300
+            description: "Timeout in seconds"
         returns:
           vulnerable:
             type: boolean
@@ -189,6 +605,16 @@ tools:
             type: string
             required: true
             description: "Target URL (previously confirmed vulnerable)"
+          data:
+            type: string
+            description: "POST data if needed"
+          cookie:
+            type: string
+            description: "HTTP cookie header value"
+          timeout:
+            type: integer
+            default: 300
+            description: "Timeout in seconds"
         returns:
           databases:
             type: array
@@ -213,61 +639,31 @@ tools:
           columns:
             type: string
             description: "Specific columns to dump (comma-separated)"
+          data:
+            type: string
+            description: "POST data if needed"
+          cookie:
+            type: string
+            description: "HTTP cookie header value"
+          limit:
+            type: integer
+            default: 100
+            description: "Maximum rows to dump"
+          timeout:
+            type: integer
+            default: 600
+            description: "Timeout in seconds"
         returns:
           data:
             type: array
             description: "Table contents"
-
-  nikto:
-    name: nikto
-    version: "2.5"
-    description: "Web server vulnerability scanner"
-    image: "ghcr.io/silicon-works/mcp-tools-nikto:latest"
-    image_size_mb: 120
-
-    capabilities:
-      - web_vulnerability_scanning
-      - server_misconfiguration
-      - outdated_software_detection
-
-    phases:
-      - enumeration
-
-    requirements:
-      network: true
-      privileged: false
-
-    resources:
-      memory_mb: 256
-      cpu: 0.5
-
-    methods:
-      scan:
-        description: "Scan a web server for vulnerabilities and misconfigurations"
-        when_to_use: "After discovering HTTP/HTTPS service to identify web vulnerabilities"
-        params:
-          target:
-            type: string
-            required: true
-            description: "Target URL or IP:port"
-          tuning:
-            type: string
-            description: "Scan tuning options (1-9, a-c)"
-          ssl:
-            type: boolean
-            default: false
-            description: "Force SSL/TLS connection"
-        returns:
-          findings:
-            type: array
-            description: "Vulnerabilities and interesting findings"
 
   hydra:
     name: hydra
     version: "9.5"
     description: "Network authentication brute-forcing tool"
     image: "ghcr.io/silicon-works/mcp-tools-hydra:latest"
-    image_size_mb: 100
+    image_size_mb: 200
 
     capabilities:
       - password_bruteforce
@@ -296,21 +692,21 @@ tools:
           service:
             type: enum
             required: true
-            values: [ssh, ftp, http-get, http-post, smb, rdp, mysql, postgres, vnc, telnet]
+            values: [ssh, ftp, http-get, http-post, https-get, https-post, smb, rdp, mysql, postgres, vnc, telnet, smtp, pop3, imap]
             description: "Service protocol to attack"
           username:
             type: string
             description: "Single username to test"
           userlist:
             type: string
-            description: "Path to username wordlist"
+            description: "Wordlist name (usernames) or path to username list"
           password:
             type: string
             description: "Single password to test"
           passlist:
             type: string
-            default: "/usr/share/wordlists/rockyou.txt"
-            description: "Path to password wordlist"
+            default: "common-passwords"
+            description: "Wordlist name (rockyou, common-passwords) or path"
           threads:
             type: integer
             default: 16
@@ -318,160 +714,175 @@ tools:
           port:
             type: integer
             description: "Service port (uses default if not specified)"
+          timeout:
+            type: integer
+            default: 600
+            description: "Timeout in seconds"
+          http_path:
+            type: string
+            description: "Path for HTTP auth (e.g., /admin/login)"
+          http_form:
+            type: string
+            description: "HTTP form parameters (e.g., 'user=^USER^&pass=^PASS^:F=incorrect')"
         returns:
           credentials:
             type: array
             description: "Valid username:password combinations found"
 
-  ffuf:
-    name: ffuf
-    version: "2.1"
-    description: "Fast web fuzzer for directory discovery, parameter fuzzing, and vhost enumeration"
-    image: "ghcr.io/silicon-works/mcp-tools-ffuf:latest"
-    image_size_mb: 100
+  metasploit:
+    name: metasploit
+    version: "6.4"
+    description: "Exploitation framework for payload generation, vulnerability checks, and exploits"
+    image: "ghcr.io/silicon-works/mcp-tools-metasploit:latest"
+    image_size_mb: 3000
 
     capabilities:
-      - directory_bruteforce
-      - parameter_fuzzing
-      - vhost_discovery
+      - payload_generation
+      - exploit_execution
+      - vulnerability_checking
+      - module_search
 
     phases:
-      - enumeration
+      - exploitation
 
     requirements:
       network: true
       privileged: false
-      privileged_reason: null
 
     resources:
-      memory_mb: 512
+      memory_mb: 2048
       cpu: 1.0
 
     methods:
-      dir_fuzz:
-        description: "Fuzz directories and files on a web server"
-        when_to_use: "After discovering HTTP/HTTPS service to find hidden paths and files"
-        requires_privileged: false
+      generate_payload:
+        description: "Generate a payload using msfvenom"
+        when_to_use: "To create reverse shells, meterpreter payloads, or encoded payloads"
         params:
-          url:
+          payload:
             type: string
             required: true
-            description: "Target URL (FUZZ keyword added automatically if missing)"
-          wordlist:
+            description: "Payload name (e.g., 'windows/meterpreter/reverse_tcp') or shortcut"
+          lhost:
             type: string
-            default: "common"
-            description: "Wordlist name (common, big, dirbuster-small, dirbuster-medium) or path"
-          extensions:
-            type: string
-            description: "File extensions to append (e.g., 'php,html,txt')"
-          threads:
+            required: true
+            description: "Listening host IP for reverse connections"
+          lport:
             type: integer
-            default: 40
-            description: "Number of concurrent threads"
-          filter_status:
+            required: true
+            description: "Listening port for reverse connections"
+          format:
             type: string
-            description: "Match these status codes (default: 200,204,301,302,307,401,403,405)"
-          filter_size:
+            default: "raw"
+            description: "Output format: exe, elf, raw, python, php, asp, c, dll, etc."
+          encoder:
             type: string
-            description: "Filter out responses of this size"
+            description: "Encoder to use (e.g., 'x86/shikata_ga_nai')"
+          iterations:
+            type: integer
+            default: 1
+            description: "Number of encoding iterations"
+        returns:
+          payload_base64:
+            type: string
+            description: "Base64 encoded payload"
+          size_bytes:
+            type: integer
+            description: "Payload size in bytes"
+
+      search_modules:
+        description: "Search for Metasploit modules"
+        when_to_use: "To find exploits or auxiliary modules for a specific vulnerability or service"
+        params:
+          query:
+            type: string
+            required: true
+            description: "Search query (e.g., 'ms17-010', 'apache struts', 'smb')"
+          type:
+            type: enum
+            values: [all, exploit, auxiliary, post, payload]
+            default: all
+            description: "Module type to search for"
+        returns:
+          modules:
+            type: array
+            description: "Matching modules with paths and descriptions"
+
+      check_vuln:
+        description: "Check if a target is vulnerable using an auxiliary scanner module"
+        when_to_use: "To verify if a target is vulnerable before attempting exploitation"
+        params:
+          module:
+            type: string
+            required: true
+            description: "Auxiliary module path (e.g., 'auxiliary/scanner/smb/smb_ms17_010')"
+          rhosts:
+            type: string
+            required: true
+            description: "Target host(s)"
+          options:
+            type: object
+            description: "Additional module options as key-value pairs"
           timeout:
             type: integer
-            default: 10
-            description: "HTTP request timeout in seconds"
+            default: 120
+            description: "Timeout in seconds"
         returns:
-          results:
-            type: array
-            description: "Discovered paths with status codes and sizes"
-          summary:
-            type: object
-            description: "Summary with target, wordlist, and found paths"
+          vulnerable:
+            type: boolean
+            description: "Whether target appears vulnerable"
 
-      param_fuzz:
-        description: "Fuzz GET or POST parameters"
-        when_to_use: "To discover valid parameter values or test for injection points"
-        requires_privileged: false
+      run_exploit:
+        description: "Run an exploit module against a target"
+        when_to_use: "To exploit a confirmed vulnerability"
         params:
-          url:
+          module:
             type: string
             required: true
-            description: "Target URL with FUZZ keyword in parameter"
-          wordlist:
+            description: "Exploit module path (e.g., 'exploit/windows/smb/ms17_010_eternalblue')"
+          rhosts:
             type: string
-            default: "common"
-            description: "Wordlist name or path"
-          method:
-            type: enum
-            default: GET
-            values: [GET, POST]
-            description: "HTTP method"
-          data:
+            required: true
+            description: "Target host(s)"
+          payload:
             type: string
-            description: "POST data with FUZZ keyword (e.g., 'username=admin&password=FUZZ')"
-          threads:
+            description: "Payload to use"
+          lhost:
+            type: string
+            description: "Listening host for reverse payloads"
+          lport:
             type: integer
-            default: 40
-            description: "Number of concurrent threads"
-          filter_status:
-            type: string
-            description: "Match these status codes"
-          filter_size:
-            type: string
-            description: "Filter out responses of this size"
-        returns:
-          results:
-            type: array
-            description: "Matching parameter values with responses"
-
-      vhost_fuzz:
-        description: "Fuzz virtual hosts on a web server"
-        when_to_use: "To discover virtual hosts when targeting an IP with multiple sites"
-        requires_privileged: false
-        params:
-          url:
-            type: string
-            required: true
-            description: "Target URL (IP address or hostname)"
-          domain:
-            type: string
-            required: true
-            description: "Base domain for vhost fuzzing (e.g., 'target.htb')"
-          wordlist:
-            type: string
-            default: "common"
-            description: "Wordlist for subdomain prefixes"
-          threads:
-            type: integer
-            default: 40
-            description: "Number of concurrent threads"
-          filter_size:
-            type: string
-            description: "Filter out default response size"
-        returns:
-          vhosts:
-            type: array
-            description: "Discovered virtual hosts"
-          summary:
+            description: "Listening port for reverse payloads"
+          options:
             type: object
-            description: "Summary with target domain and found vhosts"
+            description: "Additional module options"
+          timeout:
+            type: integer
+            default: 300
+            description: "Timeout in seconds"
+        returns:
+          exploit_success:
+            type: boolean
+            description: "Whether exploit appeared successful"
+          session_opened:
+            type: boolean
+            description: "Whether a session was opened"
 
-  whatweb:
-    name: whatweb
-    version: "0.5"
-    description: "Web technology fingerprinting tool"
-    image: "ghcr.io/silicon-works/mcp-tools-whatweb:latest"
-    image_size_mb: 100
+  searchsploit:
+    name: searchsploit
+    version: "latest"
+    description: "Search ExploitDB for public exploits and vulnerability information"
+    image: "ghcr.io/silicon-works/mcp-tools-searchsploit:latest"
+    image_size_mb: 500
 
     capabilities:
-      - web_fingerprinting
-      - technology_detection
-      - cms_detection
+      - exploit_search
+      - vulnerability_research
 
     phases:
-      - reconnaissance
-      - enumeration
+      - exploitation
 
     requirements:
-      network: true
+      network: false
       privileged: false
 
     resources:
@@ -479,35 +890,55 @@ tools:
       cpu: 0.5
 
     methods:
-      scan:
-        description: "Identify web technologies used by a target"
-        when_to_use: "Early reconnaissance to identify CMS, frameworks, and technologies"
+      search:
+        description: "Search ExploitDB for exploits matching a query"
+        when_to_use: "After identifying a service version to find known exploits"
         params:
-          target:
+          query:
             type: string
             required: true
-            description: "Target URL"
-          aggression:
+            description: "Search terms (e.g., 'apache 2.4', 'wordpress 5.0', 'ms17-010')"
+          exact:
+            type: boolean
+            default: false
+            description: "Perform exact match search"
+          type:
             type: enum
-            default: stealthy
-            values: [stealthy, passive, polite, aggressive, heavy]
-            description: "Scan aggression level"
+            values: [all, exploit, shellcode, paper]
+            default: all
+            description: "Type of results to return"
         returns:
-          technologies:
+          results:
             type: array
-            description: "Identified technologies with versions"
+            description: "Matching exploits with ID, title, and path"
 
-  linpeas:
-    name: linpeas
-    version: "latest"
-    description: "Linux privilege escalation enumeration script"
-    image: "ghcr.io/silicon-works/mcp-tools-linpeas:latest"
-    image_size_mb: 50
+      get_exploit:
+        description: "Get the content of a specific exploit by ID or path"
+        when_to_use: "To retrieve exploit code for manual review or execution"
+        params:
+          exploit_id:
+            type: string
+            required: true
+            description: "Exploit ID number or path from search results"
+        returns:
+          content:
+            type: string
+            description: "Exploit source code"
+
+  # =============================================================================
+  # POST-EXPLOITATION
+  # =============================================================================
+
+  john:
+    name: john
+    version: "1.9"
+    description: "Password hash cracking tool (John the Ripper)"
+    image: "ghcr.io/silicon-works/mcp-tools-john:latest"
+    image_size_mb: 200
 
     capabilities:
-      - privilege_escalation_enumeration
-      - linux_enumeration
-      - credential_hunting
+      - password_cracking
+      - hash_identification
 
     phases:
       - post-exploitation
@@ -517,59 +948,65 @@ tools:
       privileged: false
 
     resources:
-      memory_mb: 128
-      cpu: 0.5
+      memory_mb: 1024
+      cpu: 2.0
 
     methods:
-      enumerate:
-        description: "Run privilege escalation enumeration on a Linux target"
-        when_to_use: "After gaining initial access to find privilege escalation vectors"
+      crack:
+        description: "Crack password hashes using wordlist or incremental mode"
+        when_to_use: "After extracting password hashes to recover plaintext passwords"
         params:
-          intensity:
-            type: enum
-            default: normal
-            values: [quiet, normal, thorough]
-            description: "Scan intensity level"
-          checks:
-            type: array
-            description: "Specific checks to run (e.g., ['sudo', 'suid', 'cron'])"
+          hashes:
+            type: string
+            required: true
+            description: "Hash(es) to crack, one per line, or in user:hash format"
+          format:
+            type: string
+            default: "auto"
+            description: "Hash format (auto-detect if not specified)"
+          wordlist:
+            type: string
+            default: "rockyou"
+            description: "Wordlist name (rockyou, common) or path"
+          rules:
+            type: boolean
+            default: true
+            description: "Apply word mangling rules"
+          timeout:
+            type: integer
+            default: 300
+            description: "Maximum time to spend cracking in seconds"
         returns:
-          findings:
+          cracked:
             type: array
-            description: "Potential privilege escalation vectors"
+            description: "Cracked username:password pairs"
 
-  winpeas:
-    name: winpeas
-    version: "latest"
-    description: "Windows privilege escalation enumeration script"
-    image: "ghcr.io/silicon-works/mcp-tools-winpeas:latest"
-    image_size_mb: 50
-
-    capabilities:
-      - privilege_escalation_enumeration
-      - windows_enumeration
-      - credential_hunting
-
-    phases:
-      - post-exploitation
-
-    requirements:
-      network: false
-      privileged: false
-
-    resources:
-      memory_mb: 128
-      cpu: 0.5
-
-    methods:
-      enumerate:
-        description: "Run privilege escalation enumeration on a Windows target"
-        when_to_use: "After gaining initial access to find Windows privesc vectors"
+      show:
+        description: "Show previously cracked passwords from a hash file"
+        when_to_use: "To retrieve already cracked passwords"
         params:
-          checks:
-            type: array
-            description: "Specific checks to run"
+          hashes:
+            type: string
+            required: true
+            description: "Hash(es) to check for cracked passwords"
+          format:
+            type: string
+            default: "auto"
+            description: "Hash format"
         returns:
-          findings:
+          cracked:
             type: array
-            description: "Potential privilege escalation vectors"
+            description: "Previously cracked passwords"
+
+      identify:
+        description: "Identify the format of a hash"
+        when_to_use: "When unsure what hash type was extracted"
+        params:
+          hash:
+            type: string
+            required: true
+            description: "Hash to identify"
+        returns:
+          possible_formats:
+            type: array
+            description: "Possible hash formats"
