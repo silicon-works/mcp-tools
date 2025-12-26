@@ -168,6 +168,65 @@ tools:
             type: integer
             description: "Length of raw response body"
 
+      upload:
+        description: "Upload a file using multipart/form-data"
+        when_to_use: "For web shell uploads, file injection, exploiting upload vulnerabilities"
+        params:
+          url:
+            type: string
+            required: true
+            description: "Target upload URL"
+          file_field:
+            type: string
+            required: true
+            description: "Form field name for file (e.g., 'file', 'upload', 'avatar')"
+          filename:
+            type: string
+            required: true
+            description: "Filename to send (e.g., 'shell.php', 'image.png')"
+          content:
+            type: string
+            required: true
+            description: "File content (plain text or base64 encoded)"
+          content_type:
+            type: string
+            default: "application/octet-stream"
+            description: "MIME type for the uploaded file"
+          is_base64:
+            type: boolean
+            default: false
+            description: "Whether content is base64 encoded"
+          extra_fields:
+            type: object
+            description: "Additional form fields as key-value pairs"
+          headers:
+            type: object
+            description: "Custom HTTP headers"
+          cookie:
+            type: string
+            description: "Cookie header value"
+          timeout:
+            type: integer
+            default: 60
+            description: "Upload timeout in seconds"
+          insecure:
+            type: boolean
+            default: false
+            description: "Skip SSL certificate verification"
+        returns:
+          status_code:
+            type: integer
+            description: "HTTP response status code"
+          filename:
+            type: string
+            description: "Uploaded filename"
+          file_size:
+            type: integer
+            description: "Size of uploaded content"
+          body:
+            type: string
+            description: "Response body"
+
   playwright-mcp:
     name: playwright-mcp
     version: "latest"
@@ -380,6 +439,12 @@ tools:
             type: integer
             default: 10
             description: "HTTP request timeout in seconds"
+          headers:
+            type: object
+            description: "Custom HTTP headers as key-value pairs (e.g., {\"Host\": \"target.htb\"})"
+          cookies:
+            type: string
+            description: "Cookie header value for authenticated fuzzing"
         returns:
           results:
             type: array
@@ -418,6 +483,12 @@ tools:
           filter_size:
             type: string
             description: "Filter out responses of this size"
+          headers:
+            type: object
+            description: "Custom HTTP headers as key-value pairs"
+          cookies:
+            type: string
+            description: "Cookie header value for authenticated fuzzing"
         returns:
           results:
             type: array
@@ -892,7 +963,7 @@ tools:
           service:
             type: enum
             required: true
-            values: [ssh, ftp, http-get, http-post, https-get, https-post, smb, rdp, mysql, postgres, vnc, telnet, smtp, pop3, imap]
+            values: [ssh, ftp, http-get, http-post, http-post-form, http-get-form, https-get, https-post, https-post-form, https-get-form, smb, rdp, mysql, postgres, vnc, telnet, smtp, pop3, imap]
             description: "Service protocol to attack"
           username:
             type: string
@@ -923,7 +994,7 @@ tools:
             description: "Path for HTTP auth (e.g., /admin/login)"
           http_form:
             type: string
-            description: "HTTP form parameters (e.g., 'user=^USER^&pass=^PASS^:F=incorrect')"
+            description: "HTTP form attack string for http-post-form/http-get-form (format: '/path:user=^USER^&pass=^PASS^:F=error_message')"
         returns:
           credentials:
             type: array
@@ -2823,3 +2894,846 @@ tools:
           metasploit_search:
             type: string
             description: "Metasploit search command"
+
+  # =============================================================================
+  # NEW TOOLS - Added to fill pentest gaps
+  # =============================================================================
+
+  ftp:
+    name: ftp
+    version: "1.0"
+    description: "FTP/FTPS client for file operations and transfers"
+    image: "ghcr.io/silicon-works/mcp-tools-ftp:latest"
+    image_size_mb: 100
+
+    capabilities:
+      - ftp_connection
+      - file_transfer
+      - directory_listing
+
+    phases:
+      - enumeration
+      - exploitation
+      - post-exploitation
+
+    requirements:
+      network: true
+      privileged: false
+
+    resources:
+      memory_mb: 128
+      cpu: 0.25
+
+    methods:
+      connect:
+        description: "Test FTP connection and list root directory"
+        when_to_use: "To verify FTP access and enumerate initial contents"
+        params:
+          host:
+            type: string
+            required: true
+            description: "FTP server hostname or IP"
+          port:
+            type: integer
+            default: 21
+            description: "FTP port"
+          username:
+            type: string
+            default: "anonymous"
+            description: "FTP username (default: anonymous)"
+          password:
+            type: string
+            default: "anonymous@"
+            description: "FTP password"
+          ssl:
+            type: boolean
+            default: false
+            description: "Use FTPS (FTP over SSL/TLS)"
+          timeout:
+            type: integer
+            default: 30
+            description: "Connection timeout in seconds"
+        returns:
+          welcome:
+            type: string
+            description: "Server welcome message"
+          listing:
+            type: array
+            description: "Root directory listing"
+
+      list:
+        description: "List directory contents on FTP server"
+        when_to_use: "To enumerate files in a specific directory"
+        params:
+          host:
+            type: string
+            required: true
+            description: "FTP server hostname or IP"
+          path:
+            type: string
+            default: "/"
+            description: "Directory path to list"
+          port:
+            type: integer
+            default: 21
+            description: "FTP port"
+          username:
+            type: string
+            default: "anonymous"
+            description: "FTP username"
+          password:
+            type: string
+            default: "anonymous@"
+            description: "FTP password"
+          ssl:
+            type: boolean
+            default: false
+            description: "Use FTPS"
+          timeout:
+            type: integer
+            default: 30
+            description: "Connection timeout"
+        returns:
+          files:
+            type: array
+            description: "Parsed file list with permissions and sizes"
+          raw_listing:
+            type: array
+            description: "Raw FTP LIST output"
+
+      download:
+        description: "Download a file from FTP server"
+        when_to_use: "To retrieve files for analysis or exploitation"
+        params:
+          host:
+            type: string
+            required: true
+            description: "FTP server hostname or IP"
+          remote_path:
+            type: string
+            required: true
+            description: "Remote file path to download"
+          port:
+            type: integer
+            default: 21
+            description: "FTP port"
+          username:
+            type: string
+            default: "anonymous"
+            description: "FTP username"
+          password:
+            type: string
+            default: "anonymous@"
+            description: "FTP password"
+          ssl:
+            type: boolean
+            default: false
+            description: "Use FTPS"
+          timeout:
+            type: integer
+            default: 60
+            description: "Transfer timeout"
+        returns:
+          filename:
+            type: string
+            description: "Downloaded filename"
+          size_bytes:
+            type: integer
+            description: "File size"
+          content_base64:
+            type: string
+            description: "File content as base64"
+          content_text:
+            type: string
+            description: "File content as text (if decodable)"
+
+      upload:
+        description: "Upload a file to FTP server"
+        when_to_use: "To upload shells, exploits, or files to target"
+        params:
+          host:
+            type: string
+            required: true
+            description: "FTP server hostname or IP"
+          remote_path:
+            type: string
+            required: true
+            description: "Remote path to upload to"
+          content:
+            type: string
+            required: true
+            description: "File content (plain text or base64)"
+          is_base64:
+            type: boolean
+            default: false
+            description: "Whether content is base64 encoded"
+          port:
+            type: integer
+            default: 21
+            description: "FTP port"
+          username:
+            type: string
+            required: true
+            description: "FTP username"
+          password:
+            type: string
+            required: true
+            description: "FTP password"
+          ssl:
+            type: boolean
+            default: false
+            description: "Use FTPS"
+          timeout:
+            type: integer
+            default: 60
+            description: "Transfer timeout"
+        returns:
+          uploaded:
+            type: boolean
+            description: "Upload success status"
+          size_bytes:
+            type: integer
+            description: "Uploaded file size"
+
+      delete:
+        description: "Delete a file from FTP server"
+        when_to_use: "To clean up uploaded files after exploitation"
+        params:
+          host:
+            type: string
+            required: true
+            description: "FTP server hostname or IP"
+          remote_path:
+            type: string
+            required: true
+            description: "Remote file path to delete"
+          port:
+            type: integer
+            default: 21
+            description: "FTP port"
+          username:
+            type: string
+            required: true
+            description: "FTP username"
+          password:
+            type: string
+            required: true
+            description: "FTP password"
+          ssl:
+            type: boolean
+            default: false
+            description: "Use FTPS"
+          timeout:
+            type: integer
+            default: 30
+            description: "Connection timeout"
+        returns:
+          deleted:
+            type: boolean
+            description: "Deletion success status"
+
+  web-session:
+    name: web-session
+    version: "1.0"
+    description: "Web session state management for authenticated testing"
+    image: "ghcr.io/silicon-works/mcp-tools-web-session:latest"
+    image_size_mb: 100
+
+    capabilities:
+      - session_management
+      - cookie_handling
+      - authenticated_requests
+      - csrf_extraction
+
+    phases:
+      - enumeration
+      - exploitation
+
+    requirements:
+      network: true
+      privileged: false
+
+    resources:
+      memory_mb: 128
+      cpu: 0.25
+
+    methods:
+      login:
+        description: "Perform login and capture session cookies"
+        when_to_use: "To authenticate to a web application and store session for reuse"
+        params:
+          url:
+            type: string
+            required: true
+            description: "Login URL endpoint"
+          username_field:
+            type: string
+            default: "username"
+            description: "Form field name for username"
+          password_field:
+            type: string
+            default: "password"
+            description: "Form field name for password"
+          username:
+            type: string
+            required: true
+            description: "Username to login with"
+          password:
+            type: string
+            required: true
+            description: "Password to login with"
+          extra_fields:
+            type: object
+            description: "Additional form fields (e.g., CSRF token)"
+          session_name:
+            type: string
+            default: "default"
+            description: "Name to store this session under"
+          success_indicator:
+            type: string
+            description: "Text that indicates successful login"
+          failure_indicator:
+            type: string
+            description: "Text that indicates failed login"
+          headers:
+            type: object
+            description: "Custom HTTP headers"
+          timeout:
+            type: integer
+            default: 30
+            description: "Request timeout in seconds"
+        returns:
+          login_success:
+            type: boolean
+            description: "Whether login succeeded"
+          cookies:
+            type: object
+            description: "Captured session cookies"
+          cookie_header:
+            type: string
+            description: "Cookie string for use in other tools"
+
+      get_cookies:
+        description: "Get cookies from a stored session"
+        when_to_use: "To retrieve cookies for use with other tools (curl, ffuf, etc.)"
+        params:
+          session_name:
+            type: string
+            default: "default"
+            description: "Session name to retrieve"
+          format:
+            type: enum
+            values: [header, dict, raw]
+            default: "header"
+            description: "Output format"
+        returns:
+          cookies:
+            type: object
+            description: "Session cookies"
+          cookie_header:
+            type: string
+            description: "Cookie header string"
+
+      set_cookies:
+        description: "Manually set cookies for a session"
+        when_to_use: "To import cookies from browser or other source"
+        params:
+          cookies:
+            type: string
+            required: true
+            description: "Cookie string (format: 'name1=value1; name2=value2')"
+          session_name:
+            type: string
+            default: "default"
+            description: "Session name to store under"
+          domain:
+            type: string
+            description: "Cookie domain"
+        returns:
+          cookies:
+            type: object
+            description: "Parsed cookies"
+
+      request:
+        description: "Make authenticated request using stored session"
+        when_to_use: "To make requests with session cookies automatically included"
+        params:
+          url:
+            type: string
+            required: true
+            description: "URL to request"
+          method:
+            type: enum
+            values: [GET, POST, PUT, DELETE]
+            default: "GET"
+            description: "HTTP method"
+          session_name:
+            type: string
+            default: "default"
+            description: "Session to use"
+          data:
+            type: string
+            description: "Request body data"
+          headers:
+            type: object
+            description: "Additional HTTP headers"
+          timeout:
+            type: integer
+            default: 30
+            description: "Request timeout"
+        returns:
+          status_code:
+            type: integer
+            description: "HTTP response status"
+          body:
+            type: string
+            description: "Response body"
+
+      list_sessions:
+        description: "List all stored sessions"
+        when_to_use: "To see available authenticated sessions"
+        params: {}
+        returns:
+          sessions:
+            type: array
+            description: "List of stored sessions"
+
+      extract_csrf:
+        description: "Extract CSRF token from a page"
+        when_to_use: "To get CSRF token for form submissions"
+        params:
+          url:
+            type: string
+            required: true
+            description: "URL to fetch"
+          session_name:
+            type: string
+            default: "default"
+            description: "Session to use (if any)"
+          token_pattern:
+            type: string
+            description: "Regex pattern to extract token"
+          timeout:
+            type: integer
+            default: 30
+            description: "Request timeout"
+        returns:
+          token:
+            type: string
+            description: "Extracted CSRF token"
+          tokens:
+            type: array
+            description: "All tokens found"
+
+  lfi-rfi:
+    name: lfi-rfi
+    version: "1.0"
+    description: "Local/Remote File Inclusion vulnerability testing"
+    image: "ghcr.io/silicon-works/mcp-tools-lfi-rfi:latest"
+    image_size_mb: 100
+
+    capabilities:
+      - lfi_testing
+      - rfi_testing
+      - path_traversal
+      - php_filters
+      - log_poisoning
+
+    phases:
+      - enumeration
+      - exploitation
+
+    requirements:
+      network: true
+      privileged: false
+
+    resources:
+      memory_mb: 128
+      cpu: 0.5
+
+    methods:
+      test_lfi:
+        description: "Test URL parameter for Local File Inclusion vulnerability"
+        when_to_use: "When file parameter is suspected vulnerable to path traversal"
+        params:
+          url:
+            type: string
+            required: true
+            description: "Target URL with {PAYLOAD} placeholder"
+          os:
+            type: enum
+            values: [linux, windows, auto]
+            default: "auto"
+            description: "Target operating system"
+          depth:
+            type: integer
+            default: 8
+            description: "Maximum directory traversal depth"
+          encodings:
+            type: array
+            description: "Encodings to try (plain, url, double-url, etc.)"
+          cookie:
+            type: string
+            description: "Cookie header for authenticated testing"
+          headers:
+            type: object
+            description: "Custom HTTP headers"
+          success_pattern:
+            type: string
+            description: "Regex pattern indicating successful inclusion"
+          timeout:
+            type: integer
+            default: 10
+            description: "Request timeout per attempt"
+        returns:
+          vulnerable:
+            type: boolean
+            description: "Whether LFI was found"
+          vulnerabilities:
+            type: array
+            description: "Working payloads and encodings"
+          working_payload:
+            type: string
+            description: "First successful payload"
+
+      test_rfi:
+        description: "Test URL parameter for Remote File Inclusion vulnerability"
+        when_to_use: "When parameter may include remote URLs"
+        params:
+          url:
+            type: string
+            required: true
+            description: "Target URL with {PAYLOAD} placeholder"
+          remote_url:
+            type: string
+            required: true
+            description: "URL to include (your controlled server)"
+          wrappers:
+            type: array
+            description: "PHP wrappers to try"
+          cookie:
+            type: string
+            description: "Cookie header"
+          headers:
+            type: object
+            description: "Custom HTTP headers"
+          timeout:
+            type: integer
+            default: 10
+            description: "Request timeout"
+        returns:
+          vulnerable:
+            type: boolean
+            description: "Whether RFI may be possible"
+          vulnerabilities:
+            type: array
+            description: "Working wrappers"
+
+      read_file:
+        description: "Read a specific file via confirmed LFI vulnerability"
+        when_to_use: "After confirming LFI to read specific files"
+        params:
+          url:
+            type: string
+            required: true
+            description: "Vulnerable URL with {PAYLOAD} placeholder"
+          file_path:
+            type: string
+            required: true
+            description: "File to read (e.g., /etc/passwd)"
+          traversal:
+            type: string
+            default: "../"
+            description: "Traversal string that works"
+          depth:
+            type: integer
+            default: 8
+            description: "Traversal depth"
+          wrapper:
+            type: string
+            description: "PHP wrapper if needed"
+          cookie:
+            type: string
+            description: "Cookie header"
+          headers:
+            type: object
+            description: "Custom HTTP headers"
+          timeout:
+            type: integer
+            default: 15
+            description: "Request timeout"
+        returns:
+          content:
+            type: string
+            description: "File contents"
+          content_length:
+            type: integer
+            description: "Content length"
+
+      php_filter:
+        description: "Use PHP filter wrapper to read file contents (base64 encoded)"
+        when_to_use: "To read PHP source code without execution"
+        params:
+          url:
+            type: string
+            required: true
+            description: "Vulnerable URL with {PAYLOAD} placeholder"
+          file_path:
+            type: string
+            required: true
+            description: "File to read"
+          cookie:
+            type: string
+            description: "Cookie header"
+          headers:
+            type: object
+            description: "Custom HTTP headers"
+          timeout:
+            type: integer
+            default: 15
+            description: "Request timeout"
+        returns:
+          decoded_content:
+            type: string
+            description: "Decoded file content"
+          base64_content:
+            type: string
+            description: "Raw base64 content"
+
+      log_poison:
+        description: "Attempt log poisoning via User-Agent or other headers"
+        when_to_use: "To achieve RCE via LFI + log poisoning"
+        params:
+          url:
+            type: string
+            required: true
+            description: "Vulnerable URL with {PAYLOAD} placeholder"
+          log_file:
+            type: string
+            required: true
+            description: "Log file path"
+          payload:
+            type: string
+            required: true
+            description: "Payload to inject (e.g., PHP code)"
+          traversal:
+            type: string
+            default: "../"
+            description: "Traversal string"
+          depth:
+            type: integer
+            default: 8
+            description: "Traversal depth"
+          poison_header:
+            type: enum
+            values: [User-Agent, Referer, X-Forwarded-For]
+            default: "User-Agent"
+            description: "Header to poison"
+          cookie:
+            type: string
+            description: "Cookie header"
+          timeout:
+            type: integer
+            default: 15
+            description: "Request timeout"
+        returns:
+          payload_visible:
+            type: boolean
+            description: "Whether payload appears in log"
+          body_preview:
+            type: string
+            description: "Response preview"
+
+  exploit-runner:
+    name: exploit-runner
+    version: "1.0"
+    description: "Execute CVE exploits and PoCs safely"
+    image: "ghcr.io/silicon-works/mcp-tools-exploit-runner:latest"
+    image_size_mb: 800
+
+    capabilities:
+      - python_exploits
+      - shell_exploits
+      - ruby_exploits
+      - exploit_analysis
+
+    phases:
+      - exploitation
+
+    requirements:
+      network: true
+      privileged: true
+
+    resources:
+      memory_mb: 512
+      cpu: 1.0
+
+    methods:
+      run_python:
+        description: "Execute a Python exploit script"
+        when_to_use: "To run Python-based CVE exploits or PoCs"
+        params:
+          script:
+            type: string
+            required: true
+            description: "Python script content or path"
+          args:
+            type: array
+            description: "Command line arguments for the script"
+          is_path:
+            type: boolean
+            default: false
+            description: "Whether script is a file path"
+          is_base64:
+            type: boolean
+            default: false
+            description: "Whether script content is base64 encoded"
+          python_version:
+            type: enum
+            values: [python3, python2]
+            default: "python3"
+            description: "Python version to use"
+          timeout:
+            type: integer
+            default: 120
+            description: "Execution timeout in seconds"
+          env:
+            type: object
+            description: "Environment variables to set"
+        returns:
+          returncode:
+            type: integer
+            description: "Exit code"
+          stdout:
+            type: string
+            description: "Standard output"
+          stderr:
+            type: string
+            description: "Standard error"
+
+      run_shell:
+        description: "Execute a shell script or command"
+        when_to_use: "To run shell-based exploits"
+        params:
+          script:
+            type: string
+            required: true
+            description: "Shell script content"
+          args:
+            type: array
+            description: "Command line arguments"
+          shell:
+            type: enum
+            values: [bash, sh, zsh]
+            default: "bash"
+            description: "Shell to use"
+          timeout:
+            type: integer
+            default: 120
+            description: "Execution timeout"
+          env:
+            type: object
+            description: "Environment variables"
+        returns:
+          returncode:
+            type: integer
+            description: "Exit code"
+          stdout:
+            type: string
+            description: "Standard output"
+          stderr:
+            type: string
+            description: "Standard error"
+
+      run_ruby:
+        description: "Execute a Ruby exploit script"
+        when_to_use: "To run Ruby-based exploits (many Metasploit modules)"
+        params:
+          script:
+            type: string
+            required: true
+            description: "Ruby script content or path"
+          args:
+            type: array
+            description: "Command line arguments"
+          is_path:
+            type: boolean
+            default: false
+            description: "Whether script is a file path"
+          timeout:
+            type: integer
+            default: 120
+            description: "Execution timeout"
+        returns:
+          returncode:
+            type: integer
+            description: "Exit code"
+          stdout:
+            type: string
+            description: "Standard output"
+          stderr:
+            type: string
+            description: "Standard error"
+
+      prepare_exploit:
+        description: "Prepare exploit by saving and setting up dependencies"
+        when_to_use: "To save exploit for repeated execution"
+        params:
+          content:
+            type: string
+            required: true
+            description: "Exploit script content"
+          filename:
+            type: string
+            required: true
+            description: "Filename to save as"
+          is_base64:
+            type: boolean
+            default: false
+            description: "Whether content is base64 encoded"
+          requirements:
+            type: array
+            description: "Python packages to install"
+        returns:
+          path:
+            type: string
+            description: "Saved exploit path"
+          requirements_installed:
+            type: array
+            description: "Installed packages"
+
+      list_exploits:
+        description: "List prepared exploits in workspace"
+        when_to_use: "To see available prepared exploits"
+        params: {}
+        returns:
+          exploits:
+            type: array
+            description: "List of prepared exploits"
+
+      analyze_exploit:
+        description: "Analyze an exploit script for safety and requirements"
+        when_to_use: "Before running to understand what exploit does"
+        params:
+          script:
+            type: string
+            required: true
+            description: "Exploit script content"
+          language:
+            type: enum
+            values: [python, ruby, shell, auto]
+            default: "auto"
+            description: "Script language"
+        returns:
+          language:
+            type: string
+            description: "Detected language"
+          imports:
+            type: array
+            description: "Imported modules"
+          dangerous_patterns:
+            type: array
+            description: "Potentially dangerous operations"
+          likely_requirements:
+            type: array
+            description: "Likely pip requirements"

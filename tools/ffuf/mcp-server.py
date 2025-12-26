@@ -73,6 +73,14 @@ class FfufServer(BaseMCPServer):
                     "default": 10,
                     "description": "HTTP request timeout in seconds",
                 },
+                "headers": {
+                    "type": "object",
+                    "description": "Custom HTTP headers as key-value pairs (e.g., {\"Host\": \"target.htb\"})",
+                },
+                "cookies": {
+                    "type": "string",
+                    "description": "Cookie header value for authenticated fuzzing",
+                },
             },
             handler=self.dir_fuzz,
         )
@@ -113,6 +121,14 @@ class FfufServer(BaseMCPServer):
                 "filter_size": {
                     "type": "string",
                     "description": "Filter out responses of this size",
+                },
+                "headers": {
+                    "type": "object",
+                    "description": "Custom HTTP headers as key-value pairs",
+                },
+                "cookies": {
+                    "type": "string",
+                    "description": "Cookie header value for authenticated fuzzing",
                 },
             },
             handler=self.param_fuzz,
@@ -249,6 +265,8 @@ class FfufServer(BaseMCPServer):
         filter_status: Optional[str] = None,
         filter_size: Optional[str] = None,
         timeout: int = 10,
+        headers: Optional[Dict[str, str]] = None,
+        cookies: Optional[str] = None,
     ) -> ToolResult:
         """
         Fuzz directories and files on a web server.
@@ -281,6 +299,15 @@ class FfufServer(BaseMCPServer):
         if filter_size:
             args.extend(["-fs", filter_size])
 
+        # Add custom headers
+        if headers:
+            for key, value in headers.items():
+                args.extend(["-H", f"{key}: {value}"])
+
+        # Add cookies
+        if cookies:
+            args.extend(["-b", cookies])
+
         # Calculate timeout based on wordlist size
         try:
             with open(wordlist_path, "r") as f:
@@ -312,6 +339,8 @@ class FfufServer(BaseMCPServer):
         threads: int = 40,
         filter_status: Optional[str] = None,
         filter_size: Optional[str] = None,
+        headers: Optional[Dict[str, str]] = None,
+        cookies: Optional[str] = None,
     ) -> ToolResult:
         """
         Fuzz GET or POST parameters.
@@ -335,6 +364,15 @@ class FfufServer(BaseMCPServer):
 
         if filter_size:
             args.extend(["-fs", filter_size])
+
+        # Add custom headers
+        if headers:
+            for key, value in headers.items():
+                args.extend(["-H", f"{key}: {value}"])
+
+        # Add cookies
+        if cookies:
+            args.extend(["-b", cookies])
 
         result = await self._run_ffuf(args, timeout=300)
 
