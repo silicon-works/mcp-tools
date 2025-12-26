@@ -28,8 +28,12 @@ class HydraServer(BaseMCPServer):
         "ftp": 21,
         "http-get": 80,
         "http-post": 80,
+        "http-post-form": 80,
+        "http-get-form": 80,
         "https-get": 443,
         "https-post": 443,
+        "https-post-form": 443,
+        "https-get-form": 443,
         "smb": 445,
         "rdp": 3389,
         "mysql": 3306,
@@ -186,9 +190,9 @@ class HydraServer(BaseMCPServer):
         # Handle HTTP services specially
         if service in ["http-get", "https-get"]:
             path = http_path or "/"
-            args.append(f"http-get")
+            args.append("http-get")
             args.append(path)
-        elif service in ["http-post", "https-post"]:
+        elif service in ["http-post-form", "https-post-form"]:
             if http_form:
                 args.append("http-post-form")
                 args.append(http_form)
@@ -196,8 +200,23 @@ class HydraServer(BaseMCPServer):
                 return ToolResult(
                     success=False,
                     data={},
-                    error="http_form parameter required for http-post service",
+                    error="http_form parameter required for http-post-form service (format: '/path:user=^USER^&pass=^PASS^:F=error_message')",
                 )
+        elif service in ["http-get-form", "https-get-form"]:
+            if http_form:
+                args.append("http-get-form")
+                args.append(http_form)
+            else:
+                return ToolResult(
+                    success=False,
+                    data={},
+                    error="http_form parameter required for http-get-form service (format: '/path:user=^USER^&pass=^PASS^:F=error_message')",
+                )
+        elif service in ["http-post", "https-post"]:
+            # Basic HTTP POST auth (not form-based)
+            path = http_path or "/"
+            args.append("http-post")
+            args.append(path)
         else:
             args.append(service)
 

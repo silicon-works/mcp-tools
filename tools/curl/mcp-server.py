@@ -142,6 +142,66 @@ class CurlServer(BaseMCPServer):
         )
 
         self.register_method(
+            name="upload",
+            description="Upload a file using multipart/form-data (for web shell uploads, file injection, etc.)",
+            params={
+                "url": {
+                    "type": "string",
+                    "required": True,
+                    "description": "Target upload URL",
+                },
+                "file_field": {
+                    "type": "string",
+                    "required": True,
+                    "description": "Form field name for file (e.g., 'file', 'upload', 'avatar')",
+                },
+                "filename": {
+                    "type": "string",
+                    "required": True,
+                    "description": "Filename to send (e.g., 'shell.php', 'image.png')",
+                },
+                "content": {
+                    "type": "string",
+                    "required": True,
+                    "description": "File content (plain text or base64 encoded)",
+                },
+                "content_type": {
+                    "type": "string",
+                    "default": "application/octet-stream",
+                    "description": "MIME type for the uploaded file",
+                },
+                "is_base64": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": "Whether content is base64 encoded",
+                },
+                "extra_fields": {
+                    "type": "object",
+                    "description": "Additional form fields as key-value pairs",
+                },
+                "headers": {
+                    "type": "object",
+                    "description": "Custom HTTP headers",
+                },
+                "cookie": {
+                    "type": "string",
+                    "description": "Cookie header value",
+                },
+                "timeout": {
+                    "type": "integer",
+                    "default": 60,
+                    "description": "Upload timeout in seconds",
+                },
+                "insecure": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": "Skip SSL certificate verification",
+                },
+            },
+            handler=self.upload,
+        )
+
+        self.register_method(
             name="download",
             description="Download a file from a URL",
             params={
@@ -372,6 +432,121 @@ class CurlServer(BaseMCPServer):
             },
             raw_output=extracted,
         )
+
+    async def upload(
+        self,
+        url: str,
+        file_field: str,
+        filename: str,
+        content: str,
+        content_type: str = "application/octet-stream",
+        is_base64: bool = False,
+        extra_fields: Optional[Dict[str, str]] = None,
+        headers: Optional[Dict[str, str]] = None,
+        cookie: Optional[str] = None,
+        timeout: int = 60,
+        insecure: bool = False,
+    ) -> ToolResult:
+        """Upload a file using multipart/form-data."""
+        self.logger.info(f"Uploading {filename} to {url}")
+
+        import tempfile
+        import os
+
+        # Decode content if base64
+        if is_base64:
+            try:
+                file_content = base64.b64decode(content)
+            except Exception as e:
+                return ToolResult(
+                    success=False,
+                    data={"url": url},
+                    error=f"Failed to decode base64 content: {e}",
+                )
+        else:
+            file_content = content.encode('utf-8')
+
+        # Write content to temp file for curl upload
+        with tempfile.NamedTemporaryFile(mode='wb', delete=False, suffix=f"_{filename}") as f:
+            f.write(file_content)
+            temp_file = f.name
+
+        try:
+            args = [
+                "curl",
+                "-s",
+                "-S",
+                "-i",
+                "-X", "POST",
+                "--max-time", str(timeout),
+            ]
+
+            if insecure:
+                args.append("-k")
+
+            # Add the file field with multipart upload
+            args.extend(["-F", f"{file_field}=@{temp_file};filename={filename};type={content_type}"])
+
+            # Add extra form fields
+            if extra_fields:
+                for key, value in extra_fields.items():
+                    args.extend(["-F", f"{key}={value}"])
+
+            # Add custom headers
+            if headers:
+                for key, value in headers.items():
+                    args.extend(["-H", f"{key}: {value}"])
+
+            # Add cookies
+            if cookie:
+                args.extend(["-b", cookie])
+
+            args.append(url)
+
+            result = await self.run_command(args, timeout=timeout + 10)
+            output = result.stdout
+
+            # Parse response
+            status_code = None
+            response_headers = {}
+            body = output
+
+            if "\r\n\r\n" in output:
+                header_section, body = output.split("\r\n\r\n", 1)
+                lines = header_section.split("\r\n")
+                if lines and lines[0].startswith("HTTP/"):
+                    status_parts = lines[0].split(" ", 2)
+                    if len(status_parts) >= 2:
+                        try:
+                            status_code = int(status_parts[1])
+                        except ValueError:
+                            pass
+                response_headers = self._parse_headers(header_section)
+
+            return ToolResult(
+                success=True,
+                data={
+                    "url": url,
+                    "filename": filename,
+                    "file_size": len(file_content),
+                    "status_code": status_code,
+                    "headers": response_headers,
+                    "body": body[:50000] if len(body) > 50000 else body,
+                    "body_length": len(body),
+                },
+                raw_output=sanitize_output(output),
+            )
+
+        except ToolError as e:
+            return ToolResult(
+                success=False,
+                data={"url": url, "filename": filename},
+                error=str(e),
+            )
+        finally:
+            # Cleanup temp file
+            if os.path.exists(temp_file):
+                os.unlink(temp_file)
 
     async def download(
         self,

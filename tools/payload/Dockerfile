@@ -15,10 +15,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /app
 
-# Install Python dependencies
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
-
 # Install mcp-common from local package
 COPY packages/mcp-common /tmp/mcp-common
 RUN pip install --no-cache-dir /tmp/mcp-common && rm -rf /tmp/mcp-common
