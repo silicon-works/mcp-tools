@@ -27,7 +27,7 @@ jobs:
   changes:
     runs-on: ubuntu-latest
     outputs:
-      tools: ${{ steps.filter.outputs.changes }}
+      tools: ${{ steps.filter-tools.outputs.tools }}
       mcp-common: ${{ steps.filter.outputs.mcp-common }}
     steps:
       - uses: actions/checkout@v4
@@ -91,6 +91,13 @@ jobs:
             wpscan:
               - 'tools/wpscan/**'
 
+      - name: Filter out mcp-common from tools list
+        id: filter-tools
+        run: |
+          CHANGES='${{ steps.filter.outputs.changes }}'
+          TOOLS=$(echo "$CHANGES" | jq -c '[.[] | select(. != "mcp-common")]')
+          echo "tools=$TOOLS" >> $GITHUB_OUTPUT
+
   # Build and push tool images
   build:
     needs: changes
@@ -100,8 +107,6 @@ jobs:
       fail-fast: false
       matrix:
         tool: ${{ github.event.inputs.tool != '' && fromJson(format('["{0}"]', github.event.inputs.tool)) || fromJson(needs.changes.outputs.tools) }}
-        exclude:
-          - tool: mcp-common  # Not a standalone tool
 
     permissions:
       contents: read
