@@ -1,5 +1,5 @@
 version: "1.0"
-updated_at: "2024-12-25T00:00:00Z"
+updated_at: "2024-12-28T00:00:00Z"
 
 tools:
   # =============================================================================
@@ -18,6 +18,20 @@ tools:
       - file_download
       - exploit_testing
       - api_interaction
+
+    # Routing hints for tool selection
+    routing:
+      use_for:
+        - "single HTTP request"
+        - "exploit payload delivery"
+        - "file download"
+        - "web shell interaction"
+        - "RCE exploitation"
+      never_use_for:
+        - "directory brute-forcing"
+        - "web fuzzing"
+        - "automated scanning"
+      prefer_over: []
 
     phases:
       - reconnaissance
@@ -279,6 +293,22 @@ tools:
       - vulnerability_scanning
       - host_discovery
 
+    # Routing hints for tool selection
+    routing:
+      use_for:
+        - "port scanning"
+        - "service detection"
+        - "OS fingerprinting"
+        - "host discovery"
+        - "network enumeration"
+        - "initial reconnaissance"
+      never_use_for:
+        - "web fuzzing"
+        - "SQL injection"
+        - "password cracking"
+      prefer_over:
+        - "masscan"  # More reliable, better service detection
+
     phases:
       - reconnaissance
       - enumeration
@@ -397,6 +427,24 @@ tools:
       - directory_bruteforce
       - parameter_fuzzing
       - vhost_discovery
+
+    # Routing hints for tool selection
+    routing:
+      use_for:
+        - "directory brute-forcing"
+        - "directory enumeration"
+        - "find hidden files"
+        - "find hidden directories"
+        - "parameter fuzzing"
+        - "vhost discovery"
+        - "subdomain enumeration"
+      never_use_for:
+        - "SQL injection"
+        - "port scanning"
+        - "password cracking"
+      prefer_over:
+        - "gobuster"  # ffuf is faster and more flexible
+        - "dirbuster"  # ffuf is CLI-based and faster
 
     phases:
       - enumeration
@@ -593,6 +641,22 @@ tools:
       - cve_detection
       - technology_detection
       - misconfiguration_detection
+
+    # Routing hints for tool selection
+    routing:
+      use_for:
+        - "vulnerability scanning"
+        - "CVE scanning"
+        - "known vulnerability detection"
+        - "technology fingerprinting"
+        - "misconfiguration detection"
+        - "security scanning"
+      never_use_for:
+        - "port scanning"
+        - "directory brute-forcing"
+        - "password cracking"
+      prefer_over:
+        - "nikto"  # nuclei has more templates and is faster
 
     phases:
       - enumeration
@@ -815,6 +879,20 @@ tools:
       - data_extraction
       - os_shell
 
+    # Routing hints for tool selection
+    routing:
+      use_for:
+        - "SQL injection"
+        - "SQL injection testing"
+        - "database enumeration"
+        - "data extraction from SQL database"
+        - "testing GET/POST parameters for SQL injection"
+      never_use_for:
+        - "NoSQL injection"
+        - "MongoDB"
+        - "directory enumeration"
+      prefer_over: []
+
     phases:
       - exploitation
 
@@ -929,6 +1007,167 @@ tools:
             type: array
             description: "Table contents"
 
+  nosqlmap:
+    name: nosqlmap
+    version: "0.7"
+    description: "NoSQL injection and database takeover tool for MongoDB, CouchDB, and other NoSQL databases"
+    image: "ghcr.io/silicon-works/mcp-tools-nosqlmap:latest"
+    image_size_mb: 180
+
+    capabilities:
+      - nosql_injection
+      - mongodb_exploitation
+      - database_enumeration
+      - authentication_bypass
+
+    # Routing hints for tool selection
+    routing:
+      use_for:
+        - "NoSQL injection"
+        - "MongoDB injection"
+        - "authentication bypass"
+        - "NoSQL database exploitation"
+        - "$ne injection"
+        - "$regex injection"
+      never_use_for:
+        - "SQL injection"
+        - "MySQL"
+        - "PostgreSQL"
+        - "port scanning"
+      prefer_over: []
+
+    phases:
+      - exploitation
+
+    requirements:
+      network: true
+      privileged: false
+
+    resources:
+      memory_mb: 256
+      cpu: 0.5
+
+    methods:
+      scan:
+        description: "Scan a URL for NoSQL injection vulnerabilities"
+        when_to_use: "When testing web forms or APIs that may use NoSQL backends"
+        params:
+          url:
+            type: string
+            required: true
+            description: "Target URL to scan"
+          method:
+            type: enum
+            values: [GET, POST]
+            default: POST
+            description: "HTTP method"
+          params:
+            type: object
+            description: "Request parameters as key-value pairs"
+          headers:
+            type: object
+            description: "Custom HTTP headers"
+          cookie:
+            type: string
+            description: "Cookie header value for authenticated scans"
+          timeout:
+            type: integer
+            default: 30
+            description: "Request timeout in seconds"
+        returns:
+          vulnerable:
+            type: boolean
+            description: "Whether target appears vulnerable"
+          injection_points:
+            type: array
+            description: "Parameters that appear injectable"
+          findings:
+            type: array
+            description: "Detailed findings with payloads that worked"
+
+      inject:
+        description: "Exploit NoSQL injection to bypass authentication or extract data"
+        when_to_use: "After confirming NoSQL injection vulnerability to exploit it"
+        params:
+          url:
+            type: string
+            required: true
+            description: "Target URL"
+          method:
+            type: enum
+            values: [GET, POST]
+            default: POST
+            description: "HTTP method"
+          injection_type:
+            type: enum
+            values: [auth_bypass, data_extraction, operator_injection, js_injection]
+            default: auth_bypass
+            description: "Type of injection to attempt"
+          params:
+            type: object
+            description: "Base request parameters"
+          inject_param:
+            type: string
+            required: true
+            description: "Parameter to inject into"
+          headers:
+            type: object
+            description: "Custom HTTP headers"
+          cookie:
+            type: string
+            description: "Cookie header value"
+        returns:
+          success:
+            type: boolean
+            description: "Whether injection succeeded"
+          response_data:
+            type: string
+            description: "Response from successful injection"
+          payload_used:
+            type: string
+            description: "Payload that worked"
+
+      test_payloads:
+        description: "Test multiple NoSQL injection payloads against a target"
+        when_to_use: "To systematically test various NoSQL injection techniques"
+        params:
+          url:
+            type: string
+            required: true
+            description: "Target URL"
+          method:
+            type: enum
+            values: [GET, POST]
+            default: POST
+            description: "HTTP method"
+          params:
+            type: object
+            required: true
+            description: "Base request parameters"
+          test_param:
+            type: string
+            required: true
+            description: "Parameter to test for injection"
+          headers:
+            type: object
+            description: "Custom HTTP headers"
+          cookie:
+            type: string
+            description: "Cookie header value"
+          payload_types:
+            type: array
+            description: "Types of payloads to test: operator, regex, js, timing"
+        returns:
+          results:
+            type: array
+            description: "Results for each payload tested"
+          vulnerable:
+            type: boolean
+            description: "Whether any injection succeeded"
+          recommended_payload:
+            type: string
+            description: "Most effective payload found"
+
   hydra:
     name: hydra
     version: "9.5"
@@ -939,6 +1178,21 @@ tools:
     capabilities:
       - password_bruteforce
       - credential_testing
+
+    # Routing hints for tool selection
+    routing:
+      use_for:
+        - "password brute-forcing"
+        - "credential testing"
+        - "SSH brute-force"
+        - "FTP brute-force"
+        - "HTTP authentication brute-force"
+        - "login testing"
+      never_use_for:
+        - "hash cracking"
+        - "offline password cracking"
+        - "vulnerability scanning"
+      prefer_over: []
 
     phases:
       - exploitation
@@ -1995,6 +2249,272 @@ tools:
           credentials:
             type: array
             description: "Found credentials (username, password/hash)"
+
+  mongodb:
+    name: mongodb
+    version: "1.0"
+    description: "MongoDB client for database enumeration and data extraction"
+    image: "ghcr.io/silicon-works/mcp-tools-mongodb:latest"
+    image_size_mb: 250
+
+    capabilities:
+      - database_enumeration
+      - nosql_access
+      - credential_extraction
+      - data_exfiltration
+
+    phases:
+      - enumeration
+      - post-exploitation
+
+    requirements:
+      network: true
+      privileged: false
+
+    resources:
+      memory_mb: 256
+      cpu: 0.5
+
+    methods:
+      connect:
+        description: "Test connection to a MongoDB server"
+        when_to_use: "To verify MongoDB is accessible and check authentication requirements"
+        params:
+          host:
+            type: string
+            required: true
+            description: "MongoDB hostname or IP"
+          port:
+            type: integer
+            default: 27017
+            description: "MongoDB port"
+          username:
+            type: string
+            description: "Username for authentication (optional)"
+          password:
+            type: string
+            description: "Password for authentication (optional)"
+          auth_db:
+            type: string
+            default: admin
+            description: "Authentication database"
+          timeout:
+            type: integer
+            default: 5
+            description: "Connection timeout in seconds"
+        returns:
+          connected:
+            type: boolean
+            description: "Whether connection succeeded"
+          version:
+            type: string
+            description: "MongoDB server version"
+
+      list_databases:
+        description: "List all databases on the MongoDB server"
+        when_to_use: "To enumerate available databases"
+        params:
+          host:
+            type: string
+            required: true
+            description: "MongoDB hostname or IP"
+          port:
+            type: integer
+            default: 27017
+            description: "MongoDB port"
+          username:
+            type: string
+            description: "Username for authentication (optional)"
+          password:
+            type: string
+            description: "Password for authentication (optional)"
+          auth_db:
+            type: string
+            default: admin
+            description: "Authentication database"
+        returns:
+          databases:
+            type: array
+            description: "List of databases with size info"
+
+      list_collections:
+        description: "List all collections in a database"
+        when_to_use: "To enumerate collections after identifying a target database"
+        params:
+          host:
+            type: string
+            required: true
+            description: "MongoDB hostname or IP"
+          database:
+            type: string
+            required: true
+            description: "Database name"
+          port:
+            type: integer
+            default: 27017
+            description: "MongoDB port"
+          username:
+            type: string
+            description: "Username for authentication (optional)"
+          password:
+            type: string
+            description: "Password for authentication (optional)"
+          auth_db:
+            type: string
+            default: admin
+            description: "Authentication database"
+        returns:
+          collections:
+            type: array
+            description: "List of collection names"
+
+      query:
+        description: "Query documents from a collection using MongoDB filter syntax"
+        when_to_use: "To retrieve specific documents with filter criteria"
+        params:
+          host:
+            type: string
+            required: true
+            description: "MongoDB hostname or IP"
+          database:
+            type: string
+            required: true
+            description: "Database name"
+          collection:
+            type: string
+            required: true
+            description: "Collection name"
+          filter:
+            type: object
+            default: {}
+            description: "MongoDB query filter (JSON)"
+          projection:
+            type: object
+            description: "Fields to include/exclude"
+          limit:
+            type: integer
+            default: 100
+            description: "Maximum documents to return"
+          port:
+            type: integer
+            default: 27017
+            description: "MongoDB port"
+          username:
+            type: string
+            description: "Username for authentication (optional)"
+          password:
+            type: string
+            description: "Password for authentication (optional)"
+          auth_db:
+            type: string
+            default: admin
+            description: "Authentication database"
+        returns:
+          documents:
+            type: array
+            description: "Matching documents"
+          count:
+            type: integer
+            description: "Number of documents returned"
+
+      dump_collection:
+        description: "Dump all documents from a collection"
+        when_to_use: "To extract all data from a collection"
+        params:
+          host:
+            type: string
+            required: true
+            description: "MongoDB hostname or IP"
+          database:
+            type: string
+            required: true
+            description: "Database name"
+          collection:
+            type: string
+            required: true
+            description: "Collection name"
+          limit:
+            type: integer
+            default: 100
+            description: "Maximum documents to return"
+          port:
+            type: integer
+            default: 27017
+            description: "MongoDB port"
+          username:
+            type: string
+            description: "Username for authentication (optional)"
+          password:
+            type: string
+            description: "Password for authentication (optional)"
+          auth_db:
+            type: string
+            default: admin
+            description: "Authentication database"
+        returns:
+          documents:
+            type: array
+            description: "All documents in collection"
+
+      find_credentials:
+        description: "Search for credential-like data across collections"
+        when_to_use: "To search for stored passwords, tokens, or auth data"
+        params:
+          host:
+            type: string
+            required: true
+            description: "MongoDB hostname or IP"
+          database:
+            type: string
+            description: "Database to search (searches all if not specified)"
+          port:
+            type: integer
+            default: 27017
+            description: "MongoDB port"
+          username:
+            type: string
+            description: "Username for authentication (optional)"
+          password:
+            type: string
+            description: "Password for authentication (optional)"
+          auth_db:
+            type: string
+            default: admin
+            description: "Authentication database"
+        returns:
+          findings:
+            type: array
+            description: "Collections with potential credentials"
+
+      server_info:
+        description: "Get MongoDB server information and version"
+        when_to_use: "To fingerprint the MongoDB installation"
+        params:
+          host:
+            type: string
+            required: true
+            description: "MongoDB hostname or IP"
+          port:
+            type: integer
+            default: 27017
+            description: "MongoDB port"
+          username:
+            type: string
+            description: "Username for authentication (optional)"
+          password:
+            type: string
+            description: "Password for authentication (optional)"
+          auth_db:
+            type: string
+            default: admin
+            description: "Authentication database"
+        returns:
+          version:
+            type: string
+            description: "MongoDB version"
+          storage_engines:
+            type: array
+            description: "Available storage engines"
 
   sqlite:
     name: sqlite
