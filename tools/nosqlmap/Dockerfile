@@ -1,5 +1,5 @@
 # OpenSploit MCP Server: nosqlmap
-# NoSQL injection and database takeover tool
+# NoSQL injection testing tool (native implementation)
 
 FROM kalilinux/kali-rolling
 
@@ -13,7 +13,6 @@ RUN apt-get update && \
         python3 \
         python3-pip \
         python3-venv \
-        git \
         && \
     rm -rf /var/lib/apt/lists/* && \
     apt-get clean
@@ -24,11 +23,6 @@ WORKDIR /app
 # Create virtual environment
 RUN python3 -m venv /app/venv
 ENV PATH="/app/venv/bin:$PATH"
-
-# Install NoSQLMap from GitHub
-RUN pip install --no-cache-dir git+https://github.com/codingo/NoSQLMap.git || \
-    (git clone https://github.com/codingo/NoSQLMap.git /app/nosqlmap && \
-     cd /app/nosqlmap && pip install --no-cache-dir -r requirements.txt)
 
 # Copy and install shared mcp-common package
 COPY packages/mcp-common /app/packages/mcp-common
