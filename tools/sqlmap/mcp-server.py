@@ -137,6 +137,135 @@ class SqlmapServer(BaseMCPServer):
             handler=self.dump_table,
         )
 
+        self.register_method(
+            name="dump_all",
+            description="Dump all tables from a database",
+            params={
+                "url": {
+                    "type": "string",
+                    "required": True,
+                    "description": "Target URL",
+                },
+                "database": {
+                    "type": "string",
+                    "required": True,
+                    "description": "Database name to dump",
+                },
+                "data": {
+                    "type": "string",
+                    "description": "POST data if needed",
+                },
+                "cookie": {
+                    "type": "string",
+                    "description": "HTTP cookie header value",
+                },
+                "timeout": {
+                    "type": "integer",
+                    "default": 900,
+                    "description": "Timeout in seconds",
+                },
+            },
+            handler=self.dump_all,
+        )
+
+        self.register_method(
+            name="os_shell",
+            description="Get an interactive OS shell via SQL injection (requires stacked queries or specific DBMS)",
+            params={
+                "url": {
+                    "type": "string",
+                    "required": True,
+                    "description": "Target URL",
+                },
+                "command": {
+                    "type": "string",
+                    "required": True,
+                    "description": "Command to execute",
+                },
+                "data": {
+                    "type": "string",
+                    "description": "POST data if needed",
+                },
+                "cookie": {
+                    "type": "string",
+                    "description": "HTTP cookie header value",
+                },
+                "timeout": {
+                    "type": "integer",
+                    "default": 120,
+                    "description": "Timeout in seconds",
+                },
+            },
+            handler=self.os_shell,
+        )
+
+        self.register_method(
+            name="file_read",
+            description="Read a file from the target server via SQL injection",
+            params={
+                "url": {
+                    "type": "string",
+                    "required": True,
+                    "description": "Target URL",
+                },
+                "file_path": {
+                    "type": "string",
+                    "required": True,
+                    "description": "Absolute path to file on target server",
+                },
+                "data": {
+                    "type": "string",
+                    "description": "POST data if needed",
+                },
+                "cookie": {
+                    "type": "string",
+                    "description": "HTTP cookie header value",
+                },
+                "timeout": {
+                    "type": "integer",
+                    "default": 120,
+                    "description": "Timeout in seconds",
+                },
+            },
+            handler=self.file_read,
+        )
+
+        self.register_method(
+            name="file_write",
+            description="Write a file to the target server via SQL injection",
+            params={
+                "url": {
+                    "type": "string",
+                    "required": True,
+                    "description": "Target URL",
+                },
+                "local_file": {
+                    "type": "string",
+                    "required": True,
+                    "description": "Local file path or content to write",
+                },
+                "remote_path": {
+                    "type": "string",
+                    "required": True,
+                    "description": "Absolute path on target server",
+                },
+                "data": {
+                    "type": "string",
+                    "description": "POST data if needed",
+                },
+                "cookie": {
+                    "type": "string",
+                    "description": "HTTP cookie header value",
+                },
+                "timeout": {
+                    "type": "integer",
+                    "default": 120,
+                    "description": "Timeout in seconds",
+                },
+            },
+            handler=self.file_write,
+        )
+
     def _parse_sqlmap_output(self, output: str) -> Dict[str, Any]:
         """Parse sqlmap output for injection results."""
         result = {
@@ -393,6 +522,232 @@ class SqlmapServer(BaseMCPServer):
             return ToolResult(
                 success=True,
                 data=parsed,
+                raw_output=sanitize_output(output),
+            )
+
+        except ToolError as e:
+            return ToolResult(
+                success=False,
+                data={},
+                error=str(e),
+            )
+
+    async def dump_all(
+        self,
+        url: str,
+        database: str,
+        data: Optional[str] = None,
+        cookie: Optional[str] = None,
+        timeout: int = 900,
+    ) -> ToolResult:
+        """Dump all tables from a database."""
+        self.logger.info(f"Dumping all tables from {database} on {url}")
+
+        args = [
+            "sqlmap",
+            "-u", url,
+            "--batch",
+            "-D", database,
+            "--dump-all",
+            "--threads", "4",
+        ]
+
+        if data:
+            args.extend(["--data", data])
+
+        if cookie:
+            args.extend(["--cookie", cookie])
+
+        try:
+            self.logger.info(f"Running: {' '.join(args)}")
+            result = await self.run_command(args, timeout=timeout)
+
+            output = result.stdout + result.stderr
+
+            return ToolResult(
+                success=True,
+                data={
+                    "database": database,
+                    "target": url,
+                    "message": "Database dump completed. Check output for table contents.",
+                },
+                raw_output=sanitize_output(output),
+            )
+
+        except ToolError as e:
+            return ToolResult(
+                success=False,
+                data={},
+                error=str(e),
+            )
+
+    async def os_shell(
+        self,
+        url: str,
+        command: str,
+        data: Optional[str] = None,
+        cookie: Optional[str] = None,
+        timeout: int = 120,
+    ) -> ToolResult:
+        """Execute an OS command via SQL injection."""
+        self.logger.info(f"Executing OS command on {url}: {command}")
+
+        args = [
+            "sqlmap",
+            "-u", url,
+            "--batch",
+            "--os-cmd", command,
+        ]
+
+        if data:
+            args.extend(["--data", data])
+
+        if cookie:
+            args.extend(["--cookie", cookie])
+
+        try:
+            self.logger.info(f"Running: {' '.join(args)}")
+            result = await self.run_command(args, timeout=timeout)
+
+            output = result.stdout + result.stderr
+
+            # Extract command output
+            cmd_output = ""
+            in_output = False
+            for line in output.split("\n"):
+                if "command standard output" in line.lower():
+                    in_output = True
+                    continue
+                if in_output:
+                    if line.startswith("[") or line.startswith("---"):
+                        in_output = False
+                    else:
+                        cmd_output += line + "\n"
+
+            return ToolResult(
+                success=True,
+                data={
+                    "command": command,
+                    "output": cmd_output.strip(),
+                    "target": url,
+                },
+                raw_output=sanitize_output(output),
+            )
+
+        except ToolError as e:
+            return ToolResult(
+                success=False,
+                data={},
+                error=str(e),
+            )
+
+    async def file_read(
+        self,
+        url: str,
+        file_path: str,
+        data: Optional[str] = None,
+        cookie: Optional[str] = None,
+        timeout: int = 120,
+    ) -> ToolResult:
+        """Read a file from the target server."""
+        self.logger.info(f"Reading file {file_path} from {url}")
+
+        args = [
+            "sqlmap",
+            "-u", url,
+            "--batch",
+            "--file-read", file_path,
+        ]
+
+        if data:
+            args.extend(["--data", data])
+
+        if cookie:
+            args.extend(["--cookie", cookie])
+
+        try:
+            self.logger.info(f"Running: {' '.join(args)}")
+            result = await self.run_command(args, timeout=timeout)
+
+            output = result.stdout + result.stderr
+
+            # Extract file content
+            file_content = ""
+            for line in output.split("\n"):
+                if "file saved to" in line.lower():
+                    # Find the local path where sqlmap saved the file
+                    match = re.search(r"'([^']+)'", line)
+                    if match:
+                        local_path = match.group(1)
+                        try:
+                            with open(local_path, 'r') as f:
+                                file_content = f.read()
+                        except:
+                            file_content = f"File saved to: {local_path}"
+
+            return ToolResult(
+                success=True,
+                data={
+                    "file_path": file_path,
+                    "content": file_content,
+                    "target": url,
+                },
+                raw_output=sanitize_output(output),
+            )
+
+        except ToolError as e:
+            return ToolResult(
+                success=False,
+                data={},
+                error=str(e),
+            )
+
+    async def file_write(
+        self,
+        url: str,
+        local_file: str,
+        remote_path: str,
+        data: Optional[str] = None,
+        cookie: Optional[str] = None,
+        timeout: int = 120,
+    ) -> ToolResult:
+        """Write a file to the target server."""
+        self.logger.info(f"Writing file to {remote_path} on {url}")
+
+        # If local_file is content (not a path), write to temp file
+        if not os.path.exists(local_file):
+            with tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='.txt') as f:
+                f.write(local_file)
+                local_file = f.name
+
+        args = [
+            "sqlmap",
+            "-u", url,
+            "--batch",
+            "--file-write", local_file,
+            "--file-dest", remote_path,
+        ]
+
+        if data:
+            args.extend(["--data", data])
+
+        if cookie:
+            args.extend(["--cookie", cookie])
+
+        try:
+            self.logger.info(f"Running: {' '.join(args)}")
+            result = await self.run_command(args, timeout=timeout)
+
+            output = result.stdout + result.stderr
+            success = "file has been successfully written" in output.lower()
+
+            return ToolResult(
+                success=success,
+                data={
+                    "remote_path": remote_path,
+                    "written": success,
+                    "target": url,
+                },
                 raw_output=sanitize_output(output),
             )
 

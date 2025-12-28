@@ -266,8 +266,9 @@ class ZapServer(BaseMCPServer):
             output.append("Spider running in background. Use scan_status to check progress.")
 
         return ToolResult(
-            output="\n".join(output),
-            metadata={"scan_id": scan_id, "target": target},
+            success=True,
+            data={"scan_id": scan_id, "target": target},
+            raw_output="\n".join(output),
         )
 
     async def active_scan(
@@ -321,8 +322,9 @@ class ZapServer(BaseMCPServer):
             output.append("Active scan running in background. Use scan_status to check progress.")
 
         return ToolResult(
-            output="\n".join(output),
-            metadata={"scan_id": scan_id, "target": target},
+            success=True,
+            data={"scan_id": scan_id, "target": target},
+            raw_output="\n".join(output),
         )
 
     async def quick_scan(
@@ -390,8 +392,8 @@ class ZapServer(BaseMCPServer):
                         output.append(f"  Description: {desc}...")
 
         return ToolResult(
-            output="\n".join(output),
-            metadata={
+            success=True,
+            data={
                 "target": target,
                 "urls_found": url_count,
                 "alerts": {
@@ -420,7 +422,7 @@ class ZapServer(BaseMCPServer):
         alert_list = alerts.get("alerts", [])
 
         if not alert_list:
-            return ToolResult(output="No alerts found.")
+            return ToolResult(success=True, data={}, raw_output="No alerts found.")
 
         output = [f"Found {len(alert_list)} alerts:"]
 
@@ -431,8 +433,8 @@ class ZapServer(BaseMCPServer):
             output.append(f"  CWE: {alert.get('cweid', 'N/A')}")
 
         return ToolResult(
-            output="\n".join(output),
-            metadata={"count": len(alert_list)},
+            success=True,
+            data={"count": len(alert_list)},
         )
 
     async def get_urls(self, target: str = None) -> ToolResult:
@@ -441,7 +443,7 @@ class ZapServer(BaseMCPServer):
         url_list = urls.get("urls", [])
 
         if not url_list:
-            return ToolResult(output="No URLs discovered. Run spider first.")
+            return ToolResult(success=True, data={}, raw_output="No URLs discovered. Run spider first.")
 
         output = [f"Discovered {len(url_list)} URLs:"]
         for url in url_list[:100]:
@@ -450,8 +452,8 @@ class ZapServer(BaseMCPServer):
             output.append(f"  ... and {len(url_list) - 100} more")
 
         return ToolResult(
-            output="\n".join(output),
-            metadata={"count": len(url_list)},
+            success=True,
+            data={"count": len(url_list)},
         )
 
     async def scan_status(self) -> ToolResult:
@@ -472,7 +474,7 @@ class ZapServer(BaseMCPServer):
         except:
             output.append("  Active Scan: Not running")
 
-        return ToolResult(output="\n".join(output))
+        return ToolResult(success=True, data={}, raw_output="\n".join(output))
 
     async def summary(self, target: str = None) -> ToolResult:
         """Get summary of findings."""
@@ -516,8 +518,8 @@ class ZapServer(BaseMCPServer):
             output.append(f"  [{info['risk']}] {alert_type}: {info['count']}")
 
         return ToolResult(
-            output="\n".join(output),
-            metadata={
+            success=True,
+            data={
                 "total": len(alert_list),
                 "high": len(by_risk["High"]),
                 "medium": len(by_risk["Medium"]),
@@ -542,8 +544,9 @@ class ZapServer(BaseMCPServer):
 
         if not msg_list:
             return ToolResult(
-                output="No messages in proxy history.\n\nTo capture traffic, configure your browser/tool to use ZAP as proxy.",
-                metadata={"count": 0},
+                success=True,
+                data={"count": 0},
+                raw_output="No messages in proxy history.\n\nTo capture traffic, configure your browser/tool to use ZAP as proxy.",
             )
 
         output = [f"Proxy History ({len(msg_list)} messages):"]
@@ -559,8 +562,8 @@ class ZapServer(BaseMCPServer):
             output.append(f"  Time: {msg.get('timestamp', 'N/A')}")
 
         return ToolResult(
-            output="\n".join(output),
-            metadata={"count": len(msg_list)},
+            success=True,
+            data={"count": len(msg_list)},
         )
 
     async def send_request(
@@ -610,13 +613,15 @@ class ZapServer(BaseMCPServer):
                 output.append(str(response_data))
 
             return ToolResult(
-                output="\n".join(output),
-                metadata={"target": target},
+                success=True,
+                data={"target": target},
+                raw_output="\n".join(output),
             )
         else:
             return ToolResult(
-                output=f"Request sent. Response: {result}",
-                metadata={"target": target},
+                success=True,
+                data={"target": target},
+                raw_output=f"Request sent. Response: {result}",
             )
 
     async def proxy_info(self) -> ToolResult:
@@ -646,11 +651,10 @@ class ZapServer(BaseMCPServer):
         ]
 
         return ToolResult(
-            output="\n".join(output),
-            metadata={"port": port},
+            success=True,
+            data={"port": port},
         )
 
 
 if __name__ == "__main__":
-    server = ZapServer()
-    server.run()
+    ZapServer.main()
