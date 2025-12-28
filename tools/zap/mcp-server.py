@@ -171,17 +171,25 @@ class ZapServer(BaseMCPServer):
         # Send request (like Burp Repeater)
         self.register_method(
             name="send_request",
-            description="Send an HTTP request through ZAP and get the response (like Burp Repeater)",
+            description="Send an HTTP request through ZAP proxy and get the response (like Burp Repeater)",
             params={
-                "request": {
+                "url": {
                     "type": "string",
                     "required": True,
-                    "description": "Raw HTTP request (headers and body)",
+                    "description": "Full URL to request (e.g., http://target.com/path)",
                 },
-                "target": {
+                "method": {
                     "type": "string",
-                    "required": True,
-                    "description": "Target URL (e.g., https://target.com)",
+                    "default": "GET",
+                    "description": "HTTP method (GET, POST, PUT, DELETE, etc.)",
+                },
+                "headers": {
+                    "type": "object",
+                    "description": "Custom headers as key-value pairs",
+                },
+                "body": {
+                    "type": "string",
+                    "description": "Request body for POST/PUT requests",
                 },
                 "follow_redirects": {
                     "type": "boolean",
@@ -568,60 +576,70 @@ class ZapServer(BaseMCPServer):
 
     async def send_request(
         self,
-        request: str,
-        target: str,
+        url: str,
+        method: str = "GET",
+        headers: Dict[str, str] = None,
+        body: str = None,
         follow_redirects: bool = True,
     ) -> ToolResult:
-        """Send an HTTP request through ZAP (like Burp Repeater)."""
-        from urllib.parse import urlparse
+        """Send an HTTP request through ZAP and get the response."""
+        import requests
 
-        parsed = urlparse(target)
-        if not parsed.scheme or not parsed.netloc:
-            raise ToolError("Invalid target URL. Use format: https://target.com")
+        # Use requests to send through ZAP proxy
+        proxies = {"http": "http://127.0.0.1:8080", "https": "http://127.0.0.1:8080"}
 
-        # ZAP's sendRequest API
-        result = self._zap_request(
-            "/JSON/core/action/sendRequest/",
-            {
-                "request": request,
-                "followRedirects": str(follow_redirects).lower(),
-            }
-        )
+        try:
+            resp = requests.request(
+                method=method,
+                url=url,
+                headers=headers or {},
+                data=body,
+                proxies=proxies,
+                allow_redirects=follow_redirects,
+                verify=False,
+                timeout=30,
+            )
 
-        # Get the response
-        if "sendRequest" in result:
-            response_data = result["sendRequest"]
             output = [
                 "REQUEST SENT",
                 "=" * 40,
-                f"Target: {target}",
+                f"URL: {url}",
+                f"Method: {method}",
                 "",
-                "Response:",
+                f"Status: {resp.status_code} {resp.reason}",
+                "",
+                "Response Headers:",
                 "-" * 40,
             ]
 
-            if isinstance(response_data, dict):
-                output.append(response_data.get("responseHeader", ""))
-                body = response_data.get("responseBody", "")
-                if body:
-                    # Truncate long bodies
-                    if len(body) > 2000:
-                        output.append(body[:2000] + f"\n\n... [truncated, {len(body)} bytes total]")
-                    else:
-                        output.append(body)
+            for key, value in resp.headers.items():
+                output.append(f"{key}: {value}")
+
+            output.append("")
+            output.append("Response Body:")
+            output.append("-" * 40)
+
+            body_text = resp.text
+            if len(body_text) > 2000:
+                output.append(body_text[:2000] + f"\n\n... [truncated, {len(body_text)} bytes total]")
             else:
-                output.append(str(response_data))
+                output.append(body_text)
 
             return ToolResult(
                 success=True,
-                data={"target": target},
+                data={
+                    "url": url,
+                    "status_code": resp.status_code,
+                    "content_length": len(resp.content),
+                },
                 raw_output="\n".join(output),
             )
-        else:
+
+        except Exception as e:
             return ToolResult(
-                success=True,
-                data={"target": target},
-                raw_output=f"Request sent. Response: {result}",
+                success=False,
+                data={},
+                error=f"Request failed: {str(e)}",
             )
 
     async def proxy_info(self) -> ToolResult:
