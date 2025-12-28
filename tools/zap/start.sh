@@ -1,11 +1,11 @@
 #!/bin/bash
 # Start ZAP in daemon mode and then run MCP server
 
-# Start ZAP daemon in background
+# Start ZAP daemon in background (redirect stdout/stderr to stderr to keep MCP stdout clean)
 /zap/zap.sh -daemon -host 127.0.0.1 -port ${ZAP_PORT:-8080} \
     -config api.addrs.addr.name=.* \
     -config api.addrs.addr.regex=true \
-    -config api.disablekey=true &
+    -config api.disablekey=true >&2 &
 
 ZAP_PID=$!
 
