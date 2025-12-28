@@ -161,7 +161,7 @@ class NiktoServer(BaseMCPServer):
         self.logger.info(f"Starting nikto scan on {target}")
 
         # Build command
-        args = ["nikto", "-h", target, "-Format", "txt", "-nointeractive"]
+        args = ["nikto", "-h", target, "-nointeractive"]
 
         if ssl:
             args.append("-ssl")
