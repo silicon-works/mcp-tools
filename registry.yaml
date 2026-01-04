@@ -2270,6 +2270,242 @@ tools:
             type: string
             description: "Script error output"
 
+  shell-session:
+    name: shell-session
+    version: "1.0"
+    description: "Persistent shell session management for SSH and reverse shells - enables multi-command operations on compromised targets"
+    image: "ghcr.io/silicon-works/mcp-tools-shell-session:latest"
+    image_size_mb: 150
+
+    capabilities:
+      - persistent_shell_sessions
+      - ssh_session_management
+      - reverse_shell_handling
+      - file_transfer
+      - command_execution
+
+    # Routing hints for tool selection
+    routing:
+      use_for:
+        - "multiple commands on compromised target"
+        - "persistent SSH session"
+        - "reverse shell interaction"
+        - "post-exploitation command execution"
+        - "file upload to target"
+        - "file download from target"
+      never_use_for:
+        - "initial SSH connection test"
+        - "single command execution"
+      prefer_over:
+        - ssh  # Prefer shell-session for multiple commands
+
+    phases:
+      - exploitation
+      - post-exploitation
+
+    requirements:
+      network: true
+      privileged: false
+
+    resources:
+      memory_mb: 256
+      cpu: 0.5
+
+    methods:
+      ssh_connect:
+        description: "Establish persistent SSH session to target"
+        when_to_use: "When you have SSH credentials and will run multiple commands"
+        params:
+          host:
+            type: string
+            required: true
+            description: "Target hostname or IP"
+          port:
+            type: integer
+            default: 22
+            description: "SSH port"
+          username:
+            type: string
+            required: true
+            description: "SSH username"
+          password:
+            type: string
+            description: "SSH password"
+          private_key:
+            type: string
+            description: "Base64-encoded private key"
+          timeout:
+            type: integer
+            default: 30
+            description: "Connection timeout"
+        returns:
+          session_id:
+            type: string
+            description: "Session ID for subsequent commands"
+          banner:
+            type: string
+            description: "SSH banner if available"
+
+      exec:
+        description: "Execute command on established session"
+        when_to_use: "To run commands on an active SSH session"
+        params:
+          session_id:
+            type: string
+            required: true
+            description: "Session ID from ssh_connect"
+          command:
+            type: string
+            required: true
+            description: "Command to execute"
+          timeout:
+            type: integer
+            default: 120
+            description: "Command timeout"
+          get_pty:
+            type: boolean
+            default: false
+            description: "Request PTY for interactive commands"
+        returns:
+          stdout:
+            type: string
+            description: "Command output"
+          stderr:
+            type: string
+            description: "Error output"
+          exit_code:
+            type: integer
+            description: "Command exit code"
+
+      upload:
+        description: "Upload file to target via SFTP"
+        when_to_use: "To upload tools, scripts, or exploits to target"
+        params:
+          session_id:
+            type: string
+            required: true
+            description: "Session ID"
+          content:
+            type: string
+            required: true
+            description: "File content (text or base64)"
+          remote_path:
+            type: string
+            required: true
+            description: "Destination path on target"
+          mode:
+            type: string
+            default: "0755"
+            description: "File permissions"
+          is_base64:
+            type: boolean
+            default: false
+            description: "Content is base64-encoded"
+        returns:
+          size:
+            type: integer
+            description: "Uploaded file size"
+
+      download:
+        description: "Download file from target via SFTP"
+        when_to_use: "To retrieve files, flags, or credentials from target"
+        params:
+          session_id:
+            type: string
+            required: true
+            description: "Session ID"
+          remote_path:
+            type: string
+            required: true
+            description: "Path on target"
+          as_base64:
+            type: boolean
+            default: false
+            description: "Return content as base64"
+        returns:
+          content:
+            type: string
+            description: "File content"
+          size:
+            type: integer
+            description: "File size"
+
+      listen:
+        description: "Start listener for reverse shell connection"
+        when_to_use: "When triggering a reverse shell from target"
+        params:
+          port:
+            type: integer
+            required: true
+            description: "Port to listen on"
+          timeout:
+            type: integer
+            default: 300
+            description: "Wait timeout for connection"
+        returns:
+          session_id:
+            type: string
+            description: "Session ID for shell commands"
+          remote_ip:
+            type: string
+            description: "IP of connecting client"
+
+      shell_exec:
+        description: "Execute command on reverse shell with output stability detection"
+        when_to_use: "To run commands on a reverse shell session"
+        params:
+          session_id:
+            type: string
+            required: true
+            description: "Session ID from listen"
+          command:
+            type: string
+            required: true
+            description: "Command to execute"
+          timeout:
+            type: integer
+            default: 60
+            description: "Command timeout"
+        returns:
+          output:
+            type: string
+            description: "Command output"
+
+      list_sessions:
+        description: "List all active sessions"
+        when_to_use: "To see what sessions are currently active"
+        params: {}
+        returns:
+          sessions:
+            type: array
+            description: "List of active sessions"
+
+      close:
+        description: "Close session gracefully"
+        when_to_use: "To terminate a session when done"
+        params:
+          session_id:
+            type: string
+            required: true
+            description: "Session ID to close"
+        returns:
+          success:
+            type: boolean
+            description: "Whether session was closed"
+
+      upgrade_shell:
+        description: "Upgrade dumb shell to interactive PTY"
+        when_to_use: "To get a fully interactive shell from a basic reverse shell"
+        params:
+          session_id:
+            type: string
+            required: true
+            description: "Shell session ID"
+        returns:
+          success:
+            type: boolean
+            description: "Whether upgrade succeeded"
+
   # =============================================================================
   # DATABASE
   # =============================================================================
