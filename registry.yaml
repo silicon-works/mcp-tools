@@ -4969,8 +4969,8 @@ tools:
 
   exploit-runner:
     name: exploit-runner
-    version: "1.0"
-    description: "Execute CVE exploits and PoCs safely"
+    version: "1.1"
+    description: "Execute CVE exploits, PoCs, and parameterized templates"
     image: "ghcr.io/silicon-works/mcp-tools-exploit-runner:latest"
     image_size_mb: 800
 
@@ -4979,6 +4979,19 @@ tools:
       - shell_exploits
       - ruby_exploits
       - exploit_analysis
+      - exploit_templates
+      - payload_generation
+
+    routing:
+      use_for:
+        - "run known CVE exploits"
+        - "execute exploit templates"
+        - "generate reverse shell payloads"
+        - "run PoC scripts"
+      never_use_for:
+        - "port scanning"
+        - "enumeration"
+      prefer_over: []
 
     phases:
       - exploitation
@@ -5160,3 +5173,131 @@ tools:
           likely_requirements:
             type: array
             description: "Likely pip requirements"
+
+      # Template-based exploit methods
+      list_templates:
+        description: "List available parameterized exploit templates"
+        when_to_use: "To see what CVE exploits are available as templates"
+        params:
+          cve:
+            type: string
+            description: "Filter by CVE ID"
+          software:
+            type: string
+            description: "Filter by affected software"
+          severity:
+            type: string
+            enum: [critical, high, medium, low]
+            description: "Filter by severity"
+          tag:
+            type: string
+            description: "Filter by tag"
+        returns:
+          templates:
+            type: array
+            description: "List of exploit templates"
+          total:
+            type: integer
+            description: "Number of templates found"
+
+      get_template:
+        description: "Get details of a specific exploit template"
+        when_to_use: "To see what parameters an exploit template needs"
+        params:
+          template_id:
+            type: string
+            required: true
+            description: "Template ID"
+        returns:
+          id:
+            type: string
+            description: "Template ID"
+          name:
+            type: string
+            description: "Template name"
+          cve:
+            type: string
+            description: "CVE identifier"
+          parameters:
+            type: array
+            description: "Required parameters"
+          description:
+            type: string
+            description: "Full description"
+
+      search_templates:
+        description: "Search for exploit templates by software/version"
+        when_to_use: "To find exploits for a specific software you discovered"
+        params:
+          software:
+            type: string
+            required: true
+            description: "Software name (e.g., 'jenkins', 'log4j')"
+          version:
+            type: string
+            description: "Version string"
+        returns:
+          matches:
+            type: array
+            description: "Matching templates"
+          total:
+            type: integer
+            description: "Number of matches"
+
+      run_template:
+        description: "Execute an exploit template with parameters"
+        when_to_use: "To run a CVE exploit by filling in target-specific parameters"
+        params:
+          template_id:
+            type: string
+            required: true
+            description: "Template ID (e.g., 'log4shell', 'cacti-cmd-injection')"
+          params:
+            type: object
+            required: true
+            description: "Exploit parameters (target_url, command, etc.)"
+          timeout:
+            type: integer
+            default: 120
+            description: "Execution timeout"
+        returns:
+          output:
+            type: string
+            description: "Exploit output"
+          success:
+            type: boolean
+            description: "Whether exploit succeeded"
+          indicators_matched:
+            type: array
+            description: "Success indicators found in output"
+
+      generate_payload:
+        description: "Generate a payload for use with exploits"
+        when_to_use: "To create reverse shell or command payloads"
+        params:
+          payload_type:
+            type: string
+            required: true
+            enum: [reverse_shell, bind_shell, command]
+            description: "Type of payload"
+          lhost:
+            type: string
+            description: "Attacker IP for reverse shells"
+          lport:
+            type: integer
+            description: "Attacker port"
+          command:
+            type: string
+            description: "Command for command payloads"
+          language:
+            type: string
+            default: "bash"
+            enum: [bash, python, php]
+            description: "Payload language"
+        returns:
+          payload:
+            type: string
+            description: "Generated payload"
+          payload_base64:
+            type: string
+            description: "Base64 encoded payload"
