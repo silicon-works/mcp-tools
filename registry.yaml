@@ -5308,8 +5308,8 @@ tools:
 
   ike-scan:
     name: ike-scan
-    version: "1.9"
-    description: "IKE/IPsec VPN enumeration for aggressive mode testing, transform discovery, and PSK hash capture"
+    version: "1.1.0"
+    description: "IKE/IPsec VPN enumeration for aggressive mode testing, transform discovery, PSK hash capture and cracking"
     image: "ghcr.io/silicon-works/mcp-tools-ike-scan:latest"
     image_size_mb: 150
 
@@ -5318,7 +5318,9 @@ tools:
       - vpn_testing
       - aggressive_mode
       - psk_capture
+      - psk_cracking
       - transform_enumeration
+      - group_name_bruteforce
 
     routing:
       use_for:
@@ -5327,10 +5329,16 @@ tools:
         - "aggressive mode attack"
         - "VPN group name brute force"
         - "PSK hash capture"
+        - "PSK hash cracking"
         - "port 500 UDP service"
       never_use_for:
         - "SSL VPN testing"
         - "OpenVPN testing"
+      triggers:
+        - "ike"
+        - "ipsec"
+        - "vpn port 500"
+        - "psk crack"
       prefer_over: []
 
     phases:
@@ -5422,7 +5430,7 @@ tools:
             description: "Vendor identification"
 
       brute_group_names:
-        description: "Brute force IKE group names using aggressive mode"
+        description: "Brute force IKE group names with parallel scanning support"
         when_to_use: "To discover valid VPN group names for further exploitation"
         params:
           target:
@@ -5432,11 +5440,26 @@ tools:
           wordlist:
             type: string
             default: "common"
-            description: "Wordlist: 'common', 'company', or file path"
+            description: "Wordlist: 'common', 'company', 'extensive', or file path"
+          names:
+            type: array
+            description: "Inline list of group names to test (overrides wordlist)"
           dport:
             type: integer
             default: 500
             description: "Destination port"
+          concurrency:
+            type: integer
+            default: 5
+            description: "Number of parallel requests (max 10)"
+          delay:
+            type: number
+            default: 0.1
+            description: "Delay between requests in seconds"
+          stop_on_first:
+            type: boolean
+            default: false
+            description: "Stop when first valid group found"
         returns:
           valid_groups:
             type: array
@@ -5447,6 +5470,9 @@ tools:
           tested_count:
             type: integer
             description: "Number of names tested"
+          concurrency_used:
+            type: integer
+            description: "Concurrency level used"
 
       get_psk_hash:
         description: "Capture PSK hash for offline cracking"
@@ -5467,13 +5493,55 @@ tools:
         returns:
           psk_hash:
             type: string
-            description: "PSK hash for cracking"
+            description: "PSK hash for cracking with crack_psk method"
           crackable:
             type: boolean
             description: "Whether hash was captured"
-          crack_with:
+          next_step:
             type: string
-            description: "Suggested cracking tool"
+            description: "Guidance on next step"
+
+      crack_psk:
+        description: "Crack a captured PSK hash using dictionary or brute force"
+        when_to_use: "After capturing PSK hash with get_psk_hash, attempt to crack it"
+        params:
+          hash_data:
+            type: string
+            required: true
+            description: "PSK hash data from get_psk_hash"
+          wordlist:
+            type: string
+            default: "common"
+            description: "Built-in wordlist: 'common', 'rockyou_sample', or file path"
+          passwords:
+            type: array
+            description: "Inline list of passwords to try (overrides wordlist)"
+          bruteforce:
+            type: boolean
+            default: false
+            description: "Use brute force instead of dictionary"
+          charset:
+            type: string
+            default: "alnum"
+            description: "Charset for brute force: 'alnum', 'alpha', 'numeric', 'special'"
+          min_length:
+            type: integer
+            default: 1
+            description: "Min password length for brute force"
+          max_length:
+            type: integer
+            default: 6
+            description: "Max password length for brute force"
+        returns:
+          cracked:
+            type: boolean
+            description: "Whether password was cracked"
+          password:
+            type: string
+            description: "Cracked password if successful"
+          method:
+            type: string
+            description: "Method used (dictionary or bruteforce)"
 
   # =============================================================================
   # PACKET CRAFTING / PROTOCOL TESTING
