@@ -1,6 +1,20 @@
 version: "1.0"
 updated_at: "2024-12-28T00:00:00Z"
 
+# =============================================================================
+# TOOL REGISTRY
+# =============================================================================
+# This registry is used for RAG-based tool discovery. Each tool entry includes:
+# - methods: Available operations with parameters and return values
+# - routing: Hints for when to use/avoid this tool
+# - phases: Which pentest phases this tool applies to
+#
+# Workflow guidance is embedded in each method via:
+# - when_to_use: Describes the context for using this method
+# - next_step: Suggests what to do after this method completes
+# - routing.never_use_for: Warns about incorrect usage with alternatives
+# =============================================================================
+
 tools:
   # =============================================================================
   # HTTP / WEB INTERACTION
@@ -527,6 +541,18 @@ tools:
             type: array
             description: "Discovered vulnerabilities with CVE references"
 
+      get_interfaces:
+        description: "Get local network interfaces and IP addresses (useful for LHOST)"
+        when_to_use: "To determine local IP addresses for reverse shells or LHOST configuration"
+        params: {}
+        returns:
+          interfaces:
+            type: array
+            description: "List of network interfaces with IP addresses"
+          recommended_lhost:
+            type: string
+            description: "First non-loopback IPv4 address (recommended for LHOST)"
+
   # =============================================================================
   # ENUMERATION
   # =============================================================================
@@ -818,6 +844,48 @@ tools:
             type: object
             description: "Count of findings grouped by severity"
 
+      quick_scan:
+        description: "Quick scan for critical/high severity vulnerabilities only"
+        when_to_use: "For rapid initial assessment focusing on high-impact vulnerabilities"
+        params:
+          target:
+            type: string
+            required: true
+            description: "Target URL or IP"
+          focus:
+            type: enum
+            values: [cve, rce, lfi, sqli, xss, ssrf, auth-bypass, default-login]
+            default: "cve"
+            description: "Focus area for quick scan"
+          timeout:
+            type: integer
+            default: 120
+            description: "Timeout in seconds"
+        returns:
+          findings:
+            type: array
+            description: "Critical/high severity findings"
+
+      tech_detect:
+        description: "Detect technologies used by target (fast)"
+        when_to_use: "For quick technology fingerprinting before deeper scanning"
+        params:
+          target:
+            type: string
+            required: true
+            description: "Target URL or IP"
+          timeout:
+            type: integer
+            default: 60
+            description: "Timeout in seconds"
+        returns:
+          technologies:
+            type: array
+            description: "Detected technology names"
+          details:
+            type: array
+            description: "Full detection details"
+
   zap:
     name: zap
     version: "2.14"
@@ -1099,6 +1167,114 @@ tools:
             type: object
             description: "Operating system information"
 
+      enum_users:
+        description: "Enumerate users via RID cycling on SMB/Windows target"
+        when_to_use: "To enumerate user accounts on Windows/Samba targets"
+        params:
+          target:
+            type: string
+            required: true
+            description: "Target IP or hostname"
+          username:
+            type: string
+            description: "Username for authenticated enumeration"
+          password:
+            type: string
+            description: "Password for authenticated enumeration"
+          rid_range:
+            type: string
+            default: "500-550,1000-1200"
+            description: "RID range to enumerate (e.g., '500-550,1000-1200')"
+          timeout:
+            type: integer
+            default: 300
+            description: "Timeout in seconds"
+        returns:
+          users:
+            type: array
+            description: "Discovered users with RID and domain info"
+          count:
+            type: integer
+            description: "Number of users found"
+
+      enum_shares:
+        description: "Enumerate SMB shares and check access permissions"
+        when_to_use: "To discover available SMB shares and access levels"
+        params:
+          target:
+            type: string
+            required: true
+            description: "Target IP or hostname"
+          username:
+            type: string
+            description: "Username for authenticated enumeration"
+          password:
+            type: string
+            description: "Password for authenticated enumeration"
+          timeout:
+            type: integer
+            default: 300
+            description: "Timeout in seconds"
+        returns:
+          shares:
+            type: array
+            description: "Discovered shares with type, comment, and access info"
+          count:
+            type: integer
+            description: "Number of shares found"
+
+      enum_groups:
+        description: "Enumerate groups and their members from SMB/Windows target"
+        when_to_use: "To discover group memberships for privilege escalation paths"
+        params:
+          target:
+            type: string
+            required: true
+            description: "Target IP or hostname"
+          username:
+            type: string
+            description: "Username for authenticated enumeration"
+          password:
+            type: string
+            description: "Password for authenticated enumeration"
+          timeout:
+            type: integer
+            default: 300
+            description: "Timeout in seconds"
+        returns:
+          groups:
+            type: array
+            description: "Discovered groups with RID and members"
+          count:
+            type: integer
+            description: "Number of groups found"
+
+      enum_policy:
+        description: "Enumerate password policy and domain info"
+        when_to_use: "To understand password requirements before brute-forcing"
+        params:
+          target:
+            type: string
+            required: true
+            description: "Target IP or hostname"
+          username:
+            type: string
+            description: "Username for authenticated enumeration"
+          password:
+            type: string
+            description: "Password for authenticated enumeration"
+          timeout:
+            type: integer
+            default: 300
+            description: "Timeout in seconds"
+        returns:
+          password_policy:
+            type: object
+            description: "Password policy settings"
+          domain_info:
+            type: object
+            description: "Domain and OS information"
+
   wpscan:
     name: wpscan
     version: "3.8"
@@ -1188,6 +1364,100 @@ tools:
           password_found:
             type: object
             description: "Username and password if found"
+
+      enumerate_users:
+        description: "Enumerate WordPress users"
+        when_to_use: "To discover valid usernames for brute-force attacks"
+        params:
+          url:
+            type: string
+            required: true
+            description: "Target WordPress URL"
+          api_token:
+            type: string
+            description: "WPVulnDB API token for vulnerability data"
+          timeout:
+            type: integer
+            default: 300
+            description: "Timeout in seconds"
+        returns:
+          users:
+            type: array
+            description: "Discovered users with username, id, and slug"
+          count:
+            type: integer
+            description: "Number of users found"
+
+      enumerate_plugins:
+        description: "Enumerate WordPress plugins and their vulnerabilities"
+        when_to_use: "To find vulnerable plugins for exploitation"
+        params:
+          url:
+            type: string
+            required: true
+            description: "Target WordPress URL"
+          detection_mode:
+            type: enum
+            values: [passive, aggressive, mixed]
+            default: "aggressive"
+            description: "Plugin detection mode"
+          all_plugins:
+            type: boolean
+            default: false
+            description: "Enumerate all plugins (not just vulnerable ones)"
+          api_token:
+            type: string
+            description: "WPVulnDB API token for vulnerability data"
+          timeout:
+            type: integer
+            default: 300
+            description: "Timeout in seconds"
+        returns:
+          plugins:
+            type: array
+            description: "Discovered plugins with version and vulnerability count"
+          vulnerabilities:
+            type: array
+            description: "Plugin vulnerabilities with CVE and references"
+          plugin_count:
+            type: integer
+            description: "Number of plugins found"
+          vulnerability_count:
+            type: integer
+            description: "Number of vulnerabilities found"
+
+      enumerate_themes:
+        description: "Enumerate WordPress themes and their vulnerabilities"
+        when_to_use: "To find vulnerable themes for exploitation"
+        params:
+          url:
+            type: string
+            required: true
+            description: "Target WordPress URL"
+          all_themes:
+            type: boolean
+            default: false
+            description: "Enumerate all themes (not just vulnerable ones)"
+          api_token:
+            type: string
+            description: "WPVulnDB API token for vulnerability data"
+          timeout:
+            type: integer
+            default: 300
+            description: "Timeout in seconds"
+        returns:
+          themes:
+            type: array
+            description: "Discovered themes with version and vulnerability count"
+          vulnerabilities:
+            type: array
+            description: "Theme vulnerabilities with CVE and references"
+          theme_count:
+            type: integer
+            description: "Number of themes found"
+          vulnerability_count:
+            type: integer
+            description: "Number of vulnerabilities found"
 
   # =============================================================================
   # EXPLOITATION
@@ -1333,6 +1603,130 @@ tools:
           data:
             type: array
             description: "Table contents"
+
+      dump_all:
+        description: "Dump all tables from a database"
+        when_to_use: "To extract all data from a database at once"
+        params:
+          url:
+            type: string
+            required: true
+            description: "Target URL"
+          database:
+            type: string
+            required: true
+            description: "Database name to dump"
+          data:
+            type: string
+            description: "POST data if needed"
+          cookie:
+            type: string
+            description: "HTTP cookie header value"
+          timeout:
+            type: integer
+            default: 900
+            description: "Timeout in seconds"
+        returns:
+          database:
+            type: string
+            description: "Database name dumped"
+          message:
+            type: string
+            description: "Status message"
+
+      os_shell:
+        description: "Get an interactive OS shell via SQL injection (requires stacked queries or specific DBMS)"
+        when_to_use: "To execute OS commands via SQL injection for code execution"
+        params:
+          url:
+            type: string
+            required: true
+            description: "Target URL"
+          command:
+            type: string
+            required: true
+            description: "Command to execute"
+          data:
+            type: string
+            description: "POST data if needed"
+          cookie:
+            type: string
+            description: "HTTP cookie header value"
+          timeout:
+            type: integer
+            default: 120
+            description: "Timeout in seconds"
+        returns:
+          command:
+            type: string
+            description: "Executed command"
+          output:
+            type: string
+            description: "Command output"
+
+      file_read:
+        description: "Read a file from the target server via SQL injection"
+        when_to_use: "To read sensitive files like config files, /etc/passwd, etc."
+        params:
+          url:
+            type: string
+            required: true
+            description: "Target URL"
+          file_path:
+            type: string
+            required: true
+            description: "Absolute path to file on target server"
+          data:
+            type: string
+            description: "POST data if needed"
+          cookie:
+            type: string
+            description: "HTTP cookie header value"
+          timeout:
+            type: integer
+            default: 120
+            description: "Timeout in seconds"
+        returns:
+          file_path:
+            type: string
+            description: "Path of file read"
+          content:
+            type: string
+            description: "File contents"
+
+      file_write:
+        description: "Write a file to the target server via SQL injection"
+        when_to_use: "To upload web shells or other files to the target"
+        params:
+          url:
+            type: string
+            required: true
+            description: "Target URL"
+          local_file:
+            type: string
+            required: true
+            description: "Local file path or content to write"
+          remote_path:
+            type: string
+            required: true
+            description: "Absolute path on target server"
+          data:
+            type: string
+            description: "POST data if needed"
+          cookie:
+            type: string
+            description: "HTTP cookie header value"
+          timeout:
+            type: integer
+            default: 120
+            description: "Timeout in seconds"
+        returns:
+          remote_path:
+            type: string
+            description: "Path where file was written"
+          written:
+            type: boolean
+            description: "Whether write succeeded"
 
   nosqlmap:
     name: nosqlmap
@@ -1581,6 +1975,147 @@ tools:
             type: array
             description: "Valid username:password combinations found"
 
+      ssh_brute:
+        description: "Brute-force SSH login (convenience method)"
+        when_to_use: "For targeted SSH credential testing"
+        params:
+          target:
+            type: string
+            required: true
+            description: "Target IP or hostname"
+          username:
+            type: string
+            description: "Single username to test (or use userlist)"
+          userlist:
+            type: string
+            description: "Path to username wordlist"
+          passlist:
+            type: string
+            default: "common-passwords"
+            description: "Password wordlist name or path"
+          port:
+            type: integer
+            default: 22
+            description: "SSH port"
+          timeout:
+            type: integer
+            default: 600
+            description: "Timeout in seconds"
+        returns:
+          credentials:
+            type: array
+            description: "Valid username:password combinations found"
+
+      ftp_brute:
+        description: "Brute-force FTP login (convenience method)"
+        when_to_use: "For targeted FTP credential testing"
+        params:
+          target:
+            type: string
+            required: true
+            description: "Target IP or hostname"
+          username:
+            type: string
+            description: "Single username (default: tries common FTP usernames)"
+          passlist:
+            type: string
+            default: "common-passwords"
+            description: "Password wordlist name or path"
+          port:
+            type: integer
+            default: 21
+            description: "FTP port"
+          timeout:
+            type: integer
+            default: 600
+            description: "Timeout in seconds"
+        returns:
+          credentials:
+            type: array
+            description: "Valid username:password combinations found"
+
+      web_form_brute:
+        description: "Brute-force web login form"
+        when_to_use: "For web application login brute-forcing"
+        params:
+          target:
+            type: string
+            required: true
+            description: "Target IP or hostname"
+          path:
+            type: string
+            required: true
+            description: "Login form path (e.g., /login.php)"
+          user_field:
+            type: string
+            default: "username"
+            description: "Username form field name"
+          pass_field:
+            type: string
+            default: "password"
+            description: "Password form field name"
+          fail_string:
+            type: string
+            required: true
+            description: "String that appears on failed login (e.g., 'Invalid', 'incorrect')"
+          username:
+            type: string
+            description: "Single username to test"
+          userlist:
+            type: string
+            description: "Username wordlist"
+          passlist:
+            type: string
+            default: "common-passwords"
+            description: "Password wordlist"
+          https:
+            type: boolean
+            default: false
+            description: "Use HTTPS"
+          port:
+            type: integer
+            description: "Port (default: 80 or 443 for HTTPS)"
+          extra_params:
+            type: string
+            description: "Additional POST parameters (e.g., 'submit=Login&csrf=token')"
+          timeout:
+            type: integer
+            default: 600
+            description: "Timeout in seconds"
+        returns:
+          credentials:
+            type: array
+            description: "Valid username:password combinations found"
+
+      mysql_brute:
+        description: "Brute-force MySQL login"
+        when_to_use: "For MySQL database credential testing"
+        params:
+          target:
+            type: string
+            required: true
+            description: "Target IP or hostname"
+          username:
+            type: string
+            default: "root"
+            description: "Username to test"
+          passlist:
+            type: string
+            default: "common-passwords"
+            description: "Password wordlist"
+          port:
+            type: integer
+            default: 3306
+            description: "MySQL port"
+          timeout:
+            type: integer
+            default: 600
+            description: "Timeout in seconds"
+        returns:
+          credentials:
+            type: array
+            description: "Valid username:password combinations found"
+
   metasploit:
     name: metasploit
     version: "6.4"
@@ -1719,6 +2254,138 @@ tools:
             type: boolean
             description: "Whether a session was opened"
 
+      exec_command:
+        description: "Execute a command on target using an exploit with cmd/unix/generic payload"
+        when_to_use: "For command execution exploits without needing a full session"
+        params:
+          module:
+            type: string
+            required: true
+            description: "Exploit module path that supports command execution"
+          rhosts:
+            type: string
+            required: true
+            description: "Target host(s)"
+          command:
+            type: string
+            required: true
+            description: "Command to execute on the target"
+          options:
+            type: object
+            description: "Additional module options (e.g., RPORT, TARGETURI)"
+          timeout:
+            type: integer
+            default: 120
+            description: "Timeout in seconds"
+        returns:
+          exploit_success:
+            type: boolean
+            description: "Whether exploit succeeded"
+          command_output:
+            type: string
+            description: "Output from executed command"
+
+      list_sessions:
+        description: "List active Meterpreter/shell sessions"
+        when_to_use: "To check for established sessions from previous exploits"
+        params:
+          timeout:
+            type: integer
+            default: 30
+            description: "Timeout in seconds"
+        returns:
+          sessions:
+            type: array
+            description: "Active sessions with ID, type, and connection info"
+          count:
+            type: integer
+            description: "Number of active sessions"
+
+      session_command:
+        description: "Run a command in an active session"
+        when_to_use: "To execute commands in an established Meterpreter/shell session"
+        params:
+          session_id:
+            type: integer
+            required: true
+            description: "Session ID to interact with"
+          command:
+            type: string
+            required: true
+            description: "Command to execute in the session"
+          timeout:
+            type: integer
+            default: 60
+            description: "Timeout in seconds"
+        returns:
+          session_id:
+            type: integer
+            description: "Session ID used"
+          command:
+            type: string
+            description: "Command executed"
+
+      post_module:
+        description: "Run a post-exploitation module on a session"
+        when_to_use: "For post-exploitation tasks like credential gathering, privilege escalation"
+        params:
+          module:
+            type: string
+            required: true
+            description: "Post module path (e.g., 'post/multi/gather/env')"
+          session_id:
+            type: integer
+            required: true
+            description: "Session ID to run the module on"
+          options:
+            type: object
+            description: "Additional module options"
+          timeout:
+            type: integer
+            default: 120
+            description: "Timeout in seconds"
+        returns:
+          module:
+            type: string
+            description: "Module executed"
+          session_id:
+            type: integer
+            description: "Session ID used"
+
+      handler:
+        description: "Start a multi/handler to catch reverse shells"
+        when_to_use: "To set up a listener for reverse shell payloads"
+        params:
+          payload:
+            type: string
+            required: true
+            description: "Payload to listen for (e.g., 'windows_reverse_tcp')"
+          lhost:
+            type: string
+            required: true
+            description: "Listening host IP"
+          lport:
+            type: integer
+            required: true
+            description: "Listening port"
+          timeout:
+            type: integer
+            default: 300
+            description: "Timeout waiting for connection (seconds)"
+        returns:
+          payload:
+            type: string
+            description: "Payload type"
+          lhost:
+            type: string
+            description: "Listening host"
+          lport:
+            type: integer
+            description: "Listening port"
+          handler_started:
+            type: boolean
+            description: "Whether handler started successfully"
+
   searchsploit:
     name: searchsploit
     version: "latest"
@@ -1791,6 +2458,27 @@ tools:
     capabilities:
       - password_cracking
       - hash_identification
+
+    routing:
+      use_for:
+        - "Linux password hash cracking"
+        - "Windows NTLM/LM hash cracking"
+        - "MD5/SHA hash cracking"
+        - "/etc/shadow password cracking"
+        - "Database password hash cracking"
+      never_use_for:
+        - task: "IKE/IPsec PSK hash cracking"
+          use_instead: "ike-scan.crack_psk"
+          reason: "John does not support psk-ike format. Use ike-scan's built-in crack_psk method which uses psk-crack."
+        - task: "VPN PSK cracking"
+          use_instead: "ike-scan.crack_psk"
+          reason: "IKE PSK hashes require psk-crack, not John the Ripper"
+      triggers:
+        - "crack password"
+        - "hash crack"
+        - "shadow file"
+        - "ntlm"
+      prefer_over: []
 
     phases:
       - post-exploitation
@@ -4863,6 +5551,22 @@ tools:
             type: array
             description: "All tokens found"
 
+      delete_session:
+        description: "Delete a stored session"
+        when_to_use: "To clean up sessions or logout"
+        params:
+          session_name:
+            type: string
+            required: true
+            description: "Session name to delete"
+        returns:
+          session_name:
+            type: string
+            description: "Name of deleted session"
+          deleted:
+            type: boolean
+            description: "Whether session was deleted"
+
   lfi-rfi:
     name: lfi-rfi
     version: "1.0"
@@ -5591,7 +6295,8 @@ tools:
 
       get_psk_hash:
         description: "Capture PSK hash for offline cracking"
-        when_to_use: "After finding valid group name, capture hash for cracking"
+        when_to_use: "After finding valid group name via brute_group_names or aggressive_mode"
+        next_step: "Use ike-scan.crack_psk with the captured hash_data. Do NOT use john - it doesn't support IKE PSK format."
         params:
           target:
             type: string
@@ -5608,17 +6313,14 @@ tools:
         returns:
           psk_hash:
             type: string
-            description: "PSK hash for cracking with crack_psk method"
+            description: "PSK hash for cracking - pass this to crack_psk method"
           crackable:
             type: boolean
             description: "Whether hash was captured"
-          next_step:
-            type: string
-            description: "Guidance on next step"
 
       crack_psk:
-        description: "Crack a captured PSK hash using dictionary or brute force"
-        when_to_use: "After capturing PSK hash with get_psk_hash, attempt to crack it"
+        description: "Crack a captured PSK hash using psk-crack (dictionary or brute force)"
+        when_to_use: "After capturing PSK hash with get_psk_hash. This is the ONLY way to crack IKE PSK hashes - john does not support this format."
         params:
           hash_data:
             type: string

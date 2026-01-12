@@ -216,8 +216,14 @@ class BaseMCPServer(ABC):
     async def _handle_tool_call(self, name: str, arguments: Dict[str, Any]) -> CallToolResult:
         """Handle an incoming tool call."""
         if name not in self.methods:
+            available_methods = list(self.methods.keys())
+            error_msg = f"Unknown method: '{name}'\n\nAvailable methods for {self.name}:\n"
+            for method_name in available_methods:
+                method = self.methods[method_name]
+                error_msg += f"  - {method_name}: {method.description}\n"
+            error_msg += f"\nUse tool_registry_search to find the correct method name."
             return CallToolResult(
-                content=[TextContent(type="text", text=f"Unknown method: {name}")],
+                content=[TextContent(type="text", text=error_msg)],
                 isError=True,
             )
 
