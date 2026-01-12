@@ -367,8 +367,9 @@ class SSHServer(BaseMCPServer):
         port: int = 22,
         password: Optional[str] = None,
         key_file: Optional[str] = None,
+        connect_timeout: int = 30,
     ) -> list:
-        """Build common SSH arguments."""
+        """Build common SSH arguments with robust connection settings."""
         args = []
 
         if password:
@@ -379,7 +380,10 @@ class SSHServer(BaseMCPServer):
             "-o", "StrictHostKeyChecking=no",
             "-o", "UserKnownHostsFile=/dev/null",
             "-o", "BatchMode=yes" if not password else "BatchMode=no",
-            "-o", "ConnectTimeout=10",
+            "-o", f"ConnectTimeout={connect_timeout}",
+            "-o", "ServerAliveInterval=15",
+            "-o", "ServerAliveCountMax=3",
+            "-o", "TCPKeepAlive=yes",
             "-p", str(port),
         ])
 
@@ -390,6 +394,27 @@ class SSHServer(BaseMCPServer):
 
         return args
 
+    def _classify_ssh_error(self, returncode: int, stderr: str) -> str:
+        """Classify SSH errors and provide helpful suggestions."""
+        stderr_lower = stderr.lower()
+
+        if "connection refused" in stderr_lower:
+            return "Connection refused - The SSH port is closed or a firewall is blocking the connection."
+        elif "connection timed out" in stderr_lower:
+            return "Connection timed out - The host may be unreachable or the SSH service is not responding. Try increasing the timeout or check network connectivity."
+        elif "no route to host" in stderr_lower:
+            return "No route to host - The target is not reachable. Check your network configuration and target IP."
+        elif "permission denied" in stderr_lower:
+            return "Permission denied - Invalid credentials. Verify username and password/key."
+        elif "host key verification failed" in stderr_lower:
+            return "Host key verification failed - SSH host key mismatch."
+        elif "network is unreachable" in stderr_lower:
+            return "Network unreachable - Check your network connection."
+        elif returncode == 255:
+            return f"SSH connection failed (exit code 255). This usually indicates a connection or authentication problem. Details: {stderr.strip()}"
+
+        return f"SSH error (exit code {returncode}): {stderr.strip()}"
+
     async def exec_command(
         self,
         host: str,
@@ -399,11 +424,15 @@ class SSHServer(BaseMCPServer):
         key: Optional[str] = None,
         port: int = 22,
         timeout: int = 30,
+        retries: int = 2,
     ) -> ToolResult:
-        """Execute a single command via SSH."""
+        """Execute a single command via SSH with automatic retry on transient failures."""
         self.logger.info(f"Executing command on {username}@{host}:{port}")
 
         key_file = None
+        last_error = None
+        attempt = 0
+
         try:
             # Write key to temp file if provided
             if key:
@@ -414,51 +443,98 @@ class SSHServer(BaseMCPServer):
                 os.close(fd)
                 os.chmod(key_file, 0o600)
 
-            args = self._build_ssh_args(host, username, port, password, key_file)
-            args.append(command)
+            while attempt <= retries:
+                attempt += 1
 
-            proc = await asyncio.create_subprocess_exec(
-                *args,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
+                # Use a longer connect timeout for first attempt
+                connect_timeout = min(30, timeout // 2) if attempt == 1 else min(45, timeout)
+                args = self._build_ssh_args(host, username, port, password, key_file, connect_timeout)
+                args.append(command)
+
+                proc = await asyncio.create_subprocess_exec(
+                    *args,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+
+                try:
+                    stdout, stderr = await asyncio.wait_for(
+                        proc.communicate(),
+                        timeout=timeout,
+                    )
+
+                    output = stdout.decode("utf-8", errors="replace")
+                    errors = stderr.decode("utf-8", errors="replace")
+
+                    # Filter out SSH warnings
+                    errors_filtered = "\n".join(
+                        line for line in errors.split("\n")
+                        if not line.startswith("Warning:")
+                        and "Permanently added" not in line
+                    )
+
+                    # Check for transient failures that can be retried
+                    if proc.returncode != 0:
+                        errors_lower = errors.lower()
+                        is_transient = (
+                            "connection timed out" in errors_lower or
+                            "connection reset" in errors_lower or
+                            "network is unreachable" in errors_lower
+                        )
+
+                        if is_transient and attempt <= retries:
+                            self.logger.warning(f"SSH connection failed (attempt {attempt}/{retries + 1}), retrying...")
+                            await asyncio.sleep(2 * attempt)  # Exponential backoff
+                            continue
+
+                        # Non-transient failure or max retries reached
+                        classified_error = self._classify_ssh_error(proc.returncode, errors)
+                        return ToolResult(
+                            success=False,
+                            data={
+                                "host": host,
+                                "username": username,
+                                "command": command,
+                                "exit_code": proc.returncode,
+                                "attempt": attempt,
+                            },
+                            error=classified_error,
+                            raw_output=errors_filtered,
+                        )
+
+                    # Success
+                    return ToolResult(
+                        success=True,
+                        data={
+                            "host": host,
+                            "username": username,
+                            "command": command,
+                            "exit_code": proc.returncode,
+                            "stdout": output,
+                            "stderr": errors_filtered.strip() if errors_filtered.strip() else None,
+                        },
+                        raw_output=output if output else errors_filtered,
+                    )
+
+                except asyncio.TimeoutError:
+                    proc.kill()
+                    last_error = f"Command timed out after {timeout} seconds"
+                    if attempt <= retries:
+                        self.logger.warning(f"SSH timeout (attempt {attempt}/{retries + 1}), retrying...")
+                        await asyncio.sleep(2 * attempt)
+                        continue
+                    return ToolResult(
+                        success=False,
+                        data={"host": host, "username": username, "command": command, "attempt": attempt},
+                        error=f"{last_error}. The SSH service may be slow or unreachable. Consider using shell-session for persistent connections.",
+                    )
+
+            # Should not reach here, but just in case
+            return ToolResult(
+                success=False,
+                data={"host": host, "username": username, "command": command},
+                error=last_error or "SSH connection failed after all retries",
             )
-
-            try:
-                stdout, stderr = await asyncio.wait_for(
-                    proc.communicate(),
-                    timeout=timeout,
-                )
-
-                output = stdout.decode("utf-8", errors="replace")
-                errors = stderr.decode("utf-8", errors="replace")
-
-                # Filter out SSH warnings
-                errors = "\n".join(
-                    line for line in errors.split("\n")
-                    if not line.startswith("Warning:")
-                    and "Permanently added" not in line
-                )
-
-                return ToolResult(
-                    success=proc.returncode == 0,
-                    data={
-                        "host": host,
-                        "username": username,
-                        "command": command,
-                        "exit_code": proc.returncode,
-                        "stdout": output,
-                        "stderr": errors.strip() if errors.strip() else None,
-                    },
-                    raw_output=output if output else errors,
-                )
-
-            except asyncio.TimeoutError:
-                proc.kill()
-                return ToolResult(
-                    success=False,
-                    data={"host": host, "username": username, "command": command},
-                    error=f"Command timed out after {timeout} seconds",
-                )
 
         except Exception as e:
             return ToolResult(

@@ -87,11 +87,15 @@ class ShellSessionServer(BaseMCPServer):
     and enabling stateful operations.
     """
 
+    # Connection retry settings
+    MAX_RETRIES = 3
+    INITIAL_RETRY_DELAY = 1.0  # seconds
+
     def __init__(self):
         super().__init__(
             name="shell-session",
             description="Persistent shell session management for SSH and reverse shells",
-            version="1.0.0",
+            version="1.1.0",
         )
 
         # Session storage
@@ -202,6 +206,44 @@ class ShellSessionServer(BaseMCPServer):
             handler=self.upgrade_shell,
         )
 
+    def _classify_ssh_error(self, error: Exception) -> str:
+        """Classify SSH errors and provide helpful suggestions."""
+        error_str = str(error).lower()
+
+        if "authentication failed" in error_str or "permission denied" in error_str:
+            return f"Authentication failed - Invalid credentials. Verify username and password/key. Details: {error}"
+        elif "connection refused" in error_str:
+            return f"Connection refused - SSH port is closed or firewall is blocking. Details: {error}"
+        elif "timed out" in error_str or "timeout" in error_str:
+            return f"Connection timed out - Host may be unreachable or SSH service not responding. Try increasing timeout. Details: {error}"
+        elif "no route to host" in error_str:
+            return f"No route to host - Target is unreachable. Check network connectivity. Details: {error}"
+        elif "network is unreachable" in error_str:
+            return f"Network unreachable - Check your network connection. Details: {error}"
+        elif "host key" in error_str:
+            return f"Host key verification failed. Details: {error}"
+        elif "key" in error_str and ("invalid" in error_str or "format" in error_str):
+            return f"Invalid SSH key format. Ensure key is properly base64-encoded. Details: {error}"
+
+        return f"SSH connection failed: {error}"
+
+    def _is_retryable_error(self, error: Exception) -> bool:
+        """Determine if an error is transient and worth retrying."""
+        error_str = str(error).lower()
+        retryable_patterns = [
+            "timed out",
+            "timeout",
+            "connection reset",
+            "network is unreachable",
+            "temporary failure",
+            "resource temporarily unavailable",
+        ]
+        return any(pattern in error_str for pattern in retryable_patterns)
+
+    def _calculate_retry_delay(self, attempt: int) -> float:
+        """Calculate delay with exponential backoff."""
+        return min(self.INITIAL_RETRY_DELAY * (2 ** attempt), 10.0)
+
     def _generate_session_id(self) -> str:
         """Generate unique session ID."""
         return f"ses_{uuid.uuid4().hex[:12]}"
@@ -215,31 +257,26 @@ class ShellSessionServer(BaseMCPServer):
         private_key: Optional[str] = None,
         timeout: int = 30,
     ) -> ToolResult:
-        """Establish persistent SSH session."""
+        """Establish persistent SSH session with automatic retry on transient failures."""
         self.logger.info(f"Connecting SSH to {username}@{host}:{port}")
 
-        try:
-            client = paramiko.SSHClient()
-            client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        # Validate credentials upfront
+        if not private_key and not password:
+            return ToolResult(
+                success=False,
+                data={"host": host, "username": username},
+                error="Either password or private_key is required",
+            )
 
-            # Prepare authentication
-            connect_kwargs = {
-                "hostname": host,
-                "port": port,
-                "username": username,
-                "timeout": timeout,
-                "allow_agent": False,
-                "look_for_keys": False,
-            }
-
-            if private_key:
-                # Decode base64 key if provided
+        # Prepare key if provided
+        pkey = None
+        if private_key:
+            try:
                 try:
                     key_data = base64.b64decode(private_key).decode()
                 except:
                     key_data = private_key
 
-                # Try to load key
                 key_file = io.StringIO(key_data)
                 try:
                     pkey = paramiko.RSAKey.from_private_key(key_file)
@@ -250,87 +287,113 @@ class ShellSessionServer(BaseMCPServer):
                     except:
                         key_file.seek(0)
                         pkey = paramiko.ECDSAKey.from_private_key(key_file)
-
-                connect_kwargs["pkey"] = pkey
-            elif password:
-                connect_kwargs["password"] = password
-            else:
+            except Exception as e:
                 return ToolResult(
                     success=False,
                     data={"host": host, "username": username},
-                    error="Either password or private_key is required",
+                    error=f"Invalid SSH key format: {e}",
                 )
 
-            # Connect
-            client.connect(**connect_kwargs)
-
-            # Get banner
-            transport = client.get_transport()
-            banner = ""
-            if transport:
-                try:
-                    banner = transport.get_banner().decode() if transport.get_banner() else ""
-                except:
-                    pass
-
-            # Open SFTP if possible
-            sftp = None
+        # Connection with retry logic
+        last_error = None
+        for attempt in range(self.MAX_RETRIES):
             try:
-                sftp = client.open_sftp()
-            except:
-                self.logger.warning("SFTP not available on this connection")
+                client = paramiko.SSHClient()
+                client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
 
-            # Create session
-            session_id = self._generate_session_id()
-            session = SSHSession(
-                id=session_id,
-                client=client,
-                sftp=sftp,
-                host=host,
-                port=port,
-                username=username,
-                connected_at=time.time(),
-            )
-            self.ssh_sessions[session_id] = session
-
-            self.logger.info(f"SSH session established: {session_id}")
-
-            return ToolResult(
-                success=True,
-                data={
-                    "session_id": session_id,
-                    "host": host,
-                    "username": username,
+                connect_kwargs = {
+                    "hostname": host,
                     "port": port,
-                    "banner": banner,
-                    "sftp_available": sftp is not None,
-                },
-                raw_output=f"SSH session established: {session_id}",
-            )
+                    "username": username,
+                    "timeout": timeout,
+                    "allow_agent": False,
+                    "look_for_keys": False,
+                }
 
-        except paramiko.AuthenticationException as e:
-            return ToolResult(
-                success=False,
-                data={"host": host, "username": username},
-                error=f"Authentication failed: {e}",
-            )
-        except paramiko.SSHException as e:
-            return ToolResult(
-                success=False,
-                data={"host": host, "username": username},
-                error=f"SSH error: {e}",
-            )
-        except socket.timeout:
-            return ToolResult(
-                success=False,
-                data={"host": host, "username": username},
-                error=f"Connection timed out after {timeout} seconds",
-            )
-        except Exception as e:
-            return ToolResult(
-                success=False,
-                data={"host": host, "username": username},
-                error=str(e),
+                if pkey:
+                    connect_kwargs["pkey"] = pkey
+                elif password:
+                    connect_kwargs["password"] = password
+
+                # Connect
+                client.connect(**connect_kwargs)
+
+                # Get banner
+                transport = client.get_transport()
+                banner = ""
+                if transport:
+                    try:
+                        banner = transport.get_banner().decode() if transport.get_banner() else ""
+                    except:
+                        pass
+
+                # Open SFTP if possible
+                sftp = None
+                try:
+                    sftp = client.open_sftp()
+                except:
+                    self.logger.warning("SFTP not available on this connection")
+
+                # Create session
+                session_id = self._generate_session_id()
+                session = SSHSession(
+                    id=session_id,
+                    client=client,
+                    sftp=sftp,
+                    host=host,
+                    port=port,
+                    username=username,
+                    connected_at=time.time(),
+                )
+                self.ssh_sessions[session_id] = session
+
+                if attempt > 0:
+                    self.logger.info(f"SSH session established after {attempt + 1} attempts: {session_id}")
+                else:
+                    self.logger.info(f"SSH session established: {session_id}")
+
+                return ToolResult(
+                    success=True,
+                    data={
+                        "session_id": session_id,
+                        "host": host,
+                        "username": username,
+                        "port": port,
+                        "banner": banner,
+                        "sftp_available": sftp is not None,
+                        "attempts": attempt + 1,
+                    },
+                    raw_output=f"SSH session established: {session_id}",
+                )
+
+            except paramiko.AuthenticationException as e:
+                # Authentication errors are not retryable
+                return ToolResult(
+                    success=False,
+                    data={"host": host, "username": username},
+                    error=self._classify_ssh_error(e),
+                )
+            except (paramiko.SSHException, socket.timeout, socket.error, OSError) as e:
+                last_error = e
+                if self._is_retryable_error(e) and attempt < self.MAX_RETRIES - 1:
+                    delay = self._calculate_retry_delay(attempt)
+                    self.logger.warning(
+                        f"SSH connection failed (attempt {attempt + 1}/{self.MAX_RETRIES}), "
+                        f"retrying in {delay:.1f}s: {e}"
+                    )
+                    await asyncio.sleep(delay)
+                    continue
+                # Max retries reached or non-retryable error
+                break
+            except Exception as e:
+                last_error = e
+                break
+
+        # All retries exhausted
+        return ToolResult(
+            success=False,
+            data={"host": host, "username": username, "attempts": self.MAX_RETRIES},
+            error=self._classify_ssh_error(last_error),
             )
 
     async def exec_command(
