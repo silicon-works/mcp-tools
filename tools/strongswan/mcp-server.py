@@ -300,7 +300,7 @@ conn {connection_name}
             with open(conf_path, 'w') as f:
                 f.write(ipsec_conf)
 
-            with open(secrets_path, 'w', mode='0600'[1:]) as f:
+            with open(secrets_path, 'w') as f:
                 f.write(ipsec_secrets)
             os.chmod(secrets_path, 0o600)
 
