@@ -224,6 +224,39 @@ class CurlServer(BaseMCPServer):
             handler=self.download,
         )
 
+        self.register_method(
+            name="download_to_file",
+            description="Download a large file directly to a path (use for wordlists, binaries, etc.)",
+            params={
+                "url": {
+                    "type": "string",
+                    "required": True,
+                    "description": "URL to download from",
+                },
+                "output_path": {
+                    "type": "string",
+                    "required": True,
+                    "description": "Path to save file (e.g., /session/wordlists/rockyou.txt)",
+                },
+                "timeout": {
+                    "type": "integer",
+                    "default": 600,
+                    "description": "Download timeout in seconds (default 10 minutes for large files)",
+                },
+                "insecure": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": "Skip SSL certificate verification",
+                },
+                "decompress": {
+                    "type": "boolean",
+                    "default": True,
+                    "description": "Auto-decompress .gz files after download",
+                },
+            },
+            handler=self.download_to_file,
+        )
+
     def _parse_headers(self, header_output: str) -> Dict[str, str]:
         """Parse curl header output into a dictionary."""
         headers = {}
@@ -620,6 +653,125 @@ class CurlServer(BaseMCPServer):
             return ToolResult(
                 success=False,
                 data={"url": url},
+                error=str(e),
+            )
+
+    async def download_to_file(
+        self,
+        url: str,
+        output_path: str,
+        timeout: int = 600,
+        insecure: bool = False,
+        decompress: bool = True,
+    ) -> ToolResult:
+        """Download a large file directly to a path (for wordlists, binaries, etc.)."""
+        import os
+        import gzip
+        import shutil
+
+        self.logger.info(f"Downloading file from {url} to {output_path}")
+
+        # Ensure parent directory exists
+        parent_dir = os.path.dirname(output_path)
+        if parent_dir and not os.path.exists(parent_dir):
+            os.makedirs(parent_dir, exist_ok=True)
+
+        # Determine if we need to decompress
+        is_gzip = url.endswith('.gz') or '.gz?' in url
+        temp_path = output_path + '.gz' if is_gzip and decompress else output_path
+
+        args = [
+            "curl",
+            "-s",
+            "-S",
+            "-L",
+            "--max-time", str(timeout),
+            "-o", temp_path,
+            "--progress-bar",  # Show progress
+        ]
+
+        if insecure:
+            args.append("-k")
+
+        args.append(url)
+
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *args,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+
+            stdout, stderr = await asyncio.wait_for(
+                proc.communicate(),
+                timeout=timeout + 30,
+            )
+
+            if proc.returncode != 0:
+                return ToolResult(
+                    success=False,
+                    data={"url": url, "output_path": output_path},
+                    error=f"Download failed: {stderr.decode('utf-8', errors='replace')}",
+                )
+
+            # Check file was created
+            if not os.path.exists(temp_path):
+                return ToolResult(
+                    success=False,
+                    data={"url": url, "output_path": output_path},
+                    error="Download completed but file not found",
+                )
+
+            file_size = os.path.getsize(temp_path)
+
+            # Decompress if needed
+            if is_gzip and decompress:
+                self.logger.info(f"Decompressing {temp_path} to {output_path}")
+                try:
+                    with gzip.open(temp_path, 'rb') as f_in:
+                        with open(output_path, 'wb') as f_out:
+                            shutil.copyfileobj(f_in, f_out)
+                    os.remove(temp_path)
+                    file_size = os.path.getsize(output_path)
+                except Exception as e:
+                    return ToolResult(
+                        success=False,
+                        data={"url": url, "output_path": output_path},
+                        error=f"Decompression failed: {str(e)}",
+                    )
+
+            # Count lines for text files
+            line_count = None
+            if output_path.endswith('.txt'):
+                try:
+                    with open(output_path, 'rb') as f:
+                        line_count = sum(1 for _ in f)
+                except:
+                    pass
+
+            return ToolResult(
+                success=True,
+                data={
+                    "url": url,
+                    "output_path": output_path,
+                    "size_bytes": file_size,
+                    "size_mb": round(file_size / (1024 * 1024), 2),
+                    "line_count": line_count,
+                    "decompressed": is_gzip and decompress,
+                },
+                raw_output=f"Downloaded to {output_path} ({file_size} bytes, {line_count} lines)" if line_count else f"Downloaded to {output_path} ({file_size} bytes)",
+            )
+
+        except asyncio.TimeoutError:
+            return ToolResult(
+                success=False,
+                data={"url": url, "output_path": output_path},
+                error=f"Download timed out after {timeout} seconds",
+            )
+        except Exception as e:
+            return ToolResult(
+                success=False,
+                data={"url": url, "output_path": output_path},
                 error=str(e),
             )
 
