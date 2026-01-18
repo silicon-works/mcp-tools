@@ -152,12 +152,15 @@ class StrongSwanServer(BaseMCPServer):
         # Determine IKE and ESP proposals
         if transforms:
             ike_proposal = transforms
-            esp_proposal = transforms.split('-')[0] + "-sha1"  # Simplified ESP
+            # Extract encryption algorithm and build comprehensive ESP proposals
+            enc_alg = transforms.split('-')[0]
+            # Include multiple hash options for Phase 2 compatibility
+            esp_proposal = f"{enc_alg}-sha256,{enc_alg}-sha1,{enc_alg}-md5"
         else:
             # Default proposals that work with most VPNs
             if ike_version == 1:
                 ike_proposal = "aes256-sha1-modp1024,aes128-sha1-modp1024,3des-sha1-modp1024"
-                esp_proposal = "aes256-sha1,aes128-sha1,3des-sha1"
+                esp_proposal = "aes256-sha256,aes256-sha1,aes128-sha1,3des-sha1,3des-md5"
             else:
                 ike_proposal = "aes256-sha256-modp2048,aes256-sha1-modp1024"
                 esp_proposal = "aes256-sha256,aes256-sha1"
@@ -356,8 +359,15 @@ conn {connection_name}
 
             output = result.stdout + result.stderr
 
-            # Check if connection succeeded
-            success = "established" in output.lower() or "connection" in output.lower()
+            # Check if connection succeeded - look for specific success indicators
+            # and ensure no failure indicators are present
+            output_lower = output.lower()
+            has_established = "established successfully" in output_lower or "connection established" in output_lower
+            has_sa_established = "ike_sa" in output_lower and "established" in output_lower
+            has_child_sa = "child_sa" in output_lower and "established" in output_lower
+            has_failure = "failed" in output_lower or "no_proposal_chosen" in output_lower or "timeout" in output_lower
+
+            success = (has_established or has_sa_established or has_child_sa) and not has_failure
 
             if success:
                 # Get assigned IP if any
