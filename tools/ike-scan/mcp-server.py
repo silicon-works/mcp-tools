@@ -554,6 +554,50 @@ class IkeScanServer(BaseMCPServer):
             raw_output=f"Tested {len(names_to_test)} group names with concurrency={concurrency}, found {len(valid_groups)} valid: {', '.join(valid_groups) if valid_groups else 'none'}",
         )
 
+    def _is_valid_psk_hash_line(self, line: str) -> bool:
+        """
+        Validate if a line is a valid PSK hash format.
+
+        PSK hash format: g_xr:g_xi:cky_r:cky_i:sai_b:idir_b:ni_b:nr_b:hash_r
+        - 9 colon-separated fields
+        - All fields are hex data
+        - g_xr and g_xi are typically 256+ chars each (DH public values)
+        - cky_r and cky_i are 16 chars (cookies)
+        - hash_r is 40 chars for SHA1 or 32 for MD5
+        """
+        # Skip obvious metadata lines
+        skip_patterns = [
+            'Starting', 'Ending', 'IKE PSK', 'http://', 'https://',
+            'Aggressive Mode', 'Main Mode', 'SA=', 'VID=', 'hosts scanned',
+            'returned handshake', 'returned notify', 'ike-scan'
+        ]
+        for pattern in skip_patterns:
+            if pattern in line:
+                return False
+
+        parts = line.split(':')
+
+        # Must have exactly 9 fields
+        if len(parts) != 9:
+            return False
+
+        # All parts must be pure hex (possibly empty for some fields)
+        for part in parts:
+            if part and not all(c in '0123456789abcdefABCDEF' for c in part):
+                return False
+
+        # At least 2 long fields (DH values g_xr, g_xi are typically 256+ chars)
+        long_fields = sum(1 for p in parts if len(p) >= 100)
+        if long_fields < 2:
+            return False
+
+        # Last field (hash_r) should be 32-64 chars for common hash types
+        hash_field = parts[-1]
+        if not (32 <= len(hash_field) <= 64):
+            return False
+
+        return True
+
     async def get_psk_hash(
         self,
         target: str,
@@ -591,21 +635,14 @@ class IkeScanServer(BaseMCPServer):
 
             # Look for PSK hash in output
             # Format: g_xr:g_xi:cky_r:cky_i:sai_b:idir_b:ni_b:nr_b:hash_r
-            # 9 colon-separated fields, predominantly hex data
             psk_hash = None
             for line in output.split('\n'):
                 line = line.strip()
-                # Skip metadata lines
-                if line.startswith('Starting') or line.startswith('Ending') or line.startswith('IKE PSK') or not line:
+                if not line:
                     continue
-                # PSK hash format has 8+ colons (9+ fields) with long hex strings
-                parts = line.split(':')
-                if len(parts) >= 9:
-                    # Check if parts are predominantly hex (at least 3 long hex fields)
-                    hex_fields = sum(1 for p in parts if len(p) > 20 and all(c in '0123456789abcdefABCDEF' for c in p))
-                    if hex_fields >= 3:
-                        psk_hash = line
-                        break
+                if self._is_valid_psk_hash_line(line):
+                    psk_hash = line
+                    break
 
             # Check for handshake failure
             no_handshake = "0 returned handshake" in output

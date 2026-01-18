@@ -22,6 +22,14 @@ class HydraServer(BaseMCPServer):
         "usernames": "/usr/share/seclists/Usernames/top-usernames-shortlist.txt",
     }
 
+    # SSH-specific usernames for targeted brute-forcing
+    SSH_USERNAMES = [
+        "root", "admin", "user", "ubuntu", "debian", "kali", "centos", "fedora",
+        "ec2-user", "pi", "vagrant", "ansible", "deploy", "git", "jenkins",
+        "www-data", "mysql", "postgres", "oracle", "test", "guest", "backup",
+        "operator", "ftpuser", "sshuser", "administrator", "support", "service",
+    ]
+
     # Service default ports
     SERVICE_PORTS = {
         "ssh": 22,
@@ -276,9 +284,25 @@ class HydraServer(BaseMCPServer):
         )
 
     def _resolve_wordlist(self, wordlist: str) -> str:
-        """Resolve wordlist name to path."""
+        """
+        Resolve wordlist name to path.
+
+        Built-in wordlists: rockyou, common-passwords, default-passwords, usernames, ssh-usernames
+        Custom paths: /session/wordlists/mylist.txt (mounted from session directory)
+        """
         if wordlist in self.WORDLISTS:
             return self.WORDLISTS[wordlist]
+
+        # Handle ssh-usernames specially - create temp file with common SSH users
+        if wordlist == "ssh-usernames":
+            import tempfile
+            import os
+            tmp_path = "/tmp/ssh-usernames.txt"
+            if not os.path.exists(tmp_path):
+                with open(tmp_path, "w") as f:
+                    f.write("\n".join(self.SSH_USERNAMES))
+            return tmp_path
+
         return wordlist
 
     def _parse_hydra_output(self, output: str) -> Dict[str, Any]:
