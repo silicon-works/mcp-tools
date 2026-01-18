@@ -79,6 +79,11 @@ class StrongSwanServer(BaseMCPServer):
                     "type": "string",
                     "description": "Custom connection name (auto-generated if not provided)",
                 },
+                "timeout": {
+                    "type": "integer",
+                    "default": 120,
+                    "description": "Connection timeout in seconds (default: 120)",
+                },
             },
             handler=self.connect,
         )
@@ -270,6 +275,7 @@ conn {connection_name}
         mode: str = "aggressive",
         transforms: Optional[str] = None,
         connection_name: Optional[str] = None,
+        timeout: int = 120,
     ) -> ToolResult:
         """Establish an IPsec VPN connection."""
 
@@ -338,10 +344,10 @@ conn {connection_name}
             await asyncio.sleep(1)
 
             # Bring up the connection
-            self.logger.info(f"Bringing up connection {connection_name}")
+            self.logger.info(f"Bringing up connection {connection_name} (timeout: {timeout}s)")
             result = await self.run_command(
                 ["ipsec", "up", connection_name],
-                timeout=30
+                timeout=timeout
             )
 
             output = result.stdout + result.stderr
