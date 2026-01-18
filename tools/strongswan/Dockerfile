@@ -41,3 +41,4 @@ COPY tools/strongswan/mcp-server.py .
 
 # MCP servers communicate via stdio
 CMD ["python3", "mcp-server.py"]
+# Build trigger
