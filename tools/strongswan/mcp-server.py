@@ -150,17 +150,19 @@ class StrongSwanServer(BaseMCPServer):
         """Generate ipsec.conf content."""
 
         # Determine IKE and ESP proposals
+        # NOTE: ESP proposals use '!' suffix to disable PFS - many legacy VPNs don't support PFS
         if transforms:
             ike_proposal = transforms
             # Extract encryption algorithm and build comprehensive ESP proposals
             enc_alg = transforms.split('-')[0]
-            # Include multiple hash options for Phase 2 compatibility
-            esp_proposal = f"{enc_alg}-sha256,{enc_alg}-sha1,{enc_alg}-md5"
+            # Include multiple hash options for Phase 2 compatibility, no PFS
+            esp_proposal = f"{enc_alg}-sha1!,{enc_alg}-sha256!,{enc_alg}-md5!"
         else:
-            # Default proposals that work with most VPNs
+            # Default proposals that work with most VPNs (no PFS for compatibility)
             if ike_version == 1:
-                ike_proposal = "aes256-sha1-modp1024,aes128-sha1-modp1024,3des-sha1-modp1024"
-                esp_proposal = "aes256-sha256,aes256-sha1,aes128-sha1,3des-sha1,3des-md5"
+                ike_proposal = "3des-sha1-modp1024,aes128-sha1-modp1024,aes256-sha1-modp1024"
+                # '!' disables PFS which many legacy IKEv1 VPNs require
+                esp_proposal = "3des-sha1!,aes128-sha1!,aes256-sha1!,3des-md5!"
             else:
                 ike_proposal = "aes256-sha256-modp2048,aes256-sha1-modp1024"
                 esp_proposal = "aes256-sha256,aes256-sha1"
