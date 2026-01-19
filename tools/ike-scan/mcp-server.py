@@ -299,7 +299,7 @@ class IkeScanServer(BaseMCPServer):
         """
         Test IKE aggressive mode with a specific group name.
 
-        Aggressive mode reveals PSK hash if group name is valid.
+        Confirms if a group name is valid. Use get_psk_hash() to capture the hash.
 
         Args:
             target: Target IP or hostname
@@ -560,10 +560,7 @@ class IkeScanServer(BaseMCPServer):
 
         PSK hash format: g_xr:g_xi:cky_r:cky_i:sai_b:idir_b:ni_b:nr_b:hash_r
         - 9 colon-separated fields
-        - All fields are hex data
-        - g_xr and g_xi are typically 256+ chars each (DH public values)
-        - cky_r and cky_i are 16 chars (cookies)
-        - hash_r is 40 chars for SHA1 or 32 for MD5
+        - Fields are hex data
         """
         # Skip obvious metadata lines
         skip_patterns = [
@@ -577,23 +574,13 @@ class IkeScanServer(BaseMCPServer):
 
         parts = line.split(':')
 
-        # Must have exactly 9 fields
-        if len(parts) != 9:
+        # Must have at least 9 fields
+        if len(parts) < 9:
             return False
 
-        # All parts must be pure hex (possibly empty for some fields)
-        for part in parts:
-            if part and not all(c in '0123456789abcdefABCDEF' for c in part):
-                return False
-
-        # At least 2 long fields (DH values g_xr, g_xi are typically 256+ chars)
-        long_fields = sum(1 for p in parts if len(p) >= 100)
-        if long_fields < 2:
-            return False
-
-        # Last field (hash_r) should be 32-64 chars for common hash types
-        hash_field = parts[-1]
-        if not (32 <= len(hash_field) <= 64):
+        # At least 3 hex fields > 20 chars (DH values, hash, etc.)
+        hex_fields = sum(1 for p in parts if len(p) > 20 and all(c in '0123456789abcdefABCDEF' for c in p))
+        if hex_fields < 3:
             return False
 
         return True
@@ -699,6 +686,7 @@ class IkeScanServer(BaseMCPServer):
             f.write(hash_data.strip() + '\n')
             hash_file = f.name
 
+        dict_file = None
         try:
             if bruteforce:
                 # Brute force mode
@@ -802,7 +790,7 @@ class IkeScanServer(BaseMCPServer):
             # Clean up temp files
             if os.path.exists(hash_file):
                 os.unlink(hash_file)
-            if 'dict_file' in locals() and os.path.exists(dict_file):
+            if dict_file and os.path.exists(dict_file):
                 os.unlink(dict_file)
 
     def _parse_crack_output(self, output: str) -> Optional[str]:
