@@ -8,6 +8,7 @@ SSH client for remote shell access with password or key authentication.
 import asyncio
 import base64
 import os
+import shlex
 import subprocess
 import tempfile
 from typing import Optional
@@ -62,6 +63,10 @@ class SSHServer(BaseMCPServer):
                     "default": 30,
                     "description": "Connection timeout in seconds",
                 },
+                "ssh_options": {
+                    "type": "string",
+                    "description": "Additional SSH options (e.g., '-o KexAlgorithms=curve25519-sha256' for VPN/MTU issues)",
+                },
             },
             handler=self.exec_command,
         )
@@ -102,6 +107,10 @@ class SSHServer(BaseMCPServer):
                     "type": "integer",
                     "default": 60,
                     "description": "Total timeout for all commands",
+                },
+                "ssh_options": {
+                    "type": "string",
+                    "description": "Additional SSH options (e.g., '-o KexAlgorithms=curve25519-sha256' for VPN/MTU issues)",
                 },
             },
             handler=self.shell,
@@ -368,6 +377,7 @@ class SSHServer(BaseMCPServer):
         password: Optional[str] = None,
         key_file: Optional[str] = None,
         connect_timeout: int = 30,
+        ssh_options: Optional[str] = None,
     ) -> list:
         """Build common SSH arguments with robust connection settings."""
         args = []
@@ -386,6 +396,10 @@ class SSHServer(BaseMCPServer):
             "-o", "TCPKeepAlive=yes",
             "-p", str(port),
         ])
+
+        # Add custom SSH options (e.g., "-o KexAlgorithms=curve25519-sha256")
+        if ssh_options:
+            args.extend(shlex.split(ssh_options))
 
         if key_file:
             args.extend(["-i", key_file])
@@ -425,6 +439,7 @@ class SSHServer(BaseMCPServer):
         port: int = 22,
         timeout: int = 30,
         retries: int = 2,
+        ssh_options: Optional[str] = None,
     ) -> ToolResult:
         """Execute a single command via SSH with automatic retry on transient failures."""
         self.logger.info(f"Executing command on {username}@{host}:{port}")
@@ -448,7 +463,7 @@ class SSHServer(BaseMCPServer):
 
                 # Use a longer connect timeout for first attempt
                 connect_timeout = min(30, timeout // 2) if attempt == 1 else min(45, timeout)
-                args = self._build_ssh_args(host, username, port, password, key_file, connect_timeout)
+                args = self._build_ssh_args(host, username, port, password, key_file, connect_timeout, ssh_options)
                 args.append(command)
 
                 proc = await asyncio.create_subprocess_exec(
@@ -555,6 +570,7 @@ class SSHServer(BaseMCPServer):
         key: Optional[str] = None,
         port: int = 22,
         timeout: int = 60,
+        ssh_options: Optional[str] = None,
     ) -> ToolResult:
         """Execute multiple commands in sequence."""
         self.logger.info(f"Executing {len(commands)} commands on {username}@{host}")
@@ -570,6 +586,7 @@ class SSHServer(BaseMCPServer):
             key=key,
             port=port,
             timeout=timeout,
+            ssh_options=ssh_options,
         )
 
     async def copy_from(
@@ -581,6 +598,7 @@ class SSHServer(BaseMCPServer):
         key: Optional[str] = None,
         port: int = 22,
         timeout: int = 60,
+        ssh_options: Optional[str] = None,
     ) -> ToolResult:
         """Download a file from remote host."""
         self.logger.info(f"Downloading {remote_path} from {username}@{host}")
@@ -611,6 +629,10 @@ class SSHServer(BaseMCPServer):
                 "-o", "UserKnownHostsFile=/dev/null",
                 "-P", str(port),
             ])
+
+            # Add custom SSH options
+            if ssh_options:
+                args.extend(shlex.split(ssh_options))
 
             if key_file:
                 args.extend(["-i", key_file])
@@ -684,6 +706,7 @@ class SSHServer(BaseMCPServer):
         key: Optional[str] = None,
         port: int = 22,
         timeout: int = 60,
+        ssh_options: Optional[str] = None,
     ) -> ToolResult:
         """Upload content to remote host."""
         self.logger.info(f"Uploading to {remote_path} on {username}@{host}")
@@ -715,6 +738,10 @@ class SSHServer(BaseMCPServer):
                 "-o", "UserKnownHostsFile=/dev/null",
                 "-P", str(port),
             ])
+
+            # Add custom SSH options
+            if ssh_options:
+                args.extend(shlex.split(ssh_options))
 
             if key_file:
                 args.extend(["-i", key_file])
@@ -786,6 +813,7 @@ class SSHServer(BaseMCPServer):
         port: int = 22,
         chunk_size: int = 50000,
         timeout: int = 300,
+        ssh_options: Optional[str] = None,
     ) -> ToolResult:
         """Upload binary content via base64 chunking."""
         self.logger.info(f"Uploading binary to {remote_path} on {username}@{host}")
@@ -806,6 +834,7 @@ class SSHServer(BaseMCPServer):
                 command=f"rm -f {remote_path}",
                 port=port,
                 timeout=30,
+                ssh_options=ssh_options,
             )
 
             # Split into chunks and upload
@@ -825,6 +854,7 @@ class SSHServer(BaseMCPServer):
                     command=f"echo '{chunk_b64}' | base64 -d >> {remote_path}",
                     port=port,
                     timeout=60,
+                    ssh_options=ssh_options,
                 )
                 if not result.success:
                     return ToolResult(
@@ -843,6 +873,7 @@ class SSHServer(BaseMCPServer):
                     command=f"chmod +x {remote_path}",
                     port=port,
                     timeout=30,
+                    ssh_options=ssh_options,
                 )
 
             # Verify upload
@@ -854,6 +885,7 @@ class SSHServer(BaseMCPServer):
                 command=f"ls -la {remote_path} && file {remote_path}",
                 port=port,
                 timeout=30,
+                ssh_options=ssh_options,
             )
 
             return ToolResult(
@@ -886,6 +918,7 @@ class SSHServer(BaseMCPServer):
         interpreter: str = "/bin/bash",
         port: int = 22,
         timeout: int = 120,
+        ssh_options: Optional[str] = None,
     ) -> ToolResult:
         """Upload and execute a script."""
         self.logger.info(f"Running script on {username}@{host}")
@@ -903,6 +936,7 @@ class SSHServer(BaseMCPServer):
                 remote_path=remote_script,
                 port=port,
                 timeout=60,
+                ssh_options=ssh_options,
             )
 
             if not upload_result.success:
@@ -917,6 +951,7 @@ class SSHServer(BaseMCPServer):
                 command=f"chmod +x {remote_script} && {interpreter} {remote_script}; rm -f {remote_script}",
                 port=port,
                 timeout=timeout,
+                ssh_options=ssh_options,
             )
 
             return result
