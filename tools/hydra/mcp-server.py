@@ -5,7 +5,9 @@ OpenSploit MCP Server: hydra
 Network authentication brute-forcing tool.
 """
 
+import asyncio
 import re
+import time
 from typing import Any, Dict, List, Optional
 
 from mcp_common import BaseMCPServer, ToolResult, ToolError, sanitize_output
@@ -53,6 +55,18 @@ class HydraServer(BaseMCPServer):
         "imap": 143,
     }
 
+    # Service-specific default threads (encode expert knowledge)
+    SERVICE_THREADS = {
+        "ssh": 4,       # SSH servers aggressively rate-limit
+        "ftp": 8,       # More tolerant than SSH
+        "mysql": 4,     # Database connections are expensive
+        "postgres": 4,
+        "smb": 8,       # Windows can be touchy
+        "rdp": 4,       # RDP is sensitive to concurrent attempts
+        "vnc": 4,
+    }
+    DEFAULT_THREADS = 16  # For HTTP and other services
+
     def __init__(self):
         super().__init__(
             name="hydra",
@@ -81,7 +95,7 @@ class HydraServer(BaseMCPServer):
                 },
                 "userlist": {
                     "type": "string",
-                    "description": "Wordlist name (usernames) or path to username list",
+                    "description": "Wordlist name (usernames, ssh-usernames) or path to username list",
                 },
                 "password": {
                     "type": "string",
@@ -89,13 +103,11 @@ class HydraServer(BaseMCPServer):
                 },
                 "passlist": {
                     "type": "string",
-                    "default": "common-passwords",
-                    "description": "Wordlist name (rockyou, common-passwords) or path",
+                    "description": "Wordlist name (rockyou, common-passwords) or path. Ignored if password is set.",
                 },
                 "threads": {
                     "type": "integer",
-                    "default": 16,
-                    "description": "Number of parallel connections",
+                    "description": "Number of parallel connections (default: service-specific, e.g., SSH=4, HTTP=16)",
                 },
                 "port": {
                     "type": "integer",
@@ -105,6 +117,25 @@ class HydraServer(BaseMCPServer):
                     "type": "integer",
                     "default": 600,
                     "description": "Timeout in seconds",
+                },
+                "wait_time": {
+                    "type": "integer",
+                    "description": "Seconds to wait between connection attempts (hydra -W flag)",
+                },
+                "stop_on_first": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": "Stop after finding first valid credential (hydra -f flag)",
+                },
+                "try_common": {
+                    "type": "string",
+                    "enum": ["n", "s", "r", "ns", "nr", "sr", "nsr"],
+                    "description": "Try common passwords: n=null, s=same as login, r=reversed login (e.g., 'nsr' for all)",
+                },
+                "verbose": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": "Include verbose output with each attempt (warning: can be large)",
                 },
                 "http_path": {
                     "type": "string",
@@ -120,7 +151,7 @@ class HydraServer(BaseMCPServer):
 
         self.register_method(
             name="ssh_brute",
-            description="Brute-force SSH login (convenience method)",
+            description="Brute-force SSH login (convenience method with SSH-optimized defaults)",
             params={
                 "target": {
                     "type": "string",
@@ -129,26 +160,53 @@ class HydraServer(BaseMCPServer):
                 },
                 "username": {
                     "type": "string",
-                    "description": "Single username to test (or use userlist)",
+                    "description": "Single username to test",
                 },
                 "userlist": {
                     "type": "string",
-                    "description": "Path to username wordlist",
+                    "description": "Wordlist name (usernames, ssh-usernames) or path",
+                },
+                "password": {
+                    "type": "string",
+                    "description": "Single password to test",
                 },
                 "passlist": {
                     "type": "string",
-                    "default": "common-passwords",
-                    "description": "Password wordlist name or path",
+                    "description": "Password wordlist name or path. Ignored if password is set.",
                 },
                 "port": {
                     "type": "integer",
                     "default": 22,
                     "description": "SSH port",
                 },
+                "threads": {
+                    "type": "integer",
+                    "default": 4,
+                    "description": "Parallel connections (default: 4 for SSH to avoid rate limiting)",
+                },
                 "timeout": {
                     "type": "integer",
                     "default": 600,
                     "description": "Timeout in seconds",
+                },
+                "wait_time": {
+                    "type": "integer",
+                    "description": "Seconds to wait between connection attempts",
+                },
+                "stop_on_first": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": "Stop after finding first valid credential",
+                },
+                "try_common": {
+                    "type": "string",
+                    "enum": ["n", "s", "r", "ns", "nr", "sr", "nsr"],
+                    "description": "Try common passwords: n=null, s=same as login, r=reversed login",
+                },
+                "verbose": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": "Include verbose output with each attempt",
                 },
             },
             handler=self.ssh_brute,
@@ -165,22 +223,53 @@ class HydraServer(BaseMCPServer):
                 },
                 "username": {
                     "type": "string",
-                    "description": "Single username (default: anonymous, ftp, admin)",
+                    "description": "Single username to test",
+                },
+                "userlist": {
+                    "type": "string",
+                    "description": "Wordlist name or path (default: tries common FTP usernames)",
+                },
+                "password": {
+                    "type": "string",
+                    "description": "Single password to test",
                 },
                 "passlist": {
                     "type": "string",
-                    "default": "common-passwords",
-                    "description": "Password wordlist name or path",
+                    "description": "Password wordlist name or path. Ignored if password is set.",
                 },
                 "port": {
                     "type": "integer",
                     "default": 21,
                     "description": "FTP port",
                 },
+                "threads": {
+                    "type": "integer",
+                    "default": 8,
+                    "description": "Parallel connections (default: 8 for FTP)",
+                },
                 "timeout": {
                     "type": "integer",
                     "default": 600,
                     "description": "Timeout in seconds",
+                },
+                "wait_time": {
+                    "type": "integer",
+                    "description": "Seconds to wait between connection attempts",
+                },
+                "stop_on_first": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": "Stop after finding first valid credential",
+                },
+                "try_common": {
+                    "type": "string",
+                    "enum": ["n", "s", "r", "ns", "nr", "sr", "nsr"],
+                    "description": "Try common passwords: n=null, s=same as login, r=reversed login",
+                },
+                "verbose": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": "Include verbose output with each attempt",
                 },
             },
             handler=self.ftp_brute,
@@ -221,12 +310,15 @@ class HydraServer(BaseMCPServer):
                 },
                 "userlist": {
                     "type": "string",
-                    "description": "Username wordlist",
+                    "description": "Username wordlist name or path",
+                },
+                "password": {
+                    "type": "string",
+                    "description": "Single password to test",
                 },
                 "passlist": {
                     "type": "string",
-                    "default": "common-passwords",
-                    "description": "Password wordlist",
+                    "description": "Password wordlist name or path. Ignored if password is set.",
                 },
                 "https": {
                     "type": "boolean",
@@ -237,6 +329,11 @@ class HydraServer(BaseMCPServer):
                     "type": "integer",
                     "description": "Port (default: 80 or 443 for HTTPS)",
                 },
+                "threads": {
+                    "type": "integer",
+                    "default": 16,
+                    "description": "Parallel connections (default: 16 for HTTP)",
+                },
                 "extra_params": {
                     "type": "string",
                     "description": "Additional POST parameters (e.g., 'submit=Login&csrf=token')",
@@ -245,6 +342,25 @@ class HydraServer(BaseMCPServer):
                     "type": "integer",
                     "default": 600,
                     "description": "Timeout in seconds",
+                },
+                "wait_time": {
+                    "type": "integer",
+                    "description": "Seconds to wait between connection attempts",
+                },
+                "stop_on_first": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": "Stop after finding first valid credential",
+                },
+                "try_common": {
+                    "type": "string",
+                    "enum": ["n", "s", "r", "ns", "nr", "sr", "nsr"],
+                    "description": "Try common passwords: n=null, s=same as login, r=reversed login",
+                },
+                "verbose": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": "Include verbose output with each attempt",
                 },
             },
             handler=self.web_form_brute,
@@ -262,22 +378,53 @@ class HydraServer(BaseMCPServer):
                 "username": {
                     "type": "string",
                     "default": "root",
-                    "description": "Username to test",
+                    "description": "Single username to test",
+                },
+                "userlist": {
+                    "type": "string",
+                    "description": "Username wordlist name or path",
+                },
+                "password": {
+                    "type": "string",
+                    "description": "Single password to test",
                 },
                 "passlist": {
                     "type": "string",
-                    "default": "common-passwords",
-                    "description": "Password wordlist",
+                    "description": "Password wordlist name or path. Ignored if password is set.",
                 },
                 "port": {
                     "type": "integer",
                     "default": 3306,
                     "description": "MySQL port",
                 },
+                "threads": {
+                    "type": "integer",
+                    "default": 4,
+                    "description": "Parallel connections (default: 4 for MySQL)",
+                },
                 "timeout": {
                     "type": "integer",
                     "default": 600,
                     "description": "Timeout in seconds",
+                },
+                "wait_time": {
+                    "type": "integer",
+                    "description": "Seconds to wait between connection attempts",
+                },
+                "stop_on_first": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": "Stop after finding first valid credential",
+                },
+                "try_common": {
+                    "type": "string",
+                    "enum": ["n", "s", "r", "ns", "nr", "sr", "nsr"],
+                    "description": "Try common passwords: n=null, s=same as login, r=reversed login",
+                },
+                "verbose": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": "Include verbose output with each attempt",
                 },
             },
             handler=self.mysql_brute,
@@ -305,31 +452,85 @@ class HydraServer(BaseMCPServer):
 
         return wordlist
 
-    def _parse_hydra_output(self, output: str) -> Dict[str, Any]:
-        """Parse hydra output for credentials."""
+    def _parse_hydra_output(self, output: str, include_verbose: bool = False) -> Dict[str, Any]:
+        """Parse hydra output for credentials and statistics."""
         credentials = []
+        attempts_total = 0
+        attempts_completed = 0
+        warnings = []
+        errors = []
 
         for line in output.split("\n"):
-            # Hydra outputs found credentials like:
-            # [22][ssh] host: 10.10.10.1   login: admin   password: admin123
-            match = re.search(
-                r"\[(\d+)\]\[(\w+)\]\s+host:\s+(\S+)\s+login:\s+(\S+)\s+password:\s+(\S+)",
+            # Parse found credentials
+            # SSH format: [22][ssh] host: 10.10.10.1   login: admin   password: admin123
+            # HTTP form format: [80][http-post-form] host: httpbin.org   misc: /path:...   login: admin   password: admin123
+            cred_match = re.search(
+                r"\[(\d+)\]\[([\w-]+)\]\s+host:\s+(\S+).*?\s+login:\s+(\S+)\s+password:\s+(\S+)",
                 line
             )
-            if match:
+            if cred_match:
                 credentials.append({
-                    "port": int(match.group(1)),
-                    "service": match.group(2),
-                    "host": match.group(3),
-                    "username": match.group(4),
-                    "password": match.group(5),
+                    "port": int(cred_match.group(1)),
+                    "service": cred_match.group(2),
+                    "host": cred_match.group(3),
+                    "username": cred_match.group(4),
+                    "password": cred_match.group(5),
                 })
+                continue
 
-        return {
+            # Parse progress info: [STATUS] 1234.00 tries/min, 5678 tries in 00:04h, 9012 to do
+            status_match = re.search(
+                r"\[STATUS\].*?(\d+)\s+tries\s+in\s+[\d:]+h?,\s+(\d+)\s+to\s+do",
+                line
+            )
+            if status_match:
+                attempts_completed = int(status_match.group(1))
+                remaining = int(status_match.group(2))
+                attempts_total = attempts_completed + remaining
+                continue
+
+            # Parse total combinations: [DATA] max 16 tasks per 1 server, overall 16 tasks, 14344398 login tries
+            data_match = re.search(r"\[DATA\].*?(\d+)\s+login\s+tries", line)
+            if data_match and attempts_total == 0:
+                attempts_total = int(data_match.group(1))
+                continue
+
+            # Parse warnings
+            if line.strip().startswith("[WARNING]"):
+                warnings.append(line.strip()[10:].strip())
+                continue
+
+            # Parse errors
+            if line.strip().startswith("[ERROR]"):
+                errors.append(line.strip()[8:].strip())
+                continue
+
+        result = {
             "credentials": credentials,
             "found": len(credentials) > 0,
             "count": len(credentials),
+            "stats": {
+                "attempts_total": attempts_total,
+                "attempts_completed": attempts_completed,
+                "attempts_successful": len(credentials),
+            },
         }
+
+        if warnings:
+            result["warnings"] = warnings
+
+        if errors:
+            result["errors"] = errors
+
+        if include_verbose:
+            # Extract attempt lines for verbose output
+            verbose_lines = [
+                line for line in output.split("\n")
+                if "[ATTEMPT]" in line or "[STATUS]" in line or "[DATA]" in line
+            ]
+            result["verbose_output"] = "\n".join(verbose_lines[-1000:])  # Last 1000 lines
+
+        return result
 
     async def bruteforce(
         self,
@@ -338,22 +539,46 @@ class HydraServer(BaseMCPServer):
         username: Optional[str] = None,
         userlist: Optional[str] = None,
         password: Optional[str] = None,
-        passlist: str = "common-passwords",
-        threads: int = 16,
+        passlist: Optional[str] = None,
+        threads: Optional[int] = None,
         port: Optional[int] = None,
         timeout: int = 600,
+        wait_time: Optional[int] = None,
+        stop_on_first: bool = False,
+        try_common: Optional[str] = None,
+        verbose: bool = False,
         http_path: Optional[str] = None,
         http_form: Optional[str] = None,
     ) -> ToolResult:
         """Brute-force login credentials for a service."""
+        start_time = time.time()
         self.logger.info(f"Starting brute-force on {target} ({service})")
 
         # Resolve port
         if port is None:
             port = self.SERVICE_PORTS.get(service, 0)
 
+        # Resolve threads (service-specific defaults)
+        if threads is None:
+            threads = self.SERVICE_THREADS.get(service, self.DEFAULT_THREADS)
+
         # Build command
-        args = ["hydra", "-t", str(threads), "-V"]
+        args = ["hydra", "-t", str(threads)]
+
+        # Add verbose flag if requested (always use -V for progress tracking)
+        args.append("-V")
+
+        # Wait time between connections
+        if wait_time is not None:
+            args.extend(["-W", str(wait_time)])
+
+        # Stop on first valid credential
+        if stop_on_first:
+            args.append("-f")
+
+        # Try common passwords (null, same as login, reversed)
+        if try_common:
+            args.extend(["-e", try_common])
 
         # Username options
         if username:
@@ -367,8 +592,11 @@ class HydraServer(BaseMCPServer):
         # Password options
         if password:
             args.extend(["-p", password])
-        else:
+        elif passlist:
             args.extend(["-P", self._resolve_wordlist(passlist)])
+        else:
+            # Default to common passwords if no password specified
+            args.extend(["-P", self.WORDLISTS["common-passwords"]])
 
         # Add target and service
         if port:
@@ -409,19 +637,93 @@ class HydraServer(BaseMCPServer):
         else:
             args.append(service)
 
-        try:
-            self.logger.info(f"Running: {' '.join(args)}")
-            result = await self.run_command(args, timeout=timeout)
+        self.logger.info(f"Running: {' '.join(args)}")
 
-            output = result.stdout + result.stderr
-            parsed = self._parse_hydra_output(output)
+        # Execute with timeout handling that captures partial output
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *args,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+
+            try:
+                stdout_bytes, stderr_bytes = await asyncio.wait_for(
+                    proc.communicate(),
+                    timeout=timeout,
+                )
+                stdout = stdout_bytes.decode('utf-8', errors='replace')
+                stderr = stderr_bytes.decode('utf-8', errors='replace')
+                timed_out = False
+
+            except asyncio.TimeoutError:
+                # Terminate the process gracefully first (SIGTERM allows output flush)
+                proc.terminate()
+                try:
+                    stdout_bytes, stderr_bytes = await asyncio.wait_for(
+                        proc.communicate(),
+                        timeout=5,
+                    )
+                    stdout = stdout_bytes.decode('utf-8', errors='replace')
+                    stderr = stderr_bytes.decode('utf-8', errors='replace')
+                except asyncio.TimeoutError:
+                    # If still running after 5s, force kill
+                    proc.kill()
+                    try:
+                        stdout_bytes, stderr_bytes = await asyncio.wait_for(
+                            proc.communicate(),
+                            timeout=2,
+                        )
+                        stdout = stdout_bytes.decode('utf-8', errors='replace')
+                        stderr = stderr_bytes.decode('utf-8', errors='replace')
+                    except:
+                        stdout = ""
+                        stderr = ""
+                except Exception:
+                    stdout = ""
+                    stderr = ""
+                timed_out = True
+
+            output = stdout + stderr
+            duration_seconds = int(time.time() - start_time)
+            parsed = self._parse_hydra_output(output, include_verbose=verbose)
 
             parsed["summary"] = {
                 "target": target,
                 "service": service,
                 "port": port,
+                "threads": threads,
                 "found": parsed["found"],
+                "duration_seconds": duration_seconds,
             }
+
+            if timed_out:
+                parsed["partial"] = True
+                parsed["stats"]["duration_seconds"] = duration_seconds
+                return ToolResult(
+                    success=False,
+                    data=parsed,
+                    raw_output=sanitize_output(output),
+                    error={
+                        "type": "timeout",
+                        "message": f"Operation timed out after {timeout} seconds",
+                        "partial_results": True,
+                        "credentials_found": len(parsed["credentials"]),
+                    },
+                )
+
+            # Check for hydra errors (connection failures, etc.)
+            if parsed.get("errors"):
+                return ToolResult(
+                    success=False,
+                    data=parsed,
+                    raw_output=sanitize_output(output),
+                    error={
+                        "type": "hydra_error",
+                        "message": parsed["errors"][0] if parsed["errors"] else "Unknown hydra error",
+                        "errors": parsed["errors"],
+                    },
+                )
 
             return ToolResult(
                 success=True,
@@ -429,10 +731,10 @@ class HydraServer(BaseMCPServer):
                 raw_output=sanitize_output(output),
             )
 
-        except ToolError as e:
+        except Exception as e:
             return ToolResult(
                 success=False,
-                data={},
+                data={"summary": {"target": target, "service": service, "port": port}},
                 error=str(e),
             )
 
@@ -441,48 +743,68 @@ class HydraServer(BaseMCPServer):
         target: str,
         username: Optional[str] = None,
         userlist: Optional[str] = None,
-        passlist: str = "common-passwords",
+        password: Optional[str] = None,
+        passlist: Optional[str] = None,
         port: int = 22,
+        threads: int = 4,
         timeout: int = 600,
+        wait_time: Optional[int] = None,
+        stop_on_first: bool = False,
+        try_common: Optional[str] = None,
+        verbose: bool = False,
     ) -> ToolResult:
-        """Brute-force SSH login (convenience method)."""
+        """Brute-force SSH login (convenience method with SSH-optimized defaults)."""
         return await self.bruteforce(
             target=target,
             service="ssh",
             username=username,
             userlist=userlist,
+            password=password,
             passlist=passlist,
             port=port,
+            threads=threads,
             timeout=timeout,
+            wait_time=wait_time,
+            stop_on_first=stop_on_first,
+            try_common=try_common,
+            verbose=verbose,
         )
 
     async def ftp_brute(
         self,
         target: str,
         username: Optional[str] = None,
-        passlist: str = "common-passwords",
+        userlist: Optional[str] = None,
+        password: Optional[str] = None,
+        passlist: Optional[str] = None,
         port: int = 21,
+        threads: int = 8,
         timeout: int = 600,
+        wait_time: Optional[int] = None,
+        stop_on_first: bool = False,
+        try_common: Optional[str] = None,
+        verbose: bool = False,
     ) -> ToolResult:
         """Brute-force FTP login (convenience method)."""
-        # If no username specified, try common FTP usernames
-        if not username:
-            # Run with username list for anonymous, ftp, admin
-            return await self.bruteforce(
-                target=target,
-                service="ftp",
-                userlist="usernames",
-                passlist=passlist,
-                port=port,
-                timeout=timeout,
-            )
+        # If no username or userlist specified, try common FTP usernames
+        effective_userlist = userlist
+        if not username and not userlist:
+            effective_userlist = "usernames"
+
         return await self.bruteforce(
             target=target,
             service="ftp",
             username=username,
+            userlist=effective_userlist,
+            password=password,
             passlist=passlist,
             port=port,
+            threads=threads,
             timeout=timeout,
+            wait_time=wait_time,
+            stop_on_first=stop_on_first,
+            try_common=try_common,
+            verbose=verbose,
         )
 
     async def web_form_brute(
@@ -494,11 +816,17 @@ class HydraServer(BaseMCPServer):
         pass_field: str = "password",
         username: Optional[str] = None,
         userlist: Optional[str] = None,
-        passlist: str = "common-passwords",
+        password: Optional[str] = None,
+        passlist: Optional[str] = None,
         https: bool = False,
         port: Optional[int] = None,
+        threads: int = 16,
         extra_params: Optional[str] = None,
         timeout: int = 600,
+        wait_time: Optional[int] = None,
+        stop_on_first: bool = False,
+        try_common: Optional[str] = None,
+        verbose: bool = False,
     ) -> ToolResult:
         """Brute-force web login form."""
         # Build the http_form string for hydra
@@ -517,9 +845,15 @@ class HydraServer(BaseMCPServer):
             service=service,
             username=username,
             userlist=userlist,
+            password=password,
             passlist=passlist,
             port=port or default_port,
+            threads=threads,
             timeout=timeout,
+            wait_time=wait_time,
+            stop_on_first=stop_on_first,
+            try_common=try_common,
+            verbose=verbose,
             http_form=form_string,
         )
 
@@ -527,18 +861,32 @@ class HydraServer(BaseMCPServer):
         self,
         target: str,
         username: str = "root",
-        passlist: str = "common-passwords",
+        userlist: Optional[str] = None,
+        password: Optional[str] = None,
+        passlist: Optional[str] = None,
         port: int = 3306,
+        threads: int = 4,
         timeout: int = 600,
+        wait_time: Optional[int] = None,
+        stop_on_first: bool = False,
+        try_common: Optional[str] = None,
+        verbose: bool = False,
     ) -> ToolResult:
         """Brute-force MySQL login."""
         return await self.bruteforce(
             target=target,
             service="mysql",
-            username=username,
+            username=username if not userlist else None,
+            userlist=userlist,
+            password=password,
             passlist=passlist,
             port=port,
+            threads=threads,
             timeout=timeout,
+            wait_time=wait_time,
+            stop_on_first=stop_on_first,
+            try_common=try_common,
+            verbose=verbose,
         )
 
 
