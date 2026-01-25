@@ -1101,14 +1101,35 @@ tools:
             type: integer
             default: 5
             description: "Maximum crawl depth"
+          max_children:
+            type: integer
+            default: 0
+            description: "Maximum child URLs per page (0=unlimited)"
           wait:
             type: boolean
             default: true
-            description: "Wait for spider to complete"
+            description: "Wait for spider to complete (if false, returns immediately with scan_id)"
+          timeout:
+            type: integer
+            default: 300
+            description: "Maximum seconds to wait for spider. Returns partial results on timeout."
+          subtree_only:
+            type: boolean
+            default: true
+            description: "Only spider URLs under the target path (recommended)"
         returns:
-          urls:
-            type: array
-            description: "Discovered URLs"
+          scan_id:
+            type: string
+            description: "Spider scan ID for status checking"
+          urls_found:
+            type: integer
+            description: "Number of URLs discovered"
+          progress:
+            type: integer
+            description: "Spider progress percentage (0-100)"
+          partial:
+            type: boolean
+            description: "True if scan timed out with partial results"
 
       active_scan:
         description: "Actively scan a target for vulnerabilities (SQLi, XSS, etc.)"
@@ -1121,14 +1142,30 @@ tools:
           wait:
             type: boolean
             default: true
-            description: "Wait for scan to complete"
+            description: "Wait for scan to complete (if false, returns immediately with scan_id)"
+          timeout:
+            type: integer
+            default: 600
+            description: "Maximum seconds to wait for scan. Returns partial results on timeout."
+          scan_policy:
+            type: string
+            description: "Scan policy name: 'Default Policy' or custom. Controls which checks run."
         returns:
+          scan_id:
+            type: string
+            description: "Active scan ID for status checking"
+          progress:
+            type: integer
+            description: "Scan progress percentage (0-100)"
           alerts:
-            type: array
-            description: "Discovered vulnerabilities grouped by severity"
+            type: object
+            description: "Counts by severity: high, medium, low, info, total"
+          partial:
+            type: boolean
+            description: "True if scan timed out with partial results"
 
       quick_scan:
-        description: "Perform a complete scan: spider the target then run active scan"
+        description: "Perform a complete scan: spider the target then run active scan. Returns partial results if either phase times out."
         when_to_use: "For a comprehensive security assessment of a web application"
         params:
           target:
@@ -1139,10 +1176,60 @@ tools:
             type: integer
             default: 5
             description: "Maximum spider depth"
+          max_children:
+            type: integer
+            default: 0
+            description: "Maximum child URLs per page (0=unlimited)"
+          spider_timeout:
+            type: integer
+            default: 300
+            description: "Maximum seconds for spider phase"
+          scan_timeout:
+            type: integer
+            default: 900
+            description: "Maximum seconds for active scan phase"
+          scan_policy:
+            type: string
+            description: "Scan policy name for active scan phase"
+          ajax_spider:
+            type: boolean
+            default: false
+            description: "Run AJAX spider after traditional spider (for JavaScript-heavy sites)"
+          exclude_regex:
+            type: string
+            description: "Regex pattern for URLs to exclude (e.g., 'logout|delete|signout')"
         returns:
-          summary:
+          spider_id:
+            type: string
+            description: "Spider scan ID"
+          scan_id:
+            type: string
+            description: "Active scan ID"
+          urls_found:
+            type: integer
+            description: "Number of URLs discovered"
+          alerts:
             type: object
-            description: "Scan results with vulnerability counts by severity"
+            description: "Counts by severity: high, medium, low, info, total"
+          partial:
+            type: boolean
+            description: "True if any phase timed out"
+
+      stop_scan:
+        description: "Stop a running spider or active scan"
+        when_to_use: "To cancel a stuck or long-running scan"
+        params:
+          scan_type:
+            type: string
+            required: true
+            description: "Type of scan to stop: 'spider', 'active', 'ajax', or 'all'"
+          scan_id:
+            type: string
+            description: "Specific scan ID to stop. If not provided, stops all scans of the type."
+        returns:
+          stopped:
+            type: array
+            description: "List of stopped scans with type and id"
 
       get_alerts:
         description: "Get vulnerabilities discovered by ZAP"
@@ -1176,16 +1263,22 @@ tools:
             description: "List of discovered URLs"
 
       scan_status:
-        description: "Get the status of running scans"
-        when_to_use: "To check progress of background scans"
+        description: "Get the status of all running and completed scans"
+        when_to_use: "To check progress of background scans or verify scan completion"
         params: {}
         returns:
-          spider_status:
-            type: string
-            description: "Spider completion percentage"
-          scan_status:
-            type: string
-            description: "Active scan completion percentage"
+          spider_scans:
+            type: array
+            description: "List of spider scans with id, progress, state, urls_found"
+          active_scans:
+            type: array
+            description: "List of active scans with id, progress, state, alerts count"
+          running_spiders:
+            type: integer
+            description: "Number of currently running spider scans"
+          running_scans:
+            type: integer
+            description: "Number of currently running active scans"
 
       summary:
         description: "Get a summary of all findings by risk level"
@@ -1223,25 +1316,37 @@ tools:
             description: "List of HTTP request/response pairs"
 
       send_request:
-        description: "Send an HTTP request through ZAP and get the response (like Burp Repeater)"
+        description: "Send an HTTP request through ZAP proxy and get the response (like Burp Repeater)"
         when_to_use: "To manually send or replay HTTP requests for testing"
         params:
-          request:
+          url:
             type: string
             required: true
-            description: "Raw HTTP request (headers and body)"
-          target:
+            description: "Full URL to request (e.g., http://target.com/path)"
+          method:
             type: string
-            required: true
-            description: "Target URL (e.g., https://target.com)"
+            default: "GET"
+            description: "HTTP method (GET, POST, PUT, DELETE, etc.)"
+          headers:
+            type: object
+            description: "Custom headers as key-value pairs"
+          body:
+            type: string
+            description: "Request body for POST/PUT requests"
           follow_redirects:
             type: boolean
             default: true
             description: "Follow HTTP redirects"
         returns:
-          response:
+          url:
             type: string
-            description: "HTTP response headers and body"
+            description: "Request URL"
+          status_code:
+            type: integer
+            description: "HTTP response status code"
+          content_length:
+            type: integer
+            description: "Response body length in bytes"
 
       proxy_info:
         description: "Get ZAP proxy connection info for routing traffic through ZAP"
