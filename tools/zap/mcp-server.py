@@ -7,12 +7,93 @@ Communicates with ZAP daemon via REST API.
 """
 
 import os
+import socket
 import time
-from typing import Any, Dict, List, Optional
+from dataclasses import dataclass
+from typing import Any, Dict, List, Optional, Tuple
+from urllib.parse import urlparse
 
 import requests
 
 from mcp_common import BaseMCPServer, ToolResult, ToolError
+
+
+def validate_url(url: str) -> Tuple[bool, Optional[Dict[str, str]]]:
+    """
+    Validate a URL and check if target is reachable.
+
+    Returns:
+        Tuple of (is_valid, error_dict or None)
+        error_dict has 'type' and 'message' keys
+    """
+    # Check URL format
+    try:
+        parsed = urlparse(url)
+        if not parsed.scheme or not parsed.netloc:
+            return False, {
+                "type": "invalid_url",
+                "message": f"Invalid URL format: {url}. Must include scheme (http/https) and host."
+            }
+        if parsed.scheme not in ("http", "https"):
+            return False, {
+                "type": "invalid_url",
+                "message": f"Invalid URL scheme: {parsed.scheme}. Must be http or https."
+            }
+    except Exception as e:
+        return False, {
+            "type": "invalid_url",
+            "message": f"Could not parse URL: {str(e)}"
+        }
+
+    # Check DNS resolution
+    hostname = parsed.netloc.split(":")[0]
+    try:
+        socket.gethostbyname(hostname)
+    except socket.gaierror:
+        return False, {
+            "type": "dns_error",
+            "message": f"Could not resolve hostname: {hostname}"
+        }
+
+    # Check if target is reachable (quick connection test)
+    port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    try:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.settimeout(5)
+        result = sock.connect_ex((hostname, port))
+        sock.close()
+        if result != 0:
+            return False, {
+                "type": "connection_error",
+                "message": f"Could not connect to {hostname}:{port} - target unreachable"
+            }
+    except socket.timeout:
+        return False, {
+            "type": "connection_error",
+            "message": f"Connection to {hostname}:{port} timed out"
+        }
+    except Exception as e:
+        return False, {
+            "type": "connection_error",
+            "message": f"Connection error: {str(e)}"
+        }
+
+    return True, None
+
+
+# Default timeouts (seconds)
+DEFAULT_SPIDER_TIMEOUT = 300   # 5 minutes
+DEFAULT_SCAN_TIMEOUT = 600     # 10 minutes
+DEFAULT_QUICK_SCAN_TIMEOUT = 900  # 15 minutes for active scan in quick_scan
+
+
+@dataclass
+class WaitResult:
+    """Result from waiting for a scan to complete."""
+    completed: bool
+    progress: int
+    elapsed: float
+    message: str
 
 
 class ZapServer(BaseMCPServer):
@@ -42,10 +123,25 @@ class ZapServer(BaseMCPServer):
                     "default": 5,
                     "description": "Maximum crawl depth",
                 },
+                "max_children": {
+                    "type": "integer",
+                    "default": 0,
+                    "description": "Maximum child URLs per page (0=unlimited)",
+                },
                 "wait": {
                     "type": "boolean",
                     "default": True,
-                    "description": "Wait for spider to complete",
+                    "description": "Wait for spider to complete (if false, returns immediately with scan_id)",
+                },
+                "timeout": {
+                    "type": "integer",
+                    "default": 300,
+                    "description": "Maximum seconds to wait for spider (default 300). Returns partial results on timeout.",
+                },
+                "subtree_only": {
+                    "type": "boolean",
+                    "default": True,
+                    "description": "Only spider URLs under the target path (recommended to avoid crawling external sites)",
                 },
             },
             handler=self.spider,
@@ -64,7 +160,16 @@ class ZapServer(BaseMCPServer):
                 "wait": {
                     "type": "boolean",
                     "default": True,
-                    "description": "Wait for scan to complete",
+                    "description": "Wait for scan to complete (if false, returns immediately with scan_id)",
+                },
+                "timeout": {
+                    "type": "integer",
+                    "default": 600,
+                    "description": "Maximum seconds to wait for scan (default 600). Returns partial results on timeout.",
+                },
+                "scan_policy": {
+                    "type": "string",
+                    "description": "Scan policy name: 'Default Policy', or custom policy name. Controls which checks are run.",
                 },
             },
             handler=self.active_scan,
@@ -73,7 +178,7 @@ class ZapServer(BaseMCPServer):
         # Quick scan - spider + active scan
         self.register_method(
             name="quick_scan",
-            description="Perform a complete scan: spider the target then run active scan",
+            description="Perform a complete scan: spider the target then run active scan. Returns partial results if either phase times out.",
             params={
                 "target": {
                     "type": "string",
@@ -84,6 +189,34 @@ class ZapServer(BaseMCPServer):
                     "type": "integer",
                     "default": 5,
                     "description": "Maximum spider depth",
+                },
+                "max_children": {
+                    "type": "integer",
+                    "default": 0,
+                    "description": "Maximum child URLs per page (0=unlimited)",
+                },
+                "spider_timeout": {
+                    "type": "integer",
+                    "default": 300,
+                    "description": "Maximum seconds for spider phase (default 300)",
+                },
+                "scan_timeout": {
+                    "type": "integer",
+                    "default": 900,
+                    "description": "Maximum seconds for active scan phase (default 900)",
+                },
+                "scan_policy": {
+                    "type": "string",
+                    "description": "Scan policy name for active scan phase",
+                },
+                "ajax_spider": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": "Run AJAX spider after traditional spider (for JavaScript-heavy sites)",
+                },
+                "exclude_regex": {
+                    "type": "string",
+                    "description": "Regex pattern for URLs to exclude from scanning (e.g., 'logout|delete|signout')",
                 },
             },
             handler=self.quick_scan,
@@ -130,6 +263,24 @@ class ZapServer(BaseMCPServer):
             description="Get the status of running scans",
             params={},
             handler=self.scan_status,
+        )
+
+        # Stop scan
+        self.register_method(
+            name="stop_scan",
+            description="Stop a running spider or active scan",
+            params={
+                "scan_type": {
+                    "type": "string",
+                    "required": True,
+                    "description": "Type of scan to stop: 'spider', 'active', 'ajax', or 'all'",
+                },
+                "scan_id": {
+                    "type": "string",
+                    "description": "Specific scan ID to stop. If not provided, stops all scans of the type.",
+                },
+            },
+            handler=self.stop_scan,
         )
 
         # Get summary
@@ -218,101 +369,273 @@ class ZapServer(BaseMCPServer):
         except requests.exceptions.RequestException as e:
             raise ToolError(f"ZAP API error: {e}")
 
-    def _wait_for_spider(self, scan_id: str, timeout: int = 300) -> None:
-        """Wait for spider to complete."""
-        start = time.time()
-        while time.time() - start < timeout:
-            status = self._zap_request("/JSON/spider/view/status/", {"scanId": scan_id})
-            if int(status.get("status", 0)) >= 100:
-                return
-            time.sleep(2)
-        raise ToolError(f"Spider timed out after {timeout} seconds")
+    def _wait_for_spider(self, scan_id: str, timeout: int = 300) -> WaitResult:
+        """Wait for spider to complete.
 
-    def _wait_for_scan(self, scan_id: str, timeout: int = 600) -> None:
-        """Wait for active scan to complete."""
+        Returns WaitResult with completed=True if finished, or completed=False
+        with partial progress if timeout reached.
+        """
         start = time.time()
+        progress = 0
         while time.time() - start < timeout:
-            status = self._zap_request("/JSON/ascan/view/status/", {"scanId": scan_id})
-            if int(status.get("status", 0)) >= 100:
-                return
+            try:
+                status = self._zap_request("/JSON/spider/view/status/", {"scanId": scan_id})
+                progress = int(status.get("status", 0))
+                if progress >= 100:
+                    elapsed = time.time() - start
+                    return WaitResult(
+                        completed=True,
+                        progress=100,
+                        elapsed=elapsed,
+                        message=f"Spider completed in {elapsed:.1f}s",
+                    )
+            except Exception:
+                pass  # Continue waiting on API errors
+            time.sleep(2)
+
+        elapsed = time.time() - start
+        return WaitResult(
+            completed=False,
+            progress=progress,
+            elapsed=elapsed,
+            message=f"Spider timed out at {progress}% after {timeout}s",
+        )
+
+    def _wait_for_scan(self, scan_id: str, timeout: int = 600) -> WaitResult:
+        """Wait for active scan to complete.
+
+        Returns WaitResult with completed=True if finished, or completed=False
+        with partial progress if timeout reached.
+        """
+        start = time.time()
+        progress = 0
+        while time.time() - start < timeout:
+            try:
+                status = self._zap_request("/JSON/ascan/view/status/", {"scanId": scan_id})
+                progress = int(status.get("status", 0))
+                if progress >= 100:
+                    elapsed = time.time() - start
+                    return WaitResult(
+                        completed=True,
+                        progress=100,
+                        elapsed=elapsed,
+                        message=f"Active scan completed in {elapsed:.1f}s",
+                    )
+            except Exception:
+                pass  # Continue waiting on API errors
             time.sleep(5)
-        raise ToolError(f"Active scan timed out after {timeout} seconds")
+
+        elapsed = time.time() - start
+        return WaitResult(
+            completed=False,
+            progress=progress,
+            elapsed=elapsed,
+            message=f"Active scan timed out at {progress}% after {timeout}s",
+        )
 
     async def spider(
         self,
         target: str,
         max_depth: int = 5,
+        max_children: int = 0,
         wait: bool = True,
+        timeout: int = DEFAULT_SPIDER_TIMEOUT,
+        subtree_only: bool = True,
     ) -> ToolResult:
         """Crawl a target to discover URLs."""
+        # Validate URL first
+        is_valid, error = validate_url(target)
+        if not is_valid:
+            return ToolResult(
+                success=True,  # Return True so JSON data is sent, not error text
+                data={
+                    "success": False,
+                    "error": error,
+                    "urls": [],
+                    "urls_count": 0,
+                },
+                raw_output=f"Error: {error['message']}",
+            )
+
+        # Build spider params
+        spider_params = {
+            "url": target,
+            "recurse": "true",
+            "subtreeOnly": "true" if subtree_only else "false",
+        }
+        if max_children > 0:
+            spider_params["maxChildren"] = max_children
+
+        # Set max depth via ZAP option
+        if max_depth > 0:
+            try:
+                self._zap_request("/JSON/spider/action/setOptionMaxDepth/", {"Integer": max_depth})
+            except Exception:
+                pass  # Continue if setting fails
+
         # Start spider
-        result = self._zap_request(
-            "/JSON/spider/action/scan/",
-            {"url": target, "maxChildren": max_depth}
-        )
+        result = self._zap_request("/JSON/spider/action/scan/", spider_params)
         scan_id = result.get("scan")
 
         if not scan_id:
             raise ToolError("Failed to start spider")
 
         output = [f"Spider started on {target} (scan ID: {scan_id})"]
+        data = {
+            "success": True,
+            "scan_id": scan_id,
+            "target": target,
+            "urls": [],
+            "urls_count": 0,
+            "progress": {"percent": 0},
+        }
+        partial = False
 
         if wait:
-            output.append("Waiting for spider to complete...")
-            self._wait_for_spider(scan_id)
+            output.append(f"Waiting for spider to complete (timeout: {timeout}s)...")
+            wait_result = self._wait_for_spider(scan_id, timeout=timeout)
 
-            # Get results
+            # Get results regardless of completion
             urls = self._zap_request("/JSON/spider/view/results/", {"scanId": scan_id})
             url_list = urls.get("results", [])
+            data["urls"] = url_list
+            data["urls_count"] = len(url_list)
+            data["progress"] = {"percent": wait_result.progress}
+            data["elapsed"] = round(wait_result.elapsed, 1)
 
-            output.append(f"\nSpider complete. Discovered {len(url_list)} URLs:")
+            if wait_result.completed:
+                data["success"] = True
+                output.append(f"\nSpider complete. Discovered {len(url_list)} URLs:")
+            else:
+                partial = True
+                data["success"] = False
+                data["partial"] = True
+                data["error"] = {
+                    "type": "timeout",
+                    "message": f"Spider timed out after {timeout} seconds"
+                }
+                output.append(f"\n⚠️ {wait_result.message}")
+                output.append(f"Partial results: discovered {len(url_list)} URLs so far:")
+
             for url in url_list[:50]:  # Limit output
                 output.append(f"  • {url}")
             if len(url_list) > 50:
                 output.append(f"  ... and {len(url_list) - 50} more")
+
+            if partial:
+                output.append(f"\nUse scan_status to check if spider is still running.")
+                output.append(f"Use get_urls to retrieve all discovered URLs.")
         else:
             output.append("Spider running in background. Use scan_status to check progress.")
 
         return ToolResult(
-            success=True,
-            data={"scan_id": scan_id, "target": target},
+            success=not partial,
+            data=data,
             raw_output="\n".join(output),
+            error=data.get("error", {}).get("message") if partial else None,
         )
 
     async def active_scan(
         self,
         target: str,
         wait: bool = True,
+        timeout: int = DEFAULT_SCAN_TIMEOUT,
+        scan_policy: str = None,
     ) -> ToolResult:
         """Run active vulnerability scan."""
+        # Validate URL first
+        is_valid, error = validate_url(target)
+        if not is_valid:
+            return ToolResult(
+                success=True,  # Return True so JSON data is sent, not error text
+                data={
+                    "success": False,
+                    "error": error,
+                    "alerts": [],
+                    "alerts_count": 0,
+                },
+                raw_output=f"Error: {error['message']}",
+            )
+
+        # Build scan params
+        scan_params = {"url": target, "recurse": "true"}
+        if scan_policy:
+            scan_params["scanPolicyName"] = scan_policy
+
         # Start active scan
-        result = self._zap_request(
-            "/JSON/ascan/action/scan/",
-            {"url": target, "recurse": "true"}
-        )
+        result = self._zap_request("/JSON/ascan/action/scan/", scan_params)
         scan_id = result.get("scan")
 
         if not scan_id:
             raise ToolError("Failed to start active scan")
 
         output = [f"Active scan started on {target} (scan ID: {scan_id})"]
+        data = {
+            "success": True,
+            "scan_id": scan_id,
+            "target": target,
+            "alerts": [],
+            "alerts_count": 0,
+            "progress": {"percent": 0},
+        }
+        partial = False
 
         if wait:
-            output.append("Scanning for vulnerabilities (this may take several minutes)...")
-            self._wait_for_scan(scan_id)
+            output.append(f"Scanning for vulnerabilities (timeout: {timeout}s)...")
+            wait_result = self._wait_for_scan(scan_id, timeout=timeout)
 
-            # Get alerts
+            # Get alerts regardless of completion
             alerts = self._zap_request("/JSON/core/view/alerts/", {"baseurl": target})
             alert_list = alerts.get("alerts", [])
 
-            # Group by risk
+            # Format alerts for response
+            formatted_alerts = []
+            for alert in alert_list:
+                formatted_alerts.append({
+                    "name": alert.get("alert", "Unknown"),
+                    "risk": alert.get("risk", "Informational"),
+                    "confidence": alert.get("confidence", "Unknown"),
+                    "url": alert.get("url", ""),
+                    "param": alert.get("param", ""),
+                    "description": alert.get("description", ""),
+                    "solution": alert.get("solution", ""),
+                    "cweid": alert.get("cweid", ""),
+                    "wascid": alert.get("wascid", ""),
+                })
+
+            # Group by risk for summary
             by_risk = {"High": [], "Medium": [], "Low": [], "Informational": []}
             for alert in alert_list:
                 risk = alert.get("risk", "Informational")
                 if risk in by_risk:
                     by_risk[risk].append(alert)
 
-            output.append(f"\nScan complete. Found {len(alert_list)} issues:")
+            data["alerts"] = formatted_alerts
+            data["alerts_count"] = len(alert_list)
+            data["progress"] = {"percent": wait_result.progress}
+            data["elapsed"] = round(wait_result.elapsed, 1)
+            data["summary"] = {
+                "high": len(by_risk["High"]),
+                "medium": len(by_risk["Medium"]),
+                "low": len(by_risk["Low"]),
+                "info": len(by_risk["Informational"]),
+                "total": len(alert_list),
+            }
+
+            if wait_result.completed:
+                data["success"] = True
+                output.append(f"\nScan complete. Found {len(alert_list)} issues:")
+            else:
+                partial = True
+                data["success"] = False
+                data["partial"] = True
+                data["error"] = {
+                    "type": "timeout",
+                    "message": f"Active scan timed out after {timeout} seconds"
+                }
+                output.append(f"\n⚠️ {wait_result.message}")
+                output.append(f"Partial results: found {len(alert_list)} issues so far:")
+
             output.append(f"  • High: {len(by_risk['High'])}")
             output.append(f"  • Medium: {len(by_risk['Medium'])}")
             output.append(f"  • Low: {len(by_risk['Low'])}")
@@ -326,62 +649,213 @@ class ZapServer(BaseMCPServer):
                         output.append(f"  [{alert.get('alert')}]")
                         output.append(f"    URL: {alert.get('url', 'N/A')}")
                         output.append(f"    Param: {alert.get('param', 'N/A')}")
+
+            if partial:
+                output.append(f"\nUse scan_status to check if scan is still running.")
+                output.append(f"Use get_alerts to retrieve all discovered vulnerabilities.")
         else:
             output.append("Active scan running in background. Use scan_status to check progress.")
 
         return ToolResult(
-            success=True,
-            data={"scan_id": scan_id, "target": target},
+            success=not partial,
+            data=data,
             raw_output="\n".join(output),
+            error=data.get("error", {}).get("message") if partial else None,
         )
 
     async def quick_scan(
         self,
         target: str,
         max_depth: int = 5,
+        max_children: int = 0,
+        spider_timeout: int = DEFAULT_SPIDER_TIMEOUT,
+        scan_timeout: int = DEFAULT_QUICK_SCAN_TIMEOUT,
+        scan_policy: str = None,
+        ajax_spider: bool = False,
+        exclude_regex: str = None,
     ) -> ToolResult:
         """Perform complete scan: spider then active scan."""
+        # Validate URL first
+        is_valid, error = validate_url(target)
+        if not is_valid:
+            return ToolResult(
+                success=True,  # Return True so JSON data is sent, not error text
+                data={
+                    "success": False,
+                    "error": error,
+                    "urls": [],
+                    "urls_count": 0,
+                    "alerts": [],
+                    "alerts_count": 0,
+                },
+                raw_output=f"Error: {error['message']}",
+            )
+
         output = [f"Starting quick scan of {target}\n"]
+        data = {
+            "success": True,
+            "target": target,
+            "urls": [],
+            "urls_count": 0,
+            "alerts": [],
+            "alerts_count": 0,
+            "progress": {"spider_percent": 0, "scan_percent": 0},
+        }
+        spider_partial = False
+        scan_partial = False
+
+        # Set exclusion regex if provided
+        if exclude_regex:
+            try:
+                self._zap_request("/JSON/spider/action/excludeFromScan/", {"regex": exclude_regex})
+                self._zap_request("/JSON/ascan/action/excludeFromScan/", {"regex": exclude_regex})
+                output.append(f"Excluding URLs matching: {exclude_regex}")
+            except Exception as e:
+                output.append(f"Warning: Could not set exclusion regex: {e}")
+
+        # Set max depth
+        if max_depth > 0:
+            try:
+                self._zap_request("/JSON/spider/action/setOptionMaxDepth/", {"Integer": max_depth})
+            except Exception:
+                pass
 
         # Spider first
-        output.append("Phase 1: Spidering target...")
-        spider_result = self._zap_request(
-            "/JSON/spider/action/scan/",
-            {"url": target, "maxChildren": max_depth}
-        )
+        output.append(f"Phase 1: Spidering target (timeout: {spider_timeout}s)...")
+        spider_params = {
+            "url": target,
+            "recurse": "true",
+            "subtreeOnly": "true",
+        }
+        if max_children > 0:
+            spider_params["maxChildren"] = max_children
+        spider_result = self._zap_request("/JSON/spider/action/scan/", spider_params)
         spider_id = spider_result.get("scan")
-        self._wait_for_spider(spider_id)
+        if not spider_id:
+            raise ToolError("Failed to start spider")
+
+        spider_wait = self._wait_for_spider(spider_id, timeout=spider_timeout)
 
         urls = self._zap_request("/JSON/spider/view/results/", {"scanId": spider_id})
-        url_count = len(urls.get("results", []))
-        output.append(f"  Discovered {url_count} URLs\n")
+        url_list = urls.get("results", [])
+        data["spider_id"] = spider_id
+        data["urls"] = url_list
+        data["urls_count"] = len(url_list)
+        data["progress"]["spider_percent"] = spider_wait.progress
+        data["spider_elapsed"] = round(spider_wait.elapsed, 1)
+
+        if spider_wait.completed:
+            output.append(f"  ✓ Discovered {len(url_list)} URLs in {spider_wait.elapsed:.1f}s\n")
+        else:
+            spider_partial = True
+            data["spider_partial"] = True
+            output.append(f"  ⚠️ {spider_wait.message}")
+            output.append(f"  Proceeding with {len(url_list)} URLs discovered so far\n")
+
+        # AJAX Spider (optional)
+        if ajax_spider:
+            output.append("Phase 1b: Running AJAX spider for JavaScript content...")
+            try:
+                ajax_result = self._zap_request("/JSON/ajaxSpider/action/scan/", {"url": target})
+                ajax_id = ajax_result.get("scan", "0")
+                # Wait for AJAX spider (shorter timeout since it's supplemental)
+                ajax_timeout = min(120, spider_timeout // 2)
+                start = time.time()
+                while time.time() - start < ajax_timeout:
+                    status = self._zap_request("/JSON/ajaxSpider/view/status/")
+                    if status.get("status") == "stopped":
+                        break
+                    time.sleep(2)
+                # Get updated URL count
+                urls = self._zap_request("/JSON/spider/view/results/", {"scanId": spider_id})
+                url_list = urls.get("results", [])
+                if len(url_list) > data["urls_count"]:
+                    output.append(f"  ✓ AJAX spider found {len(url_list) - data['urls_count']} additional URLs\n")
+                    data["urls"] = url_list
+                    data["urls_count"] = len(url_list)
+                else:
+                    output.append(f"  ✓ AJAX spider complete (no new URLs)\n")
+            except Exception as e:
+                output.append(f"  ⚠️ AJAX spider failed: {e}\n")
 
         # Active scan
-        output.append("Phase 2: Active vulnerability scanning...")
-        scan_result = self._zap_request(
-            "/JSON/ascan/action/scan/",
-            {"url": target, "recurse": "true"}
-        )
+        output.append(f"Phase 2: Active vulnerability scanning (timeout: {scan_timeout}s)...")
+        scan_params = {"url": target, "recurse": "true"}
+        if scan_policy:
+            scan_params["scanPolicyName"] = scan_policy
+        scan_result = self._zap_request("/JSON/ascan/action/scan/", scan_params)
         scan_id = scan_result.get("scan")
-        self._wait_for_scan(scan_id, timeout=900)  # 15 min for full scan
+        if not scan_id:
+            raise ToolError("Failed to start active scan")
+
+        scan_wait = self._wait_for_scan(scan_id, timeout=scan_timeout)
 
         # Get alerts
         alerts = self._zap_request("/JSON/core/view/alerts/", {"baseurl": target})
         alert_list = alerts.get("alerts", [])
 
-        # Group by risk
+        # Format alerts for response
+        formatted_alerts = []
+        for alert in alert_list:
+            formatted_alerts.append({
+                "name": alert.get("alert", "Unknown"),
+                "risk": alert.get("risk", "Informational"),
+                "confidence": alert.get("confidence", "Unknown"),
+                "url": alert.get("url", ""),
+                "param": alert.get("param", ""),
+                "description": alert.get("description", ""),
+                "solution": alert.get("solution", ""),
+            })
+
+        # Group by risk for summary
         by_risk = {"High": [], "Medium": [], "Low": [], "Informational": []}
         for alert in alert_list:
             risk = alert.get("risk", "Informational")
             if risk in by_risk:
                 by_risk[risk].append(alert)
 
+        data["scan_id"] = scan_id
+        data["alerts"] = formatted_alerts
+        data["alerts_count"] = len(alert_list)
+        data["progress"]["scan_percent"] = scan_wait.progress
+        data["scan_elapsed"] = round(scan_wait.elapsed, 1)
+        data["summary"] = {
+            "high": len(by_risk["High"]),
+            "medium": len(by_risk["Medium"]),
+            "low": len(by_risk["Low"]),
+            "info": len(by_risk["Informational"]),
+            "total": len(alert_list),
+        }
+
+        if not scan_wait.completed:
+            scan_partial = True
+            data["scan_partial"] = True
+
         output.append(f"\n{'='*50}")
-        output.append("SCAN COMPLETE - VULNERABILITY SUMMARY")
+        if spider_partial or scan_partial:
+            output.append("SCAN SUMMARY (PARTIAL RESULTS)")
+            data["partial"] = True
+            data["success"] = False
+            # Determine which phase timed out
+            if scan_partial:
+                data["error"] = {
+                    "type": "timeout",
+                    "message": f"Active scan timed out after {scan_timeout} seconds",
+                    "phase": "active_scan"
+                }
+            elif spider_partial:
+                data["error"] = {
+                    "type": "timeout",
+                    "message": f"Spider timed out after {spider_timeout} seconds",
+                    "phase": "spider"
+                }
+        else:
+            output.append("SCAN COMPLETE - VULNERABILITY SUMMARY")
         output.append(f"{'='*50}")
         output.append(f"Target: {target}")
-        output.append(f"URLs Discovered: {url_count}")
-        output.append(f"Total Issues: {len(alert_list)}")
+        output.append(f"URLs Discovered: {len(url_list)}" + (" (partial)" if spider_partial else ""))
+        output.append(f"Scan Progress: {scan_wait.progress}%")
+        output.append(f"Total Issues: {len(alert_list)}" + (" (partial)" if scan_partial else ""))
         output.append(f"  🔴 High: {len(by_risk['High'])}")
         output.append(f"  🟠 Medium: {len(by_risk['Medium'])}")
         output.append(f"  🟡 Low: {len(by_risk['Low'])}")
@@ -399,18 +873,16 @@ class ZapServer(BaseMCPServer):
                     if desc:
                         output.append(f"  Description: {desc}...")
 
+        if spider_partial or scan_partial:
+            output.append(f"\n⚠️ Scan did not complete fully.")
+            output.append(f"Use scan_status to check if scans are still running.")
+            output.append(f"Use get_alerts to retrieve all discovered vulnerabilities.")
+
         return ToolResult(
-            success=True,
-            data={
-                "target": target,
-                "urls_found": url_count,
-                "alerts": {
-                    "high": len(by_risk["High"]),
-                    "medium": len(by_risk["Medium"]),
-                    "low": len(by_risk["Low"]),
-                    "info": len(by_risk["Informational"]),
-                }
-            },
+            success=not (spider_partial or scan_partial),
+            data=data,
+            raw_output="\n".join(output),
+            error=data.get("error", {}).get("message") if (spider_partial or scan_partial) else None,
         )
 
     async def get_alerts(
@@ -430,7 +902,29 @@ class ZapServer(BaseMCPServer):
         alert_list = alerts.get("alerts", [])
 
         if not alert_list:
-            return ToolResult(success=True, data={}, raw_output="No alerts found.")
+            return ToolResult(
+                success=True,
+                data={
+                    "alerts": [],
+                    "alerts_count": 0,
+                },
+                raw_output="No alerts found."
+            )
+
+        # Format alerts for response
+        formatted_alerts = []
+        for alert in alert_list:
+            formatted_alerts.append({
+                "name": alert.get("alert", "Unknown"),
+                "risk": alert.get("risk", "Informational"),
+                "confidence": alert.get("confidence", "Unknown"),
+                "url": alert.get("url", ""),
+                "param": alert.get("param", ""),
+                "description": alert.get("description", ""),
+                "solution": alert.get("solution", ""),
+                "cweid": alert.get("cweid", ""),
+                "wascid": alert.get("wascid", ""),
+            })
 
         output = [f"Found {len(alert_list)} alerts:"]
 
@@ -442,7 +936,10 @@ class ZapServer(BaseMCPServer):
 
         return ToolResult(
             success=True,
-            data={"count": len(alert_list)},
+            data={
+                "alerts": formatted_alerts,
+                "alerts_count": len(alert_list),
+            },
         )
 
     async def get_urls(self, target: str = None) -> ToolResult:
@@ -451,7 +948,14 @@ class ZapServer(BaseMCPServer):
         url_list = urls.get("urls", [])
 
         if not url_list:
-            return ToolResult(success=True, data={}, raw_output="No URLs discovered. Run spider first.")
+            return ToolResult(
+                success=True,
+                data={
+                    "urls": [],
+                    "urls_count": 0,
+                },
+                raw_output="No URLs discovered. Run spider first."
+            )
 
         output = [f"Discovered {len(url_list)} URLs:"]
         for url in url_list[:100]:
@@ -461,28 +965,157 @@ class ZapServer(BaseMCPServer):
 
         return ToolResult(
             success=True,
-            data={"count": len(url_list)},
+            data={
+                "urls": url_list,
+                "urls_count": len(url_list),
+            },
         )
 
     async def scan_status(self) -> ToolResult:
         """Get status of running scans."""
-        output = ["Scan Status:"]
+        output = ["SCAN STATUS"]
+        output.append("=" * 40)
+        data = {}
 
-        # Spider status
+        # Spider status - get all scans
         try:
-            spider = self._zap_request("/JSON/spider/view/status/")
-            output.append(f"  Spider: {spider.get('status', 'N/A')}% complete")
-        except:
-            output.append("  Spider: Not running")
+            spider_scans = self._zap_request("/JSON/spider/view/scans/")
+            scans = spider_scans.get("scans", [])
+            data["spider_scans"] = []
 
-        # Active scan status
+            if scans:
+                output.append("\nSpider Scans:")
+                for scan in scans:
+                    scan_id = scan.get("id", "?")
+                    progress = scan.get("progress", "0")
+                    state = scan.get("state", "unknown")
+                    urls_found = scan.get("urlsInScope", 0)
+
+                    data["spider_scans"].append({
+                        "id": scan_id,
+                        "progress": int(progress),
+                        "state": state,
+                        "urls_found": urls_found,
+                    })
+
+                    status_icon = "✓" if state == "FINISHED" else "⏳" if state == "RUNNING" else "○"
+                    output.append(f"  {status_icon} Scan {scan_id}: {progress}% ({state})")
+                    if urls_found:
+                        output.append(f"      URLs found: {urls_found}")
+            else:
+                output.append("\nSpider: No scans")
+        except Exception as e:
+            output.append(f"\nSpider: Error checking status ({e})")
+
+        # Active scan status - get all scans
         try:
-            ascan = self._zap_request("/JSON/ascan/view/status/")
-            output.append(f"  Active Scan: {ascan.get('status', 'N/A')}% complete")
-        except:
-            output.append("  Active Scan: Not running")
+            ascan_scans = self._zap_request("/JSON/ascan/view/scans/")
+            scans = ascan_scans.get("scans", [])
+            data["active_scans"] = []
 
-        return ToolResult(success=True, data={}, raw_output="\n".join(output))
+            if scans:
+                output.append("\nActive Scans:")
+                for scan in scans:
+                    scan_id = scan.get("id", "?")
+                    progress = scan.get("progress", "0")
+                    state = scan.get("state", "unknown")
+                    # Get alerts count for this scan's URL
+                    alerts_count = scan.get("alertCount", 0)
+
+                    data["active_scans"].append({
+                        "id": scan_id,
+                        "progress": int(progress),
+                        "state": state,
+                        "alerts": alerts_count,
+                    })
+
+                    status_icon = "✓" if state == "FINISHED" else "⏳" if state == "RUNNING" else "○"
+                    output.append(f"  {status_icon} Scan {scan_id}: {progress}% ({state})")
+                    if alerts_count:
+                        output.append(f"      Alerts found: {alerts_count}")
+            else:
+                output.append("\nActive Scan: No scans")
+        except Exception as e:
+            output.append(f"\nActive Scan: Error checking status ({e})")
+
+        # Overall summary
+        running_spiders = sum(1 for s in data.get("spider_scans", []) if s.get("state") == "RUNNING")
+        running_scans = sum(1 for s in data.get("active_scans", []) if s.get("state") == "RUNNING")
+
+        output.append("\n" + "-" * 40)
+        output.append(f"Running: {running_spiders} spider(s), {running_scans} active scan(s)")
+
+        data["running_spiders"] = running_spiders
+        data["running_scans"] = running_scans
+
+        return ToolResult(success=True, data=data, raw_output="\n".join(output))
+
+    async def stop_scan(
+        self,
+        scan_type: str,
+        scan_id: str = None,
+    ) -> ToolResult:
+        """Stop a running spider or active scan."""
+        output = []
+        data = {"stopped": []}
+        errors = []
+
+        scan_type = scan_type.lower()
+
+        if scan_type in ("spider", "all"):
+            try:
+                if scan_id:
+                    self._zap_request("/JSON/spider/action/stop/", {"scanId": scan_id})
+                    output.append(f"Stopped spider scan {scan_id}")
+                    data["stopped"].append({"type": "spider", "id": scan_id})
+                else:
+                    self._zap_request("/JSON/spider/action/stopAllScans/")
+                    output.append("Stopped all spider scans")
+                    data["stopped"].append({"type": "spider", "id": "all"})
+            except Exception as e:
+                errors.append(f"Spider stop failed: {e}")
+
+        if scan_type in ("active", "all"):
+            try:
+                if scan_id:
+                    self._zap_request("/JSON/ascan/action/stop/", {"scanId": scan_id})
+                    output.append(f"Stopped active scan {scan_id}")
+                    data["stopped"].append({"type": "active", "id": scan_id})
+                else:
+                    self._zap_request("/JSON/ascan/action/stopAllScans/")
+                    output.append("Stopped all active scans")
+                    data["stopped"].append({"type": "active", "id": "all"})
+            except Exception as e:
+                errors.append(f"Active scan stop failed: {e}")
+
+        if scan_type in ("ajax", "all"):
+            try:
+                self._zap_request("/JSON/ajaxSpider/action/stop/")
+                output.append("Stopped AJAX spider")
+                data["stopped"].append({"type": "ajax", "id": "all"})
+            except Exception as e:
+                errors.append(f"AJAX spider stop failed: {e}")
+
+        if scan_type not in ("spider", "active", "ajax", "all"):
+            return ToolResult(
+                success=False,
+                data={},
+                error=f"Invalid scan_type '{scan_type}'. Use: spider, active, ajax, or all",
+            )
+
+        if errors:
+            output.extend([f"⚠️ {e}" for e in errors])
+            data["errors"] = errors
+
+        if not output:
+            output.append("No scans to stop")
+
+        return ToolResult(
+            success=len(errors) == 0,
+            data=data,
+            raw_output="\n".join(output),
+            error="; ".join(errors) if errors else None,
+        )
 
     async def summary(self, target: str = None) -> ToolResult:
         """Get summary of findings."""
