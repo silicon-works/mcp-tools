@@ -23,7 +23,7 @@ tools:
   curl:
     name: curl
     version: "8.5"
-    description: "HTTP client for web requests, exploit testing, and file downloads"
+    description: "HTTP client for simple API requests, exploit testing, and file downloads. For login forms and JS pages, use playwright-mcp instead."
     image: "ghcr.io/silicon-works/mcp-tools-curl:latest"
     image_size_mb: 100
 
@@ -32,6 +32,12 @@ tools:
       - file_download
       - exploit_testing
       - api_interaction
+
+    # Cross-references to related tools
+    see_also:
+      - playwright-mcp  # For JavaScript-rendered pages, login forms, when curl returns empty
+      - ffuf            # For directory/parameter fuzzing
+      - zap             # For automated security scanning
 
     # Routing hints for tool selection
     routing:
@@ -43,16 +49,28 @@ tools:
         - "download wordlist to session directory"
         - "web shell interaction"
         - "RCE exploitation"
+        - "API request with known endpoint"
       never_use_for:
         - "directory brute-forcing"
         - "web fuzzing"
         - "automated scanning"
+        - "login form filling"
+        - "JavaScript rendered pages"
+        - "pages that return empty bodies"
       triggers:
         - "download wordlist"
         - "get rockyou"
         - "fetch wordlist"
         - "download to session"
+        - "api request"
+        - "exploit payload"
       prefer_over: []
+
+    warnings:
+      - "Returns raw HTTP response - does NOT execute JavaScript"
+      - "If response body is empty, the page likely requires JavaScript - use playwright-mcp instead"
+      - "For login forms, playwright-mcp is usually better (handles cookies, CSRF, JS validation)"
+      - "Cannot see rendered page content - use playwright-mcp browser_snapshot for that"
 
     phases:
       - reconnaissance
@@ -415,10 +433,9 @@ tools:
   playwright-mcp:
     name: playwright-mcp
     version: "latest"
-    description: "Browser automation for complex web interactions (Microsoft maintained)"
+    description: "Browser automation for complex web interactions, JavaScript-rendered pages, and form filling"
     source: "https://github.com/microsoft/playwright-mcp"
-    external: true
-    image: "mcr.microsoft.com/playwright-mcp:latest"
+    image: "ghcr.io/silicon-works/mcp-tools-playwright:latest"
     image_size_mb: 1500
 
     capabilities:
@@ -441,9 +458,60 @@ tools:
       memory_mb: 2048
       cpu: 2.0
 
+    # Cross-references to related tools
+    see_also:
+      - curl  # For simple API requests, file downloads, exploit payload delivery
+      - zap   # For automated vulnerability scanning
+      - ffuf  # For directory/parameter fuzzing
+
+    # Routing hints for tool selection
+    routing:
+      use_for:
+        - "login form"
+        - "web login"
+        - "fill form"
+        - "web page content"
+        - "JavaScript rendered page"
+        - "browser automation"
+        - "screenshot"
+        - "form interaction"
+        - "web application testing"
+        - "see what's on the page"
+        - "empty response from curl"
+        - "SPA testing"
+        - "session management"
+        - "cookie handling"
+      never_use_for:
+        - "simple API request"
+        - "file download"
+        - "exploit payload delivery"
+        - "directory fuzzing"
+        - "brute force"
+      triggers:
+        - "login page"
+        - "fill login"
+        - "web form"
+        - "javascript"
+        - "browser"
+        - "screenshot"
+        - "empty body"
+        - "page returns empty"
+      prefer_over:
+        - curl  # When page uses JavaScript, returns empty, or has complex forms
+
+    warnings:
+      - "Large image (~1.5GB) - first pull takes time"
+      - "Requires more memory than curl (2GB recommended)"
+
     notes: |
-      External MCP server maintained by Microsoft.
-      Install: npx @anthropic-ai/create-mcp-server@latest --template playwright
+      Wraps Microsoft's @playwright/mcp npm package in a locally-built container.
+      Use for: login forms, JavaScript-rendered content, web app testing.
+      Prefer over curl when pages return empty bodies or require JS rendering.
+
+      WHEN TO USE PLAYWRIGHT vs CURL:
+      - Use Playwright: login forms, JS pages, empty curl responses, need to see page
+      - Use curl: simple API calls, file downloads, exploit payloads, known endpoints
+
       See: https://github.com/microsoft/playwright-mcp
 
     methods:
@@ -480,6 +548,8 @@ tools:
       browser_type:
         description: "Type text into an editable element"
         params:
+          ref: { type: string, required: true, description: "Element ref from browser_snapshot" }
+          element: { type: string, required: true, description: "Human description for permission" }
           text: { type: string, required: true, description: "Text to type" }
           submit: { type: boolean, description: "Press Enter after typing" }
           slowly: { type: boolean, description: "Type character by character (triggers key handlers)" }
@@ -489,7 +559,7 @@ tools:
           fields:
             type: array
             required: true
-            description: "Array of {name, type, ref, value} - type is textbox/checkbox/radio/combobox"
+            description: "Array of {name, type, ref, value} - type must be: textbox|checkbox|radio|combobox|slider"
       browser_select_option:
         description: "Select option from dropdown"
         params:
@@ -559,6 +629,20 @@ tools:
           height: { type: integer, required: true }
       browser_close:
         description: "Close the browser page"
+        params: {}
+
+      # Drag and Drop
+      browser_drag:
+        description: "Drag and drop between two elements"
+        params:
+          startElement: { type: string, required: true, description: "Human description of source element" }
+          startRef: { type: string, required: true, description: "Ref of element to drag from" }
+          endElement: { type: string, required: true, description: "Human description of target element" }
+          endRef: { type: string, required: true, description: "Ref of element to drop onto" }
+
+      # Browser Installation (utility)
+      browser_install:
+        description: "Install browser if not present (usually not needed - Chrome pre-installed)"
         params: {}
 
   # =============================================================================
