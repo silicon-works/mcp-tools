@@ -305,6 +305,63 @@ class SSHServer(BaseMCPServer):
             handler=self.run_script,
         )
 
+        self.register_method(
+            name="background",
+            description="Execute a detached background process with environment variables. Process survives SSH disconnect.",
+            params={
+                "host": {
+                    "type": "string",
+                    "required": True,
+                    "description": "Target hostname or IP",
+                },
+                "username": {
+                    "type": "string",
+                    "required": True,
+                    "description": "SSH username",
+                },
+                "command": {
+                    "type": "string",
+                    "required": True,
+                    "description": "Command to execute in background",
+                },
+                "password": {
+                    "type": "string",
+                    "description": "SSH password",
+                },
+                "key": {
+                    "type": "string",
+                    "description": "Private key content (PEM format)",
+                },
+                "port": {
+                    "type": "integer",
+                    "default": 22,
+                    "description": "SSH port",
+                },
+                "env": {
+                    "type": "object",
+                    "description": "Environment variables to inject (e.g., {\"PYTHONPATH\": \"/tmp/evil\"})",
+                },
+                "output_file": {
+                    "type": "string",
+                    "description": "File to capture stdout/stderr on remote host",
+                },
+                "pid_file": {
+                    "type": "string",
+                    "description": "File to write PID for later management",
+                },
+                "return_check_command": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": "Return command to check if process is still running",
+                },
+                "ssh_options": {
+                    "type": "string",
+                    "description": "Additional SSH options",
+                },
+            },
+            handler=self.background,
+        )
+
     def _convert_openssh_to_pem(self, key_content: str) -> str:
         """Convert OpenSSH format key to PEM format if needed.
 
@@ -962,6 +1019,129 @@ class SSHServer(BaseMCPServer):
                 data={"host": host},
                 error=str(e),
             )
+
+
+    async def background(
+        self,
+        host: str,
+        username: str,
+        command: str,
+        password: Optional[str] = None,
+        key: Optional[str] = None,
+        port: int = 22,
+        env: Optional[dict] = None,
+        output_file: Optional[str] = None,
+        pid_file: Optional[str] = None,
+        return_check_command: bool = False,
+        ssh_options: Optional[str] = None,
+    ) -> ToolResult:
+        """Execute a command in the background on a remote host.
+
+        The command runs detached from the SSH session and survives disconnect.
+        Uses nohup and disown to ensure process persistence.
+        """
+        self.logger.info(f"Starting background process on {username}@{host}")
+
+        # Build environment variable exports
+        env_prefix = ""
+        if env:
+            env_exports = " ".join(f"{k}={shlex.quote(str(v))}" for k, v in env.items())
+            env_prefix = f"export {env_exports} && "
+
+        # Determine output redirection
+        if output_file:
+            output_redirect = f">{shlex.quote(output_file)} 2>&1"
+        else:
+            output_redirect = ">/dev/null 2>&1"
+
+        # Escape single quotes in the command for embedding in bash -c
+        escaped_command = command.replace("'", "'\\''")
+
+        # Build the full background command
+        if pid_file:
+            # With PID file: run command, capture PID, then read it back
+            pid_file_escaped = shlex.quote(pid_file)
+            full_command = (
+                f"{env_prefix}"
+                f"nohup bash -c '{escaped_command}' {output_redirect} & "
+                f"echo $! > {pid_file_escaped} && "
+                f"disown && sleep 0.2 && cat {pid_file_escaped}"
+            )
+        else:
+            # Without PID file: just start the background process
+            full_command = (
+                f"{env_prefix}"
+                f"nohup bash -c '{escaped_command}' {output_redirect} & "
+                f"disown && echo BACKGROUND_STARTED"
+            )
+
+        # Execute via SSH
+        result = await self.exec_command(
+            host=host,
+            username=username,
+            password=password,
+            key=key,
+            port=port,
+            command=full_command,
+            timeout=30,  # Background start should be quick
+            ssh_options=ssh_options,
+        )
+
+        if not result.success:
+            return ToolResult(
+                success=False,
+                data={
+                    "host": host,
+                    "username": username,
+                    "command": command,
+                },
+                error=f"Failed to start background process: {result.error}",
+            )
+
+        # Parse the output to get PID if available
+        stdout = result.data.get("stdout", "")
+        pid = None
+
+        # Try to extract PID from output
+        if pid_file and stdout.strip():
+            try:
+                pid = stdout.strip().split('\n')[-1].strip()
+                if pid.isdigit():
+                    pid = pid
+                else:
+                    pid = None
+            except (IndexError, ValueError):
+                pid = None
+
+        # Build response
+        response_data = {
+            "success": True,
+            "host": host,
+            "username": username,
+            "command": command,
+            "detached": True,
+        }
+
+        if pid:
+            response_data["pid"] = pid
+        if output_file:
+            response_data["output_file"] = output_file
+        if pid_file:
+            response_data["pid_file"] = pid_file
+        if env:
+            response_data["env"] = env
+
+        # Add check command if requested
+        if return_check_command and pid:
+            response_data["check_command"] = f"ps -p {pid} -o comm="
+        elif return_check_command and pid_file:
+            response_data["check_command"] = f"ps -p $(cat {pid_file}) -o comm="
+
+        return ToolResult(
+            success=True,
+            data=response_data,
+            raw_output=f"Background process started on {host}. Command: {command}" + (f" (PID: {pid})" if pid else ""),
+        )
 
 
 if __name__ == "__main__":
