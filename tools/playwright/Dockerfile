@@ -15,4 +15,5 @@ RUN npx playwright install chrome
 
 # MCP servers communicate via stdio - run headless with no sandbox for container use
 # --no-sandbox is required when running as root in Docker
+# Proxy can be configured via PLAYWRIGHT_MCP_PROXY_SERVER env var (e.g., "http://zap:8080")
 CMD ["npx", "@playwright/mcp", "--headless", "--no-sandbox"]

@@ -481,6 +481,15 @@ tools:
         - "SPA testing"
         - "session management"
         - "cookie handling"
+        # Security testing
+        - "XSS testing"
+        - "XSS validation"
+        - "test payload execution"
+        - "check if JavaScript executes"
+        - "capture console errors"
+        - "payload validation"
+        - "verify XSS callback"
+        - "check cookie exfiltration"
       never_use_for:
         - "simple API request"
         - "file download"
@@ -511,6 +520,14 @@ tools:
       WHEN TO USE PLAYWRIGHT vs CURL:
       - Use Playwright: login forms, JS pages, empty curl responses, need to see page
       - Use curl: simple API calls, file downloads, exploit payloads, known endpoints
+
+      PLAYWRIGHT + ZAP INTEGRATION (for JS-heavy security testing):
+      Configure proxy via env var: PLAYWRIGHT_MCP_PROXY_SERVER=http://127.0.0.1:8080
+      1. Start ZAP - it listens on port 8080
+      2. Launch Playwright container with proxy env var set
+      3. Use Playwright to browse/interact with target
+      4. ZAP captures all traffic via proxy_history
+      5. Run zap.active_scan() on captured URLs
 
       See: https://github.com/microsoft/playwright-mcp
 
@@ -604,11 +621,19 @@ tools:
       browser_console_messages:
         description: "Get console log messages from page"
         when_to_use: "Check for JavaScript errors, debug info, leaked secrets"
+        notes: |
+          Critical for XSS testing. Captures:
+          - console.log() output (use for XSS markers like console.log('XSS_EXECUTED'))
+          - JavaScript errors
+          - Network errors
         params: {}
 
       # Wait & Sync
       browser_wait_for:
         description: "Wait for text to appear/disappear or timeout"
+        notes: |
+          Can wait for text/timeout. For waiting on specific network requests,
+          use browser_network_requests with polling or check ZAP proxy_history.
         params:
           text: { type: string, description: "Text to wait for" }
           textGone: { type: string, description: "Text to wait to disappear" }
@@ -644,6 +669,56 @@ tools:
       browser_install:
         description: "Install browser if not present (usually not needed - Chrome pre-installed)"
         params: {}
+
+      # Testing/Verification (useful for XSS and payload validation)
+      browser_verify_element_visible:
+        description: "Verify an element is visible on the page"
+        when_to_use: "Confirm payload rendered or element appeared after action"
+        params:
+          ref: { type: string, required: true, description: "Element ref from browser_snapshot" }
+          timeout: { type: integer, description: "Max wait time in ms" }
+
+      browser_verify_text_visible:
+        description: "Verify specific text is visible on the page"
+        when_to_use: "Check XSS output appeared, verify payload execution result"
+        params:
+          text: { type: string, required: true, description: "Text to verify is visible" }
+          timeout: { type: integer, description: "Max wait time in ms" }
+
+      browser_verify_list_visible:
+        description: "Verify a list of items is visible"
+        when_to_use: "Enumerate visible data, check multiple payloads rendered"
+        params:
+          items: { type: array, required: true, description: "List of text items to verify" }
+          timeout: { type: integer, description: "Max wait time in ms" }
+
+      browser_verify_value:
+        description: "Verify form field has specific value"
+        when_to_use: "Check form state after injection, verify pre-filled values"
+        params:
+          ref: { type: string, required: true, description: "Element ref from browser_snapshot" }
+          value: { type: string, required: true, description: "Expected value" }
+
+      # Tracing (for evidence capture)
+      browser_start_tracing:
+        description: "Start recording browser execution trace"
+        when_to_use: "Capture full execution evidence for XSS, record all network activity"
+        params:
+          name: { type: string, description: "Optional trace name" }
+
+      browser_stop_tracing:
+        description: "Stop recording and save trace file"
+        when_to_use: "Save evidence after completing XSS test or interaction sequence"
+        params:
+          path: { type: string, description: "Path to save trace file" }
+
+      # PDF Export (for evidence)
+      browser_pdf_save:
+        description: "Save current page as PDF"
+        when_to_use: "Capture page state as evidence, save rendered payload result"
+        params:
+          path: { type: string, description: "Path to save PDF file" }
+          fullPage: { type: boolean, description: "Capture full scrollable page" }
 
   # =============================================================================
   # RECONNAISSANCE
@@ -1160,6 +1235,10 @@ tools:
         - "nikto"  # ZAP has active scanning, nikto is passive
         - "curl"   # For security testing, use ZAP not manual curl
 
+    # Cross-references to related tools
+    see_also:
+      - playwright-mcp  # For browser automation, JavaScript execution, form filling, screenshots, console
+
     phases:
       - enumeration
       - exploitation
@@ -1433,8 +1512,22 @@ tools:
             description: "Response body length in bytes"
 
       proxy_info:
-        description: "Get ZAP proxy connection info for routing traffic through ZAP"
-        when_to_use: "To get proxy configuration details for browser setup"
+        description: "Get ZAP proxy connection info for routing Playwright traffic through ZAP"
+        when_to_use: |
+          - Before using Playwright to test JS-heavy applications
+          - When you need ZAP to capture and analyze browser traffic
+          - For combining Playwright automation with ZAP scanning
+        notes: |
+          RECOMMENDED APPROACH for JavaScript-heavy applications:
+
+          1. Call zap.proxy_info() to get proxy host:port
+          2. Launch Playwright browser with proxy settings
+          3. Use Playwright to navigate, login, interact with the app
+          4. ZAP captures all traffic via proxy_history
+          5. Run active_scan on captured URLs for vulnerability detection
+
+          This approach is more reliable than ajax_spider and gives full control
+          over browser interactions (auth flows, form filling, waiting for elements).
         params: {}
         returns:
           port:
@@ -1443,6 +1536,58 @@ tools:
           instructions:
             type: string
             description: "Setup instructions"
+
+      ajax_spider:
+        description: "Crawl JavaScript-heavy applications using Chrome headless browser"
+        when_to_use: |
+          - Single Page Applications (React, Vue, Angular)
+          - Pages with dynamic content loading
+          - When traditional spider misses endpoints
+          - Automated JS app crawling without custom interaction logic
+        notes: |
+          Uses Chrome headless (more reliable than Firefox in Docker).
+          Automatically discovers endpoints by executing JavaScript and clicking links.
+
+          For CUSTOM interactions (specific login flows, complex forms), use Playwright+ZAP:
+          1. zap.proxy_info() - get proxy settings
+          2. playwright with proxy - custom browser automation
+          3. zap.proxy_history() - captured traffic
+          4. zap.active_scan() - vulnerability scanning
+        params:
+          target:
+            type: string
+            required: true
+            description: "Target URL to crawl (e.g., http://target.com)"
+          wait:
+            type: boolean
+            default: true
+            description: "Wait for spider to complete"
+          timeout:
+            type: integer
+            default: 300
+            description: "Maximum seconds to wait for spider"
+          subtree_only:
+            type: boolean
+            default: true
+            description: "Only spider URLs under the target path"
+          max_crawl_depth:
+            type: integer
+            default: 10
+            description: "Maximum crawl depth"
+          max_duration:
+            type: integer
+            default: 0
+            description: "Maximum duration in minutes (0=unlimited)"
+        returns:
+          urls:
+            type: array
+            description: "List of discovered URLs"
+          urls_count:
+            type: integer
+            description: "Number of URLs discovered"
+          partial:
+            type: boolean
+            description: "True if scan timed out with partial results"
 
   enum4linux-ng:
     name: enum4linux-ng
@@ -4141,6 +4286,70 @@ tools:
           stderr:
             type: string
             description: "Script error output"
+
+      background:
+        description: "Execute detached background process with environment variables"
+        when_to_use: |
+          - Environment variable injection exploits (PYTHONPATH, LD_PRELOAD)
+          - Race condition exploits requiring persistent process
+          - Starting listeners or watchers on target
+          - Any command that must survive SSH session end
+        notes: |
+          Handles nohup/disown complexity automatically.
+          Process continues after SSH disconnects.
+          Use return_check_command=true to get a command for verifying process status later.
+        params:
+          host:
+            type: string
+            required: true
+            description: "Target hostname or IP"
+          username:
+            type: string
+            required: true
+            description: "SSH username"
+          command:
+            type: string
+            required: true
+            description: "Command to execute in background"
+          password:
+            type: string
+            description: "SSH password"
+          key:
+            type: string
+            description: "Private key content (PEM or OpenSSH format, auto-converted)"
+          port:
+            type: integer
+            default: 22
+            description: "SSH port"
+          env:
+            type: object
+            description: "Environment variables to inject (e.g., {\"PYTHONPATH\": \"/tmp/evil\"})"
+          output_file:
+            type: string
+            description: "File to capture stdout/stderr on remote host"
+          pid_file:
+            type: string
+            description: "File to write PID for later management"
+          return_check_command:
+            type: boolean
+            default: false
+            description: "Return command to check if process is still running"
+          ssh_options:
+            type: string
+            description: "Additional SSH options"
+        returns:
+          success:
+            type: boolean
+            description: "Whether process was started"
+          pid:
+            type: string
+            description: "Process ID (if pid_file specified)"
+          output_file:
+            type: string
+            description: "Path to output file"
+          check_command:
+            type: string
+            description: "Command to verify process is running (if return_check_command=true)"
 
   shell-session:
     name: shell-session

@@ -9,12 +9,16 @@ LABEL org.opencontainers.image.licenses="Apache-2.0"
 
 USER root
 
-# Install Python dependencies for MCP server
+# Install Python dependencies and Chrome for AJAX spider
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
         python3-pip \
         python3-venv \
+        wget \
         && \
+    wget -q https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb && \
+    apt-get install -y ./google-chrome-stable_current_amd64.deb && \
+    rm google-chrome-stable_current_amd64.deb && \
     rm -rf /var/lib/apt/lists/* && \
     apt-get clean
 

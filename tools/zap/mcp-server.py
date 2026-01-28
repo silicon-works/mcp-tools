@@ -359,6 +359,45 @@ class ZapServer(BaseMCPServer):
             handler=self.proxy_info,
         )
 
+        # AJAX Spider for JavaScript-heavy applications
+        self.register_method(
+            name="ajax_spider",
+            description="Crawl JavaScript-heavy applications using ZAP's built-in browser automation",
+            params={
+                "target": {
+                    "type": "string",
+                    "required": True,
+                    "description": "Target URL to crawl (e.g., http://target.com)",
+                },
+                "wait": {
+                    "type": "boolean",
+                    "default": True,
+                    "description": "Wait for spider to complete",
+                },
+                "timeout": {
+                    "type": "integer",
+                    "default": 300,
+                    "description": "Maximum seconds to wait for spider (default 300)",
+                },
+                "subtree_only": {
+                    "type": "boolean",
+                    "default": True,
+                    "description": "Only spider URLs under the target path",
+                },
+                "max_crawl_depth": {
+                    "type": "integer",
+                    "default": 10,
+                    "description": "Maximum crawl depth",
+                },
+                "max_duration": {
+                    "type": "integer",
+                    "default": 0,
+                    "description": "Maximum duration in minutes (0=unlimited)",
+                },
+            },
+            handler=self.ajax_spider,
+        )
+
     def _zap_request(self, endpoint: str, params: Dict[str, Any] = None) -> Dict:
         """Make a request to ZAP API."""
         url = f"{self.zap_url}{endpoint}"
@@ -1304,6 +1343,151 @@ class ZapServer(BaseMCPServer):
         return ToolResult(
             success=True,
             data={"port": port},
+        )
+
+    def _wait_for_ajax_spider(self, timeout: int = 300) -> WaitResult:
+        """Wait for AJAX spider to complete.
+
+        Returns WaitResult with completed=True if finished, or completed=False
+        with status if timeout reached.
+        """
+        start = time.time()
+        status = "running"
+        while time.time() - start < timeout:
+            try:
+                result = self._zap_request("/JSON/ajaxSpider/view/status/")
+                status = result.get("status", "unknown")
+                if status == "stopped":
+                    elapsed = time.time() - start
+                    return WaitResult(
+                        completed=True,
+                        progress=100,
+                        elapsed=elapsed,
+                        message=f"AJAX spider completed in {elapsed:.1f}s",
+                    )
+            except Exception:
+                pass  # Continue waiting on API errors
+            time.sleep(2)
+
+        elapsed = time.time() - start
+        return WaitResult(
+            completed=False,
+            progress=0,  # AJAX spider doesn't report progress %
+            elapsed=elapsed,
+            message=f"AJAX spider timed out after {timeout}s (status: {status})",
+        )
+
+    async def ajax_spider(
+        self,
+        target: str,
+        wait: bool = True,
+        timeout: int = 300,
+        subtree_only: bool = True,
+        max_crawl_depth: int = 10,
+        max_duration: int = 0,
+    ) -> ToolResult:
+        """Crawl a JavaScript-heavy application using ZAP's built-in browser.
+
+        This discovers endpoints that the traditional spider misses by executing
+        JavaScript and interacting with the page like a real browser.
+        """
+        # Validate URL first
+        is_valid, error = validate_url(target)
+        if not is_valid:
+            return ToolResult(
+                success=True,  # Return True so JSON data is sent, not error text
+                data={
+                    "success": False,
+                    "error": error,
+                    "urls": [],
+                    "urls_count": 0,
+                },
+                raw_output=f"Error: {error['message']}",
+            )
+
+        # Configure AJAX spider options
+        try:
+            if max_crawl_depth > 0:
+                self._zap_request("/JSON/ajaxSpider/action/setOptionMaxCrawlDepth/", {"Integer": max_crawl_depth})
+            if max_duration > 0:
+                self._zap_request("/JSON/ajaxSpider/action/setOptionMaxDuration/", {"Integer": max_duration})
+        except Exception as e:
+            # Continue even if setting options fails
+            pass
+
+        # Build spider params
+        spider_params = {"url": target}
+        if subtree_only:
+            spider_params["subtreeOnly"] = "true"
+
+        # Start AJAX spider
+        try:
+            result = self._zap_request("/JSON/ajaxSpider/action/scan/", spider_params)
+        except Exception as e:
+            raise ToolError(f"Failed to start AJAX spider: {e}")
+
+        output = [f"AJAX Spider started on {target}"]
+        output.append("Note: Uses ZAP's built-in browser automation (not Playwright)")
+        data = {
+            "success": True,
+            "target": target,
+            "urls": [],
+            "urls_count": 0,
+        }
+        partial = False
+
+        if wait:
+            output.append(f"Waiting for AJAX spider to complete (timeout: {timeout}s)...")
+            wait_result = self._wait_for_ajax_spider(timeout=timeout)
+
+            # Get results
+            try:
+                results = self._zap_request("/JSON/ajaxSpider/view/results/")
+                url_list = results.get("results", [])
+                data["urls"] = url_list
+                data["urls_count"] = len(url_list)
+            except Exception:
+                url_list = []
+
+            # Also get full scan results which include more details
+            try:
+                full_results = self._zap_request("/JSON/ajaxSpider/view/fullResults/")
+                data["full_results"] = full_results.get("fullResults", [])
+            except Exception:
+                pass
+
+            data["elapsed"] = round(wait_result.elapsed, 1)
+
+            if wait_result.completed:
+                data["success"] = True
+                output.append(f"\nAJAX Spider complete. Discovered {len(url_list)} URLs:")
+            else:
+                partial = True
+                data["success"] = False
+                data["partial"] = True
+                data["error"] = {
+                    "type": "timeout",
+                    "message": f"AJAX spider timed out after {timeout} seconds"
+                }
+                output.append(f"\n⚠️ {wait_result.message}")
+                output.append(f"Partial results: discovered {len(url_list)} URLs so far:")
+
+            for url in url_list[:50]:  # Limit output
+                output.append(f"  • {url}")
+            if len(url_list) > 50:
+                output.append(f"  ... and {len(url_list) - 50} more")
+
+            if partial:
+                output.append(f"\nUse stop_scan(scan_type='ajax') to stop the spider.")
+                output.append(f"Use get_urls to retrieve all discovered URLs.")
+        else:
+            output.append("AJAX Spider running in background. Use scan_status to check progress.")
+
+        return ToolResult(
+            success=not partial,
+            data=data,
+            raw_output="\n".join(output),
+            error=data.get("error", {}).get("message") if partial else None,
         )
 
 
