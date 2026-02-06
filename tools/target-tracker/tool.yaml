@@ -1,0 +1,461 @@
+name: target-tracker
+version: "1.0"
+description: "Track target state, credentials, vulnerabilities, and attack history throughout a penetration test"
+image: "ghcr.io/silicon-works/mcp-tools-target-tracker:latest"
+image_size_mb: 80
+
+capabilities:
+  - state_tracking
+  - credential_management
+  - vulnerability_tracking
+  - attack_history
+  - loot_tracking
+  - session_management
+
+routing:
+  use_for:
+    - "track discovered ports and services"
+    - "store credentials found during enumeration"
+    - "record vulnerability discoveries"
+    - "log attack attempts and results"
+    - "track session state"
+    - "get suggested next steps"
+  never_use_for:
+    - "actual scanning or exploitation"
+    - "credential testing"
+  triggers:
+    - "track target"
+    - "store credential"
+    - "record vulnerability"
+    - "attack history"
+    - "next steps"
+    - "engagement summary"
+    - "mark owned"
+  prefer_over: []
+
+phases:
+  - reconnaissance
+  - enumeration
+  - exploitation
+  - post-exploitation
+
+requirements:
+  network: false
+  privileged: false
+
+resources:
+  memory_mb: 128
+  cpu: 0.25
+
+methods:
+  add_target:
+    description: "Add or update a target host"
+    when_to_use: "When you discover a new target IP or want to update target info"
+    params:
+      ip:
+        type: string
+        required: true
+        description: "Target IP address"
+      hostname:
+        type: string
+        description: "Target hostname"
+      os:
+        type: string
+        description: "Operating system"
+      os_version:
+        type: string
+        description: "OS version"
+      tags:
+        type: array
+        description: "Tags for categorization"
+    returns:
+      ip:
+        type: string
+        description: "Target IP"
+
+  get_target:
+    description: "Get complete state for a target"
+    when_to_use: "To review all known information about a target"
+    params:
+      ip:
+        type: string
+        required: true
+        description: "Target IP address"
+    returns:
+      target:
+        type: object
+        description: "Complete target state"
+
+  list_targets:
+    description: "List all tracked targets"
+    when_to_use: "To see all targets in the engagement"
+    params:
+      filter_owned:
+        type: boolean
+        description: "Only show owned targets"
+      filter_tag:
+        type: string
+        description: "Filter by tag"
+    returns:
+      targets:
+        type: array
+        description: "List of targets"
+
+  add_port:
+    description: "Add discovered port/service to target"
+    when_to_use: "After port scanning to record discovered services"
+    params:
+      ip:
+        type: string
+        required: true
+        description: "Target IP"
+      port:
+        type: integer
+        required: true
+        description: "Port number"
+      protocol:
+        type: string
+        default: tcp
+        description: "Protocol (tcp/udp)"
+      service:
+        type: string
+        description: "Service name"
+      version:
+        type: string
+        description: "Service version"
+      banner:
+        type: string
+        description: "Service banner"
+    returns:
+      success:
+        type: boolean
+        description: "Whether port was added"
+
+  add_credential:
+    description: "Add discovered credential"
+    when_to_use: "When you find a username, password, or hash"
+    params:
+      ip:
+        type: string
+        required: true
+        description: "Target IP"
+      username:
+        type: string
+        required: true
+        description: "Username"
+      password:
+        type: string
+        description: "Password"
+      hash:
+        type: string
+        description: "Password hash"
+      private_key:
+        type: string
+        description: "SSH private key"
+      service:
+        type: string
+        description: "Service (ssh, smb, web)"
+      source:
+        type: string
+        description: "Where credential was found"
+      status:
+        type: string
+        enum: [discovered, testing, valid, invalid]
+        default: discovered
+        description: "Credential status"
+    returns:
+      credential_id:
+        type: string
+        description: "ID of added credential"
+
+  update_credential:
+    description: "Update credential status after testing"
+    when_to_use: "After testing a credential to mark it valid or invalid"
+    params:
+      ip:
+        type: string
+        required: true
+        description: "Target IP"
+      credential_id:
+        type: string
+        required: true
+        description: "Credential ID"
+      status:
+        type: string
+        required: true
+        enum: [discovered, testing, valid, invalid, expired]
+        description: "New status"
+      notes:
+        type: string
+        description: "Additional notes"
+    returns:
+      success:
+        type: boolean
+        description: "Whether update succeeded"
+
+  get_credentials:
+    description: "Get credentials for a target"
+    when_to_use: "To retrieve stored credentials for a target"
+    params:
+      ip:
+        type: string
+        required: true
+        description: "Target IP"
+      status:
+        type: string
+        enum: [discovered, testing, valid, invalid, expired]
+        description: "Filter by status"
+      service:
+        type: string
+        description: "Filter by service"
+    returns:
+      credentials:
+        type: array
+        description: "List of credentials"
+
+  add_vulnerability:
+    description: "Add discovered vulnerability"
+    when_to_use: "When you identify a potential vulnerability"
+    params:
+      ip:
+        type: string
+        required: true
+        description: "Target IP"
+      name:
+        type: string
+        required: true
+        description: "Vulnerability name"
+      cve:
+        type: string
+        description: "CVE identifier"
+      severity:
+        type: string
+        enum: [critical, high, medium, low]
+        description: "Severity level"
+      affected_component:
+        type: string
+        description: "Affected service/component"
+      description:
+        type: string
+        description: "Vulnerability description"
+      exploit_available:
+        type: boolean
+        default: false
+        description: "Is exploit available"
+    returns:
+      vuln_id:
+        type: string
+        description: "ID of added vulnerability"
+
+  update_vulnerability:
+    description: "Update vulnerability status"
+    when_to_use: "After confirming or exploiting a vulnerability"
+    params:
+      ip:
+        type: string
+        required: true
+        description: "Target IP"
+      vuln_id:
+        type: string
+        required: true
+        description: "Vulnerability ID"
+      status:
+        type: string
+        required: true
+        enum: [potential, confirmed, exploited, patched]
+        description: "New status"
+      exploit_used:
+        type: string
+        description: "Exploit that was used"
+      notes:
+        type: string
+        description: "Additional notes"
+    returns:
+      success:
+        type: boolean
+        description: "Whether update succeeded"
+
+  add_session:
+    description: "Register an active session on target"
+    when_to_use: "When you establish a shell or SSH session"
+    params:
+      ip:
+        type: string
+        required: true
+        description: "Target IP"
+      session_id:
+        type: string
+        required: true
+        description: "Session ID (from shell-session)"
+      session_type:
+        type: string
+        required: true
+        enum: [ssh, reverse_shell, web_shell]
+        description: "Session type"
+      user:
+        type: string
+        description: "User context"
+      privilege_level:
+        type: string
+        enum: [user, root, system]
+        description: "Privilege level"
+    returns:
+      success:
+        type: boolean
+        description: "Whether session was registered"
+
+  remove_session:
+    description: "Remove closed session"
+    when_to_use: "When a session is closed or dies"
+    params:
+      ip:
+        type: string
+        required: true
+        description: "Target IP"
+      session_id:
+        type: string
+        required: true
+        description: "Session ID"
+    returns:
+      success:
+        type: boolean
+        description: "Whether session was removed"
+
+  add_loot:
+    description: "Record retrieved file or data"
+    when_to_use: "When you retrieve a flag, config file, or sensitive data"
+    params:
+      ip:
+        type: string
+        required: true
+        description: "Target IP"
+      name:
+        type: string
+        required: true
+        description: "Loot name/filename"
+      loot_type:
+        type: string
+        default: file
+        enum: [file, hash, key, config, database, flag]
+        description: "Type of loot"
+      path:
+        type: string
+        description: "Original path on target"
+      content_preview:
+        type: string
+        description: "Preview of content"
+      notes:
+        type: string
+        description: "Additional notes"
+    returns:
+      loot_id:
+        type: string
+        description: "ID of added loot"
+
+  record_attack:
+    description: "Record an attack attempt"
+    when_to_use: "To log what attacks have been tried and their results"
+    params:
+      ip:
+        type: string
+        required: true
+        description: "Target IP"
+      attack_type:
+        type: string
+        required: true
+        description: "Type of attack"
+      target_service:
+        type: string
+        description: "Target service/port"
+      tool_used:
+        type: string
+        description: "Tool used"
+      payload:
+        type: string
+        description: "Payload used"
+      success:
+        type: boolean
+        required: true
+        description: "Was attack successful"
+      result:
+        type: string
+        description: "Result description"
+    returns:
+      attack_id:
+        type: string
+        description: "ID of recorded attack"
+
+  get_attack_history:
+    description: "Get attack history for target"
+    when_to_use: "To see what has already been tried"
+    params:
+      ip:
+        type: string
+        required: true
+        description: "Target IP"
+      attack_type:
+        type: string
+        description: "Filter by attack type"
+      success_only:
+        type: boolean
+        description: "Only show successful attacks"
+    returns:
+      attacks:
+        type: array
+        description: "List of attack attempts"
+
+  mark_owned:
+    description: "Mark target as owned"
+    when_to_use: "When you achieve user or root access"
+    params:
+      ip:
+        type: string
+        required: true
+        description: "Target IP"
+      level:
+        type: string
+        required: true
+        enum: [user, root]
+        description: "Ownership level"
+    returns:
+      success:
+        type: boolean
+        description: "Whether target was marked"
+
+  add_note:
+    description: "Add a note to target"
+    when_to_use: "To record observations or important findings"
+    params:
+      ip:
+        type: string
+        required: true
+        description: "Target IP"
+      note:
+        type: string
+        required: true
+        description: "Note content"
+    returns:
+      success:
+        type: boolean
+        description: "Whether note was added"
+
+  get_summary:
+    description: "Get engagement summary"
+    when_to_use: "To get an overview of the entire engagement"
+    params: {}
+    returns:
+      summary:
+        type: object
+        description: "Engagement statistics"
+
+  suggest_next_steps:
+    description: "Get suggested next steps based on current state"
+    when_to_use: "When unsure what to do next"
+    params:
+      ip:
+        type: string
+        description: "Target IP (optional, for specific target)"
+    returns:
+      suggestions:
+        type: array
+        description: "List of suggested actions"

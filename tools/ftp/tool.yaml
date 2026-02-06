@@ -1,0 +1,253 @@
+name: ftp
+version: "1.0"
+description: "FTP/FTPS client for file operations and transfers"
+image: "ghcr.io/silicon-works/mcp-tools-ftp:latest"
+image_size_mb: 100
+
+capabilities:
+  - ftp_connection
+  - file_transfer
+  - directory_listing
+
+phases:
+  - enumeration
+  - exploitation
+  - post-exploitation
+
+requirements:
+  network: true
+  privileged: false
+
+resources:
+  memory_mb: 128
+  cpu: 0.25
+
+# Routing hints for tool selection
+routing:
+  use_for:
+    - "FTP file transfer"
+    - "FTP directory listing"
+    - "anonymous FTP access"
+    - "FTP file upload"
+    - "FTP file download"
+  never_use_for:
+    - "FTP brute-force (use hydra)"
+    - "port scanning"
+    - "HTTP file download (use curl)"
+  triggers:
+    - "FTP"
+    - "FTPS"
+    - "anonymous FTP"
+    - "FTP upload"
+    - "FTP download"
+    - "port 21"
+  prefer_over:
+    - curl  # For FTP-specific operations (directory listing, multi-file)
+
+methods:
+  connect:
+    description: "Test FTP connection and list root directory"
+    when_to_use: "To verify FTP access and enumerate initial contents"
+    params:
+      host:
+        type: string
+        required: true
+        description: "FTP server hostname or IP"
+      port:
+        type: integer
+        default: 21
+        description: "FTP port"
+      username:
+        type: string
+        default: "anonymous"
+        description: "FTP username (default: anonymous)"
+      password:
+        type: string
+        default: "anonymous@"
+        description: "FTP password"
+      ssl:
+        type: boolean
+        default: false
+        description: "Use FTPS (FTP over SSL/TLS)"
+      timeout:
+        type: integer
+        default: 30
+        description: "Connection timeout in seconds"
+    returns:
+      welcome:
+        type: string
+        description: "Server welcome message"
+      listing:
+        type: array
+        description: "Root directory listing"
+
+  list:
+    description: "List directory contents on FTP server"
+    when_to_use: "To enumerate files in a specific directory"
+    params:
+      host:
+        type: string
+        required: true
+        description: "FTP server hostname or IP"
+      path:
+        type: string
+        default: "/"
+        description: "Directory path to list"
+      port:
+        type: integer
+        default: 21
+        description: "FTP port"
+      username:
+        type: string
+        default: "anonymous"
+        description: "FTP username"
+      password:
+        type: string
+        default: "anonymous@"
+        description: "FTP password"
+      ssl:
+        type: boolean
+        default: false
+        description: "Use FTPS"
+      timeout:
+        type: integer
+        default: 30
+        description: "Connection timeout"
+    returns:
+      files:
+        type: array
+        description: "Parsed file list with permissions and sizes"
+      raw_listing:
+        type: array
+        description: "Raw FTP LIST output"
+
+  download:
+    description: "Download a file from FTP server"
+    when_to_use: "To retrieve files for analysis or exploitation"
+    params:
+      host:
+        type: string
+        required: true
+        description: "FTP server hostname or IP"
+      remote_path:
+        type: string
+        required: true
+        description: "Remote file path to download"
+      port:
+        type: integer
+        default: 21
+        description: "FTP port"
+      username:
+        type: string
+        default: "anonymous"
+        description: "FTP username"
+      password:
+        type: string
+        default: "anonymous@"
+        description: "FTP password"
+      ssl:
+        type: boolean
+        default: false
+        description: "Use FTPS"
+      timeout:
+        type: integer
+        default: 60
+        description: "Transfer timeout"
+    returns:
+      filename:
+        type: string
+        description: "Downloaded filename"
+      size_bytes:
+        type: integer
+        description: "File size"
+      content_base64:
+        type: string
+        description: "File content as base64"
+      content_text:
+        type: string
+        description: "File content as text (if decodable)"
+
+  upload:
+    description: "Upload a file to FTP server"
+    when_to_use: "To upload shells, exploits, or files to target"
+    params:
+      host:
+        type: string
+        required: true
+        description: "FTP server hostname or IP"
+      remote_path:
+        type: string
+        required: true
+        description: "Remote path to upload to"
+      content:
+        type: string
+        required: true
+        description: "File content (plain text or base64)"
+      is_base64:
+        type: boolean
+        default: false
+        description: "Whether content is base64 encoded"
+      port:
+        type: integer
+        default: 21
+        description: "FTP port"
+      username:
+        type: string
+        required: true
+        description: "FTP username"
+      password:
+        type: string
+        required: true
+        description: "FTP password"
+      ssl:
+        type: boolean
+        default: false
+        description: "Use FTPS"
+      timeout:
+        type: integer
+        default: 60
+        description: "Transfer timeout"
+    returns:
+      uploaded:
+        type: boolean
+        description: "Upload success status"
+      size_bytes:
+        type: integer
+        description: "Uploaded file size"
+
+  delete:
+    description: "Delete a file from FTP server"
+    when_to_use: "To clean up uploaded files after exploitation"
+    params:
+      host:
+        type: string
+        required: true
+        description: "FTP server hostname or IP"
+      remote_path:
+        type: string
+        required: true
+        description: "Remote file path to delete"
+      port:
+        type: integer
+        default: 21
+        description: "FTP port"
+      username:
+        type: string
+        required: true
+        description: "FTP username"
+      password:
+        type: string
+        required: true
+        description: "FTP password"
+      ssl:
+        type: boolean
+        default: false
+        description: "Use FTPS"
+      timeout:
+        type: integer
+        default: 30
+        description: "Connection timeout"
+    returns:
+      deleted:
+        type: boolean
+        description: "Deletion success status"

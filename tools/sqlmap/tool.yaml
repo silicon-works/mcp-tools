@@ -1,0 +1,269 @@
+name: sqlmap
+version: "1.8"
+description: "Automatic SQL injection and database takeover tool"
+image: "ghcr.io/silicon-works/mcp-tools-sqlmap:latest"
+image_size_mb: 150
+
+capabilities:
+  - sql_injection
+  - database_enumeration
+  - data_extraction
+  - os_shell
+
+# Routing hints for tool selection
+routing:
+  use_for:
+    - "SQL injection"
+    - "SQL injection testing"
+    - "database enumeration"
+    - "data extraction from SQL database"
+    - "testing GET/POST parameters for SQL injection"
+  never_use_for:
+    - "NoSQL injection"
+    - "MongoDB"
+    - "directory enumeration"
+  triggers:
+    - "sql injection"
+    - "sqli"
+    - "sqlmap"
+    - "database dump"
+    - "union injection"
+  prefer_over: []
+
+phases:
+  - exploitation
+
+requirements:
+  network: true
+  privileged: false
+
+resources:
+  memory_mb: 512
+  cpu: 0.5
+
+methods:
+  test_injection:
+    description: "Test a URL parameter for SQL injection vulnerabilities"
+    when_to_use: "When a potential SQL injection point is identified"
+    params:
+      url:
+        type: string
+        required: true
+        description: "Target URL with injectable parameter (use * to mark injection point)"
+      data:
+        type: string
+        description: "POST data (for POST requests)"
+      cookie:
+        type: string
+        description: "HTTP cookie header value"
+      level:
+        type: integer
+        default: 1
+        description: "Level of tests (1-5)"
+      risk:
+        type: integer
+        default: 1
+        description: "Risk of tests (1-3)"
+      technique:
+        type: string
+        default: "BEUSTQ"
+        description: "SQL injection techniques to use"
+      timeout:
+        type: integer
+        default: 300
+        description: "Timeout in seconds"
+    returns:
+      vulnerable:
+        type: boolean
+        description: "Whether target is vulnerable"
+      injection_type:
+        type: string
+        description: "Type of SQL injection found"
+      dbms:
+        type: string
+        description: "Detected database management system"
+
+  enumerate_dbs:
+    description: "Enumerate databases on a confirmed vulnerable target"
+    when_to_use: "After confirming SQL injection to list available databases"
+    params:
+      url:
+        type: string
+        required: true
+        description: "Target URL (previously confirmed vulnerable)"
+      data:
+        type: string
+        description: "POST data if needed"
+      cookie:
+        type: string
+        description: "HTTP cookie header value"
+      timeout:
+        type: integer
+        default: 300
+        description: "Timeout in seconds"
+    returns:
+      databases:
+        type: array
+        description: "List of database names"
+
+  dump_table:
+    description: "Dump contents of a database table"
+    when_to_use: "To extract data from a specific table"
+    params:
+      url:
+        type: string
+        required: true
+        description: "Target URL"
+      database:
+        type: string
+        required: true
+        description: "Database name"
+      table:
+        type: string
+        required: true
+        description: "Table name"
+      columns:
+        type: string
+        description: "Specific columns to dump (comma-separated)"
+      data:
+        type: string
+        description: "POST data if needed"
+      cookie:
+        type: string
+        description: "HTTP cookie header value"
+      limit:
+        type: integer
+        default: 100
+        description: "Maximum rows to dump"
+      timeout:
+        type: integer
+        default: 600
+        description: "Timeout in seconds"
+    returns:
+      data:
+        type: array
+        description: "Table contents"
+
+  dump_all:
+    description: "Dump all tables from a database"
+    when_to_use: "To extract all data from a database at once"
+    params:
+      url:
+        type: string
+        required: true
+        description: "Target URL"
+      database:
+        type: string
+        required: true
+        description: "Database name to dump"
+      data:
+        type: string
+        description: "POST data if needed"
+      cookie:
+        type: string
+        description: "HTTP cookie header value"
+      timeout:
+        type: integer
+        default: 900
+        description: "Timeout in seconds"
+    returns:
+      database:
+        type: string
+        description: "Database name dumped"
+      message:
+        type: string
+        description: "Status message"
+
+  os_shell:
+    description: "Get an interactive OS shell via SQL injection (requires stacked queries or specific DBMS)"
+    when_to_use: "To execute OS commands via SQL injection for code execution"
+    params:
+      url:
+        type: string
+        required: true
+        description: "Target URL"
+      command:
+        type: string
+        required: true
+        description: "Command to execute"
+      data:
+        type: string
+        description: "POST data if needed"
+      cookie:
+        type: string
+        description: "HTTP cookie header value"
+      timeout:
+        type: integer
+        default: 120
+        description: "Timeout in seconds"
+    returns:
+      command:
+        type: string
+        description: "Executed command"
+      output:
+        type: string
+        description: "Command output"
+
+  file_read:
+    description: "Read a file from the target server via SQL injection"
+    when_to_use: "To read sensitive files like config files, /etc/passwd, etc."
+    params:
+      url:
+        type: string
+        required: true
+        description: "Target URL"
+      file_path:
+        type: string
+        required: true
+        description: "Absolute path to file on target server"
+      data:
+        type: string
+        description: "POST data if needed"
+      cookie:
+        type: string
+        description: "HTTP cookie header value"
+      timeout:
+        type: integer
+        default: 120
+        description: "Timeout in seconds"
+    returns:
+      file_path:
+        type: string
+        description: "Path of file read"
+      content:
+        type: string
+        description: "File contents"
+
+  file_write:
+    description: "Write a file to the target server via SQL injection"
+    when_to_use: "To upload web shells or other files to the target"
+    params:
+      url:
+        type: string
+        required: true
+        description: "Target URL"
+      local_file:
+        type: string
+        required: true
+        description: "Local file path or content to write"
+      remote_path:
+        type: string
+        required: true
+        description: "Absolute path on target server"
+      data:
+        type: string
+        description: "POST data if needed"
+      cookie:
+        type: string
+        description: "HTTP cookie header value"
+      timeout:
+        type: integer
+        default: 120
+        description: "Timeout in seconds"
+    returns:
+      remote_path:
+        type: string
+        description: "Path where file was written"
+      written:
+        type: boolean
+        description: "Whether write succeeded"

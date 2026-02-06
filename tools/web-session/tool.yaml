@@ -1,0 +1,230 @@
+name: web-session
+version: "1.0"
+description: "Web session state management for authenticated testing"
+image: "ghcr.io/silicon-works/mcp-tools-web-session:latest"
+image_size_mb: 100
+
+capabilities:
+  - session_management
+  - cookie_handling
+  - authenticated_requests
+  - csrf_extraction
+
+phases:
+  - enumeration
+  - exploitation
+
+requirements:
+  network: true
+  privileged: false
+
+resources:
+  memory_mb: 128
+  cpu: 0.25
+
+# Routing hints for tool selection
+routing:
+  use_for:
+    - "authenticated web testing"
+    - "session cookie management"
+    - "CSRF token extraction"
+    - "logged-in requests"
+    - "web authentication"
+    - "cookie-based access"
+  never_use_for:
+    - "unauthenticated scanning"
+    - "port scanning"
+    - "brute-force login"
+  triggers:
+    - "session"
+    - "cookie"
+    - "CSRF"
+    - "authenticated request"
+    - "login session"
+    - "web session"
+  prefer_over:
+    - curl  # For authenticated multi-request workflows
+
+methods:
+  login:
+    description: "Perform login and capture session cookies"
+    when_to_use: "To authenticate to a web application and store session for reuse"
+    params:
+      url:
+        type: string
+        required: true
+        description: "Login URL endpoint"
+      username_field:
+        type: string
+        default: "username"
+        description: "Form field name for username"
+      password_field:
+        type: string
+        default: "password"
+        description: "Form field name for password"
+      username:
+        type: string
+        required: true
+        description: "Username to login with"
+      password:
+        type: string
+        required: true
+        description: "Password to login with"
+      extra_fields:
+        type: object
+        description: "Additional form fields (e.g., CSRF token)"
+      session_name:
+        type: string
+        default: "default"
+        description: "Name to store this session under"
+      success_indicator:
+        type: string
+        description: "Text that indicates successful login"
+      failure_indicator:
+        type: string
+        description: "Text that indicates failed login"
+      headers:
+        type: object
+        description: "Custom HTTP headers"
+      timeout:
+        type: integer
+        default: 30
+        description: "Request timeout in seconds"
+    returns:
+      login_success:
+        type: boolean
+        description: "Whether login succeeded"
+      cookies:
+        type: object
+        description: "Captured session cookies"
+      cookie_header:
+        type: string
+        description: "Cookie string for use in other tools"
+
+  get_cookies:
+    description: "Get cookies from a stored session"
+    when_to_use: "To retrieve cookies for use with other tools (curl, ffuf, etc.)"
+    params:
+      session_name:
+        type: string
+        default: "default"
+        description: "Session name to retrieve"
+      format:
+        type: enum
+        values: [header, dict, raw]
+        default: "header"
+        description: "Output format"
+    returns:
+      cookies:
+        type: object
+        description: "Session cookies"
+      cookie_header:
+        type: string
+        description: "Cookie header string"
+
+  set_cookies:
+    description: "Manually set cookies for a session"
+    when_to_use: "To import cookies from browser or other source"
+    params:
+      cookies:
+        type: string
+        required: true
+        description: "Cookie string (format: 'name1=value1; name2=value2')"
+      session_name:
+        type: string
+        default: "default"
+        description: "Session name to store under"
+      domain:
+        type: string
+        description: "Cookie domain"
+    returns:
+      cookies:
+        type: object
+        description: "Parsed cookies"
+
+  request:
+    description: "Make authenticated request using stored session"
+    when_to_use: "To make requests with session cookies automatically included"
+    params:
+      url:
+        type: string
+        required: true
+        description: "URL to request"
+      method:
+        type: enum
+        values: [GET, POST, PUT, DELETE]
+        default: "GET"
+        description: "HTTP method"
+      session_name:
+        type: string
+        default: "default"
+        description: "Session to use"
+      data:
+        type: string
+        description: "Request body data"
+      headers:
+        type: object
+        description: "Additional HTTP headers"
+      timeout:
+        type: integer
+        default: 30
+        description: "Request timeout"
+    returns:
+      status_code:
+        type: integer
+        description: "HTTP response status"
+      body:
+        type: string
+        description: "Response body"
+
+  list_sessions:
+    description: "List all stored sessions"
+    when_to_use: "To see available authenticated sessions"
+    params: {}
+    returns:
+      sessions:
+        type: array
+        description: "List of stored sessions"
+
+  extract_csrf:
+    description: "Extract CSRF token from a page"
+    when_to_use: "To get CSRF token for form submissions"
+    params:
+      url:
+        type: string
+        required: true
+        description: "URL to fetch"
+      session_name:
+        type: string
+        default: "default"
+        description: "Session to use (if any)"
+      token_pattern:
+        type: string
+        description: "Regex pattern to extract token"
+      timeout:
+        type: integer
+        default: 30
+        description: "Request timeout"
+    returns:
+      token:
+        type: string
+        description: "Extracted CSRF token"
+      tokens:
+        type: array
+        description: "All tokens found"
+
+  delete_session:
+    description: "Delete a stored session"
+    when_to_use: "To clean up sessions or logout"
+    params:
+      session_name:
+        type: string
+        required: true
+        description: "Session name to delete"
+    returns:
+      session_name:
+        type: string
+        description: "Name of deleted session"
+      deleted:
+        type: boolean
+        description: "Whether session was deleted"

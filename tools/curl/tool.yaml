@@ -1,0 +1,408 @@
+name: curl
+version: "8.5"
+description: "HTTP client for simple API requests, exploit testing, and file downloads. For login forms and JS pages, use playwright-mcp instead."
+image: "ghcr.io/silicon-works/mcp-tools-curl:latest"
+image_size_mb: 100
+
+capabilities:
+  - http_requests
+  - file_download
+  - exploit_testing
+  - api_interaction
+
+# Cross-references to related tools
+see_also:
+  - playwright-mcp  # For JavaScript-rendered pages, login forms, when curl returns empty
+  - ffuf            # For directory/parameter fuzzing
+  - zap             # For automated security scanning
+
+# Routing hints for tool selection
+routing:
+  use_for:
+    - "single HTTP request"
+    - "exploit payload delivery"
+    - "file download"
+    - "wordlist download"
+    - "download wordlist to session directory"
+    - "web shell interaction"
+    - "RCE exploitation"
+    - "API request with known endpoint"
+  never_use_for:
+    - "directory brute-forcing"
+    - "web fuzzing"
+    - "automated scanning"
+    - "login form filling"
+    - "JavaScript rendered pages"
+    - "pages that return empty bodies"
+  triggers:
+    - "download wordlist"
+    - "get rockyou"
+    - "fetch wordlist"
+    - "download to session"
+    - "api request"
+    - "exploit payload"
+  prefer_over: []
+
+warnings:
+  - "Returns raw HTTP response - does NOT execute JavaScript"
+  - "If response body is empty, the page likely requires JavaScript - use playwright-mcp instead"
+  - "For login forms, playwright-mcp is usually better (handles cookies, CSRF, JS validation)"
+  - "Cannot see rendered page content - use playwright-mcp browser_snapshot for that"
+
+phases:
+  - reconnaissance
+  - enumeration
+  - exploitation
+
+requirements:
+  network: true
+  privileged: false
+
+resources:
+  memory_mb: 128
+  cpu: 0.25
+
+methods:
+  request:
+    description: "Make an HTTP request to a URL"
+    when_to_use: "For manual HTTP requests, exploit payloads, or API interactions"
+    params:
+      url:
+        type: string
+        required: true
+        description: "Target URL"
+      method:
+        type: enum
+        values: [GET, POST, PUT, DELETE, HEAD, OPTIONS, PATCH]
+        default: GET
+        description: "HTTP method"
+      headers:
+        type: [object, array]
+        description: "Custom headers as key-value pairs (object) or array of 'Header: value' strings"
+      data:
+        type: string
+        description: "Request body data"
+      body:
+        type: string
+        description: "Request body data (alias for 'data')"
+      follow_redirects:
+        type: boolean
+        default: true
+        description: "Follow HTTP redirects"
+      timeout:
+        type: integer
+        default: 30
+        description: "Request timeout in seconds"
+      connect_timeout:
+        type: integer
+        default: 10
+        description: "Connection timeout in seconds"
+      insecure:
+        type: boolean
+        default: false
+        description: "Skip SSL certificate verification"
+      user_agent:
+        type: string
+        description: "Custom User-Agent header"
+      cookie:
+        type: string
+        description: "Cookie header value"
+      auth:
+        type: string
+        description: "Basic auth in user:password format"
+      debug_level:
+        type: integer
+        enum: [0, 1, 2, 3]
+        default: 0
+        description: "Debug level: 0=none, 1=request headers, 2=verbose output, 3=full trace"
+      raw_response:
+        type: boolean
+        default: false
+        description: "Return raw binary response as base64 (for binary downloads)"
+    returns:
+      status_code:
+        type: integer
+        description: "HTTP response status code"
+      headers:
+        type: object
+        description: "Response headers"
+      body:
+        type: string
+        description: "Response body"
+      body_length:
+        type: integer
+        description: "Length of response body in bytes"
+      timing:
+        type: object
+        description: "Request timing breakdown"
+        properties:
+          dns_lookup_ms:
+            type: integer
+            description: "DNS lookup time in milliseconds"
+          connect_ms:
+            type: integer
+            description: "TCP connection time in milliseconds"
+          tls_handshake_ms:
+            type: integer
+            description: "TLS handshake time in milliseconds"
+          first_byte_ms:
+            type: integer
+            description: "Time to first byte in milliseconds"
+          total_ms:
+            type: integer
+            description: "Total request time in milliseconds"
+          remote_ip:
+            type: string
+            description: "IP address of the remote server"
+          remote_port:
+            type: integer
+            description: "Port of the remote server"
+      debug:
+        type: object
+        description: "Debug information (when debug_level >= 1)"
+        properties:
+          request_headers:
+            type: object
+            description: "Headers sent in the request"
+          verbose_output:
+            type: string
+            description: "Full verbose output (debug_level >= 2)"
+      error:
+        type: object
+        description: "Error details (on failure)"
+        properties:
+          type:
+            type: string
+            description: "Error type (e.g., 'connection_refused', 'timeout', 'could_not_resolve_host')"
+          message:
+            type: string
+            description: "Human-readable error message"
+          curl_exit_code:
+            type: integer
+            description: "Curl exit code"
+
+  download:
+    description: "Download a file from a URL"
+    when_to_use: "To download exploits, tools, or files for analysis"
+    params:
+      url:
+        type: string
+        required: true
+        description: "URL to download from"
+      timeout:
+        type: integer
+        default: 120
+        description: "Download timeout in seconds"
+      insecure:
+        type: boolean
+        default: false
+        description: "Skip SSL certificate verification"
+    returns:
+      filename:
+        type: string
+        description: "Extracted filename"
+      size_bytes:
+        type: integer
+        description: "File size in bytes"
+      content_base64:
+        type: string
+        description: "File contents as base64"
+
+  download_to_file:
+    description: "Download a large file directly to a path (for wordlists, binaries, etc.)"
+    when_to_use: "To download wordlists or large files to /session/wordlists/. Use web_search to find wordlist URLs, then download_to_file to save them. Auto-decompresses .gz files. Example: curl.download_to_file(url='https://.../rockyou.txt', output_path='/session/wordlists/rockyou.txt')"
+    params:
+      url:
+        type: string
+        required: true
+        description: "URL to download from"
+      output_path:
+        type: string
+        required: true
+        description: "Path to save file (e.g., /session/wordlists/rockyou.txt)"
+      timeout:
+        type: integer
+        default: 600
+        description: "Download timeout in seconds (default 10 minutes for large files)"
+      insecure:
+        type: boolean
+        default: false
+        description: "Skip SSL certificate verification"
+      decompress:
+        type: boolean
+        default: true
+        description: "Auto-decompress .gz files after download"
+    returns:
+      output_path:
+        type: string
+        description: "Path where file was saved"
+      size_bytes:
+        type: integer
+        description: "File size in bytes"
+      size_mb:
+        type: number
+        description: "File size in MB"
+      line_count:
+        type: integer
+        description: "Number of lines (for text files)"
+      decompressed:
+        type: boolean
+        description: "Whether file was decompressed"
+
+  inject:
+    description: "Send a payload to a web RCE endpoint and extract output"
+    when_to_use: "For web RCE exploitation with automatic payload encoding and output extraction"
+    params:
+      url:
+        type: string
+        required: true
+        description: "Target URL (use {PAYLOAD} as placeholder for command)"
+      command:
+        type: string
+        required: true
+        description: "Command to execute"
+      method:
+        type: enum
+        values: [GET, POST]
+        default: GET
+        description: "HTTP method"
+      encoding:
+        type: enum
+        values: [url, double-url, base64, none]
+        default: url
+        description: "Payload encoding method"
+      output_markers:
+        type: object
+        description: "Start/end markers to extract output: {start: str, end: str}"
+      strip_html:
+        type: boolean
+        default: true
+        description: "Strip HTML tags from output"
+      headers:
+        type: [object, array]
+        description: "Custom headers as key-value pairs (object) or array of 'Header: value' strings"
+      data:
+        type: string
+        description: "POST body (use {PAYLOAD} as placeholder)"
+      body:
+        type: string
+        description: "POST body (alias for 'data', use {PAYLOAD} as placeholder)"
+      cookie:
+        type: string
+        description: "Cookie header value"
+      timeout:
+        type: integer
+        default: 30
+        description: "Request timeout in seconds"
+      connect_timeout:
+        type: integer
+        default: 10
+        description: "Connection timeout in seconds"
+      insecure:
+        type: boolean
+        default: false
+        description: "Skip SSL certificate verification"
+      debug_level:
+        type: integer
+        enum: [0, 1, 2, 3]
+        default: 0
+        description: "Debug level: 0=none, 1=request headers, 2=verbose output, 3=full trace"
+    returns:
+      output:
+        type: string
+        description: "Extracted command output"
+      status_code:
+        type: integer
+        description: "HTTP response status code"
+      raw_body_length:
+        type: integer
+        description: "Length of raw response body"
+      timing:
+        type: object
+        description: "Request timing breakdown (same as request method)"
+      debug:
+        type: object
+        description: "Debug information (when debug_level >= 1)"
+      error:
+        type: object
+        description: "Error details (on failure)"
+
+  upload:
+    description: "Upload a file using multipart/form-data"
+    when_to_use: "For web shell uploads, file injection, exploiting upload vulnerabilities"
+    params:
+      url:
+        type: string
+        required: true
+        description: "Target upload URL"
+      file_field:
+        type: string
+        required: true
+        description: "Form field name for file (e.g., 'file', 'upload', 'avatar')"
+      filename:
+        type: string
+        required: true
+        description: "Filename to send (e.g., 'shell.php', 'image.png')"
+      content:
+        type: string
+        required: true
+        description: "File content (plain text or base64 encoded)"
+      content_type:
+        type: string
+        default: "application/octet-stream"
+        description: "MIME type for the uploaded file"
+      is_base64:
+        type: boolean
+        default: false
+        description: "Whether content is base64 encoded"
+      extra_fields:
+        type: object
+        description: "Additional form fields as key-value pairs"
+      headers:
+        type: [object, array]
+        description: "Custom HTTP headers as key-value pairs (object) or array of 'Header: value' strings"
+      cookie:
+        type: string
+        description: "Cookie header value"
+      timeout:
+        type: integer
+        default: 60
+        description: "Upload timeout in seconds"
+      connect_timeout:
+        type: integer
+        default: 10
+        description: "Connection timeout in seconds"
+      insecure:
+        type: boolean
+        default: false
+        description: "Skip SSL certificate verification"
+      debug_level:
+        type: integer
+        enum: [0, 1, 2, 3]
+        default: 0
+        description: "Debug level: 0=none, 1=request headers, 2=verbose output, 3=full trace"
+    returns:
+      status_code:
+        type: integer
+        description: "HTTP response status code"
+      filename:
+        type: string
+        description: "Uploaded filename"
+      file_size:
+        type: integer
+        description: "Size of uploaded content"
+      body:
+        type: string
+        description: "Response body"
+      body_length:
+        type: integer
+        description: "Length of response body"
+      timing:
+        type: object
+        description: "Request timing breakdown (same as request method)"
+      debug:
+        type: object
+        description: "Debug information (when debug_level >= 1)"
+      error:
+        type: object
+        description: "Error details (on failure)"

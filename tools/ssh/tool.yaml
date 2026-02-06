@@ -1,0 +1,374 @@
+name: ssh
+version: "1.0"
+description: "SSH client for remote shell access with password or key authentication"
+image: "ghcr.io/silicon-works/mcp-tools-ssh:latest"
+image_size_mb: 100
+
+capabilities:
+  - remote_shell_access
+  - command_execution
+  - file_transfer
+  - credential_based_access
+
+phases:
+  - exploitation
+  - post-exploitation
+
+requirements:
+  network: true
+  privileged: false
+
+resources:
+  memory_mb: 128
+  cpu: 0.25
+
+# Routing hints for tool selection
+routing:
+  use_for:
+    - "remote command execution via SSH"
+    - "file transfer via SCP"
+    - "SSH access with credentials"
+    - "run script on remote host"
+    - "upload file to target"
+    - "download file from target"
+  never_use_for:
+    - "SSH brute-force (use hydra)"
+    - "port scanning"
+    - "initial SSH connection test"
+  triggers:
+    - "SSH"
+    - "SCP"
+    - "remote command"
+    - "remote shell"
+    - "ssh exec"
+    - "ssh key"
+
+methods:
+  exec:
+    description: "Execute a command on a remote host via SSH"
+    when_to_use: "When you have valid SSH credentials and need to run commands"
+    params:
+      host:
+        type: string
+        required: true
+        description: "Target hostname or IP"
+      username:
+        type: string
+        required: true
+        description: "SSH username"
+      password:
+        type: string
+        description: "SSH password (use sshpass)"
+      key:
+        type: string
+        description: "Private key content (PEM or OpenSSH format, auto-converted)"
+      command:
+        type: string
+        required: true
+        description: "Command to execute"
+      port:
+        type: integer
+        default: 22
+        description: "SSH port"
+      timeout:
+        type: integer
+        default: 30
+        description: "Connection timeout in seconds"
+      ssh_options:
+        type: string
+        description: "Additional SSH options (e.g., '-o KexAlgorithms=curve25519-sha256' for VPN/MTU issues)"
+    returns:
+      exit_code:
+        type: integer
+        description: "Command exit code"
+      stdout:
+        type: string
+        description: "Command standard output"
+      stderr:
+        type: string
+        description: "Command standard error"
+
+  shell:
+    description: "Execute multiple commands in sequence on a remote host"
+    when_to_use: "To run a series of commands via SSH"
+    params:
+      host:
+        type: string
+        required: true
+        description: "Target hostname or IP"
+      username:
+        type: string
+        required: true
+        description: "SSH username"
+      password:
+        type: string
+        description: "SSH password"
+      key:
+        type: string
+        description: "Private key content (PEM or OpenSSH format, auto-converted)"
+      commands:
+        type: array
+        required: true
+        description: "List of commands to execute"
+      port:
+        type: integer
+        default: 22
+        description: "SSH port"
+      timeout:
+        type: integer
+        default: 60
+        description: "Total timeout for all commands"
+      ssh_options:
+        type: string
+        description: "Additional SSH options (e.g., '-o KexAlgorithms=curve25519-sha256' for VPN/MTU issues)"
+    returns:
+      exit_code:
+        type: integer
+        description: "Exit code of command chain"
+      stdout:
+        type: string
+        description: "Combined output"
+
+  copy_from:
+    description: "Download a file from remote host via SCP"
+    when_to_use: "To retrieve files after gaining SSH access"
+    params:
+      host:
+        type: string
+        required: true
+        description: "Target hostname or IP"
+      username:
+        type: string
+        required: true
+        description: "SSH username"
+      password:
+        type: string
+        description: "SSH password"
+      key:
+        type: string
+        description: "Private key content (PEM or OpenSSH format, auto-converted)"
+      remote_path:
+        type: string
+        required: true
+        description: "Path to file on remote host"
+      port:
+        type: integer
+        default: 22
+        description: "SSH port"
+      timeout:
+        type: integer
+        default: 60
+        description: "Transfer timeout in seconds"
+      ssh_options:
+        type: string
+        description: "Additional SSH options (e.g., '-o KexAlgorithms=curve25519-sha256' for VPN/MTU issues)"
+    returns:
+      content:
+        type: string
+        description: "File contents"
+      size:
+        type: integer
+        description: "File size in bytes"
+
+  copy_to:
+    description: "Upload content to remote host via SCP"
+    when_to_use: "To upload tools or scripts after gaining SSH access"
+    params:
+      host:
+        type: string
+        required: true
+        description: "Target hostname or IP"
+      username:
+        type: string
+        required: true
+        description: "SSH username"
+      password:
+        type: string
+        description: "SSH password"
+      key:
+        type: string
+        description: "Private key content (PEM or OpenSSH format, auto-converted)"
+      content:
+        type: string
+        required: true
+        description: "Content to upload"
+      remote_path:
+        type: string
+        required: true
+        description: "Destination path on remote host"
+      port:
+        type: integer
+        default: 22
+        description: "SSH port"
+      timeout:
+        type: integer
+        default: 60
+        description: "Transfer timeout in seconds"
+      ssh_options:
+        type: string
+        description: "Additional SSH options (e.g., '-o KexAlgorithms=curve25519-sha256' for VPN/MTU issues)"
+    returns:
+      size:
+        type: integer
+        description: "Uploaded file size"
+
+  upload_binary:
+    description: "Upload binary content via base64 chunking"
+    when_to_use: "To upload compiled binaries, exploits, or other non-text files"
+    params:
+      host:
+        type: string
+        required: true
+        description: "Target hostname or IP"
+      username:
+        type: string
+        required: true
+        description: "SSH username"
+      password:
+        type: string
+        description: "SSH password"
+      key:
+        type: string
+        description: "Private key content (PEM or OpenSSH format, auto-converted)"
+      content_base64:
+        type: string
+        required: true
+        description: "Binary content as base64"
+      remote_path:
+        type: string
+        required: true
+        description: "Destination path on remote host"
+      executable:
+        type: boolean
+        default: true
+        description: "Make file executable after upload"
+      port:
+        type: integer
+        default: 22
+        description: "SSH port"
+      timeout:
+        type: integer
+        default: 300
+        description: "Transfer timeout in seconds"
+      ssh_options:
+        type: string
+        description: "Additional SSH options (e.g., '-o KexAlgorithms=curve25519-sha256' for VPN/MTU issues)"
+    returns:
+      size:
+        type: integer
+        description: "Uploaded file size in bytes"
+      verified:
+        type: boolean
+        description: "Whether file was verified after upload"
+
+  run_script:
+    description: "Upload and execute a script on remote host"
+    when_to_use: "To run multi-line scripts or enumeration tools"
+    params:
+      host:
+        type: string
+        required: true
+        description: "Target hostname or IP"
+      username:
+        type: string
+        required: true
+        description: "SSH username"
+      password:
+        type: string
+        description: "SSH password"
+      key:
+        type: string
+        description: "Private key content (PEM or OpenSSH format, auto-converted)"
+      script:
+        type: string
+        required: true
+        description: "Script content to execute"
+      interpreter:
+        type: string
+        default: "/bin/bash"
+        description: "Script interpreter"
+      port:
+        type: integer
+        default: 22
+        description: "SSH port"
+      timeout:
+        type: integer
+        default: 300
+        description: "Execution timeout in seconds"
+      ssh_options:
+        type: string
+        description: "Additional SSH options (e.g., '-o KexAlgorithms=curve25519-sha256' for VPN/MTU issues)"
+    returns:
+      exit_code:
+        type: integer
+        description: "Script exit code"
+      stdout:
+        type: string
+        description: "Script output"
+      stderr:
+        type: string
+        description: "Script error output"
+
+  background:
+    description: "Execute detached background process with environment variables"
+    when_to_use: |
+      - Environment variable injection exploits (PYTHONPATH, LD_PRELOAD)
+      - Race condition exploits requiring persistent process
+      - Starting listeners or watchers on target
+      - Any command that must survive SSH session end
+    notes: |
+      Handles nohup/disown complexity automatically.
+      Process continues after SSH disconnects.
+      Use return_check_command=true to get a command for verifying process status later.
+    params:
+      host:
+        type: string
+        required: true
+        description: "Target hostname or IP"
+      username:
+        type: string
+        required: true
+        description: "SSH username"
+      command:
+        type: string
+        required: true
+        description: "Command to execute in background"
+      password:
+        type: string
+        description: "SSH password"
+      key:
+        type: string
+        description: "Private key content (PEM or OpenSSH format, auto-converted)"
+      port:
+        type: integer
+        default: 22
+        description: "SSH port"
+      env:
+        type: object
+        description: "Environment variables to inject (e.g., {\"PYTHONPATH\": \"/tmp/evil\"})"
+      output_file:
+        type: string
+        description: "File to capture stdout/stderr on remote host"
+      pid_file:
+        type: string
+        description: "File to write PID for later management"
+      return_check_command:
+        type: boolean
+        default: false
+        description: "Return command to check if process is still running"
+      ssh_options:
+        type: string
+        description: "Additional SSH options"
+    returns:
+      success:
+        type: boolean
+        description: "Whether process was started"
+      pid:
+        type: string
+        description: "Process ID (if pid_file specified)"
+      output_file:
+        type: string
+        description: "Path to output file"
+      check_command:
+        type: string
+        description: "Command to verify process is running (if return_check_command=true)"

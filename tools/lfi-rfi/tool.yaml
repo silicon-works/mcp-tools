@@ -1,0 +1,240 @@
+name: lfi-rfi
+version: "1.0"
+description: "Local/Remote File Inclusion vulnerability testing"
+image: "ghcr.io/silicon-works/mcp-tools-lfi-rfi:latest"
+image_size_mb: 100
+
+capabilities:
+  - lfi_testing
+  - rfi_testing
+  - path_traversal
+  - php_filters
+  - log_poisoning
+
+phases:
+  - enumeration
+  - exploitation
+
+requirements:
+  network: true
+  privileged: false
+
+resources:
+  memory_mb: 128
+  cpu: 0.5
+
+# Routing hints for tool selection
+routing:
+  use_for:
+    - "Local File Inclusion testing"
+    - "Remote File Inclusion testing"
+    - "path traversal"
+    - "directory traversal"
+    - "PHP filter exploitation"
+    - "log poisoning"
+  never_use_for:
+    - "SQL injection"
+    - "directory enumeration"
+    - "port scanning"
+  triggers:
+    - "file inclusion"
+    - "path traversal"
+    - "LFI"
+    - "RFI"
+    - "php filter"
+    - "log poison"
+    - "../"
+  prefer_over: []
+
+methods:
+  test_lfi:
+    description: "Test URL parameter for Local File Inclusion vulnerability"
+    when_to_use: "When file parameter is suspected vulnerable to path traversal"
+    params:
+      url:
+        type: string
+        required: true
+        description: "Target URL with {PAYLOAD} placeholder"
+      os:
+        type: enum
+        values: [linux, windows, auto]
+        default: "auto"
+        description: "Target operating system"
+      depth:
+        type: integer
+        default: 8
+        description: "Maximum directory traversal depth"
+      encodings:
+        type: array
+        description: "Encodings to try (plain, url, double-url, etc.)"
+      cookie:
+        type: string
+        description: "Cookie header for authenticated testing"
+      headers:
+        type: object
+        description: "Custom HTTP headers"
+      success_pattern:
+        type: string
+        description: "Regex pattern indicating successful inclusion"
+      timeout:
+        type: integer
+        default: 10
+        description: "Request timeout per attempt"
+    returns:
+      vulnerable:
+        type: boolean
+        description: "Whether LFI was found"
+      vulnerabilities:
+        type: array
+        description: "Working payloads and encodings"
+      working_payload:
+        type: string
+        description: "First successful payload"
+
+  test_rfi:
+    description: "Test URL parameter for Remote File Inclusion vulnerability"
+    when_to_use: "When parameter may include remote URLs"
+    params:
+      url:
+        type: string
+        required: true
+        description: "Target URL with {PAYLOAD} placeholder"
+      remote_url:
+        type: string
+        required: true
+        description: "URL to include (your controlled server)"
+      wrappers:
+        type: array
+        description: "PHP wrappers to try"
+      cookie:
+        type: string
+        description: "Cookie header"
+      headers:
+        type: object
+        description: "Custom HTTP headers"
+      timeout:
+        type: integer
+        default: 10
+        description: "Request timeout"
+    returns:
+      vulnerable:
+        type: boolean
+        description: "Whether RFI may be possible"
+      vulnerabilities:
+        type: array
+        description: "Working wrappers"
+
+  read_file:
+    description: "Read a specific file via confirmed LFI vulnerability"
+    when_to_use: "After confirming LFI to read specific files"
+    params:
+      url:
+        type: string
+        required: true
+        description: "Vulnerable URL with {PAYLOAD} placeholder"
+      file_path:
+        type: string
+        required: true
+        description: "File to read (e.g., /etc/passwd)"
+      traversal:
+        type: string
+        default: "../"
+        description: "Traversal string that works"
+      depth:
+        type: integer
+        default: 8
+        description: "Traversal depth"
+      wrapper:
+        type: string
+        description: "PHP wrapper if needed"
+      cookie:
+        type: string
+        description: "Cookie header"
+      headers:
+        type: object
+        description: "Custom HTTP headers"
+      timeout:
+        type: integer
+        default: 15
+        description: "Request timeout"
+    returns:
+      content:
+        type: string
+        description: "File contents"
+      content_length:
+        type: integer
+        description: "Content length"
+
+  php_filter:
+    description: "Use PHP filter wrapper to read file contents (base64 encoded)"
+    when_to_use: "To read PHP source code without execution"
+    params:
+      url:
+        type: string
+        required: true
+        description: "Vulnerable URL with {PAYLOAD} placeholder"
+      file_path:
+        type: string
+        required: true
+        description: "File to read"
+      cookie:
+        type: string
+        description: "Cookie header"
+      headers:
+        type: object
+        description: "Custom HTTP headers"
+      timeout:
+        type: integer
+        default: 15
+        description: "Request timeout"
+    returns:
+      decoded_content:
+        type: string
+        description: "Decoded file content"
+      base64_content:
+        type: string
+        description: "Raw base64 content"
+
+  log_poison:
+    description: "Attempt log poisoning via User-Agent or other headers"
+    when_to_use: "To achieve RCE via LFI + log poisoning"
+    params:
+      url:
+        type: string
+        required: true
+        description: "Vulnerable URL with {PAYLOAD} placeholder"
+      log_file:
+        type: string
+        required: true
+        description: "Log file path"
+      payload:
+        type: string
+        required: true
+        description: "Payload to inject (e.g., PHP code)"
+      traversal:
+        type: string
+        default: "../"
+        description: "Traversal string"
+      depth:
+        type: integer
+        default: 8
+        description: "Traversal depth"
+      poison_header:
+        type: enum
+        values: [User-Agent, Referer, X-Forwarded-For]
+        default: "User-Agent"
+        description: "Header to poison"
+      cookie:
+        type: string
+        description: "Cookie header"
+      timeout:
+        type: integer
+        default: 15
+        description: "Request timeout"
+    returns:
+      payload_visible:
+        type: boolean
+        description: "Whether payload appears in log"
+      body_preview:
+        type: string
+        description: "Response preview"

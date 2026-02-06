@@ -1,0 +1,204 @@
+name: wpscan
+version: "3.8"
+description: "WordPress vulnerability scanner for plugins, themes, and users"
+image: "ghcr.io/silicon-works/mcp-tools-wpscan:latest"
+image_size_mb: 300
+
+capabilities:
+  - wordpress_scanning
+  - plugin_detection
+  - theme_detection
+  - user_enumeration
+  - password_bruteforce
+
+phases:
+  - enumeration
+  - exploitation
+
+requirements:
+  network: true
+  privileged: false
+
+resources:
+  memory_mb: 512
+  cpu: 0.5
+
+# Routing hints for tool selection
+routing:
+  use_for:
+    - "WordPress vulnerability scanning"
+    - "WordPress plugin enumeration"
+    - "WordPress theme enumeration"
+    - "WordPress user enumeration"
+    - "WordPress brute-force"
+  never_use_for:
+    - "non-WordPress sites"
+    - "general vulnerability scanning"
+    - "port scanning"
+  triggers:
+    - "WordPress"
+    - "wpscan"
+    - "wp-content"
+    - "wp-admin"
+    - "wp plugin"
+    - "wp theme"
+  prefer_over:
+    - nuclei  # For WordPress-specific scanning
+
+methods:
+  scan:
+    description: "Scan a WordPress site for vulnerabilities"
+    when_to_use: "After identifying a WordPress installation to find vulnerable plugins/themes"
+    params:
+      url:
+        type: string
+        required: true
+        description: "Target WordPress URL"
+      enumerate:
+        type: string
+        default: "vp,vt,u"
+        description: "Enumeration options: vp (plugins), vt (themes), u (users), ap (all plugins)"
+      plugins_detection:
+        type: enum
+        values: [passive, aggressive, mixed]
+        default: mixed
+        description: "Plugin detection mode"
+      api_token:
+        type: string
+        description: "WPVulnDB API token for vulnerability data"
+      timeout:
+        type: integer
+        default: 300
+        description: "Timeout in seconds"
+    returns:
+      wordpress_version:
+        type: string
+        description: "Detected WordPress version"
+      plugins:
+        type: array
+        description: "Detected plugins with vulnerabilities"
+      themes:
+        type: array
+        description: "Detected themes"
+      users:
+        type: array
+        description: "Enumerated users"
+
+  bruteforce:
+    description: "Brute-force WordPress login"
+    when_to_use: "After enumerating users to test for weak passwords"
+    params:
+      url:
+        type: string
+        required: true
+        description: "Target WordPress URL"
+      username:
+        type: string
+        required: true
+        description: "Username to brute-force"
+      wordlist:
+        type: string
+        default: "/usr/share/wordlists/rockyou.txt"
+        description: "Password wordlist path"
+      timeout:
+        type: integer
+        default: 600
+        description: "Timeout in seconds"
+    returns:
+      password_found:
+        type: object
+        description: "Username and password if found"
+
+  enumerate_users:
+    description: "Enumerate WordPress users"
+    when_to_use: "To discover valid usernames for brute-force attacks"
+    params:
+      url:
+        type: string
+        required: true
+        description: "Target WordPress URL"
+      api_token:
+        type: string
+        description: "WPVulnDB API token for vulnerability data"
+      timeout:
+        type: integer
+        default: 300
+        description: "Timeout in seconds"
+    returns:
+      users:
+        type: array
+        description: "Discovered users with username, id, and slug"
+      count:
+        type: integer
+        description: "Number of users found"
+
+  enumerate_plugins:
+    description: "Enumerate WordPress plugins and their vulnerabilities"
+    when_to_use: "To find vulnerable plugins for exploitation"
+    params:
+      url:
+        type: string
+        required: true
+        description: "Target WordPress URL"
+      detection_mode:
+        type: enum
+        values: [passive, aggressive, mixed]
+        default: "aggressive"
+        description: "Plugin detection mode"
+      all_plugins:
+        type: boolean
+        default: false
+        description: "Enumerate all plugins (not just vulnerable ones)"
+      api_token:
+        type: string
+        description: "WPVulnDB API token for vulnerability data"
+      timeout:
+        type: integer
+        default: 300
+        description: "Timeout in seconds"
+    returns:
+      plugins:
+        type: array
+        description: "Discovered plugins with version and vulnerability count"
+      vulnerabilities:
+        type: array
+        description: "Plugin vulnerabilities with CVE and references"
+      plugin_count:
+        type: integer
+        description: "Number of plugins found"
+      vulnerability_count:
+        type: integer
+        description: "Number of vulnerabilities found"
+
+  enumerate_themes:
+    description: "Enumerate WordPress themes and their vulnerabilities"
+    when_to_use: "To find vulnerable themes for exploitation"
+    params:
+      url:
+        type: string
+        required: true
+        description: "Target WordPress URL"
+      all_themes:
+        type: boolean
+        default: false
+        description: "Enumerate all themes (not just vulnerable ones)"
+      api_token:
+        type: string
+        description: "WPVulnDB API token for vulnerability data"
+      timeout:
+        type: integer
+        default: 300
+        description: "Timeout in seconds"
+    returns:
+      themes:
+        type: array
+        description: "Discovered themes with version and vulnerability count"
+      vulnerabilities:
+        type: array
+        description: "Theme vulnerabilities with CVE and references"
+      theme_count:
+        type: integer
+        description: "Number of themes found"
+      vulnerability_count:
+        type: integer
+        description: "Number of vulnerabilities found"

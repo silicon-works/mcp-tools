@@ -1,0 +1,288 @@
+name: metasploit
+version: "6.4"
+description: "Exploitation framework for payload generation, vulnerability checks, and exploits"
+image: "ghcr.io/silicon-works/mcp-tools-metasploit:latest"
+image_size_mb: 3000
+
+capabilities:
+  - payload_generation
+  - exploit_execution
+  - vulnerability_checking
+  - module_search
+
+phases:
+  - exploitation
+
+requirements:
+  network: true
+  privileged: false
+
+resources:
+  memory_mb: 2048
+  cpu: 1.0
+
+# Routing hints for tool selection
+routing:
+  use_for:
+    - "exploit module execution"
+    - "msfvenom payload generation"
+    - "vulnerability checking with metasploit"
+    - "meterpreter sessions"
+    - "post-exploitation modules"
+  never_use_for:
+    - "port scanning"
+    - "directory enumeration"
+    - "SQL injection"
+  triggers:
+    - "metasploit"
+    - "msfvenom"
+    - "meterpreter"
+    - "exploit module"
+    - "msf"
+  prefer_over: []
+
+methods:
+  generate_payload:
+    description: "Generate a payload using msfvenom"
+    when_to_use: "To create reverse shells, meterpreter payloads, or encoded payloads"
+    params:
+      payload:
+        type: string
+        required: true
+        description: "Payload name (e.g., 'windows/meterpreter/reverse_tcp') or shortcut"
+      lhost:
+        type: string
+        required: true
+        description: "Listening host IP for reverse connections"
+      lport:
+        type: integer
+        required: true
+        description: "Listening port for reverse connections"
+      format:
+        type: string
+        default: "raw"
+        description: "Output format: exe, elf, raw, python, php, asp, c, dll, etc."
+      encoder:
+        type: string
+        description: "Encoder to use (e.g., 'x86/shikata_ga_nai')"
+      iterations:
+        type: integer
+        default: 1
+        description: "Number of encoding iterations"
+    returns:
+      payload_base64:
+        type: string
+        description: "Base64 encoded payload"
+      size_bytes:
+        type: integer
+        description: "Payload size in bytes"
+
+  search_modules:
+    description: "Search for Metasploit modules"
+    when_to_use: "To find exploits or auxiliary modules for a specific vulnerability or service"
+    params:
+      query:
+        type: string
+        required: true
+        description: "Search query (e.g., 'ms17-010', 'apache struts', 'smb')"
+      type:
+        type: enum
+        values: [all, exploit, auxiliary, post, payload]
+        default: all
+        description: "Module type to search for"
+    returns:
+      modules:
+        type: array
+        description: "Matching modules with paths and descriptions"
+
+  check_vuln:
+    description: "Check if a target is vulnerable using an auxiliary scanner module"
+    when_to_use: "To verify if a target is vulnerable before attempting exploitation"
+    params:
+      module:
+        type: string
+        required: true
+        description: "Auxiliary module path (e.g., 'auxiliary/scanner/smb/smb_ms17_010')"
+      rhosts:
+        type: string
+        required: true
+        description: "Target host(s)"
+      options:
+        type: object
+        description: "Additional module options as key-value pairs"
+      timeout:
+        type: integer
+        default: 120
+        description: "Timeout in seconds"
+    returns:
+      vulnerable:
+        type: boolean
+        description: "Whether target appears vulnerable"
+
+  run_exploit:
+    description: "Run an exploit module against a target"
+    when_to_use: "To exploit a confirmed vulnerability"
+    params:
+      module:
+        type: string
+        required: true
+        description: "Exploit module path (e.g., 'exploit/windows/smb/ms17_010_eternalblue')"
+      rhosts:
+        type: string
+        required: true
+        description: "Target host(s)"
+      payload:
+        type: string
+        description: "Payload to use"
+      lhost:
+        type: string
+        description: "Listening host for reverse payloads"
+      lport:
+        type: integer
+        description: "Listening port for reverse payloads"
+      options:
+        type: object
+        description: "Additional module options"
+      timeout:
+        type: integer
+        default: 300
+        description: "Timeout in seconds"
+    returns:
+      exploit_success:
+        type: boolean
+        description: "Whether exploit appeared successful"
+      session_opened:
+        type: boolean
+        description: "Whether a session was opened"
+
+  exec_command:
+    description: "Execute a command on target using an exploit with cmd/unix/generic payload"
+    when_to_use: "For command execution exploits without needing a full session"
+    params:
+      module:
+        type: string
+        required: true
+        description: "Exploit module path that supports command execution"
+      rhosts:
+        type: string
+        required: true
+        description: "Target host(s)"
+      command:
+        type: string
+        required: true
+        description: "Command to execute on the target"
+      options:
+        type: object
+        description: "Additional module options (e.g., RPORT, TARGETURI)"
+      timeout:
+        type: integer
+        default: 120
+        description: "Timeout in seconds"
+    returns:
+      exploit_success:
+        type: boolean
+        description: "Whether exploit succeeded"
+      command_output:
+        type: string
+        description: "Output from executed command"
+
+  list_sessions:
+    description: "List active Meterpreter/shell sessions"
+    when_to_use: "To check for established sessions from previous exploits"
+    params:
+      timeout:
+        type: integer
+        default: 30
+        description: "Timeout in seconds"
+    returns:
+      sessions:
+        type: array
+        description: "Active sessions with ID, type, and connection info"
+      count:
+        type: integer
+        description: "Number of active sessions"
+
+  session_command:
+    description: "Run a command in an active session"
+    when_to_use: "To execute commands in an established Meterpreter/shell session"
+    params:
+      session_id:
+        type: integer
+        required: true
+        description: "Session ID to interact with"
+      command:
+        type: string
+        required: true
+        description: "Command to execute in the session"
+      timeout:
+        type: integer
+        default: 60
+        description: "Timeout in seconds"
+    returns:
+      session_id:
+        type: integer
+        description: "Session ID used"
+      command:
+        type: string
+        description: "Command executed"
+
+  post_module:
+    description: "Run a post-exploitation module on a session"
+    when_to_use: "For post-exploitation tasks like credential gathering, privilege escalation"
+    params:
+      module:
+        type: string
+        required: true
+        description: "Post module path (e.g., 'post/multi/gather/env')"
+      session_id:
+        type: integer
+        required: true
+        description: "Session ID to run the module on"
+      options:
+        type: object
+        description: "Additional module options"
+      timeout:
+        type: integer
+        default: 120
+        description: "Timeout in seconds"
+    returns:
+      module:
+        type: string
+        description: "Module executed"
+      session_id:
+        type: integer
+        description: "Session ID used"
+
+  handler:
+    description: "Start a multi/handler to catch reverse shells"
+    when_to_use: "To set up a listener for reverse shell payloads"
+    params:
+      payload:
+        type: string
+        required: true
+        description: "Payload to listen for (e.g., 'windows_reverse_tcp')"
+      lhost:
+        type: string
+        required: true
+        description: "Listening host IP"
+      lport:
+        type: integer
+        required: true
+        description: "Listening port"
+      timeout:
+        type: integer
+        default: 300
+        description: "Timeout waiting for connection (seconds)"
+    returns:
+      payload:
+        type: string
+        description: "Payload type"
+      lhost:
+        type: string
+        description: "Listening host"
+      lport:
+        type: integer
+        description: "Listening port"
+      handler_started:
+        type: boolean
+        description: "Whether handler started successfully"

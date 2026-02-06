@@ -1,0 +1,101 @@
+name: john
+version: "1.9"
+description: "Password hash cracking tool (John the Ripper)"
+image: "ghcr.io/silicon-works/mcp-tools-john:latest"
+image_size_mb: 200
+
+capabilities:
+  - password_cracking
+  - hash_identification
+
+routing:
+  use_for:
+    - "Linux password hash cracking"
+    - "Windows NTLM/LM hash cracking"
+    - "MD5/SHA hash cracking"
+    - "/etc/shadow password cracking"
+    - "Database password hash cracking"
+  never_use_for:
+    - task: "IKE/IPsec PSK hash cracking"
+      use_instead: "ike-scan.crack_psk"
+      reason: "John does not support psk-ike format. Use ike-scan's built-in crack_psk method which uses psk-crack."
+    - task: "VPN PSK cracking"
+      use_instead: "ike-scan.crack_psk"
+      reason: "IKE PSK hashes require psk-crack, not John the Ripper"
+  triggers:
+    - "crack password"
+    - "hash crack"
+    - "shadow file"
+    - "ntlm"
+  prefer_over: []
+
+phases:
+  - post-exploitation
+
+requirements:
+  network: false
+  privileged: false
+
+resources:
+  memory_mb: 1024
+  cpu: 2.0
+
+methods:
+  crack:
+    description: "Crack password hashes using wordlist or incremental mode"
+    when_to_use: "After extracting password hashes to recover plaintext passwords"
+    params:
+      hashes:
+        type: string
+        required: true
+        description: "Hash(es) to crack, one per line, or in user:hash format"
+      format:
+        type: string
+        default: "auto"
+        description: "Hash format (auto-detect if not specified)"
+      wordlist:
+        type: string
+        default: "rockyou"
+        description: "Wordlist name (rockyou, common) or path"
+      rules:
+        type: boolean
+        default: true
+        description: "Apply word mangling rules"
+      timeout:
+        type: integer
+        default: 300
+        description: "Maximum time to spend cracking in seconds"
+    returns:
+      cracked:
+        type: array
+        description: "Cracked username:password pairs"
+
+  show:
+    description: "Show previously cracked passwords from a hash file"
+    when_to_use: "To retrieve already cracked passwords"
+    params:
+      hashes:
+        type: string
+        required: true
+        description: "Hash(es) to check for cracked passwords"
+      format:
+        type: string
+        default: "auto"
+        description: "Hash format"
+    returns:
+      cracked:
+        type: array
+        description: "Previously cracked passwords"
+
+  identify:
+    description: "Identify the format of a hash"
+    when_to_use: "When unsure what hash type was extracted"
+    params:
+      hash:
+        type: string
+        required: true
+        description: "Hash to identify"
+    returns:
+      possible_formats:
+        type: array
+        description: "Possible hash formats"

@@ -1,0 +1,150 @@
+name: nmap
+version: "7.94"
+description: "Network scanner for port discovery, service detection, and OS fingerprinting"
+image: "ghcr.io/silicon-works/mcp-tools-nmap:latest"
+image_size_mb: 150
+
+capabilities:
+  - port_scanning
+  - service_detection
+  - os_fingerprinting
+  - vulnerability_scanning
+  - host_discovery
+
+# Routing hints for tool selection
+routing:
+  use_for:
+    - "port scanning"
+    - "service detection"
+    - "OS fingerprinting"
+    - "host discovery"
+    - "network enumeration"
+    - "initial reconnaissance"
+  never_use_for:
+    - "web fuzzing"
+    - "SQL injection"
+    - "password cracking"
+  triggers:
+    - "nmap"
+    - "port scan"
+    - "service detection"
+    - "OS fingerprint"
+    - "host discovery"
+    - "network scan"
+  prefer_over:
+    - "masscan"  # More reliable, better service detection
+
+phases:
+  - reconnaissance
+  - enumeration
+
+requirements:
+  network: true
+  privileged: true
+  privileged_reason: "Raw socket access for SYN scans, OS detection, and packet manipulation"
+
+resources:
+  memory_mb: 256
+  cpu: 0.5
+
+methods:
+  port_scan:
+    description: "Scan for open ports on a target"
+    when_to_use: "Initial reconnaissance to discover open ports and services"
+    requires_privileged:
+      tcp_connect: false
+      syn: true
+      udp: true
+      ack: true
+    params:
+      target:
+        type: string
+        required: true
+        description: "IP address, hostname, or CIDR range"
+      ports:
+        type: string
+        default: "1-1000"
+        description: "Port range (e.g., '22,80,443' or '1-1000')"
+      scan_type:
+        type: enum
+        values: [tcp_connect, syn, udp, ack]
+        default: tcp_connect
+        description: "Type of port scan"
+      timing:
+        type: enum
+        values: [paranoid, sneaky, polite, normal, aggressive, insane]
+        default: normal
+        description: "Scan timing template (T0-T5)"
+    returns:
+      open_ports:
+        type: array
+        description: "List of open port numbers"
+      services:
+        type: array
+        description: "Service information for each port"
+
+  service_scan:
+    description: "Identify service versions on open ports"
+    when_to_use: "After port scan to enumerate service versions for vulnerability research"
+    requires_privileged: true
+    params:
+      target:
+        type: string
+        required: true
+        description: "IP address or hostname"
+      ports:
+        type: string
+        required: true
+        description: "Ports to scan (from previous port_scan results)"
+    returns:
+      services:
+        type: array
+        description: "Detailed service and version information"
+
+  os_detection:
+    description: "Detect operating system of target"
+    when_to_use: "After port scan to identify target OS for targeted exploitation"
+    requires_privileged: true
+    params:
+      target:
+        type: string
+        required: true
+        description: "IP address or hostname"
+    returns:
+      os_matches:
+        type: array
+        description: "Possible OS matches with confidence scores"
+
+  vuln_scan:
+    description: "Run NSE vulnerability scripts against target"
+    when_to_use: "After service detection to identify known vulnerabilities"
+    requires_privileged: true
+    params:
+      target:
+        type: string
+        required: true
+        description: "IP address or hostname"
+      ports:
+        type: string
+        required: true
+        description: "Ports to scan"
+      scripts:
+        type: string
+        default: "vuln"
+        description: "NSE script category or specific scripts"
+    returns:
+      vulnerabilities:
+        type: array
+        description: "Discovered vulnerabilities with CVE references"
+
+  get_interfaces:
+    description: "Get local network interfaces and IP addresses (useful for LHOST)"
+    when_to_use: "To determine local IP addresses for reverse shells or LHOST configuration"
+    params: {}
+    returns:
+      interfaces:
+        type: array
+        description: "List of network interfaces with IP addresses"
+      recommended_lhost:
+        type: string
+        description: "First non-loopback IPv4 address (recommended for LHOST)"

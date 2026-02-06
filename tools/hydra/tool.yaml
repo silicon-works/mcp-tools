@@ -1,0 +1,367 @@
+name: hydra
+version: "9.5"
+description: "Network authentication brute-forcing tool with service-specific thread defaults"
+image: "ghcr.io/silicon-works/mcp-tools-hydra:latest"
+image_size_mb: 200
+
+capabilities:
+  - password_bruteforce
+  - credential_testing
+
+# Routing hints for tool selection
+routing:
+  use_for:
+    - "password brute-forcing"
+    - "credential testing"
+    - "SSH brute-force"
+    - "FTP brute-force"
+    - "HTTP authentication brute-force"
+    - "login testing"
+  never_use_for:
+    - "hash cracking"
+    - "offline password cracking"
+    - "vulnerability scanning"
+  triggers:
+    - "brute force"
+    - "password attack"
+    - "credential brute"
+    - "hydra"
+    - "login brute"
+  prefer_over: []
+
+phases:
+  - exploitation
+
+requirements:
+  network: true
+  privileged: false
+
+resources:
+  memory_mb: 256
+  cpu: 1.0
+
+methods:
+  bruteforce:
+    description: "Brute-force login credentials for a service"
+    when_to_use: "When default/weak credentials are suspected on a service"
+    params:
+      target:
+        type: string
+        required: true
+        description: "Target IP or hostname"
+      service:
+        type: enum
+        required: true
+        values: [ssh, ftp, http-get, http-post, http-post-form, http-get-form, https-get, https-post, https-post-form, https-get-form, smb, rdp, mysql, postgres, vnc, telnet, smtp, pop3, imap]
+        description: "Service protocol to attack"
+      username:
+        type: string
+        description: "Single username to test"
+      userlist:
+        type: string
+        description: "Wordlist name (usernames, ssh-usernames) or path to username list"
+      password:
+        type: string
+        description: "Single password to test"
+      passlist:
+        type: string
+        description: "Wordlist name (rockyou, common-passwords) or path. Ignored if password is set."
+      threads:
+        type: integer
+        description: "Number of parallel connections (default: service-specific, e.g., SSH=4, HTTP=16)"
+      port:
+        type: integer
+        description: "Service port (uses default if not specified)"
+      timeout:
+        type: integer
+        default: 600
+        description: "Timeout in seconds"
+      wait_time:
+        type: integer
+        description: "Seconds to wait between connection attempts (hydra -W flag)"
+      stop_on_first:
+        type: boolean
+        default: false
+        description: "Stop after finding first valid credential (hydra -f flag)"
+      try_common:
+        type: string
+        enum: [n, s, r, ns, nr, sr, nsr]
+        description: "Try common passwords: n=null, s=same as login, r=reversed login (e.g., 'nsr' for all)"
+      verbose:
+        type: boolean
+        default: false
+        description: "Include verbose output with each attempt (warning: can be large)"
+      http_path:
+        type: string
+        description: "Path for HTTP auth (e.g., /admin/login)"
+      http_form:
+        type: string
+        description: "HTTP form attack string for http-post-form/http-get-form (format: '/path:user=^USER^&pass=^PASS^:F=error_message')"
+    returns:
+      credentials:
+        type: array
+        description: "Valid username:password combinations found"
+      found:
+        type: boolean
+        description: "Whether any credentials were found"
+      count:
+        type: integer
+        description: "Number of credentials found"
+      stats:
+        type: object
+        description: "Attack statistics (attempts_total, attempts_completed, attempts_successful)"
+      warnings:
+        type: array
+        description: "Warnings from hydra (e.g., rate limiting suggestions)"
+      partial:
+        type: boolean
+        description: "True if operation timed out with partial results"
+      verbose_output:
+        type: string
+        description: "Verbose attempt log (if verbose=true)"
+      summary:
+        type: object
+        description: "Operation summary with target, service, port, threads, duration"
+
+  ssh_brute:
+    description: "Brute-force SSH login (convenience method with SSH-optimized defaults: threads=4)"
+    when_to_use: "For targeted SSH credential testing"
+    params:
+      target:
+        type: string
+        required: true
+        description: "Target IP or hostname"
+      username:
+        type: string
+        description: "Single username to test"
+      userlist:
+        type: string
+        description: "Wordlist name (usernames, ssh-usernames) or path"
+      password:
+        type: string
+        description: "Single password to test"
+      passlist:
+        type: string
+        description: "Password wordlist name or path. Ignored if password is set."
+      port:
+        type: integer
+        default: 22
+        description: "SSH port"
+      threads:
+        type: integer
+        default: 4
+        description: "Parallel connections (default: 4 for SSH to avoid rate limiting)"
+      timeout:
+        type: integer
+        default: 600
+        description: "Timeout in seconds"
+      wait_time:
+        type: integer
+        description: "Seconds to wait between connection attempts"
+      stop_on_first:
+        type: boolean
+        default: false
+        description: "Stop after finding first valid credential"
+      try_common:
+        type: string
+        enum: [n, s, r, ns, nr, sr, nsr]
+        description: "Try common passwords: n=null, s=same as login, r=reversed login"
+      verbose:
+        type: boolean
+        default: false
+        description: "Include verbose output with each attempt"
+    returns:
+      credentials:
+        type: array
+        description: "Valid username:password combinations found"
+      stats:
+        type: object
+        description: "Attack statistics including attempts_total, attempts_completed"
+
+  ftp_brute:
+    description: "Brute-force FTP login (convenience method with threads=8)"
+    when_to_use: "For targeted FTP credential testing"
+    params:
+      target:
+        type: string
+        required: true
+        description: "Target IP or hostname"
+      username:
+        type: string
+        description: "Single username to test"
+      userlist:
+        type: string
+        description: "Wordlist name or path (default: tries common FTP usernames)"
+      password:
+        type: string
+        description: "Single password to test"
+      passlist:
+        type: string
+        description: "Password wordlist name or path. Ignored if password is set."
+      port:
+        type: integer
+        default: 21
+        description: "FTP port"
+      threads:
+        type: integer
+        default: 8
+        description: "Parallel connections (default: 8 for FTP)"
+      timeout:
+        type: integer
+        default: 600
+        description: "Timeout in seconds"
+      wait_time:
+        type: integer
+        description: "Seconds to wait between connection attempts"
+      stop_on_first:
+        type: boolean
+        default: false
+        description: "Stop after finding first valid credential"
+      try_common:
+        type: string
+        enum: [n, s, r, ns, nr, sr, nsr]
+        description: "Try common passwords: n=null, s=same as login, r=reversed login"
+      verbose:
+        type: boolean
+        default: false
+        description: "Include verbose output with each attempt"
+    returns:
+      credentials:
+        type: array
+        description: "Valid username:password combinations found"
+      stats:
+        type: object
+        description: "Attack statistics"
+
+  web_form_brute:
+    description: "Brute-force web login form (convenience method with threads=16)"
+    when_to_use: "For web application login brute-forcing"
+    params:
+      target:
+        type: string
+        required: true
+        description: "Target IP or hostname"
+      path:
+        type: string
+        required: true
+        description: "Login form path (e.g., /login.php)"
+      user_field:
+        type: string
+        default: "username"
+        description: "Username form field name"
+      pass_field:
+        type: string
+        default: "password"
+        description: "Password form field name"
+      fail_string:
+        type: string
+        required: true
+        description: "String that appears on failed login (e.g., 'Invalid', 'incorrect')"
+      username:
+        type: string
+        description: "Single username to test"
+      userlist:
+        type: string
+        description: "Username wordlist name or path"
+      password:
+        type: string
+        description: "Single password to test"
+      passlist:
+        type: string
+        description: "Password wordlist name or path. Ignored if password is set."
+      https:
+        type: boolean
+        default: false
+        description: "Use HTTPS"
+      port:
+        type: integer
+        description: "Port (default: 80 or 443 for HTTPS)"
+      threads:
+        type: integer
+        default: 16
+        description: "Parallel connections (default: 16 for HTTP)"
+      extra_params:
+        type: string
+        description: "Additional POST parameters (e.g., 'submit=Login&csrf=token')"
+      timeout:
+        type: integer
+        default: 600
+        description: "Timeout in seconds"
+      wait_time:
+        type: integer
+        description: "Seconds to wait between connection attempts"
+      stop_on_first:
+        type: boolean
+        default: false
+        description: "Stop after finding first valid credential"
+      try_common:
+        type: string
+        enum: [n, s, r, ns, nr, sr, nsr]
+        description: "Try common passwords: n=null, s=same as login, r=reversed login"
+      verbose:
+        type: boolean
+        default: false
+        description: "Include verbose output with each attempt"
+    returns:
+      credentials:
+        type: array
+        description: "Valid username:password combinations found"
+      stats:
+        type: object
+        description: "Attack statistics"
+
+  mysql_brute:
+    description: "Brute-force MySQL login (convenience method with threads=4)"
+    when_to_use: "For MySQL database credential testing"
+    params:
+      target:
+        type: string
+        required: true
+        description: "Target IP or hostname"
+      username:
+        type: string
+        default: "root"
+        description: "Single username to test"
+      userlist:
+        type: string
+        description: "Username wordlist name or path"
+      password:
+        type: string
+        description: "Single password to test"
+      passlist:
+        type: string
+        description: "Password wordlist name or path. Ignored if password is set."
+      port:
+        type: integer
+        default: 3306
+        description: "MySQL port"
+      threads:
+        type: integer
+        default: 4
+        description: "Parallel connections (default: 4 for MySQL)"
+      timeout:
+        type: integer
+        default: 600
+        description: "Timeout in seconds"
+      wait_time:
+        type: integer
+        description: "Seconds to wait between connection attempts"
+      stop_on_first:
+        type: boolean
+        default: false
+        description: "Stop after finding first valid credential"
+      try_common:
+        type: string
+        enum: [n, s, r, ns, nr, sr, nsr]
+        description: "Try common passwords: n=null, s=same as login, r=reversed login"
+      verbose:
+        type: boolean
+        default: false
+        description: "Include verbose output with each attempt"
+    returns:
+      credentials:
+        type: array
+        description: "Valid username:password combinations found"
+      stats:
+        type: object
+        description: "Attack statistics"

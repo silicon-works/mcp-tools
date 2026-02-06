@@ -1,0 +1,288 @@
+name: playwright-mcp
+version: "latest"
+description: "Browser automation for complex web interactions, JavaScript-rendered pages, and form filling"
+source: "https://github.com/microsoft/playwright-mcp"
+image: "ghcr.io/silicon-works/mcp-tools-playwright:latest"
+image_size_mb: 1500
+
+capabilities:
+  - browser_automation
+  - javascript_execution
+  - screenshot_capture
+  - form_interaction
+  - spa_testing
+
+phases:
+  - reconnaissance
+  - enumeration
+  - exploitation
+
+requirements:
+  network: true
+  privileged: false
+
+resources:
+  memory_mb: 2048
+  cpu: 2.0
+
+# Cross-references to related tools
+see_also:
+  - curl  # For simple API requests, file downloads, exploit payload delivery
+  - zap   # For automated vulnerability scanning
+  - ffuf  # For directory/parameter fuzzing
+
+# Routing hints for tool selection
+routing:
+  use_for:
+    - "login form"
+    - "web login"
+    - "fill form"
+    - "web page content"
+    - "JavaScript rendered page"
+    - "browser automation"
+    - "screenshot"
+    - "form interaction"
+    - "web application testing"
+    - "see what's on the page"
+    - "empty response from curl"
+    - "SPA testing"
+    - "session management"
+    - "cookie handling"
+    # Security testing
+    - "XSS testing"
+    - "XSS validation"
+    - "test payload execution"
+    - "check if JavaScript executes"
+    - "capture console errors"
+    - "payload validation"
+    - "verify XSS callback"
+    - "check cookie exfiltration"
+  never_use_for:
+    - "simple API request"
+    - "file download"
+    - "exploit payload delivery"
+    - "directory fuzzing"
+    - "brute force"
+  triggers:
+    - "login page"
+    - "fill login"
+    - "web form"
+    - "javascript"
+    - "browser"
+    - "screenshot"
+    - "empty body"
+    - "page returns empty"
+  prefer_over:
+    - curl  # When page uses JavaScript, returns empty, or has complex forms
+
+warnings:
+  - "Large image (~1.5GB) - first pull takes time"
+  - "Requires more memory than curl (2GB recommended)"
+
+notes: |
+  Wraps Microsoft's @playwright/mcp npm package in a locally-built container.
+  Use for: login forms, JavaScript-rendered content, web app testing.
+  Prefer over curl when pages return empty bodies or require JS rendering.
+
+  WHEN TO USE PLAYWRIGHT vs CURL:
+  - Use Playwright: login forms, JS pages, empty curl responses, need to see page
+  - Use curl: simple API calls, file downloads, exploit payloads, known endpoints
+
+  PLAYWRIGHT + ZAP INTEGRATION (for JS-heavy security testing):
+  Configure proxy via env var: PLAYWRIGHT_MCP_PROXY_SERVER=http://127.0.0.1:8080
+  1. Start ZAP - it listens on port 8080
+  2. Launch Playwright container with proxy env var set
+  3. Use Playwright to browse/interact with target
+  4. ZAP captures all traffic via proxy_history
+  5. Run zap.active_scan() on captured URLs
+
+  See: https://github.com/microsoft/playwright-mcp
+
+methods:
+  # Navigation
+  browser_navigate:
+    description: "Navigate to a URL"
+    params:
+      url: { type: string, required: true, description: "URL to navigate to" }
+  browser_navigate_back:
+    description: "Go back to the previous page"
+    params: {}
+
+  # Page State (call first to get element refs)
+  browser_snapshot:
+    description: "Capture accessibility snapshot - call this first to get element refs for other tools"
+    when_to_use: "Before interacting with elements - returns refs needed for click/type/etc"
+    params: {}
+  browser_take_screenshot:
+    description: "Capture visual screenshot of the page"
+    params:
+      filename: { type: string, description: "Optional filename to save" }
+
+  # Element Interaction (use refs from snapshot)
+  browser_click:
+    description: "Click on an element using ref from snapshot"
+    params:
+      element: { type: string, required: true, description: "Human description for permission" }
+      ref: { type: string, required: true, description: "Element ref from browser_snapshot" }
+  browser_hover:
+    description: "Hover over an element (reveal menus, tooltips)"
+    params:
+      element: { type: string, required: true, description: "Human description" }
+      ref: { type: string, required: true, description: "Element ref from snapshot" }
+  browser_type:
+    description: "Type text into an editable element"
+    params:
+      ref: { type: string, required: true, description: "Element ref from browser_snapshot" }
+      element: { type: string, required: true, description: "Human description for permission" }
+      text: { type: string, required: true, description: "Text to type" }
+      submit: { type: boolean, description: "Press Enter after typing" }
+      slowly: { type: boolean, description: "Type character by character (triggers key handlers)" }
+  browser_fill_form:
+    description: "Fill multiple form fields at once"
+    params:
+      fields:
+        type: array
+        required: true
+        description: "Array of {name, type, ref, value} - type must be: textbox|checkbox|radio|combobox|slider"
+  browser_select_option:
+    description: "Select option from dropdown"
+    params:
+      element: { type: string, required: true }
+      ref: { type: string, required: true }
+      value: { type: string, required: true, description: "Option text to select" }
+  browser_file_upload:
+    description: "Upload files to file input"
+    params:
+      paths: { type: array, required: true, description: "File paths to upload" }
+
+  # Keyboard
+  browser_press_key:
+    description: "Press a keyboard key (Enter, Tab, Escape, ArrowDown, etc)"
+    params:
+      key: { type: string, required: true, description: "Key name like Enter, Tab, Escape" }
+
+  # JavaScript Execution (XSS testing, DOM manipulation)
+  browser_evaluate:
+    description: "Execute JavaScript on page or element"
+    params:
+      function: { type: string, required: true, description: "JS code as () => {...} or (element) => {...}" }
+      element: { type: string, description: "Human description if targeting element" }
+      ref: { type: string, description: "Element ref if targeting specific element" }
+  browser_run_code:
+    description: "Run arbitrary Playwright code snippet"
+    params:
+      code: { type: string, required: true, description: "Playwright code to execute" }
+
+  # Dialogs & Alerts
+  browser_handle_dialog:
+    description: "Handle alert, confirm, or prompt dialogs"
+    params:
+      accept: { type: boolean, required: true, description: "Accept or dismiss dialog" }
+      promptText: { type: string, description: "Text to enter for prompt dialogs" }
+
+  # Monitoring (useful for auth testing, API discovery)
+  browser_network_requests:
+    description: "Get list of network requests made by page"
+    when_to_use: "Discover API endpoints, check for sensitive data in requests"
+    params: {}
+  browser_console_messages:
+    description: "Get console log messages from page"
+    when_to_use: "Check for JavaScript errors, debug info, leaked secrets"
+    notes: |
+      Critical for XSS testing. Captures:
+      - console.log() output (use for XSS markers like console.log('XSS_EXECUTED'))
+      - JavaScript errors
+      - Network errors
+    params: {}
+
+  # Wait & Sync
+  browser_wait_for:
+    description: "Wait for text to appear/disappear or timeout"
+    notes: |
+      Can wait for text/timeout. For waiting on specific network requests,
+      use browser_network_requests with polling or check ZAP proxy_history.
+    params:
+      text: { type: string, description: "Text to wait for" }
+      textGone: { type: string, description: "Text to wait to disappear" }
+      timeout: { type: integer, description: "Max wait time in ms" }
+
+  # Tab Management
+  browser_tabs:
+    description: "List, create, close, or switch browser tabs"
+    params:
+      action: { type: string, required: true, description: "list, new, close, or select" }
+      tabId: { type: string, description: "Tab ID for close/select actions" }
+
+  # Control
+  browser_resize:
+    description: "Resize browser window"
+    params:
+      width: { type: integer, required: true }
+      height: { type: integer, required: true }
+  browser_close:
+    description: "Close the browser page"
+    params: {}
+
+  # Drag and Drop
+  browser_drag:
+    description: "Drag and drop between two elements"
+    params:
+      startElement: { type: string, required: true, description: "Human description of source element" }
+      startRef: { type: string, required: true, description: "Ref of element to drag from" }
+      endElement: { type: string, required: true, description: "Human description of target element" }
+      endRef: { type: string, required: true, description: "Ref of element to drop onto" }
+
+  # Browser Installation (utility)
+  browser_install:
+    description: "Install browser if not present (usually not needed - Chrome pre-installed)"
+    params: {}
+
+  # Testing/Verification (useful for XSS and payload validation)
+  browser_verify_element_visible:
+    description: "Verify an element is visible on the page"
+    when_to_use: "Confirm payload rendered or element appeared after action"
+    params:
+      ref: { type: string, required: true, description: "Element ref from browser_snapshot" }
+      timeout: { type: integer, description: "Max wait time in ms" }
+
+  browser_verify_text_visible:
+    description: "Verify specific text is visible on the page"
+    when_to_use: "Check XSS output appeared, verify payload execution result"
+    params:
+      text: { type: string, required: true, description: "Text to verify is visible" }
+      timeout: { type: integer, description: "Max wait time in ms" }
+
+  browser_verify_list_visible:
+    description: "Verify a list of items is visible"
+    when_to_use: "Enumerate visible data, check multiple payloads rendered"
+    params:
+      items: { type: array, required: true, description: "List of text items to verify" }
+      timeout: { type: integer, description: "Max wait time in ms" }
+
+  browser_verify_value:
+    description: "Verify form field has specific value"
+    when_to_use: "Check form state after injection, verify pre-filled values"
+    params:
+      ref: { type: string, required: true, description: "Element ref from browser_snapshot" }
+      value: { type: string, required: true, description: "Expected value" }
+
+  # Tracing (for evidence capture)
+  browser_start_tracing:
+    description: "Start recording browser execution trace"
+    when_to_use: "Capture full execution evidence for XSS, record all network activity"
+    params:
+      name: { type: string, description: "Optional trace name" }
+
+  browser_stop_tracing:
+    description: "Stop recording and save trace file"
+    when_to_use: "Save evidence after completing XSS test or interaction sequence"
+    params:
+      path: { type: string, description: "Path to save trace file" }
+
+  # PDF Export (for evidence)
+  browser_pdf_save:
+    description: "Save current page as PDF"
+    when_to_use: "Capture page state as evidence, save rendered payload result"
+    params:
+      path: { type: string, description: "Path to save PDF file" }
+      fullPage: { type: boolean, description: "Capture full scrollable page" }

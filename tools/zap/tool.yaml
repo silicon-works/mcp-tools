@@ -1,0 +1,393 @@
+name: zap
+version: "2.14"
+description: "OWASP ZAP - web application security scanner with active vulnerability detection, spidering, and automated testing"
+image: "ghcr.io/silicon-works/mcp-tools-zap:latest"
+image_size_mb: 1200
+
+capabilities:
+  - web_vulnerability_scanning
+  - active_scanning
+  - spider_crawling
+  - xss_detection
+  - sqli_detection
+  - security_assessment
+
+# Routing hints for tool selection
+routing:
+  use_for:
+    - "web application scanning"
+    - "active vulnerability scanning"
+    - "finding XSS vulnerabilities"
+    - "finding SQL injection"
+    - "automated web security testing"
+    - "crawling web applications"
+    - "OWASP Top 10 testing"
+  never_use_for:
+    - "port scanning"
+    - "network scanning"
+    - "password cracking"
+  triggers:
+    - "ZAP"
+    - "OWASP"
+    - "active scan"
+    - "web scanner"
+    - "spider"
+    - "crawl"
+    - "web vulnerability"
+  prefer_over:
+    - "nikto"  # ZAP has active scanning, nikto is passive
+    - "curl"   # For security testing, use ZAP not manual curl
+
+# Cross-references to related tools
+see_also:
+  - playwright-mcp  # For browser automation, JavaScript execution, form filling, screenshots, console
+
+phases:
+  - enumeration
+  - exploitation
+
+requirements:
+  network: true
+  privileged: false
+
+resources:
+  memory_mb: 2048
+  cpu: 2.0
+
+methods:
+  spider:
+    description: "Crawl a target URL to discover all pages and endpoints"
+    when_to_use: "To discover all URLs on a web application before scanning"
+    params:
+      target:
+        type: string
+        required: true
+        description: "Target URL to crawl (e.g., http://target.com)"
+      max_depth:
+        type: integer
+        default: 5
+        description: "Maximum crawl depth"
+      max_children:
+        type: integer
+        default: 0
+        description: "Maximum child URLs per page (0=unlimited)"
+      wait:
+        type: boolean
+        default: true
+        description: "Wait for spider to complete (if false, returns immediately with scan_id)"
+      timeout:
+        type: integer
+        default: 300
+        description: "Maximum seconds to wait for spider. Returns partial results on timeout."
+      subtree_only:
+        type: boolean
+        default: true
+        description: "Only spider URLs under the target path (recommended)"
+    returns:
+      scan_id:
+        type: string
+        description: "Spider scan ID for status checking"
+      urls_found:
+        type: integer
+        description: "Number of URLs discovered"
+      progress:
+        type: integer
+        description: "Spider progress percentage (0-100)"
+      partial:
+        type: boolean
+        description: "True if scan timed out with partial results"
+
+  active_scan:
+    description: "Actively scan a target for vulnerabilities (SQLi, XSS, etc.)"
+    when_to_use: "To test a web application for security vulnerabilities"
+    params:
+      target:
+        type: string
+        required: true
+        description: "Target URL to scan"
+      wait:
+        type: boolean
+        default: true
+        description: "Wait for scan to complete (if false, returns immediately with scan_id)"
+      timeout:
+        type: integer
+        default: 600
+        description: "Maximum seconds to wait for scan. Returns partial results on timeout."
+      scan_policy:
+        type: string
+        description: "Scan policy name: 'Default Policy' or custom. Controls which checks run."
+    returns:
+      scan_id:
+        type: string
+        description: "Active scan ID for status checking"
+      progress:
+        type: integer
+        description: "Scan progress percentage (0-100)"
+      alerts:
+        type: object
+        description: "Counts by severity: high, medium, low, info, total"
+      partial:
+        type: boolean
+        description: "True if scan timed out with partial results"
+
+  quick_scan:
+    description: "Perform a complete scan: spider the target then run active scan. Returns partial results if either phase times out."
+    when_to_use: "For a comprehensive security assessment of a web application"
+    params:
+      target:
+        type: string
+        required: true
+        description: "Target URL to scan"
+      max_depth:
+        type: integer
+        default: 5
+        description: "Maximum spider depth"
+      max_children:
+        type: integer
+        default: 0
+        description: "Maximum child URLs per page (0=unlimited)"
+      spider_timeout:
+        type: integer
+        default: 300
+        description: "Maximum seconds for spider phase"
+      scan_timeout:
+        type: integer
+        default: 900
+        description: "Maximum seconds for active scan phase"
+      scan_policy:
+        type: string
+        description: "Scan policy name for active scan phase"
+      ajax_spider:
+        type: boolean
+        default: false
+        description: "Run AJAX spider after traditional spider (for JavaScript-heavy sites)"
+      exclude_regex:
+        type: string
+        description: "Regex pattern for URLs to exclude (e.g., 'logout|delete|signout')"
+    returns:
+      spider_id:
+        type: string
+        description: "Spider scan ID"
+      scan_id:
+        type: string
+        description: "Active scan ID"
+      urls_found:
+        type: integer
+        description: "Number of URLs discovered"
+      alerts:
+        type: object
+        description: "Counts by severity: high, medium, low, info, total"
+      partial:
+        type: boolean
+        description: "True if any phase timed out"
+
+  stop_scan:
+    description: "Stop a running spider or active scan"
+    when_to_use: "To cancel a stuck or long-running scan"
+    params:
+      scan_type:
+        type: string
+        required: true
+        description: "Type of scan to stop: 'spider', 'active', 'ajax', or 'all'"
+      scan_id:
+        type: string
+        description: "Specific scan ID to stop. If not provided, stops all scans of the type."
+    returns:
+      stopped:
+        type: array
+        description: "List of stopped scans with type and id"
+
+  get_alerts:
+    description: "Get vulnerabilities discovered by ZAP"
+    when_to_use: "To retrieve detailed vulnerability information after scanning"
+    params:
+      target:
+        type: string
+        description: "Filter alerts by target URL (optional)"
+      risk:
+        type: string
+        description: "Filter by risk level: High, Medium, Low, Informational"
+      limit:
+        type: integer
+        default: 100
+        description: "Maximum number of alerts to return"
+    returns:
+      alerts:
+        type: array
+        description: "List of vulnerabilities with details"
+
+  get_urls:
+    description: "Get all URLs discovered by the spider"
+    when_to_use: "To see what pages were found during crawling"
+    params:
+      target:
+        type: string
+        description: "Filter URLs by base URL (optional)"
+    returns:
+      urls:
+        type: array
+        description: "List of discovered URLs"
+
+  scan_status:
+    description: "Get the status of all running and completed scans"
+    when_to_use: "To check progress of background scans or verify scan completion"
+    params: {}
+    returns:
+      spider_scans:
+        type: array
+        description: "List of spider scans with id, progress, state, urls_found"
+      active_scans:
+        type: array
+        description: "List of active scans with id, progress, state, alerts count"
+      running_spiders:
+        type: integer
+        description: "Number of currently running spider scans"
+      running_scans:
+        type: integer
+        description: "Number of currently running active scans"
+
+  summary:
+    description: "Get a summary of all findings by risk level"
+    when_to_use: "To get an overview of discovered vulnerabilities"
+    params:
+      target:
+        type: string
+        description: "Filter by target URL (optional)"
+    returns:
+      total:
+        type: integer
+        description: "Total number of issues"
+      by_risk:
+        type: object
+        description: "Issue counts by risk level"
+
+  proxy_history:
+    description: "Get HTTP messages captured by ZAP proxy"
+    when_to_use: "To review traffic that passed through the proxy"
+    params:
+      start:
+        type: integer
+        default: 0
+        description: "Start index"
+      count:
+        type: integer
+        default: 50
+        description: "Number of messages to return"
+      target:
+        type: string
+        description: "Filter by target URL (optional)"
+    returns:
+      messages:
+        type: array
+        description: "List of HTTP request/response pairs"
+
+  send_request:
+    description: "Send an HTTP request through ZAP proxy and get the response (like Burp Repeater)"
+    when_to_use: "To manually send or replay HTTP requests for testing"
+    params:
+      url:
+        type: string
+        required: true
+        description: "Full URL to request (e.g., http://target.com/path)"
+      method:
+        type: string
+        default: "GET"
+        description: "HTTP method (GET, POST, PUT, DELETE, etc.)"
+      headers:
+        type: object
+        description: "Custom headers as key-value pairs"
+      body:
+        type: string
+        description: "Request body for POST/PUT requests"
+      follow_redirects:
+        type: boolean
+        default: true
+        description: "Follow HTTP redirects"
+    returns:
+      url:
+        type: string
+        description: "Request URL"
+      status_code:
+        type: integer
+        description: "HTTP response status code"
+      content_length:
+        type: integer
+        description: "Response body length in bytes"
+
+  proxy_info:
+    description: "Get ZAP proxy connection info for routing Playwright traffic through ZAP"
+    when_to_use: |
+      - Before using Playwright to test JS-heavy applications
+      - When you need ZAP to capture and analyze browser traffic
+      - For combining Playwright automation with ZAP scanning
+    notes: |
+      RECOMMENDED APPROACH for JavaScript-heavy applications:
+
+      1. Call zap.proxy_info() to get proxy host:port
+      2. Launch Playwright browser with proxy settings
+      3. Use Playwright to navigate, login, interact with the app
+      4. ZAP captures all traffic via proxy_history
+      5. Run active_scan on captured URLs for vulnerability detection
+
+      This approach is more reliable than ajax_spider and gives full control
+      over browser interactions (auth flows, form filling, waiting for elements).
+    params: {}
+    returns:
+      port:
+        type: integer
+        description: "Proxy port number"
+      instructions:
+        type: string
+        description: "Setup instructions"
+
+  ajax_spider:
+    description: "Crawl JavaScript-heavy applications using Chrome headless browser"
+    when_to_use: |
+      - Single Page Applications (React, Vue, Angular)
+      - Pages with dynamic content loading
+      - When traditional spider misses endpoints
+      - Automated JS app crawling without custom interaction logic
+    notes: |
+      Uses Chrome headless (more reliable than Firefox in Docker).
+      Automatically discovers endpoints by executing JavaScript and clicking links.
+
+      For CUSTOM interactions (specific login flows, complex forms), use Playwright+ZAP:
+      1. zap.proxy_info() - get proxy settings
+      2. playwright with proxy - custom browser automation
+      3. zap.proxy_history() - captured traffic
+      4. zap.active_scan() - vulnerability scanning
+    params:
+      target:
+        type: string
+        required: true
+        description: "Target URL to crawl (e.g., http://target.com)"
+      wait:
+        type: boolean
+        default: true
+        description: "Wait for spider to complete"
+      timeout:
+        type: integer
+        default: 300
+        description: "Maximum seconds to wait for spider"
+      subtree_only:
+        type: boolean
+        default: true
+        description: "Only spider URLs under the target path"
+      max_crawl_depth:
+        type: integer
+        default: 10
+        description: "Maximum crawl depth"
+      max_duration:
+        type: integer
+        default: 0
+        description: "Maximum duration in minutes (0=unlimited)"
+    returns:
+      urls:
+        type: array
+        description: "List of discovered URLs"
+      urls_count:
+        type: integer
+        description: "Number of URLs discovered"
+      partial:
+        type: boolean
+        description: "True if scan timed out with partial results"

@@ -1,0 +1,161 @@
+name: tunnel
+version: "1.0"
+description: "SSH tunnel and SOCKS proxy for accessing remote localhost services"
+image: "ghcr.io/silicon-works/mcp-tools-tunnel:latest"
+image_size_mb: 100
+
+capabilities:
+  - port_forwarding
+  - socks_proxy
+  - pivoting
+  - tunnel_management
+
+phases:
+  - post-exploitation
+
+requirements:
+  network: true
+  privileged: false
+  network_mode: host
+  network_mode_reason: "Tunnels must be accessible from other containers"
+
+resources:
+  memory_mb: 128
+  cpu: 0.25
+
+# Routing hints for tool selection
+routing:
+  use_for:
+    - "SSH port forwarding"
+    - "SOCKS proxy"
+    - "pivoting to internal networks"
+    - "accessing localhost services on remote host"
+    - "tunnel management"
+  never_use_for:
+    - "direct SSH commands (use ssh)"
+    - "port scanning"
+    - "file transfer"
+  triggers:
+    - "tunnel"
+    - "port forward"
+    - "SOCKS"
+    - "pivot"
+    - "proxy"
+    - "internal network"
+    - "localhost service"
+  prefer_over:
+    - ssh  # For tunneling and pivoting workflows
+
+methods:
+  forward:
+    description: "Create SSH local port forward (access remote service via local port)"
+    when_to_use: "To access localhost-only services on remote host (e.g., MySQL on 127.0.0.1:3306)"
+    params:
+      ssh_host:
+        type: string
+        required: true
+        description: "SSH server hostname or IP"
+      ssh_user:
+        type: string
+        required: true
+        description: "SSH username"
+      ssh_password:
+        type: string
+        description: "SSH password"
+      ssh_key:
+        type: string
+        description: "SSH private key content"
+      ssh_port:
+        type: integer
+        default: 22
+        description: "SSH server port"
+      remote_host:
+        type: string
+        default: "127.0.0.1"
+        description: "Remote host to forward to (default: localhost on SSH server)"
+      remote_port:
+        type: integer
+        required: true
+        description: "Remote port to forward"
+      local_port:
+        type: integer
+        default: 0
+        description: "Local port to listen on (0 = auto-assign)"
+    returns:
+      tunnel_id:
+        type: string
+        description: "Unique tunnel identifier"
+      local_port:
+        type: integer
+        description: "Local port the tunnel is listening on"
+      connect_to:
+        type: string
+        description: "Address to connect to (e.g., 127.0.0.1:9999)"
+
+  socks:
+    description: "Create SOCKS5 proxy through SSH (dynamic port forwarding)"
+    when_to_use: "To proxy all traffic through the SSH server for pivoting"
+    params:
+      ssh_host:
+        type: string
+        required: true
+        description: "SSH server hostname or IP"
+      ssh_user:
+        type: string
+        required: true
+        description: "SSH username"
+      ssh_password:
+        type: string
+        description: "SSH password"
+      ssh_key:
+        type: string
+        description: "SSH private key content"
+      ssh_port:
+        type: integer
+        default: 22
+        description: "SSH server port"
+      local_port:
+        type: integer
+        default: 1080
+        description: "Local SOCKS port"
+    returns:
+      tunnel_id:
+        type: string
+        description: "Unique tunnel identifier"
+      proxy_url:
+        type: string
+        description: "SOCKS5 proxy URL (e.g., socks5://127.0.0.1:1080)"
+
+  list:
+    description: "List active tunnels"
+    when_to_use: "To see all active SSH tunnels and their status"
+    params: {}
+    returns:
+      tunnels:
+        type: array
+        description: "List of active tunnels with details"
+      count:
+        type: integer
+        description: "Number of active tunnels"
+
+  close:
+    description: "Close a specific tunnel"
+    when_to_use: "To close a tunnel that is no longer needed"
+    params:
+      tunnel_id:
+        type: string
+        required: true
+        description: "Tunnel ID to close"
+    returns:
+      tunnel_id:
+        type: string
+        description: "Closed tunnel ID"
+
+  close_all:
+    description: "Close all tunnels"
+    when_to_use: "Cleanup all tunnels at end of engagement"
+    params: {}
+    returns:
+      closed:
+        type: array
+        description: "List of closed tunnel IDs"

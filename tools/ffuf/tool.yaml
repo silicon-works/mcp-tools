@@ -1,0 +1,164 @@
+name: ffuf
+version: "2.1"
+description: "Fast web fuzzer for directory discovery, parameter fuzzing, and vhost enumeration"
+image: "ghcr.io/silicon-works/mcp-tools-ffuf:latest"
+image_size_mb: 200
+
+capabilities:
+  - directory_bruteforce
+  - parameter_fuzzing
+  - vhost_discovery
+
+# Routing hints for tool selection
+routing:
+  use_for:
+    - "directory brute-forcing"
+    - "directory enumeration"
+    - "find hidden files"
+    - "find hidden directories"
+    - "parameter fuzzing"
+    - "vhost discovery"
+    - "subdomain enumeration"
+  never_use_for:
+    - "SQL injection"
+    - "port scanning"
+    - "password cracking"
+  triggers:
+    - "ffuf"
+    - "directory brute"
+    - "fuzz"
+    - "dirbuster"
+    - "hidden files"
+    - "hidden directories"
+    - "vhost"
+    - "wordlist"
+  prefer_over:
+    - "gobuster"  # ffuf is faster and more flexible
+    - "dirbuster"  # ffuf is CLI-based and faster
+
+phases:
+  - enumeration
+
+requirements:
+  network: true
+  privileged: false
+
+resources:
+  memory_mb: 512
+  cpu: 1.0
+
+methods:
+  dir_fuzz:
+    description: "Fuzz directories and files on a web server"
+    when_to_use: "After discovering HTTP/HTTPS service to find hidden paths and files"
+    params:
+      url:
+        type: string
+        required: true
+        description: "Target URL (FUZZ keyword added automatically if missing)"
+      wordlist:
+        type: string
+        default: "common"
+        description: "Wordlist name (common, big, dirbuster-small, dirbuster-medium) or path"
+      extensions:
+        type: string
+        description: "File extensions to append (e.g., 'php,html,txt')"
+      threads:
+        type: integer
+        default: 40
+        description: "Number of concurrent threads"
+      filter_status:
+        type: string
+        description: "Match these status codes (default: 200,204,301,302,307,401,403,405)"
+      filter_size:
+        type: string
+        description: "Filter out responses of this size"
+      timeout:
+        type: integer
+        default: 10
+        description: "HTTP request timeout in seconds"
+      headers:
+        type: object
+        description: "Custom HTTP headers as key-value pairs (e.g., {\"Host\": \"target.htb\"})"
+      cookies:
+        type: string
+        description: "Cookie header value for authenticated fuzzing"
+    returns:
+      results:
+        type: array
+        description: "Discovered paths with status codes and sizes"
+      summary:
+        type: object
+        description: "Summary with target, wordlist, and found paths"
+
+  param_fuzz:
+    description: "Fuzz GET or POST parameters"
+    when_to_use: "To discover valid parameter values or test for injection points"
+    params:
+      url:
+        type: string
+        required: true
+        description: "Target URL with FUZZ keyword in parameter"
+      wordlist:
+        type: string
+        default: "common"
+        description: "Wordlist name or path"
+      method:
+        type: enum
+        default: GET
+        values: [GET, POST]
+        description: "HTTP method"
+      data:
+        type: string
+        description: "POST data with FUZZ keyword (e.g., 'username=admin&password=FUZZ')"
+      threads:
+        type: integer
+        default: 40
+        description: "Number of concurrent threads"
+      filter_status:
+        type: string
+        description: "Match these status codes"
+      filter_size:
+        type: string
+        description: "Filter out responses of this size"
+      headers:
+        type: object
+        description: "Custom HTTP headers as key-value pairs"
+      cookies:
+        type: string
+        description: "Cookie header value for authenticated fuzzing"
+    returns:
+      results:
+        type: array
+        description: "Matching parameter values with responses"
+
+  vhost_fuzz:
+    description: "Fuzz virtual hosts on a web server"
+    when_to_use: "To discover virtual hosts when targeting an IP with multiple sites"
+    params:
+      url:
+        type: string
+        required: true
+        description: "Target URL (IP address or hostname)"
+      domain:
+        type: string
+        required: true
+        description: "Base domain for vhost fuzzing (e.g., 'target.htb')"
+      wordlist:
+        type: string
+        default: "common"
+        description: "Wordlist for subdomain prefixes"
+      threads:
+        type: integer
+        default: 40
+        description: "Number of concurrent threads"
+      filter_size:
+        type: string
+        description: "Filter out default response size"
+    returns:
+      vhosts:
+        type: array
+        description: "Discovered virtual hosts"
+      summary:
+        type: object
+        description: "Summary with target domain and found vhosts"

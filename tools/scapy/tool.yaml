@@ -1,0 +1,284 @@
+name: scapy
+version: "2.5"
+description: "Packet crafting and protocol testing for UDP, custom protocols, raw sockets, and network manipulation"
+image: "ghcr.io/silicon-works/mcp-tools-scapy:latest"
+image_size_mb: 200
+
+capabilities:
+  - packet_crafting
+  - udp_testing
+  - protocol_manipulation
+  - raw_sockets
+  - arp_scanning
+  - dns_queries
+  - snmp_testing
+
+routing:
+  use_for:
+    - "UDP protocol testing"
+    - "custom packet crafting"
+    - "raw socket operations"
+    - "ARP scanning"
+    - "DNS queries"
+    - "SNMP community testing"
+    - "protocol fuzzing"
+    - "network layer testing"
+  never_use_for:
+    - "HTTP requests (use curl)"
+    - "port scanning (use nmap)"
+  triggers:
+    - "UDP"
+    - "packet craft"
+    - "raw socket"
+    - "ARP scan"
+    - "SNMP"
+    - "DNS query"
+    - "protocol fuzz"
+    - "scapy"
+  prefer_over:
+    - "netcat for UDP"
+
+phases:
+  - reconnaissance
+  - enumeration
+  - exploitation
+
+requirements:
+  network: true
+  privileged: true
+  privileged_reason: "Requires raw sockets (NET_RAW, NET_ADMIN) for packet crafting and ARP operations"
+  capabilities:
+    - NET_RAW
+    - NET_ADMIN
+
+resources:
+  memory_mb: 256
+  cpu: 0.5
+
+methods:
+  udp_send:
+    description: "Send a UDP packet and receive response"
+    when_to_use: "For UDP protocol testing, service interaction, or custom payloads"
+    params:
+      target:
+        type: string
+        required: true
+        description: "Target IP address"
+      port:
+        type: integer
+        required: true
+        description: "Target UDP port"
+      data:
+        type: string
+        required: true
+        description: "Payload data (string or hex with 0x prefix)"
+      sport:
+        type: integer
+        default: 0
+        description: "Source port (0 = random)"
+      timeout:
+        type: integer
+        default: 5
+        description: "Response timeout in seconds"
+    returns:
+      received:
+        type: boolean
+        description: "Whether response was received"
+      payload_hex:
+        type: string
+        description: "Response payload as hex"
+      payload_ascii:
+        type: string
+        description: "Response payload as ASCII"
+
+  udp_probe:
+    description: "Probe UDP ports to discover services"
+    when_to_use: "For UDP service discovery when nmap UDP scan is insufficient"
+    params:
+      target:
+        type: string
+        required: true
+        description: "Target IP"
+      ports:
+        type: string
+        required: true
+        description: "Ports to probe (comma-separated or range)"
+      probe_data:
+        type: string
+        default: ""
+        description: "Custom probe data (empty for service-specific defaults)"
+      timeout:
+        type: integer
+        default: 3
+        description: "Timeout per probe"
+    returns:
+      results:
+        type: array
+        description: "Per-port probe results"
+      open_ports:
+        type: array
+        description: "Potentially open ports"
+
+  tcp_syn:
+    description: "Send TCP SYN packet for custom port probing"
+    when_to_use: "For stealthy single-port checks or custom TCP testing"
+    params:
+      target:
+        type: string
+        required: true
+        description: "Target IP"
+      port:
+        type: integer
+        required: true
+        description: "Target port"
+      timeout:
+        type: integer
+        default: 3
+        description: "Response timeout"
+    returns:
+      state:
+        type: string
+        description: "Port state (open, closed, filtered)"
+      response:
+        type: object
+        description: "Response packet summary"
+
+  icmp_ping:
+    description: "Send ICMP echo request"
+    when_to_use: "For host discovery when regular ping is blocked"
+    params:
+      target:
+        type: string
+        required: true
+        description: "Target IP"
+      count:
+        type: integer
+        default: 1
+        description: "Number of pings"
+      timeout:
+        type: integer
+        default: 3
+        description: "Response timeout"
+    returns:
+      received:
+        type: integer
+        description: "Number of responses"
+      loss_percent:
+        type: number
+        description: "Packet loss percentage"
+
+  dns_query:
+    description: "Send DNS query to a server"
+    when_to_use: "For DNS enumeration, zone transfer testing, or custom DNS queries"
+    params:
+      server:
+        type: string
+        required: true
+        description: "DNS server IP"
+      domain:
+        type: string
+        required: true
+        description: "Domain to query"
+      query_type:
+        type: string
+        enum: [A, AAAA, MX, NS, TXT, SOA, CNAME, PTR, ANY]
+        default: A
+        description: "DNS query type"
+      timeout:
+        type: integer
+        default: 5
+        description: "Response timeout"
+    returns:
+      answers:
+        type: array
+        description: "DNS answers"
+      answer_count:
+        type: integer
+        description: "Number of answers"
+
+  craft_packet:
+    description: "Craft and send a custom packet"
+    when_to_use: "For protocol testing, fuzzing, or when no specialized tool exists"
+    params:
+      target:
+        type: string
+        required: true
+        description: "Target IP"
+      protocol:
+        type: string
+        enum: [tcp, udp, icmp]
+        required: true
+        description: "Protocol layer"
+      port:
+        type: integer
+        description: "Destination port (for TCP/UDP)"
+      flags:
+        type: string
+        default: "S"
+        description: "TCP flags (S=SYN, A=ACK, F=FIN, R=RST, P=PSH, U=URG)"
+      payload_hex:
+        type: string
+        description: "Payload as hex string"
+      payload_ascii:
+        type: string
+        description: "Payload as ASCII string"
+      timeout:
+        type: integer
+        default: 5
+        description: "Response timeout"
+    returns:
+      response:
+        type: object
+        description: "Response packet summary"
+
+  arp_scan:
+    description: "Perform ARP scan on local network"
+    when_to_use: "For local network host discovery"
+    params:
+      network:
+        type: string
+        required: true
+        description: "Network range (e.g., 192.168.1.0/24)"
+      timeout:
+        type: integer
+        default: 3
+        description: "Response timeout"
+    returns:
+      hosts:
+        type: array
+        description: "Discovered hosts with IP and MAC"
+      host_count:
+        type: integer
+        description: "Number of hosts found"
+
+  snmp_get:
+    description: "Send SNMP GET request for community string testing"
+    when_to_use: "To test SNMP community strings"
+    params:
+      target:
+        type: string
+        required: true
+        description: "Target IP"
+      community:
+        type: string
+        default: "public"
+        description: "SNMP community string to test"
+      oid:
+        type: string
+        default: "1.3.6.1.2.1.1.1.0"
+        description: "OID to query"
+      port:
+        type: integer
+        default: 161
+        description: "SNMP port"
+      timeout:
+        type: integer
+        default: 5
+        description: "Response timeout"
+    returns:
+      valid_community:
+        type: boolean
+        description: "Whether community string is valid"
+      response:
+        type: string
+        description: "SNMP response data"
