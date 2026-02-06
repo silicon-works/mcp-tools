@@ -14,8 +14,8 @@ RUN cd /usr/local/lib/node_modules/@playwright/mcp && npx playwright install --w
 
 # Configure MCP server to use bundled Chromium (not Chrome channel, which has VPN routing bugs)
 # defaultConfig hardcodes channel:"chrome" — override with "" to use bundled Chromium
-RUN echo '{"browser":{"browserName":"chromium","launchOptions":{"channel":"","headless":true,"chromiumSandbox":false}}}' > /config.json
+RUN echo '{"browser":{"browserName":"chromium","launchOptions":{"channel":"","headless":true,"chromiumSandbox":false}},"imageResponses":"allow"}' > /config.json
 
 # MCP servers communicate via stdio
-# --caps enables additional capabilities: testing (verify_*), tracing, pdf
-CMD ["npx", "@playwright/mcp", "--config", "/config.json", "--caps=testing,tracing,pdf"]
+# --caps enables additional capabilities: testing (verify_*), tracing, pdf, vision (coordinate-based interaction)
+CMD ["npx", "@playwright/mcp", "--config", "/config.json", "--caps=testing,tracing,pdf,vision"]
