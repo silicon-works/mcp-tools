@@ -6,6 +6,7 @@ on:
     paths:
       - 'tools/*/tool.yaml'
       - 'scripts/build-registry.py'
+      - 'scripts/build-registry-lance.py'
   workflow_dispatch:
 
 jobs:
@@ -105,8 +106,42 @@ jobs:
 
           EOF
 
-  publish:
+  build-lance:
     needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Cache BGE-M3 model weights
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/huggingface/hub/models--BAAI--bge-m3
+          key: bge-m3-model-v1
+
+      - name: Install dependencies
+        run: pip install pyyaml lancedb sentence-transformers pyarrow
+
+      - name: Build registry.yaml
+        run: python scripts/build-registry.py
+
+      - name: Build LanceDB registry artifacts
+        run: python scripts/build-registry-lance.py --output dist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: registry-lance-${{ github.sha }}
+          path: |
+            dist/registry.lance.tar.gz
+            dist/registry.sha256
+          retention-days: 90
+
+  publish:
+    needs: [build, build-lance]
     runs-on: ubuntu-latest
     if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
     steps:
@@ -122,6 +157,12 @@ jobs:
 
       - name: Build consolidated registry.yaml
         run: python scripts/build-registry.py
+
+      - name: Download LanceDB artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: registry-lance-${{ github.sha }}
+          path: dist/
 
       - name: Upload to opensploit.ai
         env:
@@ -142,18 +183,42 @@ jobs:
             "$REGISTRY_UPLOAD_URL" \
             --fail-with-body
 
-          echo "Registry published to opensploit.ai"
+          echo "Registry YAML published to opensploit.ai"
+
+          # Upload registry.sha256
+          HASH_URL="${REGISTRY_UPLOAD_URL%.yaml}.sha256"
+          curl -X PUT \
+            -H "Authorization: Bearer $REGISTRY_UPLOAD_TOKEN" \
+            -H "Content-Type: text/plain" \
+            --data-binary @dist/registry.sha256 \
+            "$HASH_URL" \
+            --fail-with-body
+
+          echo "Registry hash published to opensploit.ai"
+
+          # Upload registry.lance.tar.gz
+          LANCE_URL="${REGISTRY_UPLOAD_URL%.yaml}.lance.tar.gz"
+          curl -X PUT \
+            -H "Authorization: Bearer $REGISTRY_UPLOAD_TOKEN" \
+            -H "Content-Type: application/gzip" \
+            --data-binary @dist/registry.lance.tar.gz \
+            "$LANCE_URL" \
+            --fail-with-body
+
+          echo "Registry LanceDB archive published to opensploit.ai"
 
       - name: Create release artifact
         run: |
           # Create artifact with registry and version info
-          mkdir -p dist
-          cp registry.yaml dist/
-          echo "${{ github.sha }}" > dist/version.txt
-          echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > dist/published_at.txt
+          mkdir -p release
+          cp registry.yaml release/
+          cp dist/registry.sha256 release/
+          cp dist/registry.lance.tar.gz release/
+          echo "${{ github.sha }}" > release/version.txt
+          echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > release/published_at.txt
 
       - uses: actions/upload-artifact@v4
         with:
           name: registry-${{ github.sha }}
-          path: dist/
+          path: release/
           retention-days: 90

@@ -11,6 +11,7 @@ Usage:
 """
 
 import argparse
+import hashlib
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -20,6 +21,7 @@ import yaml
 PROJECT_ROOT = Path(__file__).parent.parent
 TOOLS_DIR = PROJECT_ROOT / "tools"
 REGISTRY_PATH = PROJECT_ROOT / "registry.yaml"
+HASH_PATH = PROJECT_ROOT / "registry.sha256"
 
 
 def load_tool_yamls() -> dict:
@@ -168,7 +170,13 @@ def main():
     with open(REGISTRY_PATH, "w") as f:
         f.write(output)
 
+    # Compute and write SHA-256 hash sidecar
+    content_hash = hashlib.sha256(output.encode("utf-8")).hexdigest()
+    with open(HASH_PATH, "w") as f:
+        f.write(content_hash + "\n")
+
     print(f"Wrote {REGISTRY_PATH} ({len(output)} bytes, {len(tools)} tools)")
+    print(f"Wrote {HASH_PATH} ({content_hash[:16]}...)")
 
 
 if __name__ == "__main__":
