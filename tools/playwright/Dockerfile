@@ -28,7 +28,7 @@ RUN echo '{"browser":{"browserName":"chromium","launchOptions":{"channel":"","he
 RUN echo '{"browser":{"browserName":"chromium","launchOptions":{"channel":"","headless":false,"chromiumSandbox":false,"args":["--window-size=1920,1080","--window-position=0,0"]}},"imageResponses":"allow"}' > /config-headed.json
 
 # Entrypoint starts Xvfb + VNC + noVNC, then launches Playwright MCP via stdio
-COPY entrypoint.sh /entrypoint.sh
+COPY tools/playwright/entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 
 EXPOSE 6080
