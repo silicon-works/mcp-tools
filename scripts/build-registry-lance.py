@@ -7,7 +7,7 @@ This script:
 2. Computes SHA-256 content hash → writes registry.sha256
 3. For each tool, builds search_text from name, description, capabilities,
    method descriptions, method when_to_use, and routing.use_for
-4. Embeds search_text with BGE-M3 via sentence-transformers → 1024-dim dense vectors
+4. Embeds search_text with BGE-M3 via FlagEmbedding (FP16) → 1024-dim dense vectors
 5. Creates LanceDB table 'tools' with plaintext fields + search_text + tool_vector + registry_hash
 6. Creates FTS index on search_text column
 7. Packages .lance directory → registry.lance.tar.gz
@@ -49,6 +49,11 @@ def build_search_text(tool: dict) -> str:
 
     Includes: name, description, capabilities, method descriptions,
     method when_to_use, and routing.use_for phrases.
+
+    IMPORTANT: This logic is duplicated in the TypeScript client at
+    packages/opencode/src/memory/tools.ts:buildSearchText().
+    Both must stay in sync for consistent FTS results between
+    CI-built indexes and YAML-fallback client-built indexes.
     """
     parts: list[str] = []
 
@@ -76,26 +81,38 @@ def build_search_text(tool: dict) -> str:
 
 
 def load_embedding_model():
-    """Load BGE-M3 model via sentence-transformers."""
-    try:
-        from sentence_transformers import SentenceTransformer
+    """
+    Load BGE-M3 model via FlagEmbedding with FP16.
 
-        print("Loading BGE-M3 model...")
-        model = SentenceTransformer("BAAI/bge-m3")
-        print(f"Model loaded (dimension: {model.get_sentence_embedding_dimension()})")
+    Uses the same library and precision as the runtime MCP server
+    (tools/embedding/mcp-server.py) to ensure CI-built vectors are in
+    the identical embedding space as query-time vectors.
+    """
+    try:
+        from FlagEmbedding import BGEM3FlagModel
+
+        print("Loading BGE-M3 model (FP16, matching runtime MCP server)...")
+        model = BGEM3FlagModel("BAAI/bge-m3", use_fp16=True)
+        print("Model loaded (dimension: 1024)")
         return model
     except ImportError:
-        print("sentence-transformers not installed, skipping embeddings", file=sys.stderr)
+        print("FlagEmbedding not installed, skipping embeddings", file=sys.stderr)
         return None
 
 
 def embed_texts(model, texts: list[str]) -> list[list[float]]:
-    """Embed texts using BGE-M3 model."""
+    """Embed texts using BGE-M3 model. Returns 1024-dim dense vectors."""
     if model is None:
         return [[] for _ in texts]
 
-    embeddings = model.encode(texts, normalize_embeddings=True, show_progress_bar=True)
-    return [emb.tolist() for emb in embeddings]
+    outputs = model.encode(
+        texts,
+        return_dense=True,
+        return_sparse=False,
+        return_colbert_vecs=False,
+        max_length=8192,
+    )
+    return [emb.tolist() for emb in outputs["dense_vecs"]]
 
 
 def build_lance_table(
@@ -218,10 +235,8 @@ def main():
     # Ensure output directory exists
     args.output.mkdir(parents=True, exist_ok=True)
 
-    # Write SHA-256 sidecar
-    sha256_path = args.output / "registry.sha256"
-    sha256_path.write_text(registry_hash + "\n")
-    print(f"Wrote {sha256_path}")
+    # Note: registry.sha256 sidecar is written by build-registry.py at project root.
+    # This script embeds the hash in LanceDB rows but doesn't write a separate file.
 
     # Build search texts
     search_texts = [build_search_text(tools[tid]) for tid in tools]
@@ -254,7 +269,6 @@ def main():
     print(f"  Hash:       {registry_hash[:16]}...")
     print(f"  Vectors:    {'yes' if embeddings else 'no (FTS only)'}")
     print(f"  Archive:    {tar_path} ({archive_size:,} bytes)")
-    print(f"  SHA-256:    {sha256_path}")
     print(f"{'='*60}")
 
 
