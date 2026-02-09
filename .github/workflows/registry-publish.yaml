@@ -9,6 +9,9 @@ on:
       - 'scripts/build-registry-lance.py'
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -20,10 +23,16 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: Install dependencies
-        run: pip install pyyaml
+      - name: Cache BGE-M3 model weights
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/huggingface/hub/models--BAAI--bge-m3
+          key: bge-m3-model-v1
 
-      - name: Build consolidated registry.yaml
+      - name: Install dependencies
+        run: pip install pyyaml lancedb sentence-transformers pyarrow
+
+      - name: Build registry.yaml and registry.sha256
         run: python scripts/build-registry.py
 
       - name: Validate registry schema
@@ -32,11 +41,9 @@ jobs:
           import yaml
           import sys
 
-          # Load registry
           with open('registry.yaml', 'r') as f:
               registry = yaml.safe_load(f)
 
-          # Basic validation
           errors = []
 
           if 'version' not in registry:
@@ -81,7 +88,18 @@ jobs:
 
           EOF
 
-      - name: Output registry summary
+      - name: Build LanceDB registry archive
+        run: python scripts/build-registry-lance.py
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: registry-artifacts
+          path: |
+            registry.yaml
+            registry.sha256
+            dist/registry.lance.tar.gz
+
+      - name: Output summary
         run: |
           echo "### Registry Summary" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
@@ -106,119 +124,39 @@ jobs:
 
           EOF
 
-  build-lance:
-    needs: build
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-
-      - name: Cache BGE-M3 model weights
-        uses: actions/cache@v4
-        with:
-          path: ~/.cache/huggingface/hub/models--BAAI--bge-m3
-          key: bge-m3-model-v1
-
-      - name: Install dependencies
-        run: pip install pyyaml lancedb sentence-transformers pyarrow
-
-      - name: Build registry.yaml
-        run: python scripts/build-registry.py
-
-      - name: Build LanceDB registry artifacts
-        run: python scripts/build-registry-lance.py --output dist
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: registry-lance-${{ github.sha }}
-          path: |
-            dist/registry.lance.tar.gz
-            dist/registry.sha256
-          retention-days: 90
-
   publish:
-    needs: [build, build-lance]
+    needs: build
     runs-on: ubuntu-latest
     if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-
-      - name: Install dependencies
-        run: pip install pyyaml
-
-      - name: Build consolidated registry.yaml
-        run: python scripts/build-registry.py
-
-      - name: Download LanceDB artifacts
+      - name: Download build artifacts
         uses: actions/download-artifact@v4
         with:
-          name: registry-lance-${{ github.sha }}
-          path: dist/
+          name: registry-artifacts
 
-      - name: Upload to opensploit.ai
+      - name: Publish to GitHub Release
         env:
-          REGISTRY_UPLOAD_TOKEN: ${{ secrets.REGISTRY_UPLOAD_TOKEN }}
-          REGISTRY_UPLOAD_URL: ${{ vars.REGISTRY_UPLOAD_URL }}
+          GH_TOKEN: ${{ github.token }}
         run: |
-          if [ -z "$REGISTRY_UPLOAD_URL" ]; then
-            echo "REGISTRY_UPLOAD_URL not configured, skipping upload"
-            echo "::notice::Registry upload skipped - configure REGISTRY_UPLOAD_URL variable"
-            exit 0
-          fi
+          # Create release if it doesn't exist
+          gh release create registry-latest \
+            --title "Registry Latest" \
+            --notes "Auto-generated registry artifacts ($(date -u +%Y-%m-%dT%H:%M:%SZ))" \
+            2>/dev/null || true
 
-          # Upload registry.yaml
-          curl -X PUT \
-            -H "Authorization: Bearer $REGISTRY_UPLOAD_TOKEN" \
-            -H "Content-Type: application/x-yaml" \
-            --data-binary @registry.yaml \
-            "$REGISTRY_UPLOAD_URL" \
-            --fail-with-body
+          # Upload/overwrite release assets
+          gh release upload registry-latest --clobber \
+            registry.yaml \
+            registry.sha256 \
+            dist/registry.lance.tar.gz
 
-          echo "Registry YAML published to opensploit.ai"
-
-          # Upload registry.sha256
-          HASH_URL="${REGISTRY_UPLOAD_URL%.yaml}.sha256"
-          curl -X PUT \
-            -H "Authorization: Bearer $REGISTRY_UPLOAD_TOKEN" \
-            -H "Content-Type: text/plain" \
-            --data-binary @dist/registry.sha256 \
-            "$HASH_URL" \
-            --fail-with-body
-
-          echo "Registry hash published to opensploit.ai"
-
-          # Upload registry.lance.tar.gz
-          LANCE_URL="${REGISTRY_UPLOAD_URL%.yaml}.lance.tar.gz"
-          curl -X PUT \
-            -H "Authorization: Bearer $REGISTRY_UPLOAD_TOKEN" \
-            -H "Content-Type: application/gzip" \
-            --data-binary @dist/registry.lance.tar.gz \
-            "$LANCE_URL" \
-            --fail-with-body
-
-          echo "Registry LanceDB archive published to opensploit.ai"
-
-      - name: Create release artifact
-        run: |
-          # Create artifact with registry and version info
-          mkdir -p release
-          cp registry.yaml release/
-          cp dist/registry.sha256 release/
-          cp dist/registry.lance.tar.gz release/
-          echo "${{ github.sha }}" > release/version.txt
-          echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > release/published_at.txt
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: registry-${{ github.sha }}
-          path: release/
-          retention-days: 90
+          echo "### Published to GitHub Release" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Release:** https://github.com/${{ github.repository }}/releases/tag/registry-latest" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Assets:" >> $GITHUB_STEP_SUMMARY
+          echo "- registry.yaml" >> $GITHUB_STEP_SUMMARY
+          echo "- registry.sha256" >> $GITHUB_STEP_SUMMARY
+          echo "- registry.lance.tar.gz" >> $GITHUB_STEP_SUMMARY
