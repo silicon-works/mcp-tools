@@ -1,17 +1,22 @@
 name: metasploit
 version: "6.4"
-description: "Exploitation framework for payload generation, vulnerability checks, and exploits"
+description: "Exploitation framework with persistent sessions via msfrpcd"
 image: "ghcr.io/silicon-works/mcp-tools-metasploit:latest"
 image_size_mb: 3000
+
+service: true
+service_name: "metasploit"
 
 capabilities:
   - payload_generation
   - exploit_execution
   - vulnerability_checking
   - module_search
+  - session_management
 
 phases:
   - exploitation
+  - post-exploitation
 
 requirements:
   network: true
@@ -29,6 +34,9 @@ routing:
     - "vulnerability checking with metasploit"
     - "meterpreter sessions"
     - "post-exploitation modules"
+    - "persistent shell sessions via exploit"
+    - "execute commands through exploit on target"
+    - "reverse shell handler"
   never_use_for:
     - "port scanning"
     - "directory enumeration"
@@ -121,7 +129,7 @@ methods:
 
   run_exploit:
     description: "Run an exploit module against a target"
-    when_to_use: "To exploit a confirmed vulnerability"
+    when_to_use: "To exploit a confirmed vulnerability. Sessions persist across tool calls."
     params:
       module:
         type: string
@@ -151,9 +159,12 @@ methods:
       exploit_success:
         type: boolean
         description: "Whether exploit appeared successful"
-      session_opened:
-        type: boolean
-        description: "Whether a session was opened"
+      sessions:
+        type: array
+        description: "New sessions opened (id, type, info, via_exploit, tunnel_peer)"
+      session_count:
+        type: integer
+        description: "Number of new sessions opened"
 
   exec_command:
     description: "Execute a command on target using an exploit with cmd/unix/generic payload"
@@ -197,7 +208,7 @@ methods:
     returns:
       sessions:
         type: array
-        description: "Active sessions with ID, type, and connection info"
+        description: "Active sessions with id, type, info, tunnel_local, tunnel_peer, via_exploit, via_payload, platform, arch"
       count:
         type: integer
         description: "Number of active sessions"
@@ -225,6 +236,9 @@ methods:
       command:
         type: string
         description: "Command executed"
+      output:
+        type: string
+        description: "Output from the command"
 
   post_module:
     description: "Run a post-exploitation module on a session"
@@ -255,7 +269,7 @@ methods:
 
   handler:
     description: "Start a multi/handler to catch reverse shells"
-    when_to_use: "To set up a listener for reverse shell payloads"
+    when_to_use: "To set up a persistent listener for reverse shell payloads"
     params:
       payload:
         type: string
@@ -286,3 +300,6 @@ methods:
       handler_started:
         type: boolean
         description: "Whether handler started successfully"
+      job_id:
+        type: string
+        description: "Background job ID in msfrpcd"

@@ -2,20 +2,25 @@
 """
 OpenSploit MCP Server: metasploit
 
-Exploitation framework for payload generation, vulnerability checks, and exploits.
+Exploitation framework with persistent sessions via msfrpcd.
+Uses pymetasploit3 RPC client so sessions survive across tool calls.
 """
 
+import asyncio
 import base64
 import os
 import re
 import tempfile
+import time
 from typing import Any, Dict, List, Optional
+
+from pymetasploit3.msfrpc import MsfRpcClient, ShellSession, MeterpreterSession
 
 from mcp_common import BaseMCPServer, ToolResult, ToolError, sanitize_output
 
 
 class MetasploitServer(BaseMCPServer):
-    """MCP server wrapping Metasploit Framework."""
+    """MCP server wrapping Metasploit Framework via msfrpcd."""
 
     PAYLOAD_FORMATS = [
         "exe", "elf", "raw", "ruby", "python", "perl", "php", "asp",
@@ -34,9 +39,12 @@ class MetasploitServer(BaseMCPServer):
     def __init__(self):
         super().__init__(
             name="metasploit",
-            description="Exploitation framework for payload generation, vulnerability checks, and exploits",
-            version="1.0.0",
+            description="Exploitation framework with persistent sessions via msfrpcd",
+            version="2.0.0",
         )
+
+        self.client: Optional[MsfRpcClient] = None
+        self.console = None  # Shared virtual console
 
         self.register_method(
             name="generate_payload",
@@ -283,6 +291,8 @@ class MetasploitServer(BaseMCPServer):
             handler=self.start_handler,
         )
 
+    # ── Helpers ──────────────────────────────────────────────────────────
+
     def _resolve_payload(self, payload: str) -> str:
         """Resolve payload shortcut to full name."""
         return self.COMMON_PAYLOADS.get(payload, payload)
@@ -307,6 +317,88 @@ class MetasploitServer(BaseMCPServer):
 
         return modules
 
+    async def _ensure_connected(self) -> None:
+        """Lazy-init RPC client and shared console. Retries up to 60s."""
+        if self.client is not None:
+            # Verify connection is still alive
+            try:
+                self.client.core.version()
+                return
+            except Exception:
+                self.logger.warning("msfrpcd connection lost, reconnecting...")
+                self.client = None
+                self.console = None
+
+        password = os.environ.get("MSF_PASSWORD", "msfpassword")
+        last_err = None
+
+        for attempt in range(30):
+            try:
+                self.client = MsfRpcClient(
+                    password, server="127.0.0.1", port=55553, ssl=False
+                )
+                self.logger.info("Connected to msfrpcd")
+
+                # Create shared console
+                self.console = self.client.consoles.console()
+
+                # Wait for console to initialize and drain banner
+                await asyncio.sleep(2)
+                self.console.read()
+                self.logger.info(f"Created shared console (cid={self.console.cid})")
+                return
+
+            except Exception as e:
+                last_err = e
+                self.logger.warning(
+                    f"msfrpcd not ready (attempt {attempt + 1}/30): {e}"
+                )
+                self.client = None
+                self.console = None
+                await asyncio.sleep(2)
+
+        raise ToolError(
+            message="Failed to connect to msfrpcd after 60 seconds",
+            details=str(last_err),
+        )
+
+    async def _console_exec(self, commands: str, timeout: int = 120) -> str:
+        """Write commands to shared console and poll until complete."""
+        await self._ensure_connected()
+
+        # Drain any pending output from previous commands
+        await asyncio.to_thread(self.console.read)
+
+        # Write commands to console
+        await asyncio.to_thread(self.console.write, commands + "\n")
+
+        # Poll until console is no longer busy
+        output = ""
+        start = time.time()
+        await asyncio.sleep(1)  # Give msfrpcd time to start processing
+
+        while time.time() - start < timeout:
+            res = await asyncio.to_thread(self.console.read)
+            output += res["data"]
+
+            if not res["busy"]:
+                # If no output yet and it's very early, command may not have started
+                if not output.strip() and time.time() - start < 5:
+                    await asyncio.sleep(1)
+                    continue
+                break
+
+            await asyncio.sleep(0.5)
+        else:
+            raise ToolError(
+                message=f"Console command timed out after {timeout}s",
+                details=output[:2000],
+            )
+
+        return output
+
+    # ── Tool Methods ─────────────────────────────────────────────────────
+
     async def generate_payload(
         self,
         payload: str,
@@ -316,7 +408,7 @@ class MetasploitServer(BaseMCPServer):
         encoder: Optional[str] = None,
         iterations: int = 1,
     ) -> ToolResult:
-        """Generate a payload using msfvenom."""
+        """Generate a payload using msfvenom (direct subprocess — stateless)."""
         self.logger.info(f"Generating payload: {payload}")
 
         payload_name = self._resolve_payload(payload)
@@ -342,6 +434,7 @@ class MetasploitServer(BaseMCPServer):
 
             # Read generated payload
             payload_data = None
+            payload_bytes = b""
             if os.path.exists(output_file) and os.path.getsize(output_file) > 0:
                 with open(output_file, "rb") as f:
                     payload_bytes = f.read()
@@ -354,7 +447,7 @@ class MetasploitServer(BaseMCPServer):
                     "lhost": lhost,
                     "lport": lport,
                     "format": format,
-                    "size_bytes": len(payload_bytes) if payload_data else 0,
+                    "size_bytes": len(payload_bytes),
                     "payload_base64": payload_data,
                     "encoder": encoder,
                 },
@@ -376,23 +469,16 @@ class MetasploitServer(BaseMCPServer):
         query: str,
         type: str = "all",
     ) -> ToolResult:
-        """Search for Metasploit modules."""
+        """Search for Metasploit modules via msfrpcd console."""
         self.logger.info(f"Searching modules: {query}")
 
-        # Build search command
         search_cmd = f"search {query}"
         if type != "all":
             search_cmd = f"search type:{type} {query}"
 
-        args = [
-            "msfconsole",
-            "-q",
-            "-x", f"{search_cmd}; exit",
-        ]
-
         try:
-            result = await self.run_command(args, timeout=60)
-            modules = self._parse_search_output(result.stdout)
+            output = await self._console_exec(search_cmd, timeout=60)
+            modules = self._parse_search_output(output)
 
             return ToolResult(
                 success=True,
@@ -402,7 +488,7 @@ class MetasploitServer(BaseMCPServer):
                     "modules": modules,
                     "count": len(modules),
                 },
-                raw_output=sanitize_output(result.stdout),
+                raw_output=sanitize_output(output),
             )
 
         except ToolError as e:
@@ -422,32 +508,24 @@ class MetasploitServer(BaseMCPServer):
         """Check if a target is vulnerable using an auxiliary scanner."""
         self.logger.info(f"Checking vulnerability with {module} against {rhosts}")
 
-        # Build msfconsole commands
-        commands = [
+        cmds = [
             f"use {module}",
             f"set RHOSTS {rhosts}",
         ]
 
         if options:
             for key, value in options.items():
-                commands.append(f"set {key} {value}")
+                cmds.append(f"set {key} {value}")
 
-        commands.extend(["run", "exit"])
-
-        args = [
-            "msfconsole",
-            "-q",
-            "-x", "; ".join(commands),
-        ]
+        cmds.append("run")
 
         try:
-            result = await self.run_command(args, timeout=timeout)
-            output = result.stdout + result.stderr
+            output = await self._console_exec("\n".join(cmds), timeout=timeout)
 
-            # Check for vulnerability indicators
-            vulnerable = False
-            if any(x in output.lower() for x in ["vulnerable", "likely vulnerable", "is vulnerable"]):
-                vulnerable = True
+            vulnerable = any(
+                x in output.lower()
+                for x in ["vulnerable", "likely vulnerable", "is vulnerable"]
+            )
 
             return ToolResult(
                 success=True,
@@ -476,54 +554,66 @@ class MetasploitServer(BaseMCPServer):
         options: Optional[Dict[str, Any]] = None,
         timeout: int = 300,
     ) -> ToolResult:
-        """Run an exploit module against a target."""
+        """Run an exploit module against a target. Sessions persist in msfrpcd."""
         self.logger.info(f"Running exploit {module} against {rhosts}")
 
-        # Build msfconsole commands
-        commands = [
-            f"use {module}",
-            f"set RHOSTS {rhosts}",
-        ]
-
-        if payload:
-            commands.append(f"set PAYLOAD {self._resolve_payload(payload)}")
-        if lhost:
-            commands.append(f"set LHOST {lhost}")
-        if lport:
-            commands.append(f"set LPORT {lport}")
-
-        if options:
-            for key, value in options.items():
-                commands.append(f"set {key} {value}")
-
-        commands.extend(["exploit -z", "exit"])
-
-        args = [
-            "msfconsole",
-            "-q",
-            "-x", "; ".join(commands),
-        ]
-
         try:
-            result = await self.run_command(args, timeout=timeout)
-            output = result.stdout + result.stderr
+            await self._ensure_connected()
 
-            # Check for success indicators
-            success = False
-            session_opened = False
-            if any(x in output.lower() for x in ["session", "meterpreter", "command shell"]):
-                session_opened = True
-                success = True
-            elif "exploit completed" in output.lower():
-                success = True
+            # Snapshot sessions before exploit
+            before = set(self.client.sessions.list.keys())
+
+            # Build console commands
+            cmds = [
+                f"use {module}",
+                f"set RHOSTS {rhosts}",
+            ]
+
+            if payload:
+                cmds.append(f"set PAYLOAD {self._resolve_payload(payload)}")
+            if lhost:
+                cmds.append(f"set LHOST {lhost}")
+            if lport:
+                cmds.append(f"set LPORT {lport}")
+
+            if options:
+                for key, value in options.items():
+                    cmds.append(f"set {key} {value}")
+
+            cmds.append("exploit -j")  # Run as background job
+
+            output = await self._console_exec("\n".join(cmds), timeout=timeout)
+
+            # Wait for session to establish
+            await asyncio.sleep(3)
+
+            # Snapshot sessions after exploit
+            after_sessions = self.client.sessions.list
+            after = set(after_sessions.keys())
+            new_session_ids = after - before
+
+            # Build session details
+            sessions = []
+            for sid in sorted(new_session_ids, key=int):
+                s = after_sessions[sid]
+                sessions.append({
+                    "id": int(sid),
+                    "type": s.get("type", "unknown"),
+                    "info": s.get("info", ""),
+                    "via_exploit": s.get("via_exploit", ""),
+                    "tunnel_peer": s.get("tunnel_peer", ""),
+                })
+
+            exploit_success = bool(sessions) or "exploit completed" in output.lower()
 
             return ToolResult(
                 success=True,
                 data={
                     "module": module,
                     "target": rhosts,
-                    "exploit_success": success,
-                    "session_opened": session_opened,
+                    "exploit_success": exploit_success,
+                    "sessions": sessions,
+                    "session_count": len(sessions),
                 },
                 raw_output=sanitize_output(output),
             )
@@ -546,46 +636,33 @@ class MetasploitServer(BaseMCPServer):
         """Execute a command on target using an exploit with cmd payload."""
         self.logger.info(f"Executing command via {module} on {rhosts}: {command}")
 
-        # Build msfconsole commands - use cmd/unix/generic for command execution
-        commands = [
+        cmds = [
             f"use {module}",
             f"set RHOSTS {rhosts}",
             "set PAYLOAD cmd/unix/generic",
-            f'set CMD {command}',
+            f"set CMD {command}",
         ]
 
         if options:
             for key, value in options.items():
-                commands.append(f"set {key} {value}")
+                cmds.append(f"set {key} {value}")
 
-        # Use 'run' instead of 'exploit -z' to see output directly
-        commands.extend(["run", "exit"])
-
-        args = [
-            "msfconsole",
-            "-q",
-            "-x", "; ".join(commands),
-        ]
+        cmds.append("run")
 
         try:
-            result = await self.run_command(args, timeout=timeout)
-            output = result.stdout + result.stderr
+            output = await self._console_exec("\n".join(cmds), timeout=timeout)
 
             # Parse the output to extract command results
-            # Look for output after the exploit runs
             command_output = ""
             exploit_success = False
 
-            # Check for success indicators
             if "exploit completed" in output.lower() or "command executed" in output.lower():
                 exploit_success = True
 
-            # Try to extract command output from the full output
-            # The output typically appears after "[*]" markers
+            # Extract command output from the console output
             lines = output.split("\n")
             capture = False
             for line in lines:
-                # Skip metasploit UI lines
                 if line.startswith("[*]") or line.startswith("[+]") or line.startswith("[-]"):
                     if "executing" in line.lower() or "command" in line.lower():
                         capture = True
@@ -617,32 +694,26 @@ class MetasploitServer(BaseMCPServer):
         self,
         timeout: int = 30,
     ) -> ToolResult:
-        """List active Meterpreter/shell sessions."""
+        """List active Meterpreter/shell sessions from msfrpcd."""
         self.logger.info("Listing active sessions")
 
-        args = [
-            "msfconsole",
-            "-q",
-            "-x", "sessions -l; exit",
-        ]
-
         try:
-            result = await self.run_command(args, timeout=timeout)
-            output = result.stdout
+            await self._ensure_connected()
 
-            # Parse session list
+            sessions_dict = self.client.sessions.list
             sessions = []
-            for line in output.split("\n"):
-                # Match lines like: "  1     meterpreter x86/windows  user@host  192.168.1.1:4444 -> ..."
-                match = re.match(r"\s*(\d+)\s+(\S+)\s+(\S+)\s+(\S+)\s+(\S+)", line)
-                if match:
-                    sessions.append({
-                        "id": int(match.group(1)),
-                        "type": match.group(2),
-                        "info": match.group(3),
-                        "user": match.group(4),
-                        "connection": match.group(5),
-                    })
+            for sid, info in sessions_dict.items():
+                sessions.append({
+                    "id": int(sid),
+                    "type": info.get("type", "unknown"),
+                    "info": info.get("info", ""),
+                    "tunnel_local": info.get("tunnel_local", ""),
+                    "tunnel_peer": info.get("tunnel_peer", ""),
+                    "via_exploit": info.get("via_exploit", ""),
+                    "via_payload": info.get("via_payload", ""),
+                    "platform": info.get("platform", ""),
+                    "arch": info.get("arch", ""),
+                })
 
             return ToolResult(
                 success=True,
@@ -650,7 +721,6 @@ class MetasploitServer(BaseMCPServer):
                     "sessions": sessions,
                     "count": len(sessions),
                 },
-                raw_output=sanitize_output(output),
             )
 
         except ToolError as e:
@@ -666,27 +736,67 @@ class MetasploitServer(BaseMCPServer):
         command: str,
         timeout: int = 60,
     ) -> ToolResult:
-        """Run a command in an active session."""
+        """Run a command in an active session via msfrpcd."""
         self.logger.info(f"Running command in session {session_id}: {command}")
 
-        # Use sessions -C to run command in a session
-        args = [
-            "msfconsole",
-            "-q",
-            "-x", f"sessions -C '{command}' -i {session_id}; exit",
-        ]
-
         try:
-            result = await self.run_command(args, timeout=timeout)
-            output = result.stdout + result.stderr
+            await self._ensure_connected()
+
+            # Verify session exists (handle both int and str keys from msgpack)
+            sessions = self.client.sessions.list
+            session_info = sessions.get(str(session_id)) or sessions.get(session_id)
+            if session_info is None:
+                available = [int(k) for k in sessions.keys()]
+                return ToolResult(
+                    success=False,
+                    data={},
+                    error=f"Session {session_id} not found. Active sessions: {available}",
+                )
+            session_type = session_info.get("type", "shell")
+
+            # Bypass pymetasploit3's session() which makes a redundant RPC
+            # call that can fail due to int/str key mismatch in msgpack
+            if session_type == "meterpreter":
+                session = MeterpreterSession(session_id, self.client, session_info)
+            else:
+                session = ShellSession(session_id, self.client, session_info)
+
+            if session_type == "meterpreter":
+                # Meterpreter: use run_with_output for synchronous command execution
+                output = await asyncio.to_thread(
+                    lambda: session.run_with_output(command, timeout=timeout)
+                )
+            else:
+                # Shell: write command and poll until output stabilizes
+                await asyncio.to_thread(session.write, command + "\n")
+                output = ""
+                stable_count = 0
+                deadline = time.time() + timeout
+                await asyncio.sleep(0.5)
+
+                while time.time() < deadline:
+                    chunk = await asyncio.to_thread(session.read)
+                    if isinstance(chunk, dict):
+                        chunk = chunk.get("data", "")
+                    if chunk:
+                        output += chunk
+                        stable_count = 0
+                    else:
+                        stable_count += 1
+                        if stable_count >= 3:  # No new data for ~1.5s
+                            break
+                    await asyncio.sleep(0.5)
+
+            if isinstance(output, dict):
+                output = output.get("data", "")
 
             return ToolResult(
                 success=True,
                 data={
                     "session_id": session_id,
                     "command": command,
+                    "output": output.strip() if isinstance(output, str) else str(output),
                 },
-                raw_output=sanitize_output(output),
             )
 
         except ToolError as e:
@@ -694,6 +804,12 @@ class MetasploitServer(BaseMCPServer):
                 success=False,
                 data={},
                 error=str(e),
+            )
+        except Exception as e:
+            return ToolResult(
+                success=False,
+                data={},
+                error=f"Session command failed: {e}",
             )
 
     async def post_module(
@@ -703,29 +819,22 @@ class MetasploitServer(BaseMCPServer):
         options: Optional[Dict[str, Any]] = None,
         timeout: int = 120,
     ) -> ToolResult:
-        """Run a post-exploitation module on a session."""
+        """Run a post-exploitation module on a session via msfrpcd console."""
         self.logger.info(f"Running post module {module} on session {session_id}")
 
-        commands = [
+        cmds = [
             f"use {module}",
             f"set SESSION {session_id}",
         ]
 
         if options:
             for key, value in options.items():
-                commands.append(f"set {key} {value}")
+                cmds.append(f"set {key} {value}")
 
-        commands.extend(["run", "exit"])
-
-        args = [
-            "msfconsole",
-            "-q",
-            "-x", "; ".join(commands),
-        ]
+        cmds.append("run")
 
         try:
-            result = await self.run_command(args, timeout=timeout)
-            output = result.stdout + result.stderr
+            output = await self._console_exec("\n".join(cmds), timeout=timeout)
 
             return ToolResult(
                 success=True,
@@ -750,12 +859,12 @@ class MetasploitServer(BaseMCPServer):
         lport: int,
         timeout: int = 300,
     ) -> ToolResult:
-        """Start a multi/handler to catch reverse shells."""
+        """Start a multi/handler to catch reverse shells. Handler persists in msfrpcd."""
         self.logger.info(f"Starting handler for {payload} on {lhost}:{lport}")
 
         payload_name = self._resolve_payload(payload)
 
-        commands = [
+        cmds = [
             "use exploit/multi/handler",
             f"set PAYLOAD {payload_name}",
             f"set LHOST {lhost}",
@@ -764,23 +873,16 @@ class MetasploitServer(BaseMCPServer):
             "exploit -j",
         ]
 
-        # Run handler and wait a bit for it to start
-        commands.append("sleep 2")
-        commands.append("jobs")
-        commands.append("exit")
-
-        args = [
-            "msfconsole",
-            "-q",
-            "-x", "; ".join(commands),
-        ]
-
         try:
-            result = await self.run_command(args, timeout=timeout)
-            output = result.stdout + result.stderr
+            output = await self._console_exec("\n".join(cmds), timeout=30)
 
-            # Check if handler started
-            handler_started = "handler" in output.lower() and "started" in output.lower()
+            # Extract job ID from output (e.g., "[*] Exploit running as background job 0.")
+            job_id = None
+            match = re.search(r"background job (\d+)", output)
+            if match:
+                job_id = match.group(1)
+
+            handler_started = "started" in output.lower() and "handler" in output.lower()
 
             return ToolResult(
                 success=True,
@@ -789,6 +891,7 @@ class MetasploitServer(BaseMCPServer):
                     "lhost": lhost,
                     "lport": lport,
                     "handler_started": handler_started,
+                    "job_id": job_id,
                 },
                 raw_output=sanitize_output(output),
             )

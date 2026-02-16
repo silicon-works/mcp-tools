@@ -1,5 +1,5 @@
 # OpenSploit MCP Server: metasploit
-# Exploitation framework for payload generation, vulnerability checks, and exploits
+# Exploitation framework with persistent sessions via msfrpcd
 
 FROM kalilinux/kali-rolling
 
@@ -7,10 +7,11 @@ LABEL org.opencontainers.image.source="https://github.com/silicon-works/mcp-tool
 LABEL org.opencontainers.image.description="metasploit MCP server for OpenSploit"
 LABEL org.opencontainers.image.licenses="MIT"
 
-# Install metasploit-framework (large package)
+# Install metasploit-framework + curl for health check
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
         metasploit-framework \
+        curl \
         python3 \
         python3-pip \
         python3-venv && \
@@ -35,5 +36,9 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy MCP server code
 COPY tools/metasploit/mcp-server.py .
 
-# MCP servers communicate via stdio
-CMD ["python3", "mcp-server.py"]
+# Copy and prepare entrypoint
+COPY tools/metasploit/entrypoint.sh .
+RUN chmod +x /app/entrypoint.sh
+
+# msfrpcd + MCP server via entrypoint
+ENTRYPOINT ["bash", "/app/entrypoint.sh"]
