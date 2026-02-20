@@ -1,5 +1,5 @@
 version: '2.0'
-updated_at: '2026-02-20T15:12:21Z'
+updated_at: '2026-02-20T16:41:18Z'
 tools:
   curl:
     name: curl
@@ -1616,7 +1616,8 @@ tools:
     name: ghidra
     version: '12.0'
     description: Ghidra reverse engineering framework for binary decompilation, disassembly, function analysis, and cross-reference
-      mapping. Converts machine code to readable C pseudocode.
+      mapping. Converts machine code to readable C pseudocode. Powered by bethington/ghidra-mcp (headless mode, 128 tools
+      available via bridge).
     image: ghcr.io/silicon-works/mcp-tools-ghidra:latest
     image_size_mb: 1500
     capabilities:
@@ -1659,93 +1660,63 @@ tools:
       cpu: 2.0
     methods:
       load_binary:
-        description: Load a binary into Ghidra and run auto-analysis. Call this first before using other analysis methods
-          — analysis can take 5-30s depending on binary size.
+        description: Load a binary file from the filesystem into Ghidra and run auto-analysis. Call this first before using
+          other analysis methods — analysis can take 5-30s depending on binary size.
         when_to_use: First step when you have a binary to analyze. Load it once, then use decompile_function, list_functions,
           etc. repeatedly without waiting again.
         params:
-          binary_path:
+          file:
             type: string
             required: true
-            description: Path to the binary file to load and analyze (use /session/ path for files in session directory)
+            description: Absolute path to the binary file (e.g., '/data/vuln', '/session/binary')
         returns:
-          binary_path:
+          program:
             type: string
-            description: Path to the loaded binary
-          analyzed:
-            type: boolean
-            description: Whether auto-analysis completed successfully
+            description: Program name in Ghidra project
       decompile_function:
-        description: Decompile a function to C pseudocode by name. Returns readable C code from machine code, making it easy
-          to identify vulnerabilities like buffer overflows, format strings, and logic flaws.
+        description: Decompile a function to C pseudocode by name or address. Returns readable C code from machine code, making
+          it easy to identify vulnerabilities like buffer overflows, format strings, and logic flaws.
         when_to_use: After identifying a potentially vulnerable function (from strings, symbols, or function list) to understand
           its logic in C rather than reading raw assembly.
         params:
-          binary_path:
-            type: string
-            required: true
-            description: Path to the binary file to analyze (use /session/ path for files in session directory)
           name:
             type: string
-            required: true
-            description: Function name to decompile (e.g., 'main', 'vuln', 'check_password')
-        returns:
-          decompiled:
-            type: string
-            description: C pseudocode of the function
-      decompile_function_by_address:
-        description: Decompile a function at a specific memory address to C pseudocode. Use when you have an address but not
-          a function name.
-        when_to_use: When you have a function address from xrefs, crash dumps, or disassembly but don't know the function
-          name.
-        params:
-          binary_path:
-            type: string
-            required: true
-            description: Path to the binary file
+            description: Function name to decompile (e.g., 'main', 'vuln'). Either name or address required.
           address:
             type: string
-            required: true
-            description: Function address in hex (e.g., '0x401234')
+            description: Function address in hex (e.g., '0x401234'). Alternative to name.
+          program:
+            type: string
+            description: Program name for multi-binary sessions
         returns:
           decompiled:
             type: string
             description: C pseudocode of the function
       list_functions:
-        description: List all functions found in the binary with their addresses and sizes.
+        description: 'List all functions found in the binary with their addresses. Note: returns all functions regardless
+          of offset/limit in headless mode.'
         when_to_use: First step when analyzing an unknown binary — get an overview of all functions to identify interesting
           targets (main, custom functions, vulnerable-looking names like 'check_auth', 'handle_input').
         params:
-          binary_path:
+          program:
             type: string
-            required: true
-            description: Path to the binary file
-          offset:
-            type: integer
-            default: 0
-            description: Pagination offset for large binaries
-          limit:
-            type: integer
-            default: 100
-            description: Maximum number of functions to return
+            description: Program name for multi-binary sessions
         returns:
           functions:
             type: array
-            description: List of functions with name, address, size
+            description: List of functions with name and address
       search_functions_by_name:
-        description: Search for functions whose names contain a query string. Useful for finding functions related to specific
-          functionality.
+        description: Search for functions whose names contain a query string. Case-insensitive substring match.
         when_to_use: When looking for functions related to specific behavior (e.g., search 'auth' to find authentication functions,
           'buf' to find buffer-related functions).
         params:
-          binary_path:
-            type: string
-            required: true
-            description: Path to the binary file
           query:
             type: string
             required: true
             description: Substring to search for in function names (e.g., 'auth', 'check', 'buf')
+          program:
+            type: string
+            description: Program name for multi-binary sessions
         returns:
           functions:
             type: array
@@ -1755,48 +1726,55 @@ tools:
         when_to_use: To understand how a potentially vulnerable function is reached (call chain), or to find all callers of
           a dangerous function like system(), execve(), strcpy().
         params:
-          binary_path:
-            type: string
-            required: true
-            description: Path to the binary file
           address:
             type: string
             required: true
-            description: Target address in hex (e.g., '0x401234') or function name
+            description: Target address in hex (e.g., '0x401234')
+          offset:
+            type: integer
+            default: 0
+            description: Pagination offset
+          limit:
+            type: integer
+            default: 100
+            description: Maximum results to return
+          program:
+            type: string
+            description: Program name for multi-binary sessions
         returns:
           xrefs:
             type: array
             description: List of addresses/functions that reference this location
-      get_xrefs_from:
-        description: Get cross-references FROM an address — shows what this function/location calls or references.
-        when_to_use: To see what dangerous functions a target function calls (system, execve, strcpy, gets, printf with user
-          input).
+      get_function_xrefs:
+        description: Get all cross-references to a function by name — easier than get_xrefs_to when you have a name, not an
+          address.
+        when_to_use: When you know a function name and want to find all callers without looking up its address first.
         params:
-          binary_path:
+          name:
             type: string
             required: true
-            description: Path to the binary file
-          address:
+            description: Function name to find references for
+          offset:
+            type: integer
+            default: 0
+            description: Pagination offset
+          limit:
+            type: integer
+            default: 100
+            description: Maximum results to return
+          program:
             type: string
-            required: true
-            description: Source address in hex (e.g., '0x401234') or function name
+            description: Program name for multi-binary sessions
         returns:
           xrefs:
             type: array
-            description: List of addresses/functions referenced by this location
+            description: List of references to the function
       list_strings:
-        description: Extract defined strings from the binary with their addresses. Finds URLs, passwords, error messages,
-          format strings, /bin/sh, and other interesting constants.
+        description: List all defined strings in the binary with their addresses. Finds URLs, passwords, error messages, format
+          strings, /bin/sh, and other interesting constants.
         when_to_use: To find interesting strings (URLs, passwords, error messages, format strings, /bin/sh) and trace them
           back to the functions that use them via xrefs.
         params:
-          binary_path:
-            type: string
-            required: true
-            description: Path to the binary file
-          filter:
-            type: string
-            description: Optional substring filter to narrow results (e.g., 'password', '/bin', 'http')
           offset:
             type: integer
             default: 0
@@ -1805,6 +1783,9 @@ tools:
             type: integer
             default: 100
             description: Maximum strings to return
+          program:
+            type: string
+            description: Program name for multi-binary sessions
         returns:
           strings:
             type: array
@@ -1815,10 +1796,17 @@ tools:
         when_to_use: To identify dangerous imports (gets, strcpy, printf, system) that indicate vulnerability types, and to
           get addresses needed for ROP chains and GOT overwrite attacks.
         params:
-          binary_path:
+          offset:
+            type: integer
+            default: 0
+            description: Pagination offset
+          limit:
+            type: integer
+            default: 100
+            description: Maximum results
+          program:
             type: string
-            required: true
-            description: Path to the binary file
+            description: Program name for multi-binary sessions
         returns:
           imports:
             type: array
@@ -1827,44 +1815,108 @@ tools:
         description: List exported symbols from the binary.
         when_to_use: To see what symbols the binary exports — useful for shared libraries or to find entry points.
         params:
-          binary_path:
+          offset:
+            type: integer
+            default: 0
+            description: Pagination offset
+          limit:
+            type: integer
+            default: 100
+            description: Maximum results
+          program:
             type: string
-            required: true
-            description: Path to the binary file
+            description: Program name for multi-binary sessions
         returns:
           exports:
             type: array
             description: Exported symbols with names and addresses
       list_segments:
-        description: List memory segments (sections) of the binary with permissions.
+        description: List memory segments (sections) of the binary with address ranges.
         when_to_use: To understand memory layout — which segments are executable (for shellcode), writable (for overwrites),
           or both (W+X = exploitable).
         params:
-          binary_path:
+          program:
             type: string
-            required: true
-            description: Path to the binary file
+            description: Program name for multi-binary sessions
         returns:
           segments:
             type: array
-            description: Segments with name, address, size, permissions
-      disassemble_function:
-        description: Get the assembly code for a function. Returns raw assembly instructions with addresses.
-        when_to_use: When you need exact assembly instructions (e.g., to verify ROP gadgets, understand calling convention,
-          or check instruction alignment). Prefer decompile_function for general understanding.
+            description: Segments with name, address range
+      get_entry_points:
+        description: Get all entry point addresses for the binary.
+        when_to_use: To find the binary's entry point(s) — useful for stripped binaries where main() isn't easily identifiable.
+        params: {}
+        returns:
+          entry_points:
+            type: array
+            description: Entry point names and addresses
+      rename_function:
+        description: Rename a function to give it a more descriptive name.
+        when_to_use: After identifying what a function does, rename it for clarity (e.g., rename 'FUN_00401234' to 'vulnerable_strcpy_wrapper').
         params:
-          binary_path:
+          old_name:
             type: string
             required: true
-            description: Path to the binary file
+            description: Current function name
+          new_name:
+            type: string
+            required: true
+            description: New function name
+        returns:
+          result:
+            type: string
+            description: Confirmation of rename
+      get_metadata:
+        description: Get metadata about the currently loaded program — name, path, architecture, compiler, image base address.
+        when_to_use: After loading a binary, to determine its architecture (x86, ARM, MIPS), compiler, and base address for
+          calculating offsets.
+        params: {}
+        returns:
+          metadata:
+            type: object
+            description: Program name, path, language, compiler, image_base, address_size
+      get_function_by_address:
+        description: Get function information by its address. Returns name, signature, and calling convention.
+        when_to_use: When you have a hex address (from xrefs, crash logs, or exploit output) and need to find which function
+          it belongs to.
+        params:
           address:
             type: string
             required: true
-            description: Function address in hex
+            description: Address in hex (e.g., '0x401234')
         returns:
-          assembly:
+          function:
+            type: object
+            description: Function name, address, signature, calling convention
+      get_function_variables:
+        description: List all variables in a function including parameters and locals.
+        when_to_use: To understand a function's stack layout — identify buffer sizes, variable types, and stack offsets needed
+          for buffer overflow exploits.
+        params:
+          function_name:
             type: string
-            description: Assembly code listing
+            required: true
+            description: Function name to inspect
+        returns:
+          variables:
+            type: object
+            description: Function parameters and local variables with types
+      check_connection:
+        description: Verify the Ghidra server is running and responsive.
+        when_to_use: To check if Ghidra is ready before starting analysis, or to diagnose connection issues.
+        params: {}
+        returns:
+          status:
+            type: string
+            description: Connection status and server version
+      list_open_programs:
+        description: List all currently open programs in Ghidra.
+        when_to_use: When working with multiple binaries to see which programs are loaded and which is currently active.
+        params: {}
+        returns:
+          programs:
+            type: array
+            description: List of open program names with current indicator
   hash-lookup:
     name: hash-lookup
     version: '1.0'
@@ -4945,7 +4997,9 @@ tools:
   nikto:
     name: nikto
     version: '2.5'
-    description: Web server vulnerability scanner
+    description: Web server vulnerability scanner that checks for 8000+ potentially dangerous files, outdated server versions
+      (Apache, nginx, IIS, Tomcat), and server-level misconfigurations including insecure HTTP methods, default credentials,
+      and known CVEs with OSVDB references
     image: ghcr.io/silicon-works/mcp-tools-nikto:latest
     image_size_mb: 150
     capabilities:
@@ -4967,6 +5021,12 @@ tools:
       - server misconfiguration detection
       - outdated software detection
       - web server fingerprinting
+      - dangerous default files and backup file detection
+      - insecure HTTP headers and methods check
+      - Apache nginx IIS Tomcat version vulnerability check
+      - server-level CVE and OSVDB detection
+      - CGI vulnerability scanning
+      - web server security audit
       never_use_for:
       - port scanning
       - SQL injection
@@ -4979,35 +5039,52 @@ tools:
       - outdated server
     methods:
       scan:
-        description: Scan a web server for vulnerabilities and misconfigurations
-        when_to_use: After discovering HTTP/HTTPS service to identify web vulnerabilities
+        description: Scan a web server for known vulnerabilities including outdated server software (Apache, nginx, IIS, Tomcat,
+          lighttpd), dangerous default files (phpinfo.php, .git, .svn, server-status, server-info, backup files, database
+          dumps), insecure HTTP methods (PUT, DELETE, TRACE, CONNECT), server misconfigurations (directory listing, default
+          credentials, exposed admin consoles), and known CVEs with OSVDB cross-references. Uses a database of 8000+ checks
+          organized by vulnerability category.
+        when_to_use: After discovering HTTP/HTTPS service on a port (from nmap) to check for server-level vulnerabilities
+          like outdated server versions, dangerous default files, insecure HTTP headers, exposed admin interfaces, and known
+          CVEs against the server software. Complements nuclei which focuses on template-based application-level CVE scanning.
+          Use nikto for broad server-level checks and default file/misconfiguration discovery, nuclei for specific CVE verification,
+          and zap for deep application-level active scanning.
         params:
           target:
             type: string
             required: true
-            description: Target URL or IP:port
+            description: Target URL or IP:port (e.g., 'http://10.10.10.1', '10.10.10.1:8080', 'https://target.htb')
           tuning:
             type: string
-            description: Scan tuning options (1-9, a-c)
+            description: 'Focus scan on specific check categories. Values: 0=file upload, 1=interesting file/log, 2=misconfiguration/default
+              file, 3=information disclosure, 4=injection (XSS/script/HTML), 5=remote file retrieval (inside web root), 6=denial
+              of service (avoid in engagements), 7=remote file retrieval (server-wide), 8=command execution/remote shell,
+              9=SQL injection, a=authentication bypass, b=software identification, c=remote source inclusion, d=WebService,
+              e=administrative console, x=reverse tuning (exclude selected categories instead of including). Combine multiple
+              (e.g., ''1234'' for web app focus, ''89'' for command exec + SQLi, ''12ab'' for files + misconfig + auth bypass
+              + software ID). Default: all categories'
           ssl:
             type: boolean
             default: false
-            description: Force SSL/TLS connection
+            description: Force SSL/TLS connection. Use when target serves HTTPS on a non-standard port or when you want to
+              explicitly test the SSL endpoint
           timeout:
             type: integer
             default: 300
-            description: Scan timeout in seconds
+            description: 'Subprocess timeout in seconds (note: max_time controls the actual nikto scan duration)'
           max_time:
             type: integer
             default: 600
-            description: Maximum scan duration in seconds
+            description: Maximum total scan duration in seconds. Increase for thorough scans of large sites (e.g., 1800 for
+              30 minutes)
         returns:
           findings:
             type: array
-            description: Vulnerabilities and interesting findings
+            description: List of vulnerabilities and interesting findings, each with description text, optional OSVDB reference
+              ID, and discovered path
           server_info:
             type: object
-            description: Server information (version, headers)
+            description: Server information including server software banner, target IP, hostname, and port
   nmap:
     name: nmap
     version: '7.94'

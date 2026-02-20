@@ -1,6 +1,6 @@
 name: nikto
 version: "2.5"
-description: "Web server vulnerability scanner"
+description: "Web server vulnerability scanner that checks for 8000+ potentially dangerous files, outdated server versions (Apache, nginx, IIS, Tomcat), and server-level misconfigurations including insecure HTTP methods, default credentials, and known CVEs with OSVDB references"
 image: "ghcr.io/silicon-works/mcp-tools-nikto:latest"
 image_size_mb: 150
 
@@ -28,6 +28,12 @@ routing:
     - "server misconfiguration detection"
     - "outdated software detection"
     - "web server fingerprinting"
+    - "dangerous default files and backup file detection"
+    - "insecure HTTP headers and methods check"
+    - "Apache nginx IIS Tomcat version vulnerability check"
+    - "server-level CVE and OSVDB detection"
+    - "CGI vulnerability scanning"
+    - "web server security audit"
   never_use_for:
     - "port scanning"
     - "SQL injection"
@@ -41,32 +47,32 @@ routing:
 
 methods:
   scan:
-    description: "Scan a web server for vulnerabilities and misconfigurations"
-    when_to_use: "After discovering HTTP/HTTPS service to identify web vulnerabilities"
+    description: "Scan a web server for known vulnerabilities including outdated server software (Apache, nginx, IIS, Tomcat, lighttpd), dangerous default files (phpinfo.php, .git, .svn, server-status, server-info, backup files, database dumps), insecure HTTP methods (PUT, DELETE, TRACE, CONNECT), server misconfigurations (directory listing, default credentials, exposed admin consoles), and known CVEs with OSVDB cross-references. Uses a database of 8000+ checks organized by vulnerability category."
+    when_to_use: "After discovering HTTP/HTTPS service on a port (from nmap) to check for server-level vulnerabilities like outdated server versions, dangerous default files, insecure HTTP headers, exposed admin interfaces, and known CVEs against the server software. Complements nuclei which focuses on template-based application-level CVE scanning. Use nikto for broad server-level checks and default file/misconfiguration discovery, nuclei for specific CVE verification, and zap for deep application-level active scanning."
     params:
       target:
         type: string
         required: true
-        description: "Target URL or IP:port"
+        description: "Target URL or IP:port (e.g., 'http://10.10.10.1', '10.10.10.1:8080', 'https://target.htb')"
       tuning:
         type: string
-        description: "Scan tuning options (1-9, a-c)"
+        description: "Focus scan on specific check categories. Values: 0=file upload, 1=interesting file/log, 2=misconfiguration/default file, 3=information disclosure, 4=injection (XSS/script/HTML), 5=remote file retrieval (inside web root), 6=denial of service (avoid in engagements), 7=remote file retrieval (server-wide), 8=command execution/remote shell, 9=SQL injection, a=authentication bypass, b=software identification, c=remote source inclusion, d=WebService, e=administrative console, x=reverse tuning (exclude selected categories instead of including). Combine multiple (e.g., '1234' for web app focus, '89' for command exec + SQLi, '12ab' for files + misconfig + auth bypass + software ID). Default: all categories"
       ssl:
         type: boolean
         default: false
-        description: "Force SSL/TLS connection"
+        description: "Force SSL/TLS connection. Use when target serves HTTPS on a non-standard port or when you want to explicitly test the SSL endpoint"
       timeout:
         type: integer
         default: 300
-        description: "Scan timeout in seconds"
+        description: "Subprocess timeout in seconds (note: max_time controls the actual nikto scan duration)"
       max_time:
         type: integer
         default: 600
-        description: "Maximum scan duration in seconds"
+        description: "Maximum total scan duration in seconds. Increase for thorough scans of large sites (e.g., 1800 for 30 minutes)"
     returns:
       findings:
         type: array
-        description: "Vulnerabilities and interesting findings"
+        description: "List of vulnerabilities and interesting findings, each with description text, optional OSVDB reference ID, and discovered path"
       server_info:
         type: object
-        description: "Server information (version, headers)"
+        description: "Server information including server software banner, target IP, hostname, and port"

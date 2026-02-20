@@ -1,12 +1,12 @@
 # OpenSploit MCP Server: ghidra
-# Binary decompilation and reverse engineering via GhidraMCP (headless)
+# Binary decompilation and reverse engineering via bethington/ghidra-mcp
 #
-# Based on bethington/ghidra-mcp headless fork which provides a REST API
-# without requiring the Ghidra GUI. Our mcp-server.py bridges this REST API
-# to the standard MCP stdio protocol via BaseMCPServer.
+# Follows the Playwright pattern: external MCP server, minimal custom code.
+# bethington's bridge_mcp_ghidra.py provides 127 MCP tools via stdio.
+# We add one tool (load_binary) for loading binaries from the filesystem.
 #
 # Architecture:
-#   Agent <-> mcp-server.py (stdio/MCP) <-> GhidraMCPHeadlessServer (HTTP:8089) <-> Ghidra API
+#   Agent <-> bridge_mcp_ghidra.py (MCP stdio) <-> GhidraMCPHeadlessServer (HTTP:8089) <-> Ghidra API
 
 FROM eclipse-temurin:21-jdk AS builder
 
@@ -23,12 +23,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends wget unzip && \
     mv /opt/ghidra_${GHIDRA_VERSION}_PUBLIC /opt/ghidra && \
     rm /tmp/ghidra.zip
 
-# Build the headless GhidraMCP plugin
-# Clone bethington's fork which has headless support
+# Clone bethington's fork and build headless plugin
 RUN apt-get install -y --no-install-recommends git maven && \
     git clone --depth 1 https://github.com/bethington/ghidra-mcp.git /tmp/ghidra-mcp && \
     cd /tmp/ghidra-mcp && \
-    # Install the 9 specific Ghidra JARs that the Maven build requires
     mvn -q install:install-file -Dfile=/opt/ghidra/Ghidra/Framework/Generic/lib/Generic.jar \
         -DgroupId=ghidra -DartifactId=Generic -Dversion=${GHIDRA_VERSION} -Dpackaging=jar && \
     mvn -q install:install-file -Dfile=/opt/ghidra/Ghidra/Framework/SoftwareModeling/lib/SoftwareModeling.jar \
@@ -54,45 +52,45 @@ FROM eclipse-temurin:21-jre
 
 LABEL org.opencontainers.image.source="https://github.com/silicon-works/mcp-tools"
 LABEL org.opencontainers.image.description="Ghidra reverse engineering MCP server for OpenSploit"
-LABEL org.opencontainers.image.licenses="MIT"
 
-# Install Python for the MCP bridge
+# Install Python for the bridge + curl for health checks
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
         python3 \
         python3-pip \
-        python3-venv && \
-    rm -rf /var/lib/apt/lists/* && \
-    apt-get clean
+        python3-venv \
+        curl && \
+    rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
-# Create virtual environment
+# Python venv + bridge dependencies
 RUN python3 -m venv /app/venv
 ENV PATH="/app/venv/bin:$PATH"
+RUN pip install --no-cache-dir "mcp>=1.5.0,<2.0.0" "requests>=2.28.0,<3.0.0"
 
 # Copy Ghidra from builder
 COPY --from=builder /opt/ghidra /opt/ghidra
 
-# Copy built GhidraMCP headless JAR from builder
+# Copy built GhidraMCP headless JAR
 COPY --from=builder /tmp/ghidra-mcp/target/GhidraMCP-*.jar /app/GhidraMCP.jar
 
-# Install Python dependencies
-RUN pip install --no-cache-dir requests
+# Copy bridge script from bethington's repo (the MCP server)
+COPY --from=builder /tmp/ghidra-mcp/bridge_mcp_ghidra.py /app/bridge_mcp_ghidra.py
 
-# Copy and install shared mcp-common package
-COPY packages/mcp-common /tmp/mcp-common
-RUN pip install --no-cache-dir /tmp/mcp-common && rm -rf /tmp/mcp-common
+# Copy our thin wrapper (adds load_binary tool) and entrypoint
+COPY tools/ghidra/mcp-wrapper.py /app/mcp-wrapper.py
+COPY tools/ghidra/entrypoint.sh /app/entrypoint.sh
+RUN chmod +x /app/entrypoint.sh
 
 # Create directories for binary analysis
 RUN mkdir -p /data /projects
 
-# Copy MCP server code
-COPY tools/ghidra/mcp-server.py .
-
 ENV GHIDRA_HOME=/opt/ghidra
-ENV GHIDRA_HEADLESS_PORT=8089
-ENV GHIDRA_PROJECT_DIR=/projects
+ENV GHIDRA_MCP_PORT=8089
+ENV GHIDRA_SERVER_URL=http://127.0.0.1:8089
 
-# MCP servers communicate via stdio
-CMD ["python3", "mcp-server.py"]
+VOLUME ["/data", "/projects"]
+
+# Entrypoint starts Java server in background, then runs MCP bridge via stdio
+ENTRYPOINT ["/app/entrypoint.sh"]
