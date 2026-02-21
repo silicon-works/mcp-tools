@@ -1,6 +1,6 @@
 name: ffuf
-version: "2.1"
-description: "Fast web fuzzer for directory discovery, parameter fuzzing, and vhost enumeration"
+version: "2.1.0"
+description: "Fast web fuzzer (ffuf v2.1.0, Go-based) for directory/file discovery, GET/POST parameter fuzzing, and virtual host enumeration. Uses FUZZ keyword placeholder in URLs, headers, or POST data. Includes 7 built-in wordlists: common (4,614 entries), big (20,469), small (959), dirbuster-small (87,650), dirbuster-medium (220,546), raft-small, raft-medium from SecLists. Supports response filtering by status code, size, lines, words, regex, and response time. Default 40 concurrent threads. JSON output with structured result parsing. Auto-calibration (-ac) for intelligent response filtering. Includes dirb and SecLists wordlists."
 image: "ghcr.io/silicon-works/mcp-tools-ffuf:latest"
 image_size_mb: 200
 
@@ -49,8 +49,8 @@ resources:
 
 methods:
   dir_fuzz:
-    description: "Fuzz directories and files on a web server"
-    when_to_use: "After discovering HTTP/HTTPS service to find hidden paths and files"
+    description: "Fuzz directories and files on a web server using wordlist-based brute-forcing. Appends FUZZ keyword to URL if not present. Runs ffuf with JSON output, auto-calibration, and configurable thread count (default 40). Supports file extension fuzzing (e.g., .php,.html,.txt), custom headers, cookies for authenticated fuzzing, and response size filtering. Returns discovered paths with HTTP status code, content length, word count, and line count."
+    when_to_use: "The standard web enumeration step after discovering an HTTP/HTTPS service. Run this to find hidden directories, admin panels, backup files, and API endpoints. Start with wordlist='common' (fast, 4.6K entries), then try 'big' (20K) or 'dirbuster-medium' (220K) if initial results are sparse. Add extensions='php,html,txt,bak,old' for the target's technology stack. For PHP sites: extensions='php,php.bak,inc'. For Java: extensions='jsp,do,action'. Filter out false positives with filter_size (e.g., '0' for empty responses). Use cookies param for post-authentication fuzzing."
     params:
       url:
         type: string
@@ -92,8 +92,8 @@ methods:
         description: "Summary with target, wordlist, and found paths"
 
   param_fuzz:
-    description: "Fuzz GET or POST parameters"
-    when_to_use: "To discover valid parameter values or test for injection points"
+    description: "Fuzz GET or POST parameters on a web endpoint. The FUZZ keyword must be placed in the URL query string (GET) or POST data body. Supports JSON POST bodies. Uses same wordlist resolution and filtering as dir_fuzz. Useful for discovering hidden GET parameters, valid parameter values, or testing for different responses that indicate injection points."
+    when_to_use: "Two main scenarios: (1) Discover hidden GET parameters — place FUZZ as the parameter name: url='http://target.com/page?FUZZ=test'. (2) Fuzz parameter values for valid inputs — place FUZZ as the value: url='http://target.com/api?id=FUZZ'. For POST parameter fuzzing, set method='POST' and data='username=admin&password=FUZZ'. Filter by response size to find responses that differ from the default (which indicates a valid parameter or value). Also useful for IDOR testing by fuzzing numeric IDs."
     params:
       url:
         type: string
@@ -133,8 +133,8 @@ methods:
         description: "Matching parameter values with responses"
 
   vhost_fuzz:
-    description: "Fuzz virtual hosts on a web server"
-    when_to_use: "To discover virtual hosts when targeting an IP with multiple sites"
+    description: "Fuzz virtual hosts by sending requests with different Host headers. Sets Host header to 'FUZZ.domain' and filters by response size to identify valid vhosts that return different content than the default. Critical for HTB/CTF targets where the IP hosts multiple sites under different subdomains."
+    when_to_use: "When you have a target IP that serves different content based on the Host header — common in CTFs (Hack The Box) and shared hosting. The workflow: (1) Access the IP directly, note the default response size, (2) vhost_fuzz with filter_size set to the default size to filter it out. This reveals subdomains like 'dev.target.htb', 'api.target.htb', 'internal.target.htb' that serve different applications. Add discovered vhosts to /etc/hosts. Use after nmap finds HTTP and you've already done dir_fuzz on the main site."
     params:
       url:
         type: string

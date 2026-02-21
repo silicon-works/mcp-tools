@@ -1,6 +1,6 @@
 name: mongodb
 version: "1.0"
-description: "MongoDB client for database enumeration and data extraction"
+description: "MongoDB client (pymongo 4.16.0) for remote database enumeration and data extraction over the network. Connects to MongoDB servers (default port 27017) with optional username/password authentication against a specified auth database. Supports both authenticated and unauthenticated access — many MongoDB instances found during pentesting have no authentication enabled. Includes automated credential hunting that pattern-matches collection names (users, accounts, admins, credentials, auth, login, passwords) and field names (password, hash, token, api_key, secret) across all databases. Also provides server fingerprinting (version, storage engines, modules, JS engine)."
 image: "ghcr.io/silicon-works/mcp-tools-mongodb:latest"
 image_size_mb: 250
 
@@ -25,10 +25,16 @@ resources:
 # Routing hints for tool selection
 routing:
   use_for:
-    - "MongoDB database access"
-    - "NoSQL enumeration"
-    - "MongoDB data extraction"
-    - "MongoDB credential search"
+    - "MongoDB database enumeration and data extraction"
+    - "connect to unauthenticated MongoDB instance on port 27017"
+    - "extract credentials from MongoDB collections"
+    - "enumerate MongoDB databases and collections"
+    - "NoSQL database access and document retrieval"
+    - "MongoDB server fingerprinting and version detection"
+    - "query MongoDB documents with filter and projection"
+    - "dump MongoDB collection contents"
+    - "search for passwords tokens secrets in MongoDB"
+    - "post-exploitation MongoDB data exfiltration"
   never_use_for:
     - "SQL databases (use mysql or sqlite)"
     - "NoSQL injection (use nosqlmap)"
@@ -39,45 +45,49 @@ routing:
     - "mongo"
     - "port 27017"
     - "BSON"
+    - "document database"
 
 methods:
   connect:
-    description: "Test connection to a MongoDB server"
-    when_to_use: "To verify MongoDB is accessible and check authentication requirements"
+    description: "Test connection to a MongoDB server by sending a ping command to the admin database and retrieving server_info(). Verifies whether the server accepts unauthenticated connections or requires credentials. Returns the MongoDB server version and whether authentication was used."
+    when_to_use: "First step when nmap discovers port 27017 (or another MongoDB port) open. Tests whether the MongoDB instance allows unauthenticated access (common misconfiguration) or requires credentials. Try without username/password first — if it succeeds, the server has no auth and you can proceed to list_databases. If it fails with 'Authentication failed', try known credentials or default credentials."
     params:
       host:
         type: string
         required: true
-        description: "MongoDB hostname or IP"
+        description: "MongoDB hostname or IP (e.g., '10.10.10.1', 'target.htb')"
       port:
         type: integer
         default: 27017
-        description: "MongoDB port"
+        description: "MongoDB port (default 27017). Nmap may find MongoDB on non-standard ports."
       username:
         type: string
-        description: "Username for authentication (optional)"
+        description: "Username for authentication. Omit to test unauthenticated access. Common defaults: 'admin', 'root', 'mongodb'."
       password:
         type: string
-        description: "Password for authentication (optional)"
+        description: "Password for authentication. Omit to test unauthenticated access."
       auth_db:
         type: string
         default: admin
-        description: "Authentication database"
+        description: "Authentication database — the database that contains the user credentials. Default 'admin'. Some apps use their own database for auth (e.g., 'myapp')."
       timeout:
         type: integer
         default: 5
-        description: "Connection timeout in seconds"
+        description: "Connection timeout in seconds. Increase to 10-15 for slow/remote connections."
     returns:
       connected:
         type: boolean
-        description: "Whether connection succeeded"
+        description: "Whether the connection and ping succeeded"
       version:
         type: string
-        description: "MongoDB server version"
+        description: "MongoDB server version (e.g., '7.0.14', '6.0.12', '4.4.29')"
+      authenticated:
+        type: boolean
+        description: "Whether authentication credentials were provided"
 
   list_databases:
-    description: "List all databases on the MongoDB server"
-    when_to_use: "To enumerate available databases"
+    description: "List all databases on the MongoDB server with their sizes. Returns each database's name, size on disk (bytes), and whether it's empty. Equivalent to 'show dbs' in the mongo shell."
+    when_to_use: "After successful connection to enumerate all databases on the server. Look for application databases (not admin/config/local system databases) that may contain user data, credentials, or sensitive information. Database names often reveal the application (e.g., 'wordpress', 'app_production', 'users_db')."
     params:
       host:
         type: string
@@ -89,10 +99,10 @@ methods:
         description: "MongoDB port"
       username:
         type: string
-        description: "Username for authentication (optional)"
+        description: "Username for authentication (omit for unauthenticated access)"
       password:
         type: string
-        description: "Password for authentication (optional)"
+        description: "Password for authentication"
       auth_db:
         type: string
         default: admin
@@ -100,11 +110,14 @@ methods:
     returns:
       databases:
         type: array
-        description: "List of databases with size info"
+        description: "List of databases, each with 'name', 'sizeOnDisk' (bytes), and 'empty' (boolean)"
+      count:
+        type: integer
+        description: "Total number of databases"
 
   list_collections:
-    description: "List all collections in a database"
-    when_to_use: "To enumerate collections after identifying a target database"
+    description: "List all collection names in a specific database. Equivalent to 'show collections' in the mongo shell. Collections are MongoDB's equivalent of SQL tables."
+    when_to_use: "After list_databases identifies interesting application databases. Collection names reveal the data model — look for collections like 'users', 'accounts', 'sessions', 'tokens', 'config', 'secrets' that may contain credentials or sensitive data."
     params:
       host:
         type: string
@@ -113,17 +126,17 @@ methods:
       database:
         type: string
         required: true
-        description: "Database name"
+        description: "Database name (from list_databases output)"
       port:
         type: integer
         default: 27017
         description: "MongoDB port"
       username:
         type: string
-        description: "Username for authentication (optional)"
+        description: "Username for authentication (omit for unauthenticated access)"
       password:
         type: string
-        description: "Password for authentication (optional)"
+        description: "Password for authentication"
       auth_db:
         type: string
         default: admin
@@ -131,11 +144,14 @@ methods:
     returns:
       collections:
         type: array
-        description: "List of collection names"
+        description: "List of collection name strings"
+      count:
+        type: integer
+        description: "Number of collections in the database"
 
   query:
-    description: "Query documents from a collection using MongoDB filter syntax"
-    when_to_use: "To retrieve specific documents with filter criteria"
+    description: "Query documents from a MongoDB collection using filter and projection. Runs collection.find(filter, projection).limit(N) via pymongo. ObjectIds are auto-serialized to strings, bytes to hex. Returns documents as JSON-serializable dictionaries."
+    when_to_use: "When you need to retrieve specific documents matching criteria — e.g., find admin users, search for specific email addresses, find documents with password fields. Use filter for matching and projection to select only needed fields (reduces output size). For dumping all documents without filtering, use dump_collection instead."
     params:
       host:
         type: string
@@ -152,24 +168,24 @@ methods:
       filter:
         type: object
         default: {}
-        description: "MongoDB query filter (JSON)"
+        description: "MongoDB query filter as JSON object. Examples: {} (all docs), {\"role\": \"admin\"} (exact match), {\"email\": {\"$regex\": \"@company.com\"}} (regex), {\"password\": {\"$exists\": true}} (has field), {\"age\": {\"$gt\": 18}} (comparison). Supports all MongoDB query operators ($eq, $ne, $gt, $lt, $in, $regex, $exists, $or, $and)."
       projection:
         type: object
-        description: "Fields to include/exclude"
+        description: "Fields to include or exclude from results. Use {\"field\": 1} to include or {\"field\": 0} to exclude. Examples: {\"username\": 1, \"password\": 1} (only these fields + _id), {\"_id\": 0, \"largeBlob\": 0} (exclude specific fields). Cannot mix include and exclude (except _id)."
       limit:
         type: integer
         default: 100
-        description: "Maximum documents to return"
+        description: "Maximum documents to return. Default 100. Set to 0 for no limit (careful with large collections)."
       port:
         type: integer
         default: 27017
         description: "MongoDB port"
       username:
         type: string
-        description: "Username for authentication (optional)"
+        description: "Username for authentication (omit for unauthenticated access)"
       password:
         type: string
-        description: "Password for authentication (optional)"
+        description: "Password for authentication"
       auth_db:
         type: string
         default: admin
@@ -177,14 +193,14 @@ methods:
     returns:
       documents:
         type: array
-        description: "Matching documents"
+        description: "Matching documents as dictionaries (ObjectIds serialized to strings, bytes to hex)"
       count:
         type: integer
         description: "Number of documents returned"
 
   dump_collection:
-    description: "Dump all documents from a collection"
-    when_to_use: "To extract all data from a collection"
+    description: "Dump all documents from a collection (shorthand for query with empty filter). Internally calls query with filter={} and the specified limit. Use this for quick full-collection extraction without needing to construct a filter."
+    when_to_use: "After identifying interesting collections via list_collections, use this to extract all documents. Simpler than query when you don't need filtering or projection — just dumps everything up to the limit. For credential collections, consider using find_credentials instead which auto-detects credential fields across multiple collections."
     params:
       host:
         type: string
@@ -197,21 +213,21 @@ methods:
       collection:
         type: string
         required: true
-        description: "Collection name"
+        description: "Collection name to dump"
       limit:
         type: integer
         default: 100
-        description: "Maximum documents to return"
+        description: "Maximum documents to return. Default 100. Increase for small collections, keep low to sample large ones."
       port:
         type: integer
         default: 27017
         description: "MongoDB port"
       username:
         type: string
-        description: "Username for authentication (optional)"
+        description: "Username for authentication (omit for unauthenticated access)"
       password:
         type: string
-        description: "Password for authentication (optional)"
+        description: "Password for authentication"
       auth_db:
         type: string
         default: admin
@@ -219,11 +235,14 @@ methods:
     returns:
       documents:
         type: array
-        description: "All documents in collection"
+        description: "All documents from the collection (up to limit), serialized as JSON dictionaries"
+      count:
+        type: integer
+        description: "Number of documents returned"
 
   find_credentials:
-    description: "Search for credential-like data across collections"
-    when_to_use: "To search for stored passwords, tokens, or auth data"
+    description: "Automatically search for credential-related data across databases and collections. Scans all non-system databases (excludes admin, config, local) for collections whose names match 14 credential patterns (users, accounts, members, admins, admin, credentials, auth, authentication, login, user, account, member, passwords). For matching collections, samples up to 20 documents and checks for field names matching 12 password patterns (password, passwd, pass, pwd, secret, hash, token, api_key, apikey, key, credential, auth). Returns up to 5 sample documents per matching collection."
+    when_to_use: "First thing to run after connecting to a MongoDB server to automatically find stored credentials. Searches across ALL non-system databases so you don't need to enumerate databases/collections manually first. If this returns no results (no credential-pattern collection names found), fall back to manual enumeration: list_databases → list_collections → dump_collection on interesting collections."
     params:
       host:
         type: string
@@ -231,17 +250,17 @@ methods:
         description: "MongoDB hostname or IP"
       database:
         type: string
-        description: "Database to search (searches all if not specified)"
+        description: "Specific database to search. If omitted, searches ALL non-system databases (admin, config, local are excluded). Specify a database to narrow the search."
       port:
         type: integer
         default: 27017
         description: "MongoDB port"
       username:
         type: string
-        description: "Username for authentication (optional)"
+        description: "Username for authentication (omit for unauthenticated access)"
       password:
         type: string
-        description: "Password for authentication (optional)"
+        description: "Password for authentication"
       auth_db:
         type: string
         default: admin
@@ -249,11 +268,17 @@ methods:
     returns:
       findings:
         type: array
-        description: "Collections with potential credentials"
+        description: "Matching collections, each with: 'database' name, 'collection' name, 'document_count' (total docs in collection), 'has_credential_fields' (boolean, whether field names match password patterns), 'sample_documents' (up to 5 sample docs with all fields)"
+      databases_searched:
+        type: array
+        description: "List of database names that were searched"
+      total_findings:
+        type: integer
+        description: "Number of matching collections found"
 
   server_info:
-    description: "Get MongoDB server information and version"
-    when_to_use: "To fingerprint the MongoDB installation"
+    description: "Get detailed MongoDB server information by running server_info() and buildInfo admin commands. Returns version, git version, architecture (32/64-bit), loaded modules (e.g., enterprise), available storage engines (e.g., wiredTiger, ephemeralForTest), JavaScript engine, and max BSON object size."
+    when_to_use: "To fingerprint the MongoDB installation after connecting. The version is important for: identifying known CVEs (e.g., pre-auth RCE in older versions), determining available features, and reporting. Modules list reveals if this is MongoDB Community or Enterprise. Storage engine info helps understand the deployment. Also useful when connect already succeeded but you want more details."
     params:
       host:
         type: string
@@ -265,10 +290,10 @@ methods:
         description: "MongoDB port"
       username:
         type: string
-        description: "Username for authentication (optional)"
+        description: "Username for authentication (omit for unauthenticated access)"
       password:
         type: string
-        description: "Password for authentication (optional)"
+        description: "Password for authentication"
       auth_db:
         type: string
         default: admin
@@ -276,7 +301,22 @@ methods:
     returns:
       version:
         type: string
-        description: "MongoDB version"
+        description: "MongoDB server version (e.g., '7.0.14')"
+      git_version:
+        type: string
+        description: "Git commit hash of the server build"
+      modules:
+        type: array
+        description: "Loaded modules (empty for Community, ['enterprise'] for Enterprise)"
+      bits:
+        type: integer
+        description: "Architecture: 32 or 64 bit"
       storage_engines:
         type: array
-        description: "Available storage engines"
+        description: "Available storage engines (e.g., ['devnull', 'ephemeralForTest', 'wiredTiger'])"
+      javascript_engine:
+        type: string
+        description: "JavaScript engine used (e.g., 'mozjs')"
+      max_bson_object_size:
+        type: integer
+        description: "Maximum BSON document size in bytes (default 16MB)"

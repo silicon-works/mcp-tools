@@ -1,6 +1,6 @@
 name: john
-version: "1.9"
-description: "Password hash cracking tool (John the Ripper)"
+version: "1.9.0-jumbo-1"
+description: "Password hash cracking tool — John the Ripper 1.9.0-jumbo-1 (community-enhanced version) with AVX2 acceleration. Supports 300+ hash formats including md5crypt, sha512crypt, bcrypt, NTLM, LM, MySQL, MSSQL, Oracle, PostgreSQL, Kerberos, WPA, SSH keys, ZIP/RAR/PDF/Office. Includes ~300 *2john converter scripts (ssh2john, zip2john, pdf2john, office2john, etc.) for extracting crackable hashes from encrypted files. Cracking modes: wordlist (with mangling rules), incremental (brute-force), mask (pattern-based), single (username-derived), PRINCE (combination). Ships with rockyou.txt (14M passwords) and john's built-in password.lst wordlist."
 image: "ghcr.io/silicon-works/mcp-tools-john:latest"
 image_size_mb: 200
 
@@ -10,11 +10,16 @@ capabilities:
 
 routing:
   use_for:
-    - "Linux password hash cracking"
-    - "Windows NTLM/LM hash cracking"
-    - "MD5/SHA hash cracking"
-    - "/etc/shadow password cracking"
-    - "Database password hash cracking"
+    - "crack password hashes from /etc/shadow or database dumps"
+    - "crack Windows NTLM LM hashes from SAM or secretsdump"
+    - "crack MD5 SHA1 SHA256 SHA512 bcrypt hashes"
+    - "crack Kerberos TGS tickets (kerberoasting)"
+    - "crack SSH private key passphrases"
+    - "crack ZIP RAR PDF Office encrypted file passwords"
+    - "identify unknown hash format type"
+    - "offline password cracking with wordlists"
+    - "recover plaintext from password hashes"
+    - "crack MySQL PostgreSQL Oracle database password hashes"
   never_use_for:
     - task: "IKE/IPsec PSK hash cracking"
       use_instead: "ike-scan.crack_psk"
@@ -22,11 +27,18 @@ routing:
     - task: "VPN PSK cracking"
       use_instead: "ike-scan.crack_psk"
       reason: "IKE PSK hashes require psk-crack, not John the Ripper"
+    - "online brute-forcing (use hydra)"
+    - "network authentication testing (use hydra)"
   triggers:
     - "crack password"
     - "hash crack"
     - "shadow file"
     - "ntlm"
+    - "john"
+    - "john the ripper"
+    - "rockyou"
+    - "kerberoast"
+    - "hashcat"
   prefer_over: []
 
 phases:
@@ -42,60 +54,72 @@ resources:
 
 methods:
   crack:
-    description: "Crack password hashes using wordlist or incremental mode"
-    when_to_use: "After extracting password hashes to recover plaintext passwords"
+    description: "Crack password hashes using john's wordlist mode with optional mangling rules. Writes hashes to a temp file, runs john with the specified wordlist and format, then runs john --show to collect cracked results. Uses AVX2 acceleration when available. The 'rockyou' wordlist (14M passwords) is the default and cracks most weak passwords. With rules enabled (default), john applies word mangling transformations (capitalization, number appending, leet speak, etc.) which dramatically increases coverage. John stores cracked passwords in ~/.john/john.pot — subsequent calls for the same hash return instantly from the pot file."
+    when_to_use: "After extracting password hashes from any source: /etc/shadow (Linux), SAM/NTDS.dit/secretsdump (Windows), database dumps (MySQL, PostgreSQL, MSSQL), web application databases, Kerberos tickets (kerberoasting). Always specify the format if you know it — auto-detection works but can be slow or wrong with ambiguous hashes. Common workflow: (1) Extract hashes (e.g., from /etc/shadow, sqlmap dump, impacket secretsdump), (2) Identify format if unsure, (3) Crack with rockyou, (4) If no results, try 'common' wordlist (john's password.lst) with rules for faster iteration. For bcrypt/scrypt hashes, expect very slow cracking (minutes per password) — reduce timeout expectations. For simple MD5/SHA hashes, rockyou with rules cracks most weak passwords in under a minute."
     params:
       hashes:
         type: string
         required: true
-        description: "Hash(es) to crack, one per line, or in user:hash format"
+        description: "Hash(es) to crack, one per line. Supports multiple formats: bare hash ('5f4dcc3b5aa765d61d8327deb882cf99'), user:hash ('admin:$6$rounds=5000$...'), /etc/shadow format ('root:$6$salt$hash:...'). For multiple hashes, separate with newlines. John auto-detects the format from the hash structure."
       format:
         type: string
         default: "auto"
-        description: "Hash format (auto-detect if not specified)"
+        description: "Hash format name. 'auto' attempts detection (may fail for raw/ambiguous hashes). Common formats: 'raw-md5' (unsalted MD5), 'raw-sha1', 'raw-sha256', 'raw-sha512', 'md5crypt' ($1$), 'sha256crypt' ($5$), 'sha512crypt' ($6$, Linux /etc/shadow), 'bcrypt' ($2a$/$2b$), 'ntlm' (Windows), 'lm' (legacy Windows), 'mysql' (MySQL 4.1+), 'mssql' (SQL Server), 'descrypt' (DES crypt), 'ssh' (SSH key passphrase via ssh2john), 'zip'/'rar'/'pdf' (encrypted files via *2john). John supports 300+ formats total — use identify method to determine the correct format."
       wordlist:
         type: string
         default: "rockyou"
-        description: "Wordlist name (rockyou, common) or path"
+        description: "Wordlist name or path. Built-in: 'rockyou' (/usr/share/wordlists/rockyou.txt, ~14M passwords — comprehensive, default), 'common' (/usr/share/john/password.lst, ~3K passwords — fast). Or provide an absolute path to a custom wordlist."
       rules:
         type: boolean
         default: true
-        description: "Apply word mangling rules"
+        description: "Apply john's word mangling rules (--rules). Transforms each wordlist entry through ~100 rules: capitalize, append numbers (password1, password123), leet speak (p@ssw0rd), reverse, etc. Increases effective wordlist size by ~100x. Enabled by default. Disable for raw wordlist-only testing (faster but less coverage)."
       timeout:
         type: integer
         default: 300
-        description: "Maximum time to spend cracking in seconds"
+        description: "Maximum cracking time in seconds. Default 300s (5 min). For MD5/SHA with rockyou: 1-2 minutes is usually enough. For bcrypt ($2a$, cost 10+): each hash takes ~0.01s to test, so 14M wordlist takes ~40 hours — use 'common' wordlist instead. For NTLM: very fast, 300s is more than enough for rockyou."
     returns:
       cracked:
         type: array
-        description: "Cracked username:password pairs"
+        description: "Cracked results. Each entry: {user: 'username', password: 'plaintext'}. Empty array if nothing cracked."
+      count:
+        type: integer
+        description: "Number of passwords cracked"
+      format:
+        type: string
+        description: "Hash format used"
+      wordlist:
+        type: string
+        description: "Full path to wordlist used"
 
   show:
-    description: "Show previously cracked passwords from a hash file"
-    when_to_use: "To retrieve already cracked passwords"
+    description: "Show previously cracked passwords from john's pot file (~/.john/john.pot). John caches all cracked passwords persistently — this retrieves results without re-cracking. Writes the hashes to a temp file, runs john --show, and parses the output. Useful for: (1) checking if hashes were already cracked in a previous crack call, (2) retrieving results after a timeout, (3) checking the pot file after manual cracking."
+    when_to_use: "After a crack attempt (especially one that timed out) to check what was cracked. Also use when you have the same hashes and want to see if they were cracked in a previous session. John's pot file persists across calls within the same container session, so all previously cracked passwords are retrievable. If crack returns 0 results but you suspect it worked (e.g., you saw progress in raw_output), call show to check the pot file."
     params:
       hashes:
         type: string
         required: true
-        description: "Hash(es) to check for cracked passwords"
+        description: "Hash(es) to check, same format as the crack method. Must match what was originally passed to crack (john matches by hash value in the pot file)."
       format:
         type: string
         default: "auto"
-        description: "Hash format"
+        description: "Hash format. Should match the format used in the crack call. If 'auto' was used for cracking, use 'auto' here too."
     returns:
       cracked:
         type: array
-        description: "Previously cracked passwords"
+        description: "Previously cracked results from the pot file. Each entry: {user: 'username', password: 'plaintext'}"
+      count:
+        type: integer
+        description: "Number of cracked passwords found in pot file"
 
   identify:
-    description: "Identify the format of a hash"
-    when_to_use: "When unsure what hash type was extracted"
+    description: "Attempt to identify the format of an unknown hash by testing it against common john formats (md5, sha1, sha256, sha512, ntlm, bcrypt, raw-md5, raw-sha1). Writes the hash to a temp file and runs john --show with each format to see which ones accept it. Returns a list of possible formats. Note: this is a basic implementation that only tests 8 common formats — for ambiguous hashes, the hash-lookup tool may provide better identification via online hash databases."
+    when_to_use: "When you have a hash but don't know its format — e.g., found a hash in a config file, database, or web application and need to determine the correct john format name before cracking. Common hash patterns to recognize manually: starts with '$1$' = md5crypt, '$5$' = sha256crypt, '$6$' = sha512crypt, '$2a$/$2b$' = bcrypt, 32 hex chars = MD5 or NTLM, 40 hex chars = SHA1, 64 hex chars = SHA256, 128 hex chars = SHA512. If this method returns 'unknown', try the hash-lookup tool or check hash format references online. For hashes from specific sources (MySQL, PostgreSQL, etc.), the format is usually known from context."
     params:
       hash:
         type: string
         required: true
-        description: "Hash to identify"
+        description: "Single hash to identify. Can be a bare hash ('5f4dcc3b5aa765d61d8327deb882cf99') or in user:hash format ('admin:$6$salt$hash'). Only provide ONE hash — multiple hashes may confuse the detection."
     returns:
       possible_formats:
         type: array
-        description: "Possible hash formats"
+        description: "List of john format names that accepted the hash (e.g., ['raw-md5', 'ntlm']). 'unknown' if no format matched. Multiple matches are common for ambiguous hashes (e.g., 32 hex chars matches both raw-md5 and ntlm)."

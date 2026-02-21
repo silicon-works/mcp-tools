@@ -1,6 +1,6 @@
 name: tunnel
 version: "1.0"
-description: "SSH tunnel and SOCKS proxy for accessing remote localhost services"
+description: "SSH tunnel and SOCKS5 proxy manager for accessing remote localhost-only services and pivoting into internal networks. 5 methods: forward (local port forwarding via 'ssh -L'), socks (dynamic port forwarding via 'ssh -D' for SOCKS5 proxy), list (show active tunnels), close (stop one tunnel), close_all (cleanup). Tunnels run as background SSH processes managed by PID. Supports password (sshpass) and private key authentication. Auto-assigns local ports when local_port=0. Requires host network mode so tunnels are accessible from other MCP containers."
 image: "ghcr.io/silicon-works/mcp-tools-tunnel:latest"
 image_size_mb: 100
 
@@ -26,15 +26,15 @@ resources:
 # Routing hints for tool selection
 routing:
   use_for:
-    - "SSH port forwarding"
-    - "SOCKS proxy"
-    - "pivoting to internal networks"
-    - "accessing localhost services on remote host"
-    - "tunnel management"
+    - "forward remote localhost-only port to local port via SSH"
+    - "create SOCKS5 proxy through SSH for pivoting to internal network"
+    - "access MySQL or web apps bound to 127.0.0.1 on remote host"
+    - "pivot through compromised host to reach internal machines"
+    - "tunnel traffic through SSH to bypass firewall rules"
   never_use_for:
-    - "direct SSH commands (use ssh)"
-    - "port scanning"
-    - "file transfer"
+    - "direct SSH command execution (use ssh)"
+    - "port scanning through tunnel (use nmap with proxychains)"
+    - "file transfer (use ssh copy_to/copy_from)"
   triggers:
     - "tunnel"
     - "port forward"
@@ -43,119 +43,121 @@ routing:
     - "proxy"
     - "internal network"
     - "localhost service"
+    - "ssh -L"
+    - "ssh -D"
   prefer_over:
     - ssh  # For tunneling and pivoting workflows
 
 methods:
   forward:
-    description: "Create SSH local port forward (access remote service via local port)"
-    when_to_use: "To access localhost-only services on remote host (e.g., MySQL on 127.0.0.1:3306)"
+    description: "Create an SSH local port forward (ssh -L) that maps a local port to a remote host:port through the SSH connection. Traffic to localhost:<local_port> is tunneled through the SSH server and forwarded to <remote_host>:<remote_port>. Runs as a background SSH process. Use local_port=0 for auto-assignment."
+    when_to_use: "To access services bound to 127.0.0.1 on the target that aren't exposed externally. Common scenarios: (1) MySQL on 127.0.0.1:3306 — forward to local port, then use mysql tool against localhost, (2) Web apps on 127.0.0.1:8080 — forward to local port, then browse with curl/playwright, (3) Internal admin panels, Redis (6379), MongoDB (27017), etc. Also works for reaching services on internal machines through the SSH host by setting remote_host to the internal IP."
     params:
       ssh_host:
         type: string
         required: true
-        description: "SSH server hostname or IP"
+        description: "SSH server to tunnel through."
       ssh_user:
         type: string
         required: true
-        description: "SSH username"
+        description: "SSH username."
       ssh_password:
         type: string
-        description: "SSH password"
+        description: "SSH password."
       ssh_key:
         type: string
-        description: "SSH private key content"
+        description: "SSH private key content (PEM or OpenSSH format)."
       ssh_port:
         type: integer
         default: 22
-        description: "SSH server port"
+        description: "SSH server port."
       remote_host:
         type: string
         default: "127.0.0.1"
-        description: "Remote host to forward to (default: localhost on SSH server)"
+        description: "Host to forward to (from SSH server's perspective). Default '127.0.0.1' for localhost services. Set to internal IP for pivoting."
       remote_port:
         type: integer
         required: true
-        description: "Remote port to forward"
+        description: "Port on remote_host to forward to (e.g., 3306 for MySQL, 8080 for web app)."
       local_port:
         type: integer
         default: 0
-        description: "Local port to listen on (0 = auto-assign)"
+        description: "Local port to listen on. 0=auto-assign an available port."
     returns:
       tunnel_id:
         type: string
-        description: "Unique tunnel identifier"
+        description: "Tunnel ID for list and close."
       local_port:
         type: integer
-        description: "Local port the tunnel is listening on"
+        description: "Local port the tunnel is listening on (use this to connect)."
       connect_to:
         type: string
-        description: "Address to connect to (e.g., 127.0.0.1:9999)"
+        description: "Address to connect to (e.g., '127.0.0.1:9999')."
 
   socks:
-    description: "Create SOCKS5 proxy through SSH (dynamic port forwarding)"
-    when_to_use: "To proxy all traffic through the SSH server for pivoting"
+    description: "Create a SOCKS5 proxy via SSH dynamic port forwarding (ssh -D). All traffic sent through the SOCKS proxy is tunneled through the SSH server and exits from the SSH server's network. Enables full network pivoting — any tool that supports SOCKS5 can reach internal hosts."
+    when_to_use: "When you need to access multiple services on an internal network through a compromised host. Instead of creating individual port forwards, a SOCKS proxy lets you reach ANY internal host:port. Use with proxychains or tool-specific SOCKS settings. Common scenario: compromised DMZ host → SOCKS proxy → scan/exploit internal network. Default port 1080."
     params:
       ssh_host:
         type: string
         required: true
-        description: "SSH server hostname or IP"
+        description: "SSH server to create SOCKS proxy through."
       ssh_user:
         type: string
         required: true
-        description: "SSH username"
+        description: "SSH username."
       ssh_password:
         type: string
-        description: "SSH password"
+        description: "SSH password."
       ssh_key:
         type: string
-        description: "SSH private key content"
+        description: "SSH private key content."
       ssh_port:
         type: integer
         default: 22
-        description: "SSH server port"
+        description: "SSH server port."
       local_port:
         type: integer
         default: 1080
-        description: "Local SOCKS port"
+        description: "Local port for SOCKS5 proxy."
     returns:
       tunnel_id:
         type: string
-        description: "Unique tunnel identifier"
+        description: "Tunnel ID for list and close."
       proxy_url:
         type: string
-        description: "SOCKS5 proxy URL (e.g., socks5://127.0.0.1:1080)"
+        description: "SOCKS5 proxy URL (e.g., 'socks5://127.0.0.1:1080')."
 
   list:
-    description: "List active tunnels"
-    when_to_use: "To see all active SSH tunnels and their status"
+    description: "List all active SSH tunnels and SOCKS proxies with their type, ports, SSH host, and process status."
+    when_to_use: "To check which tunnels are running, verify a tunnel is still alive, or find the local port for a tunnel."
     params: {}
     returns:
       tunnels:
         type: array
-        description: "List of active tunnels with details"
+        description: "Active tunnels with: id, type (forward/socks), local_port, remote details, ssh_host."
       count:
         type: integer
-        description: "Number of active tunnels"
+        description: "Number of active tunnels."
 
   close:
-    description: "Close a specific tunnel"
-    when_to_use: "To close a tunnel that is no longer needed"
+    description: "Close a specific tunnel by killing its background SSH process."
+    when_to_use: "When a specific tunnel is no longer needed. Frees the local port for reuse."
     params:
       tunnel_id:
         type: string
         required: true
-        description: "Tunnel ID to close"
+        description: "Tunnel ID to close."
     returns:
       tunnel_id:
         type: string
-        description: "Closed tunnel ID"
+        description: "ID of the closed tunnel."
 
   close_all:
-    description: "Close all tunnels"
-    when_to_use: "Cleanup all tunnels at end of engagement"
+    description: "Close all active tunnels and SOCKS proxies."
+    when_to_use: "At the end of an engagement or when resetting the network setup."
     params: {}
     returns:
       closed:
         type: array
-        description: "List of closed tunnel IDs"
+        description: "List of closed tunnel IDs."

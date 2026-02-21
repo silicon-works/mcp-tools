@@ -1,6 +1,6 @@
 name: curl
-version: "8.5"
-description: "HTTP client for simple API requests, exploit testing, and file downloads. For login forms and JS pages, use playwright-mcp instead."
+version: "8.18"
+description: "HTTP client (curl 8.18.0 with HTTP/2, HTTP/3, NTLM, Kerberos support) wrapped in 5 specialized methods: request (any HTTP method with timing/debug), inject (RCE payload delivery with {PAYLOAD} placeholder and auto-encoding), upload (multipart file upload for web shells), download (small files as base64), and download_to_file (large files with auto .gz decompression). Returns structured response data: status code, parsed headers, body (50KB cap), timing breakdown (DNS/connect/TLS/TTFB/total), and error classification. Default User-Agent mimics Chrome on Windows. For login forms and JS pages, use playwright-mcp instead."
 image: "ghcr.io/silicon-works/mcp-tools-curl:latest"
 image_size_mb: 100
 
@@ -19,14 +19,15 @@ see_also:
 # Routing hints for tool selection
 routing:
   use_for:
-    - "single HTTP request"
-    - "exploit payload delivery"
-    - "file download"
-    - "wordlist download"
-    - "download wordlist to session directory"
-    - "web shell interaction"
-    - "RCE exploitation"
-    - "API request with known endpoint"
+    - "make a single HTTP request to test an endpoint or check headers"
+    - "deliver exploit payloads to web RCE endpoints with auto-encoding"
+    - "upload web shells or malicious files via multipart form"
+    - "download wordlists or exploit scripts to session directory"
+    - "interact with a deployed web shell via command injection"
+    - "check server response headers for version fingerprinting"
+    - "send POST data to test for SQL injection or command injection"
+    - "download files from target (configs SSH keys databases)"
+    - "API request with authentication cookies or bearer tokens"
   never_use_for:
     - "directory brute-forcing"
     - "web fuzzing"
@@ -64,8 +65,8 @@ resources:
 
 methods:
   request:
-    description: "Make an HTTP request to a URL"
-    when_to_use: "For manual HTTP requests, exploit payloads, or API interactions"
+    description: "Make an HTTP request with any method (GET/POST/PUT/DELETE/HEAD/OPTIONS/PATCH). Uses curl -s -S -i under the hood with response header parsing, redirect following (up to 10), and structured timing breakdown. Returns parsed status code, response headers as dict, body text (capped at 50KB), and timing (DNS lookup, TCP connect, TLS handshake, TTFB, total in ms, remote IP/port). Supports cookies, basic auth, custom headers, SSL bypass, and 4 debug levels. Body is NOT returned as base64 by default — use raw_response=true for binary content."
+    when_to_use: "For any single HTTP request: testing an endpoint, checking response headers, verifying a vulnerability, sending API calls, or confirming exploit success. Common pentest uses: (1) Check server headers for version info (HEAD request), (2) Test for open redirects or SSRF by checking redirect chains, (3) Send POST data to test for injection, (4) Verify web shell was uploaded by requesting it, (5) Interact with REST APIs. Use inject method instead when you need automatic payload encoding for RCE. Use playwright-mcp for JavaScript-rendered pages or when response body is empty."
     params:
       url:
         type: string
@@ -182,8 +183,8 @@ methods:
             description: "Curl exit code"
 
   download:
-    description: "Download a file from a URL"
-    when_to_use: "To download exploits, tools, or files for analysis"
+    description: "Download a file from a URL and return contents as base64-encoded string. Uses curl -s -S -L (follows redirects). Filename extracted from URL path. For large files (>10MB), use download_to_file instead — this method loads the entire file into memory and base64-encodes it."
+    when_to_use: "For downloading small files (<10MB) that you need to inspect or process: exploit scripts, configuration files, SSH keys, small binaries. The base64 content can be decoded and written to disk. For wordlists, large binaries, or files >10MB, use download_to_file instead (writes directly to disk)."
     params:
       url:
         type: string
@@ -209,8 +210,8 @@ methods:
         description: "File contents as base64"
 
   download_to_file:
-    description: "Download a large file directly to a path (for wordlists, binaries, etc.)"
-    when_to_use: "To download wordlists or large files to /session/wordlists/. Use web_search to find wordlist URLs, then download_to_file to save them. Auto-decompresses .gz files. Example: curl.download_to_file(url='https://.../rockyou.txt', output_path='/session/wordlists/rockyou.txt')"
+    description: "Download a large file directly to a filesystem path using curl -o (no memory buffering). Follows redirects, shows progress bar. Auto-decompresses .gz files when decompress=true (default). Creates parent directories automatically. For text files (.txt), counts lines after download. 10-minute default timeout for large files."
+    when_to_use: "For downloading wordlists, large exploit tools, or binaries directly to disk. Common workflow: (1) Use web_search to find a wordlist URL (e.g., rockyou.txt, SecLists), (2) download_to_file to save to /session/wordlists/. Example: url='https://github.com/.../rockyou.txt.gz', output_path='/session/wordlists/rockyou.txt' (auto-decompresses .gz). Also useful for downloading large exploit scripts or toolkits that need to be saved locally before execution."
     params:
       url:
         type: string
@@ -250,8 +251,8 @@ methods:
         description: "Whether file was decompressed"
 
   inject:
-    description: "Send a payload to a web RCE endpoint and extract output"
-    when_to_use: "For web RCE exploitation with automatic payload encoding and output extraction"
+    description: "Send a command to a web RCE endpoint via {PAYLOAD} placeholder substitution with automatic encoding (URL, double-URL, base64, or none). Replaces {PAYLOAD} in both URL and POST body with the encoded command. Extracts command output from the response using optional start/end markers, strips HTML tags by default. Built on the request method — inherits timing, error handling, and redirect following."
+    when_to_use: "For exploiting confirmed web RCE vulnerabilities — command injection, PHP code injection, template injection, etc. Typical workflow: (1) Confirm RCE via request method with manual payload, (2) Switch to inject for repeated command execution with auto-encoding. The {PAYLOAD} placeholder goes in the URL for GET-based injection (e.g., url='http://target/vuln.php?cmd={PAYLOAD}') or in the POST body (data='cmd={PAYLOAD}'). Use output_markers to extract clean output from noisy HTML responses. Use encoding='double-url' for WAF bypass, 'base64' for payloads with special characters."
     params:
       url:
         type: string
@@ -328,8 +329,8 @@ methods:
         description: "Error details (on failure)"
 
   upload:
-    description: "Upload a file using multipart/form-data"
-    when_to_use: "For web shell uploads, file injection, exploiting upload vulnerabilities"
+    description: "Upload a file via multipart/form-data POST request. Content can be plain text (for web shells, scripts) or base64-encoded (for binary files). Uses curl -F with automatic temp file creation and cleanup. Supports custom MIME type spoofing, extra form fields, cookies, and custom headers. Returns parsed response including status code, headers, body, and timing."
+    when_to_use: "For exploiting file upload vulnerabilities: (1) Upload a PHP/JSP/ASP web shell through a file upload form, (2) Upload a reverse shell binary, (3) Exploit unrestricted file upload for RCE. You need to know the form field name (inspect the HTML form for the <input type='file' name='...'> attribute). Common field names: 'file', 'upload', 'avatar', 'image', 'attachment'. Set content_type to 'image/jpeg' or 'image/png' to bypass MIME type checks. Use extra_fields for additional required form parameters."
     params:
       url:
         type: string

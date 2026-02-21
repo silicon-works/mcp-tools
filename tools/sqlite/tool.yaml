@@ -1,6 +1,6 @@
 name: sqlite
 version: "1.0"
-description: "SQLite database client for extracting data from SQLite database files"
+description: "SQLite database client (v3.46.1 with FTS5) for post-exploitation extraction of data from .db and .sqlite files. Accepts database files by path (mounted volume) or base64-encoded content (downloaded from target via ssh/shell-session). Includes automated credential hunting that pattern-matches table names (users, accounts, admin, login, members, employees) and column names (password, hash, token, api_key, secret) to extract username/password pairs. Common targets: WordPress/Drupal user databases, Firefox/Chrome stored credentials and history, mobile app databases, application config stores, session databases, and any web framework using SQLite as backend."
 image: "ghcr.io/silicon-works/mcp-tools-sqlite:latest"
 image_size_mb: 100
 
@@ -23,10 +23,16 @@ resources:
 # Routing hints for tool selection
 routing:
   use_for:
-    - "SQLite database extraction"
-    - "local database analysis"
-    - "SQLite credential extraction"
-    - "SQLite file analysis"
+    - "SQLite database extraction and analysis"
+    - "extract credentials usernames passwords hashes from SQLite database"
+    - "analyze downloaded .db .sqlite database file from target"
+    - "post-exploitation database enumeration and data extraction"
+    - "browser data extraction Firefox Chrome history passwords bookmarks cookies"
+    - "CMS database analysis WordPress Drupal user tables"
+    - "application config and secret extraction from SQLite"
+    - "enumerate database schema tables columns row counts"
+    - "execute SQL queries on local SQLite database file"
+    - "mobile app database analysis Android iOS SQLite"
   never_use_for:
     - "remote database access (use mysql or mongodb)"
     - "SQL injection (use sqlmap)"
@@ -37,157 +43,164 @@ routing:
     - ".sqlite"
     - "database file"
     - "local database"
+    - "extract from database"
 
 methods:
   query:
-    description: "Execute a SQL query on a SQLite database"
-    when_to_use: "When you have access to a SQLite database file and need to extract data"
+    description: "Execute an arbitrary SQL query on a SQLite database and return structured results. Supports any valid SQLite SQL including SELECT, PRAGMA, and aggregate functions. Automatically appends LIMIT to SELECT queries that don't already have one to prevent memory exhaustion on large tables. Returns column names and rows as dictionaries for easy parsing."
+    when_to_use: "When you need to run a specific SQL query that isn't covered by the other convenience methods (list_tables, describe_table, dump_table, find_credentials). Use for: custom JOINs across tables, aggregate queries (COUNT, GROUP BY), LIKE/GLOB pattern searches for specific data, PRAGMA commands for database metadata, or any complex query. Also use when you need to search for specific values (e.g., SELECT * FROM users WHERE role='admin')."
     params:
       database:
         type: string
         required: true
-        description: "Path to SQLite database file, or base64-encoded database content"
+        description: "Path to SQLite database file inside the container (e.g., '/data/app.db' if volume-mounted), OR base64-encoded database content if is_base64=true. For databases downloaded from target, use base64 encoding: first download via ssh.download or shell-session, then pass the base64 content here."
       query:
         type: string
         required: true
-        description: "SQL query to execute"
+        description: "SQL query to execute. Any valid SQLite SQL is accepted. SELECT queries without LIMIT get an automatic LIMIT appended (controlled by limit param). Examples: 'SELECT * FROM users', 'SELECT username, password FROM accounts WHERE active=1', 'PRAGMA table_info(\"users\")', 'SELECT name, sql FROM sqlite_master'."
       is_base64:
         type: boolean
         default: false
-        description: "If true, database parameter is base64-encoded file content"
+        description: "Set to true when the database parameter contains base64-encoded file content instead of a file path. The server decodes it to a temp file, queries it, then cleans up."
       limit:
         type: integer
         default: 1000
-        description: "Maximum rows to return"
+        description: "Maximum rows to return for SELECT queries. Auto-appended as 'LIMIT N' if the query doesn't already contain a LIMIT clause. Set higher for large extractions."
     returns:
       columns:
         type: array
-        description: "Column names"
+        description: "Column names from the query result"
       rows:
         type: array
-        description: "Query results"
+        description: "Query results as array of dictionaries (column_name: value)"
       row_count:
         type: integer
         description: "Number of rows returned"
 
   list_tables:
-    description: "List all tables in a SQLite database"
-    when_to_use: "Initial enumeration of a SQLite database"
+    description: "List all tables in a SQLite database with row counts for each table. Queries sqlite_master for table names and runs COUNT(*) on each. Provides a quick overview of database contents to guide further extraction."
+    when_to_use: "First step when analyzing any SQLite database — run this to see what tables exist and how many rows each contains before deciding what to extract. Large row counts in tables named 'users', 'accounts', 'sessions', 'logs' etc. indicate high-value targets for extraction."
     params:
       database:
         type: string
         required: true
-        description: "Path to SQLite database file, or base64-encoded content"
+        description: "Path to SQLite database file, or base64-encoded content (set is_base64=true)"
       is_base64:
         type: boolean
         default: false
-        description: "If true, database parameter is base64-encoded file content"
+        description: "Set to true when database parameter contains base64-encoded file content"
     returns:
       tables:
         type: array
-        description: "List of tables with row counts"
+        description: "List of tables, each with 'name' and 'row_count' fields"
       count:
         type: integer
-        description: "Number of tables"
+        description: "Total number of tables in the database"
 
   describe_table:
-    description: "Get schema/structure of a table"
-    when_to_use: "To understand table structure before querying"
+    description: "Get detailed schema of a specific table using PRAGMA table_info(). Returns each column's name, data type, NOT NULL constraint, default value, and whether it's a primary key. Also returns the table's row count."
+    when_to_use: "After list_tables identifies interesting tables, use this to understand column structure before querying or dumping. Helps identify: which columns contain credentials (password, hash, token), which columns are primary keys for JOINs, data types for proper querying, and nullable fields."
     params:
       database:
         type: string
         required: true
-        description: "Path to SQLite database file"
+        description: "Path to SQLite database file, or base64-encoded content (set is_base64=true)"
       table:
         type: string
         required: true
-        description: "Table name to describe"
+        description: "Table name to describe (exact name as shown by list_tables)"
       is_base64:
         type: boolean
         default: false
-        description: "If true, database parameter is base64-encoded"
+        description: "Set to true when database parameter contains base64-encoded file content"
     returns:
       columns:
         type: array
-        description: "Column definitions with types"
+        description: "Column definitions, each with: cid (column index), name, type (e.g., TEXT, INTEGER, BLOB), notnull (boolean), default (default value or null), pk (boolean, is primary key)"
+      column_count:
+        type: integer
+        description: "Number of columns in the table"
       row_count:
         type: integer
-        description: "Number of rows in table"
+        description: "Number of rows in the table"
 
   dump_table:
-    description: "Dump all rows from a table"
-    when_to_use: "To extract all data from a specific table"
+    description: "Extract rows from a specific table with optional column selection. Runs 'SELECT [columns] FROM table LIMIT N' and returns results as dictionaries. Use the columns parameter to select only relevant columns (e.g., username and password) instead of dumping everything."
+    when_to_use: "After identifying interesting tables via list_tables or describe_table, use this to extract the actual data. Prefer this over query for simple full-table or column-filtered extractions since it handles quoting and limiting automatically. For credential tables, consider using find_credentials instead which auto-detects credential columns."
     params:
       database:
         type: string
         required: true
-        description: "Path to SQLite database file"
+        description: "Path to SQLite database file, or base64-encoded content (set is_base64=true)"
       table:
         type: string
         required: true
-        description: "Table name to dump"
+        description: "Table name to dump (exact name as shown by list_tables)"
       columns:
         type: array
-        description: "Specific columns to select (default: all)"
+        description: "Array of column names to select (e.g., ['username', 'password', 'email']). Omit to select all columns. Use describe_table first to see available columns."
       limit:
         type: integer
         default: 100
-        description: "Maximum rows to return"
+        description: "Maximum rows to return. Default 100. Increase for full extraction of small tables, keep low for initial sampling of large tables."
       is_base64:
         type: boolean
         default: false
-        description: "If true, database parameter is base64-encoded"
+        description: "Set to true when database parameter contains base64-encoded file content"
     returns:
+      columns:
+        type: array
+        description: "Column names in the result set"
       rows:
         type: array
-        description: "Table contents"
+        description: "Table contents as array of dictionaries (column_name: value)"
       row_count:
         type: integer
-        description: "Number of rows returned"
+        description: "Number of rows returned (may be less than total if limited)"
 
   find_credentials:
-    description: "Search for credential-related tables and extract potential usernames/passwords"
-    when_to_use: "To quickly find and extract credentials from a SQLite database"
+    description: "Automatically search for credential-related data by pattern-matching table and column names. Scans table names against 14 patterns (user, users, account, accounts, member, members, admin, admins, login, logins, auth, credential, customer, employee) and column names against username patterns (username, user, login, email, name, account, user_name, user_id) and password patterns (password, passwd, pass, pwd, hash, secret, token, api_key, apikey, auth, credential). If no credential-pattern tables are found, falls back to searching ALL tables for credential-pattern columns. Returns extracted username/password pairs with source table."
+    when_to_use: "First thing to run on any database found during post-exploitation. Automatically identifies and extracts credentials without needing to know the schema. Works on: CMS databases (WordPress wp_users, Drupal users), custom web app databases, configuration stores, session databases. If this returns no results, fall back to list_tables → describe_table → dump_table for manual analysis."
     params:
       database:
         type: string
         required: true
-        description: "Path to SQLite database file"
+        description: "Path to SQLite database file, or base64-encoded content (set is_base64=true)"
       is_base64:
         type: boolean
         default: false
-        description: "If true, database parameter is base64-encoded"
+        description: "Set to true when database parameter contains base64-encoded file content"
       limit:
         type: integer
         default: 100
-        description: "Maximum rows to return per table"
+        description: "Maximum rows to extract per matching table"
     returns:
       credential_tables:
         type: array
-        description: "Tables that may contain credentials"
+        description: "Table names that matched credential patterns (or all tables if no pattern matches found)"
       credentials:
         type: array
-        description: "Extracted username/password pairs"
+        description: "Extracted credential data, each with 'table' (source table name) and matched column values (e.g., username, password, hash, email, token)"
       count:
         type: integer
-        description: "Number of credentials found"
+        description: "Total number of credential rows extracted across all tables"
 
   schema:
-    description: "Get full database schema (all tables and columns)"
-    when_to_use: "To get complete overview of database structure"
+    description: "Get complete database schema including all tables, their columns (name, type, constraints), row counts, and original CREATE TABLE SQL statements. Provides a comprehensive overview of the entire database structure in one call."
+    when_to_use: "When you want the full picture of a database in a single call rather than running list_tables followed by describe_table on each. Returns more detail than list_tables (includes column definitions and CREATE SQL) but can produce large output for databases with many tables. Prefer list_tables for initial quick look, use schema when you need the complete structure."
     params:
       database:
         type: string
         required: true
-        description: "Path to SQLite database file"
+        description: "Path to SQLite database file, or base64-encoded content (set is_base64=true)"
       is_base64:
         type: boolean
         default: false
-        description: "If true, database parameter is base64-encoded"
+        description: "Set to true when database parameter contains base64-encoded file content"
     returns:
       tables:
         type: object
-        description: "All tables with their columns and row counts"
+        description: "Dictionary keyed by table name, each with: 'columns' (array of {name, type, notnull, pk}), 'row_count' (integer), 'create_sql' (original CREATE TABLE statement)"
       table_count:
         type: integer
-        description: "Number of tables"
+        description: "Total number of tables in the database"

@@ -1,6 +1,6 @@
 name: web-fingerprint
 version: "1.0"
-description: "Web technology fingerprinting for identifying CMS, frameworks, and servers"
+description: "Web technology fingerprinting tool that identifies CMS platforms (WordPress, Joomla, Drupal, XWiki), server-side frameworks (Laravel, Django, Rails, ASP.NET, Spring, Express), web servers (Apache, nginx, IIS, Tomcat, Jetty), JavaScript frameworks (React, Vue.js, Angular, jQuery), database management UIs (phpMyAdmin, Adminer), DevOps tools (GitLab, Jenkins, Grafana, Kibana), and CDN/infrastructure (CloudFlare, AWS ELB, Varnish) using signature-based matching against HTTP headers, response body patterns, meta tags, and cookies. Also checks security headers and calculates favicon hashes."
 image: "ghcr.io/silicon-works/mcp-tools-web-fingerprint:latest"
 image_size_mb: 100
 
@@ -26,12 +26,16 @@ resources:
 # Routing hints for tool selection
 routing:
   use_for:
-    - "technology detection"
-    - "CMS identification"
-    - "framework detection"
-    - "server fingerprinting"
-    - "security header analysis"
-    - "identify technology stack"
+    - "technology detection and web stack identification"
+    - "CMS identification WordPress Joomla Drupal"
+    - "framework detection Laravel Django Rails ASP.NET Spring Express"
+    - "web server fingerprinting Apache nginx IIS Tomcat"
+    - "security header analysis and misconfiguration check"
+    - "identify technology stack behind a web application"
+    - "JavaScript framework detection React Vue Angular"
+    - "favicon hash calculation for Shodan lookup"
+    - "HTTP header analysis and information disclosure detection"
+    - "DevOps tool detection GitLab Jenkins Grafana Kibana"
   never_use_for:
     - "vulnerability scanning"
     - "port scanning"
@@ -49,100 +53,124 @@ routing:
 
 methods:
   fingerprint:
-    description: "Fingerprint web technologies on a target URL"
-    when_to_use: "Initial reconnaissance to identify technology stack"
+    description: "Fingerprint web technologies on a target URL using signature-based matching against HTTP headers, HTML body patterns, meta generator tags, and cookies. Detects 25 technologies across 7 categories: CMS (WordPress, Joomla, Drupal, XWiki), frameworks (Laravel, Django, Rails, ASP.NET, Spring, Express), web servers (Apache, nginx, IIS, Tomcat, Jetty), JS frameworks (React, Vue.js, Angular, jQuery), database UIs (phpMyAdmin, Adminer), CDN/infrastructure (CloudFlare, AWS ELB, Varnish), and DevOps tools (GitLab, Jenkins, Grafana, Kibana). Each detection includes a confidence score (0-100) based on how many signature types matched (header=30, body=20, meta=40, cookie=25). Also extracts page title, server header, cookie names, and internal paths from href/src/action attributes."
+    when_to_use: "As the first step after discovering an HTTP/HTTPS service to identify the technology stack before choosing specific scanning tools. Results guide next steps: WordPress detected → use wpscan, Laravel/Django detected → test framework-specific vulnerabilities, phpMyAdmin/Adminer detected → try default credentials, Jenkins/GitLab detected → check for unauthenticated access. Run this before nikto/nuclei/zap to understand what you're dealing with. Lighter and faster than nuclei's tech_detect method."
     params:
       url:
         type: string
         required: true
-        description: "Target URL to fingerprint"
+        description: "Target URL to fingerprint (e.g., 'http://10.10.10.1', 'https://target.htb:8443'). Scheme is auto-added as http:// if omitted."
       follow_redirects:
         type: boolean
         default: true
-        description: "Follow HTTP redirects"
+        description: "Follow HTTP 3xx redirects to final destination. Set to false to analyze redirect behavior itself (e.g., detecting redirect-based authentication)."
       timeout:
         type: integer
         default: 30
-        description: "Request timeout in seconds"
+        description: "HTTP request timeout in seconds"
       user_agent:
         type: string
-        description: "Custom User-Agent header"
+        description: "Custom User-Agent header. Default: Chrome-like UA string. Change if target blocks automated scanners or serves different content based on UA."
     returns:
       technologies:
         type: array
-        description: "Detected technologies with confidence scores"
+        description: "Detected technologies, each with 'technology' name, 'confidence' score (0-100), and 'matches' array showing what matched (e.g., 'Header: X-Powered-By', 'Body: /wp-content/', 'Meta: generator=WordPress 6.1', 'Cookie: laravel_session')"
       server:
         type: string
-        description: "Server header value"
+        description: "Server header value (e.g., 'Apache/2.4.41', 'nginx/1.18.0', 'Microsoft-IIS/10.0')"
       title:
         type: string
-        description: "Page title"
+        description: "HTML page title extracted from <title> tag"
       interesting_paths:
         type: array
-        description: "Extracted paths from HTML"
+        description: "Internal paths extracted from href, src, and action attributes in HTML (up to 50, relative paths starting with /)"
+      status_code:
+        type: integer
+        description: "HTTP response status code"
+      cookies:
+        type: array
+        description: "Cookie names set by the server (e.g., ['PHPSESSID', 'laravel_session', 'csrftoken'])"
 
   headers:
-    description: "Extract and analyze HTTP headers"
-    when_to_use: "To analyze server configuration and security headers"
+    description: "Fetch and categorize all HTTP response headers into 4 groups: security headers (Content-Security-Policy, Strict-Transport-Security, X-Frame-Options, X-Content-Type-Options, X-XSS-Protection, Referrer-Policy, Permissions-Policy, Cross-Origin-Opener-Policy, Cross-Origin-Embedder-Policy), server info headers (Server, X-Powered-By, X-AspNet-Version, X-Generator), cache headers (Cache-Control, Expires, Pragma, ETag, Last-Modified), and other headers."
+    when_to_use: "To get a full categorized view of all HTTP headers returned by the target. Use this for initial reconnaissance to understand server configuration, identify technology versions from Server/X-Powered-By headers, check caching behavior, and spot unusual or custom headers that may reveal application internals. For specifically checking security header compliance, use the security_headers method instead."
     params:
       url:
         type: string
         required: true
-        description: "Target URL"
+        description: "Target URL (e.g., 'http://10.10.10.1'). Scheme auto-added as http:// if omitted."
       timeout:
         type: integer
         default: 30
-        description: "Request timeout in seconds"
+        description: "HTTP request timeout in seconds"
     returns:
       security_headers:
         type: object
-        description: "Security-related headers"
+        description: "Security-related headers found (CSP, HSTS, X-Frame-Options, etc.)"
       server_headers:
         type: object
-        description: "Server information headers"
+        description: "Server information headers (Server, X-Powered-By, X-AspNet-Version, X-Generator)"
+      cache_headers:
+        type: object
+        description: "Cache control headers (Cache-Control, Expires, Pragma, ETag, Last-Modified)"
+      other_headers:
+        type: object
+        description: "All remaining headers not in the above categories"
+      status_code:
+        type: integer
+        description: "HTTP response status code"
 
   security_headers:
-    description: "Check for security headers and misconfigurations"
-    when_to_use: "To assess security header configuration"
+    description: "Audit 7 security headers against best practices and flag misconfigurations. Checks: Strict-Transport-Security (HSTS — forces HTTPS, flags max-age < 1 year), Content-Security-Policy (CSP — prevents XSS/injection), X-Content-Type-Options (prevents MIME sniffing), X-Frame-Options (prevents clickjacking, flags values other than DENY/SAMEORIGIN), X-XSS-Protection (legacy XSS filter), Referrer-Policy (controls referrer leakage), Permissions-Policy (controls browser features). Also detects information disclosure via Server, X-Powered-By, X-AspNet-Version, and X-Generator headers that reveal technology and version info."
+    when_to_use: "After identifying HTTP/HTTPS services to audit security header configuration. Missing or misconfigured security headers are common findings in penetration test reports. Run this to check for: missing HSTS (allows SSL stripping), missing CSP (enables XSS), missing X-Frame-Options (enables clickjacking), weak HSTS max-age, and server version disclosure. Results include a score (e.g., '4/7') and severity ratings per finding."
     params:
       url:
         type: string
         required: true
-        description: "Target URL"
+        description: "Target URL (e.g., 'https://target.htb'). Scheme auto-added as http:// if omitted."
       timeout:
         type: integer
         default: 30
-        description: "Request timeout in seconds"
+        description: "HTTP request timeout in seconds"
     returns:
       missing_headers:
         type: array
-        description: "Missing security headers"
+        description: "Security headers not present, each with header name, description of what it protects against, and severity (medium/low/info)"
       present_headers:
         type: array
-        description: "Present security headers"
+        description: "Security headers found, each with header name, actual value, and description"
       issues:
         type: array
-        description: "Security issues found"
+        description: "Misconfigurations found: weak X-Frame-Options values, short HSTS max-age (<1 year), information disclosure from Server/X-Powered-By/X-AspNet-Version/X-Generator headers"
       score:
         type: string
-        description: "Security header score"
+        description: "Security header compliance score as 'present/total' (e.g., '4/7')"
 
   favicon_hash:
-    description: "Calculate favicon hash for Shodan lookup"
-    when_to_use: "To find similar servers via Shodan favicon search"
+    description: "Download /favicon.ico from the target and calculate its MD5 hash for identification purposes. Note: Shodan uses MurmurHash3 (mmh3) for favicon searching, not MD5 — the mmh3 library is not currently installed, so the generated Shodan query may not produce accurate results. The MD5 hash is still useful for identifying and comparing favicons across targets."
+    when_to_use: "During reconnaissance to identify the web application or framework by its favicon. Many default application installations (e.g., Spring Boot, Apache Tomcat, Grafana, Jenkins) have recognizable default favicons. The hash can be used to: identify the application if no other indicators are present, find similar servers via Shodan (note mmh3 limitation), and compare favicons across different ports/vhosts on the same target."
     params:
       url:
         type: string
         required: true
-        description: "Target URL"
+        description: "Target URL — the method will automatically request /favicon.ico from the target's root (e.g., 'http://10.10.10.1' → fetches 'http://10.10.10.1/favicon.ico')"
       timeout:
         type: integer
         default: 30
-        description: "Request timeout"
+        description: "HTTP request timeout in seconds"
     returns:
+      favicon_url:
+        type: string
+        description: "Full URL that was fetched (e.g., 'http://10.10.10.1/favicon.ico')"
+      size_bytes:
+        type: integer
+        description: "Favicon file size in bytes"
       md5:
         type: string
-        description: "Favicon MD5 hash"
+        description: "MD5 hash of the favicon file content"
       shodan_query:
         type: string
-        description: "Shodan search query"
+        description: "Shodan search query string (note: uses MD5, Shodan actually requires mmh3 hash for accurate results)"
+      note:
+        type: string
+        description: "Caveat about mmh3 vs MD5 hash difference"

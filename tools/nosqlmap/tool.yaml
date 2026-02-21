@@ -1,6 +1,6 @@
 name: nosqlmap
 version: "0.7"
-description: "NoSQL injection and database takeover tool for MongoDB, CouchDB, and other NoSQL databases"
+description: "NoSQL injection testing and exploitation tool (native Python implementation, not the nosqlmap CLI). 3 methods: scan (quick test with 3 basic MongoDB operator payloads per URL parameter), inject (targeted injection with 16 built-in MongoDB payloads for auth bypass or data extraction), test_payloads (comprehensive test with 21 payloads including baseline comparison, response length differential, and status code change detection). Supports GET and POST with form or JSON content types. Uses curl internally."
 image: "ghcr.io/silicon-works/mcp-tools-nosqlmap:latest"
 image_size_mb: 180
 
@@ -13,23 +13,26 @@ capabilities:
 # Routing hints for tool selection
 routing:
   use_for:
-    - "NoSQL injection"
-    - "MongoDB injection"
-    - "authentication bypass"
-    - "NoSQL database exploitation"
-    - "$ne injection"
-    - "$regex injection"
+    - "test web form or API login for MongoDB NoSQL injection with operator payloads"
+    - "bypass authentication on MongoDB-backed web app via $ne or $gt operator injection"
+    - "test URL parameter for NoSQL injection with $regex $where $exists operators"
+    - "NoSQL injection with JSON content type on REST API endpoints"
+    - "parameter pollution style NoSQL injection with [$ne]= syntax"
   never_use_for:
-    - "SQL injection"
-    - "MySQL"
-    - "PostgreSQL"
+    - "SQL injection (use sqlmap)"
+    - "MySQL or PostgreSQL database access"
+    - "direct MongoDB shell access (use mongodb tool)"
     - "port scanning"
   triggers:
     - "nosql injection"
     - "mongodb injection"
     - "nosqlmap"
     - "$ne"
+    - "$gt"
     - "$regex"
+    - "$where"
+    - "operator injection"
+    - "NoSQL auth bypass"
   prefer_over: []
 
 phases:
@@ -45,121 +48,123 @@ resources:
 
 methods:
   scan:
-    description: "Scan a URL for NoSQL injection vulnerabilities"
-    when_to_use: "When testing web forms or APIs that may use NoSQL backends"
+    description: "Quick scan of a URL for NoSQL injection by testing each URL/POST parameter with 3 basic MongoDB operator payloads ({\"$ne\":\"\"}, {\"$gt\":\"\"}, [$ne]=test). Uses heuristic detection: HTTP 500 (server error processing injected operator) or HTTP 301/302 redirect on auth-related parameters (possible auth bypass). Parses parameters from URL query string and POST data."
+    when_to_use: "First step when testing a web form or API endpoint backed by MongoDB/NoSQL. Provide the URL with query parameters for GET, or URL + data for POST. The tool auto-discovers all parameters and tests each one. Use this for initial detection — if it finds potential injection points, follow up with test_payloads for comprehensive confirmation with baseline comparison. Note: does NOT support cookie parameter — use headers={'Cookie': 'value'} instead."
     params:
       url:
         type: string
         required: true
-        description: "Target URL to scan"
+        description: "Target URL to scan. For GET, include query parameters (e.g., 'http://target/search?q=test&category=1'). For POST, the URL alone — provide POST data via 'data' param."
       method:
-        type: enum
-        values: [GET, POST]
-        default: POST
-        description: "HTTP method"
-      params:
-        type: object
-        description: "Request parameters as key-value pairs"
+        type: string
+        default: "GET"
+        description: "HTTP method: GET or POST."
+      data:
+        type: string
+        description: "POST body in key=value&key2=value2 format (e.g., 'username=admin&password=test'). Parameters from both URL and data are tested."
       headers:
         type: object
-        description: "Custom HTTP headers"
-      cookie:
+        description: "Custom HTTP headers as key-value pairs. Use {'Cookie': 'PHPSESSID=abc'} for authenticated scans."
+      database_type:
         type: string
-        description: "Cookie header value for authenticated scans"
+        default: "MongoDB"
+        description: "Target database type: MongoDB, CouchDB, or Redis. Currently only affects output labeling — all payloads are MongoDB-focused."
       timeout:
         type: integer
-        default: 30
-        description: "Request timeout in seconds"
+        default: 60
+        description: "Timeout in seconds per payload test."
     returns:
-      vulnerable:
-        type: boolean
-        description: "Whether target appears vulnerable"
-      injection_points:
+      vulnerabilities:
         type: array
-        description: "Parameters that appear injectable"
-      findings:
+        description: "Payloads that triggered anomalous responses — each entry has parameter, payload, description, evidence."
+      potential_injection_points:
         type: array
-        description: "Detailed findings with payloads that worked"
+        description: "Deduplicated list of parameter names that appeared injectable."
+      parameters_found:
+        type: array
+        description: "All parameters discovered in the request for testing."
 
   inject:
-    description: "Exploit NoSQL injection to bypass authentication or extract data"
-    when_to_use: "After confirming NoSQL injection vulnerability to exploit it"
+    description: "Attempt NoSQL injection on a specific parameter with 16 built-in MongoDB payloads. Includes: operator injection ({\"$ne\":\"\"}, {\"$gt\":\"\"}, {\"$regex\":\".*\"}, {\"$exists\":true}), JavaScript injection ({\"$where\":\"1==1\"}), URL-encoded variants, double-encoded variants, and parameter pollution ([$ne]=, [$gt]=, [$regex]=.*). For auth_bypass, uses first 10 payloads focused on bypassing login. For extract_data, uses regex/where payloads."
+    when_to_use: "After scan identifies a potentially injectable parameter, use inject to try the full payload set against that specific parameter. Choose injection_type='auth_bypass' for login forms (the most common NoSQL injection scenario — bypassing MongoDB authentication with {\"$ne\":\"\"} on password field). Choose 'extract_data' when you need to pull data via regex/where injection. Workflow: scan → inject(parameter=vulnerable_param) → if auth bypass succeeds, capture the authenticated session cookie."
     params:
       url:
         type: string
         required: true
-        description: "Target URL"
-      method:
-        type: enum
-        values: [GET, POST]
-        default: POST
-        description: "HTTP method"
-      injection_type:
-        type: enum
-        values: [auth_bypass, data_extraction, operator_injection, js_injection]
-        default: auth_bypass
-        description: "Type of injection to attempt"
-      params:
-        type: object
-        description: "Base request parameters"
-      inject_param:
+        description: "Target URL (e.g., 'http://target/login')."
+      parameter:
         type: string
         required: true
-        description: "Parameter to inject into"
+        description: "Parameter name to inject into (e.g., 'password', 'username'). Must match a parameter from the URL query string or POST data."
+      method:
+        type: string
+        default: "POST"
+        description: "HTTP method: GET or POST."
+      data:
+        type: string
+        description: "Base POST data in key=value&key2=value2 format (e.g., 'username=admin&password=test'). The specified parameter's value will be replaced with each injection payload."
+      injection_type:
+        type: string
+        default: "auth_bypass"
+        description: "Injection strategy: 'auth_bypass' (first 10 payloads, operator-focused), 'extract_data' (regex/where payloads only), or 'blind' (all 16 payloads)."
       headers:
         type: object
-        description: "Custom HTTP headers"
-      cookie:
-        type: string
-        description: "Cookie header value"
+        description: "Custom HTTP headers. Use {'Cookie': 'PHPSESSID=abc'} for authenticated testing."
+      timeout:
+        type: integer
+        default: 60
+        description: "Timeout in seconds per payload test."
     returns:
-      success:
-        type: boolean
-        description: "Whether injection succeeded"
-      response_data:
-        type: string
-        description: "Response from successful injection"
-      payload_used:
-        type: string
-        description: "Payload that worked"
+      successful_payloads:
+        type: array
+        description: "Payloads that triggered anomalous responses — each entry has payload, description, evidence, status_code."
+      tests_performed:
+        type: integer
+        description: "Number of payloads tested."
 
   test_payloads:
-    description: "Test multiple NoSQL injection payloads against a target"
-    when_to_use: "To systematically test various NoSQL injection techniques"
+    description: "Comprehensive NoSQL injection testing with 21 payloads (16 standard + 5 JSON-specific). First establishes a baseline response, then tests each payload and detects injection via three methods: (1) success_indicator string found in response, (2) response length differs by >100 bytes from baseline, (3) HTTP status code changes (200 or 302 from non-200 baseline). Supports both form-urlencoded and JSON content types."
+    when_to_use: "Most thorough NoSQL injection test — use when scan/inject gave inconclusive results, or when you need precise detection with baseline comparison. Supports JSON APIs via content_type='json' (automatically sets Content-Type: application/json and injects payloads into JSON body). Provide success_indicator (e.g., 'Welcome', 'Dashboard', 'logged in') for reliable detection on login forms. Provide error_indicator (e.g., 'Invalid', 'Error') to filter out false positives from error pages with different content length."
     params:
       url:
         type: string
         required: true
-        description: "Target URL"
-      method:
-        type: enum
-        values: [GET, POST]
-        default: POST
-        description: "HTTP method"
-      params:
-        type: object
-        required: true
-        description: "Base request parameters"
-      test_param:
+        description: "Target URL (e.g., 'http://target/api/login')."
+      parameter:
         type: string
         required: true
-        description: "Parameter to test for injection"
+        description: "Parameter name to inject into (e.g., 'password')."
+      method:
+        type: string
+        default: "POST"
+        description: "HTTP method: GET or POST."
+      data:
+        type: string
+        description: "Base request body. For form: 'username=admin&password=test'. For JSON: '{\"username\":\"admin\",\"password\":\"test\"}'."
+      content_type:
+        type: string
+        default: "form"
+        description: "Content type: 'form' (application/x-www-form-urlencoded) or 'json' (application/json). JSON mode injects payloads as JSON objects into the request body."
       headers:
         type: object
-        description: "Custom HTTP headers"
-      cookie:
+        description: "Custom HTTP headers. Use {'Cookie': 'PHPSESSID=abc'} for authenticated testing."
+      success_indicator:
         type: string
-        description: "Cookie header value"
-      payload_types:
-        type: array
-        description: "Types of payloads to test: operator, regex, js, timing"
+        description: "String in the response body that indicates successful injection (e.g., 'Welcome admin', 'Dashboard', 'token'). More reliable than length-based detection."
+      error_indicator:
+        type: string
+        description: "String in the response body that indicates a failed attempt (e.g., 'Invalid credentials', 'Error'). Used to filter out false positives from error pages."
+      timeout:
+        type: integer
+        default: 120
+        description: "Timeout in seconds for the full test suite."
     returns:
-      results:
+      successful:
         type: array
-        description: "Results for each payload tested"
-      vulnerable:
-        type: boolean
-        description: "Whether any injection succeeded"
-      recommended_payload:
-        type: string
-        description: "Most effective payload found"
+        description: "Payloads that differed from baseline — each entry has payload, description, evidence (array of reasons), response status and length."
+      baseline:
+        type: object
+        description: "Baseline response (status_code, response_length) for comparison."
+      payloads_tested:
+        type: integer
+        description: "Total number of payloads tested."

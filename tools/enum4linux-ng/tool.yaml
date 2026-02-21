@@ -1,6 +1,6 @@
 name: enum4linux-ng
-version: "1.3"
-description: "SMB/Windows enumeration tool for shares, users, and groups"
+version: "1.3.7"
+description: "Next-generation SMB/Windows/Samba enumeration tool (enum4linux-ng v1.3.7, Python rewrite of enum4linux.pl). Wraps Samba tools (nmblookup, net, rpcclient, smbclient) for automated enumeration of: SMB shares with access checks, users via RPC and RID cycling, groups with member lists, password policy, OS information, services, printers, NetBIOS names, and LDAP domain info (for DCs). Smart enumeration — checks SMB/LDAP accessibility first, skips inapplicable checks. Supports anonymous (null session), username/password, Kerberos ticket, and NTLM hash authentication. JSON/YAML output for structured parsing."
 image: "ghcr.io/silicon-works/mcp-tools-enum4linux-ng:latest"
 image_size_mb: 150
 
@@ -24,16 +24,18 @@ resources:
 # Routing hints for tool selection
 routing:
   use_for:
-    - "SMB enumeration"
-    - "Windows user enumeration"
-    - "share enumeration"
-    - "group enumeration"
-    - "RID cycling"
-    - "password policy enumeration"
+    - "enumerate SMB shares users and groups on Windows or Samba targets"
+    - "discover domain users via RID cycling through null sessions"
+    - "check SMB share permissions and find readable writable shares"
+    - "enumerate Windows password policy before brute-force attacks"
+    - "get OS version and domain information from SMB service"
+    - "enumerate Active Directory users and groups via SMB"
+    - "find anonymous accessible SMB shares on port 445"
+    - "enumerate Windows domain groups and their members"
   never_use_for:
-    - "SMB exploitation"
-    - "port scanning"
-    - "brute-force attacks"
+    - "SMB exploitation like EternalBlue (use metasploit or exploit-runner)"
+    - "port scanning (use nmap)"
+    - "SMB password brute-force (use hydra)"
   triggers:
     - "SMB"
     - "enum4linux"
@@ -43,158 +45,160 @@ routing:
     - "Samba"
     - "port 445"
     - "port 139"
+    - "null session"
+    - "domain users"
   prefer_over:
     - nmap  # For detailed SMB enumeration
 
 methods:
   enumerate:
-    description: "Enumerate SMB shares, users, groups, and more from a Windows/Samba target"
-    when_to_use: "After discovering SMB service (445/139) to enumerate Windows/Samba information"
+    description: "Comprehensive SMB enumeration combining shares (-S), users via RID cycling (-U), and groups (-G) into a single scan. Uses enum4linux-ng with JSON output (-oJ). Smart enumeration checks SMB accessibility first and skips inapplicable checks. If no specific modules are selected, defaults to -A (all simple enumeration). Returns parsed JSON with OS info, share list (name, type, comment), user list (username, RID), and group list (name, RID). Full raw JSON is also included for detailed analysis."
+    when_to_use: "The first tool to run after nmap discovers SMB on port 445 or 139. Start with this comprehensive scan to get an overview: what shares exist, what users are on the system, and what groups they belong to. Try anonymous (null session) first by omitting username/password — many SMB servers leak information without authentication. If null session fails, try with discovered credentials. The results feed into: (1) shares → look for readable/writable shares with sensitive files, (2) users → target for password brute-force with hydra, (3) groups → identify admin group members for privilege escalation."
     params:
       target:
         type: string
         required: true
-        description: "Target IP or hostname"
+        description: "Target IP or hostname with SMB running (port 445 or 139)."
       username:
         type: string
-        description: "Username for authenticated enumeration"
+        description: "Username for authenticated enumeration. Omit for null session (anonymous). Use '' (empty string) explicitly for guest access."
       password:
         type: string
-        description: "Password for authenticated enumeration"
+        description: "Password for authenticated enumeration. Omit for null session."
       shares:
         type: boolean
         default: true
-        description: "Enumerate shares"
+        description: "Enumerate SMB shares (-S). Shows share name, type (Disk/IPC$/Printer), and comment."
       users:
         type: boolean
         default: true
-        description: "Enumerate users via RID cycling"
+        description: "Enumerate users via RPC/RID cycling (-U). Discovers domain/local user accounts."
       groups:
         type: boolean
         default: true
-        description: "Enumerate groups"
+        description: "Enumerate groups (-G). Shows group names and RIDs. Use enum_groups for member lists."
       timeout:
         type: integer
         default: 300
-        description: "Timeout in seconds"
+        description: "Timeout in seconds. 300s is usually sufficient. Increase for slow networks or large domains."
     returns:
       shares:
         type: array
-        description: "Discovered SMB shares"
+        description: "Discovered SMB shares, each with: name, type (Disk/IPC$/Printer), comment."
       users:
         type: array
-        description: "Discovered users"
+        description: "Discovered user accounts, each with: username, RID (Relative Identifier)."
       groups:
         type: array
-        description: "Discovered groups"
+        description: "Discovered groups, each with: name, RID."
       os_info:
         type: object
-        description: "Operating system information"
+        description: "OS information from SMB: OS version, server type, domain/workgroup name."
 
   enum_users:
-    description: "Enumerate users via RID cycling on SMB/Windows target"
-    when_to_use: "To enumerate user accounts on Windows/Samba targets"
+    description: "Enumerate user accounts via RID cycling (-U -R) on an SMB/Windows target. RID cycling iterates through Relative Identifiers to discover valid user accounts — even through null sessions where user listing via RPC may be blocked. Default range covers well-known RIDs (500=Administrator, 501=Guest, 502=krbtgt) and typical user RIDs (1000+). Uses JSON output for structured results. Each user includes username, RID, and domain."
+    when_to_use: "When you need a comprehensive user list from an SMB target, especially when the enumerate method didn't find users (some servers block RPC user listing but allow RID lookups). The discovered usernames are essential for: (1) Password brute-force with hydra smb or hydra ssh, (2) Kerberoasting in Active Directory, (3) Password spraying. Well-known RIDs to look for: 500=Administrator (always exists), 501=Guest, 502=krbtgt (AD only). Expand rid_range to '500-550,1000-5000' for large domains with many users."
     params:
       target:
         type: string
         required: true
-        description: "Target IP or hostname"
+        description: "Target IP or hostname with SMB running."
       username:
         type: string
-        description: "Username for authenticated enumeration"
+        description: "Username for authenticated enumeration. Omit for null session."
       password:
         type: string
-        description: "Password for authenticated enumeration"
+        description: "Password for authenticated enumeration."
       rid_range:
         type: string
         default: "500-550,1000-1200"
-        description: "RID range to enumerate (e.g., '500-550,1000-1200')"
+        description: "RID range(s) to enumerate, comma-separated. Default '500-550,1000-1200' covers admin RIDs and first 200 user accounts. Well-known: 500=Administrator, 501=Guest, 502=krbtgt. Expand to '500-550,1000-5000' for large domains."
       timeout:
         type: integer
         default: 300
-        description: "Timeout in seconds"
+        description: "Timeout in seconds."
     returns:
       users:
         type: array
-        description: "Discovered users with RID and domain info"
+        description: "Discovered users, each with: username, rid (numeric RID), domain."
       count:
         type: integer
-        description: "Number of users found"
+        description: "Number of users found."
 
   enum_shares:
-    description: "Enumerate SMB shares and check access permissions"
-    when_to_use: "To discover available SMB shares and access levels"
+    description: "Enumerate SMB shares and check access permissions (-S). Lists all shared resources (disk shares, IPC$, printers) with share name, type, comment, and access mapping (readable/writable). Uses rpcclient and smbclient to enumerate and test access. Returns structured share data with access level information."
+    when_to_use: "After confirming SMB is running, to find accessible file shares. Key things to look for: (1) Non-default shares (anything besides ADMIN$, C$, IPC$, print$) — these often contain sensitive files. (2) Readable shares — may contain config files, credentials, backups. (3) Writable shares — can be used to plant web shells, backdoors, or exploit DLL hijacking. Common high-value shares: 'Users', 'Documents', 'Backups', 'IT', 'Scripts'. After finding readable shares, use impacket's smbclient to browse and download files."
     params:
       target:
         type: string
         required: true
-        description: "Target IP or hostname"
+        description: "Target IP or hostname with SMB running."
       username:
         type: string
-        description: "Username for authenticated enumeration"
+        description: "Username for authenticated enumeration. Omit for null session. Authenticated enumeration reveals more shares and access details."
       password:
         type: string
-        description: "Password for authenticated enumeration"
+        description: "Password for authenticated enumeration."
       timeout:
         type: integer
         default: 300
-        description: "Timeout in seconds"
+        description: "Timeout in seconds."
     returns:
       shares:
         type: array
-        description: "Discovered shares with type, comment, and access info"
+        description: "Discovered shares, each with: name, type (Disk/IPC$/Printer), comment (description), access (mapping/read/write permissions)."
       count:
         type: integer
-        description: "Number of shares found"
+        description: "Number of shares found."
 
   enum_groups:
-    description: "Enumerate groups and their members from SMB/Windows target"
-    when_to_use: "To discover group memberships for privilege escalation paths"
+    description: "Enumerate groups and their members via RPC (-G). Lists local and domain groups with RID and member usernames. Shows group membership hierarchy — critical for identifying who has administrative access. Uses rpcclient group enumeration."
+    when_to_use: "After user enumeration, to understand privilege levels. Key groups to look for: (1) 'Domain Admins' or 'Administrators' — members have full control, (2) 'Remote Desktop Users' — can RDP in, (3) 'Backup Operators' — can read any file, (4) 'Account Operators' — can create/modify accounts. Group membership reveals privilege escalation paths: if a compromised user is in a privileged group, you already have elevated access."
     params:
       target:
         type: string
         required: true
-        description: "Target IP or hostname"
+        description: "Target IP or hostname with SMB running."
       username:
         type: string
-        description: "Username for authenticated enumeration"
+        description: "Username for authenticated enumeration. Authenticated sessions reveal more groups and membership details."
       password:
         type: string
-        description: "Password for authenticated enumeration"
+        description: "Password for authenticated enumeration."
       timeout:
         type: integer
         default: 300
-        description: "Timeout in seconds"
+        description: "Timeout in seconds."
     returns:
       groups:
         type: array
-        description: "Discovered groups with RID and members"
+        description: "Discovered groups, each with: name, rid, members (list of member usernames/SIDs)."
       count:
         type: integer
-        description: "Number of groups found"
+        description: "Number of groups found."
 
   enum_policy:
-    description: "Enumerate password policy and domain info"
-    when_to_use: "To understand password requirements before brute-forcing"
+    description: "Enumerate password policy and domain/OS information via RPC (-P -I). Returns password policy settings (min length, complexity, lockout threshold, lockout duration, max password age) and OS/domain info (OS version, domain name, server type). Uses rpcclient policyquery and srvinfo commands."
+    when_to_use: "Before password brute-force attacks, to understand what passwords are valid and avoid lockouts. Key policy fields: (1) 'Minimum password length' — determines minimum wordlist entry length, (2) 'Account lockout threshold' — how many failed attempts before lockout (0=no lockout), (3) 'Account lockout duration' — how long lockout lasts. If lockout threshold is 0 or very high, aggressive brute-force is safe. If low (3-5 attempts), use careful password spraying instead. Password complexity requirements inform wordlist selection."
     params:
       target:
         type: string
         required: true
-        description: "Target IP or hostname"
+        description: "Target IP or hostname with SMB running."
       username:
         type: string
-        description: "Username for authenticated enumeration"
+        description: "Username for authenticated enumeration. Some targets only reveal policy to authenticated users."
       password:
         type: string
-        description: "Password for authenticated enumeration"
+        description: "Password for authenticated enumeration."
       timeout:
         type: integer
         default: 300
-        description: "Timeout in seconds"
+        description: "Timeout in seconds."
     returns:
       password_policy:
         type: object
-        description: "Password policy settings"
+        description: "Password policy: min_length, complexity_required, lockout_threshold, lockout_duration_minutes, max_password_age_days, password_history_length."
       domain_info:
         type: object
-        description: "Domain and OS information"
+        description: "Domain/OS info: OS version string, domain name, server type, DNS hostname."

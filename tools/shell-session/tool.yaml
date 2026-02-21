@@ -1,6 +1,6 @@
 name: shell-session
 version: "1.0"
-description: "Persistent shell session management for SSH and reverse shells - enables multi-command operations on compromised targets"
+description: "Persistent shell session manager (paramiko for SSH, raw sockets for reverse shells) for maintaining interactive sessions on compromised targets. Unlike the ssh tool (which reconnects per command), shell-session keeps a single SSH connection open for multiple commands via exec. 9 methods: ssh_connect (persistent SSH via paramiko), exec (run command on SSH session), upload/download (SFTP file transfer), listen (reverse shell TCP listener), shell_exec (send command to reverse shell with output stability detection), list_sessions, close, upgrade_shell (dumb shell to PTY via python3 pty.spawn). Supports password and base64-encoded private key authentication. Multiple concurrent sessions identified by session_id."
 image: "ghcr.io/silicon-works/mcp-tools-shell-session:latest"
 image_size_mb: 150
 
@@ -14,23 +14,26 @@ capabilities:
 # Routing hints for tool selection
 routing:
   use_for:
-    - "multiple commands on compromised target"
-    - "persistent SSH session"
-    - "reverse shell interaction"
-    - "post-exploitation command execution"
-    - "file upload to target"
-    - "file download from target"
+    - "maintain persistent SSH session for multiple commands on target"
+    - "interact with reverse shell connection"
+    - "upload and download files via SFTP on persistent session"
+    - "post-exploitation enumeration with many sequential commands"
+    - "upgrade dumb reverse shell to interactive PTY"
+    - "manage multiple concurrent sessions across targets"
   never_use_for:
-    - "initial SSH connection test"
-    - "single command execution"
+    - "initial SSH connection test (use ssh exec)"
+    - "single one-off command execution (use ssh exec)"
+    - "SSH tunneling or port forwarding (use tunnel)"
   triggers:
     - "persistent shell"
     - "reverse shell session"
     - "interactive shell"
     - "multiple commands on target"
     - "shell session"
+    - "upgrade shell"
+    - "SFTP transfer"
   prefer_over:
-    - ssh  # Prefer shell-session for multiple commands
+    - ssh  # Prefer shell-session for multiple commands (avoids reconnection overhead)
 
 phases:
   - exploitation
@@ -46,195 +49,195 @@ resources:
 
 methods:
   ssh_connect:
-    description: "Establish persistent SSH session to target"
-    when_to_use: "When you have SSH credentials and will run multiple commands"
+    description: "Establish a persistent SSH session to a target using paramiko. The connection stays open until close() is called or the server disconnects. Supports password and base64-encoded private key authentication. Returns a session_id for use with exec, upload, download."
+    when_to_use: "When you have valid SSH credentials and plan to run many commands — avoids the reconnection overhead of the ssh tool's per-command model. Typical post-exploitation workflow: ssh_connect → exec('id') → exec('cat /etc/passwd') → upload(linpeas.sh) → exec('./linpeas.sh') → download('/root/root.txt'). Use the ssh tool instead for single one-off commands."
     params:
       host:
         type: string
         required: true
-        description: "Target hostname or IP"
+        description: "Target hostname or IP address."
       port:
         type: integer
         default: 22
-        description: "SSH port"
+        description: "SSH port."
       username:
         type: string
         required: true
-        description: "SSH username"
+        description: "SSH username."
       password:
         type: string
-        description: "SSH password"
+        description: "SSH password. Provide either password or private_key."
       private_key:
         type: string
-        description: "Base64-encoded private key"
+        description: "Base64-encoded SSH private key. Decoded and loaded by paramiko."
       timeout:
         type: integer
         default: 30
-        description: "Connection timeout"
+        description: "Connection timeout in seconds."
     returns:
       session_id:
         type: string
-        description: "Session ID for subsequent commands"
+        description: "Session ID for exec, upload, download, and close."
       banner:
         type: string
-        description: "SSH banner if available"
+        description: "SSH server banner (if available)."
 
   exec:
-    description: "Execute command on established session"
-    when_to_use: "To run commands on an active SSH session"
+    description: "Execute a command on an established SSH session. Uses paramiko's exec_command (or invoke_shell with get_pty=true for interactive commands like sudo). Returns stdout, stderr, and exit code. The session remains open for more commands."
+    when_to_use: "For running commands on a persistent SSH session. Use get_pty=true for commands that need a terminal (sudo, su, interactive prompts). For commands that produce large output (linpeas, find), increase timeout."
     params:
       session_id:
         type: string
         required: true
-        description: "Session ID from ssh_connect"
+        description: "Session ID from ssh_connect."
       command:
         type: string
         required: true
-        description: "Command to execute"
+        description: "Shell command to execute."
       timeout:
         type: integer
         default: 120
-        description: "Command timeout"
+        description: "Command execution timeout in seconds."
       get_pty:
         type: boolean
         default: false
-        description: "Request PTY for interactive commands"
+        description: "Request a pseudo-terminal. Required for sudo, su, and other interactive commands."
     returns:
       stdout:
         type: string
-        description: "Command output"
+        description: "Command standard output."
       stderr:
         type: string
-        description: "Error output"
+        description: "Command standard error."
       exit_code:
         type: integer
-        description: "Command exit code"
+        description: "Command exit code."
 
   upload:
-    description: "Upload file to target via SFTP"
-    when_to_use: "To upload tools, scripts, or exploits to target"
+    description: "Upload a file to the target via SFTP on an existing SSH session. Supports text content or base64-encoded binary. Sets file permissions (default 0755 for executables)."
+    when_to_use: "To upload enumeration scripts (linpeas, pspy), compiled exploits, or web shells to the target. Faster than ssh copy_to because it reuses the existing connection. Set mode='0644' for non-executable files."
     params:
       session_id:
         type: string
         required: true
-        description: "Session ID"
+        description: "Session ID from ssh_connect."
       content:
         type: string
         required: true
-        description: "File content (text or base64)"
+        description: "File content (plain text or base64-encoded binary)."
       remote_path:
         type: string
         required: true
-        description: "Destination path on target"
+        description: "Destination path on target (e.g., '/tmp/linpeas.sh')."
       mode:
         type: string
         default: "0755"
-        description: "File permissions"
+        description: "File permissions in octal (e.g., '0755' for executable, '0644' for read-only)."
       is_base64:
         type: boolean
         default: false
-        description: "Content is base64-encoded"
+        description: "Set true if content is base64-encoded (for binary files)."
     returns:
       size:
         type: integer
-        description: "Uploaded file size"
+        description: "Uploaded file size in bytes."
 
   download:
-    description: "Download file from target via SFTP"
-    when_to_use: "To retrieve files, flags, or credentials from target"
+    description: "Download a file from the target via SFTP on an existing SSH session. Returns content as text or base64."
+    when_to_use: "To retrieve files from the target: flags (user.txt, root.txt), configs, SSH keys, database files. Use as_base64=true for binary files."
     params:
       session_id:
         type: string
         required: true
-        description: "Session ID"
+        description: "Session ID from ssh_connect."
       remote_path:
         type: string
         required: true
-        description: "Path on target"
+        description: "Absolute path to file on target."
       as_base64:
         type: boolean
         default: false
-        description: "Return content as base64"
+        description: "Return content as base64 (for binary files)."
     returns:
       content:
         type: string
-        description: "File content"
+        description: "File content (text or base64)."
       size:
         type: integer
-        description: "File size"
+        description: "File size in bytes."
 
   listen:
-    description: "Start listener for reverse shell connection"
-    when_to_use: "When triggering a reverse shell from target"
+    description: "Start a TCP listener for catching reverse shell connections. Blocks until a connection is received or timeout expires. The connected shell becomes a session accessible via shell_exec."
+    when_to_use: "Alternative to netcat listen for reverse shells. The advantage is that the session integrates directly with shell_exec for command execution and upgrade_shell for PTY upgrade — no separate listener_read/listener_write needed. Workflow: listen(port=4444) → trigger reverse shell → shell_exec('id') → upgrade_shell() → shell_exec('sudo -l')."
     params:
       port:
         type: integer
         required: true
-        description: "Port to listen on"
+        description: "Port to listen on (>1024 for non-privileged)."
       timeout:
         type: integer
         default: 300
-        description: "Wait timeout for connection"
+        description: "Timeout waiting for a connection in seconds."
     returns:
       session_id:
         type: string
-        description: "Session ID for shell commands"
+        description: "Session ID for shell_exec and upgrade_shell."
       remote_ip:
         type: string
-        description: "IP of connecting client"
+        description: "IP address of the connecting target."
 
   shell_exec:
-    description: "Execute command on reverse shell with output stability detection"
-    when_to_use: "To run commands on a reverse shell session"
+    description: "Execute a command on a reverse shell session with output stability detection. Sends the command, waits for output to stabilize (no new data for a period), then returns all collected output. More reliable than raw socket read/write."
+    when_to_use: "For running commands on a reverse shell session created via listen. The stability detection handles commands with varying output speeds. For interactive commands (sudo), upgrade_shell first."
     params:
       session_id:
         type: string
         required: true
-        description: "Session ID from listen"
+        description: "Session ID from listen."
       command:
         type: string
         required: true
-        description: "Command to execute"
+        description: "Command to execute on the reverse shell."
       timeout:
         type: integer
         default: 60
-        description: "Command timeout"
+        description: "Command timeout in seconds."
     returns:
       output:
         type: string
-        description: "Command output"
+        description: "Command output (stdout + stderr combined)."
 
   list_sessions:
-    description: "List all active sessions"
-    when_to_use: "To see what sessions are currently active"
+    description: "List all active sessions (SSH and reverse shell) with their type, host, status, and creation time."
+    when_to_use: "To check which sessions are active, find a session_id you forgot, or verify a session is still connected."
     params: {}
     returns:
       sessions:
         type: array
-        description: "List of active sessions"
+        description: "Active sessions with: id, type (ssh/shell), host, status, created_at."
 
   close:
-    description: "Close session gracefully"
-    when_to_use: "To terminate a session when done"
+    description: "Close a session gracefully. For SSH sessions, disconnects the paramiko client. For reverse shells, closes the socket."
+    when_to_use: "When done with a target — always close sessions to free resources and avoid stale connections."
     params:
       session_id:
         type: string
         required: true
-        description: "Session ID to close"
+        description: "Session ID to close."
     returns:
       success:
         type: boolean
-        description: "Whether session was closed"
+        description: "Whether the session was closed successfully."
 
   upgrade_shell:
-    description: "Upgrade dumb shell to interactive PTY"
-    when_to_use: "To get a fully interactive shell from a basic reverse shell"
+    description: "Upgrade a dumb reverse shell to a fully interactive PTY by sending 'python3 -c \"import pty;pty.spawn(\"/bin/bash\")\"'. Enables features like sudo, su, tab completion, and arrow keys that don't work in raw shells."
+    when_to_use: "After catching a reverse shell via listen, before running interactive commands like sudo or su. The upgrade enables PTY features needed by many privilege escalation techniques. Only works if python3 is available on the target."
     params:
       session_id:
         type: string
         required: true
-        description: "Shell session ID"
+        description: "Reverse shell session ID from listen."
     returns:
       success:
         type: boolean
-        description: "Whether upgrade succeeded"
+        description: "Whether the shell was upgraded to PTY."

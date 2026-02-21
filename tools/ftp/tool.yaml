@@ -1,6 +1,6 @@
 name: ftp
 version: "1.0"
-description: "FTP/FTPS client for file operations and transfers"
+description: "FTP/FTPS client (Python ftplib) for connecting to FTP servers, listing directories, downloading files, uploading content, and deleting files. 5 methods: connect (test connection + root listing), list (directory contents with parsed permissions/sizes), download (file as base64 + text), upload (text or base64 content), delete. Defaults to anonymous login (username='anonymous', password='anonymous@'). Supports FTPS (FTP over SSL/TLS) with auto-disabled certificate verification. Downloads return both base64 (for binary) and text (for readable files, capped at 50KB). Uploads support plain text or base64-encoded binary content."
 image: "ghcr.io/silicon-works/mcp-tools-ftp:latest"
 image_size_mb: 100
 
@@ -25,11 +25,12 @@ resources:
 # Routing hints for tool selection
 routing:
   use_for:
-    - "FTP file transfer"
-    - "FTP directory listing"
-    - "anonymous FTP access"
-    - "FTP file upload"
-    - "FTP file download"
+    - "connect to FTP server and list directory contents"
+    - "download files from FTP server"
+    - "upload web shells or exploits to writable FTP share"
+    - "check anonymous FTP access on port 21"
+    - "enumerate files on FTP server after nmap finds port 21"
+    - "transfer files via FTPS encrypted connection"
   never_use_for:
     - "FTP brute-force (use hydra)"
     - "port scanning"
@@ -46,208 +47,208 @@ routing:
 
 methods:
   connect:
-    description: "Test FTP connection and list root directory"
-    when_to_use: "To verify FTP access and enumerate initial contents"
+    description: "Test FTP connection, authenticate, and list the root directory contents. Returns the server welcome banner (often reveals software version like 'vsFTPd 3.0.3'), current working directory, and up to 50 file listing entries. Defaults to anonymous login."
+    when_to_use: "The first step after nmap discovers FTP on port 21. Try anonymous access first (default credentials) — many FTP servers allow anonymous read access. The welcome banner often reveals the FTP software and version (vsFTPd, ProFTPD, Pure-FTPd, FileZilla Server) — check searchsploit for exploits. If anonymous login fails with 'permission denied', try with discovered credentials. After successful connect, use list to explore subdirectories and download to retrieve interesting files."
     params:
       host:
         type: string
         required: true
-        description: "FTP server hostname or IP"
+        description: "FTP server hostname or IP address."
       port:
         type: integer
         default: 21
-        description: "FTP port"
+        description: "FTP port. Standard is 21."
       username:
         type: string
         default: "anonymous"
-        description: "FTP username (default: anonymous)"
+        description: "FTP username. Default 'anonymous' for anonymous access. Use discovered credentials for authenticated access."
       password:
         type: string
         default: "anonymous@"
-        description: "FTP password"
+        description: "FTP password. Default 'anonymous@' for anonymous access."
       ssl:
         type: boolean
         default: false
-        description: "Use FTPS (FTP over SSL/TLS)"
+        description: "Use FTPS (FTP over TLS). Certificate verification is disabled for pentest use."
       timeout:
         type: integer
         default: 30
-        description: "Connection timeout in seconds"
+        description: "Connection timeout in seconds."
     returns:
       welcome:
         type: string
-        description: "Server welcome message"
+        description: "Server welcome banner (often contains software name and version)."
       listing:
         type: array
-        description: "Root directory listing"
+        description: "Root directory listing (raw LIST output, up to 50 entries)."
 
   list:
-    description: "List directory contents on FTP server"
-    when_to_use: "To enumerate files in a specific directory"
+    description: "List contents of a specific directory on the FTP server. Returns both parsed file data (permissions, size, name, is_dir flag) and raw LIST output. Also returns simple filenames via NLST. Changes to the specified directory before listing."
+    when_to_use: "To explore subdirectories after initial connect. Look for: (1) Configuration files — .conf, .ini, .xml, .env, (2) Backup files — .bak, .old, .zip, .tar.gz, (3) Web application files — .php, .html, .asp, (4) Credential files — .htpasswd, id_rsa, (5) Directories with write permissions (starts with 'drwxrwxrwx'). After finding interesting files, use download to retrieve them."
     params:
       host:
         type: string
         required: true
-        description: "FTP server hostname or IP"
+        description: "FTP server hostname or IP address."
       path:
         type: string
         default: "/"
-        description: "Directory path to list"
+        description: "Directory path to list (e.g., '/pub', '/upload', '/home/user')."
       port:
         type: integer
         default: 21
-        description: "FTP port"
+        description: "FTP port."
       username:
         type: string
         default: "anonymous"
-        description: "FTP username"
+        description: "FTP username."
       password:
         type: string
         default: "anonymous@"
-        description: "FTP password"
+        description: "FTP password."
       ssl:
         type: boolean
         default: false
-        description: "Use FTPS"
+        description: "Use FTPS."
       timeout:
         type: integer
         default: 30
-        description: "Connection timeout"
+        description: "Connection timeout in seconds."
     returns:
       files:
         type: array
-        description: "Parsed file list with permissions and sizes"
+        description: "Parsed files, each with: permissions (e.g., 'drwxr-xr-x'), size, name, is_dir (boolean)."
       raw_listing:
         type: array
-        description: "Raw FTP LIST output"
+        description: "Raw FTP LIST output lines."
 
   download:
-    description: "Download a file from FTP server"
-    when_to_use: "To retrieve files for analysis or exploitation"
+    description: "Download a file from the FTP server via RETR binary transfer. Returns file content as both base64 (always) and plain text (if UTF-8 decodable, capped at 50KB). The entire file is loaded into memory — suitable for config files, scripts, and small binaries, not for multi-GB files."
+    when_to_use: "To retrieve files discovered via connect or list. Common targets: (1) Configuration files with credentials — wp-config.php, .env, web.config, (2) SSH private keys — id_rsa, (3) Database files — .sqlite, .db, (4) Backup archives — .zip, .tar.gz (check size first), (5) CTF flags — user.txt, root.txt. The content_text field is useful for text files; use content_base64 for binary files that need further processing."
     params:
       host:
         type: string
         required: true
-        description: "FTP server hostname or IP"
+        description: "FTP server hostname or IP address."
       remote_path:
         type: string
         required: true
-        description: "Remote file path to download"
+        description: "Full path to the file on the FTP server (e.g., '/pub/backup.zip', '/home/user/.ssh/id_rsa')."
       port:
         type: integer
         default: 21
-        description: "FTP port"
+        description: "FTP port."
       username:
         type: string
         default: "anonymous"
-        description: "FTP username"
+        description: "FTP username."
       password:
         type: string
         default: "anonymous@"
-        description: "FTP password"
+        description: "FTP password."
       ssl:
         type: boolean
         default: false
-        description: "Use FTPS"
+        description: "Use FTPS."
       timeout:
         type: integer
         default: 60
-        description: "Transfer timeout"
+        description: "Transfer timeout in seconds."
     returns:
       filename:
         type: string
-        description: "Downloaded filename"
+        description: "Extracted filename from the path."
       size_bytes:
         type: integer
-        description: "File size"
+        description: "Downloaded file size in bytes."
       content_base64:
         type: string
-        description: "File content as base64"
+        description: "File content as base64 string (always present)."
       content_text:
         type: string
-        description: "File content as text (if decodable)"
+        description: "File content as text (only if UTF-8 decodable, capped at 50KB). null for binary files."
 
   upload:
-    description: "Upload a file to FTP server"
-    when_to_use: "To upload shells, exploits, or files to target"
+    description: "Upload a file to the FTP server via STOR binary transfer. Content can be plain text (default) or base64-encoded binary. Writes to a local temp file, uploads via STORBINARY, then cleans up. Requires write permission on the FTP server — anonymous upload is rarely allowed."
+    when_to_use: "When the FTP server has a writable directory (often overlapping with a web server's document root). Common uses: (1) Upload a PHP web shell to a writable /var/www/html via FTP, then trigger via HTTP, (2) Upload exploit scripts or tools to the target, (3) Plant backdoor files in shared directories. Check list output for writable directories first (look for 'drwxrwxrwx' permissions or try uploading a test file). Requires authenticated credentials — anonymous upload is rare."
     params:
       host:
         type: string
         required: true
-        description: "FTP server hostname or IP"
+        description: "FTP server hostname or IP address."
       remote_path:
         type: string
         required: true
-        description: "Remote path to upload to"
+        description: "Destination path on the FTP server (e.g., '/upload/shell.php', '/var/www/html/cmd.php')."
       content:
         type: string
         required: true
-        description: "File content (plain text or base64)"
+        description: "File content as plain text (default) or base64-encoded binary (set is_base64=true)."
       is_base64:
         type: boolean
         default: false
-        description: "Whether content is base64 encoded"
+        description: "Set true if content is base64-encoded (for binary file uploads)."
       port:
         type: integer
         default: 21
-        description: "FTP port"
+        description: "FTP port."
       username:
         type: string
         required: true
-        description: "FTP username"
+        description: "FTP username (required — anonymous upload is rarely allowed)."
       password:
         type: string
         required: true
-        description: "FTP password"
+        description: "FTP password."
       ssl:
         type: boolean
         default: false
-        description: "Use FTPS"
+        description: "Use FTPS."
       timeout:
         type: integer
         default: 60
-        description: "Transfer timeout"
+        description: "Transfer timeout in seconds."
     returns:
       uploaded:
         type: boolean
-        description: "Upload success status"
+        description: "Whether upload succeeded."
       size_bytes:
         type: integer
-        description: "Uploaded file size"
+        description: "Uploaded file size in bytes."
 
   delete:
-    description: "Delete a file from FTP server"
-    when_to_use: "To clean up uploaded files after exploitation"
+    description: "Delete a file from the FTP server via DELE command. Requires write/delete permissions on the server."
+    when_to_use: "To clean up uploaded web shells, exploit files, or other artifacts after exploitation is complete. Good operational security practice to remove evidence."
     params:
       host:
         type: string
         required: true
-        description: "FTP server hostname or IP"
+        description: "FTP server hostname or IP address."
       remote_path:
         type: string
         required: true
-        description: "Remote file path to delete"
+        description: "Path to the file to delete on the FTP server."
       port:
         type: integer
         default: 21
-        description: "FTP port"
+        description: "FTP port."
       username:
         type: string
         required: true
-        description: "FTP username"
+        description: "FTP username (must have delete permissions)."
       password:
         type: string
         required: true
-        description: "FTP password"
+        description: "FTP password."
       ssl:
         type: boolean
         default: false
-        description: "Use FTPS"
+        description: "Use FTPS."
       timeout:
         type: integer
         default: 30
-        description: "Connection timeout"
+        description: "Connection timeout in seconds."
     returns:
       deleted:
         type: boolean
-        description: "Deletion success status"
+        description: "Whether deletion succeeded."

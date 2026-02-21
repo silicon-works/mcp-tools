@@ -1,6 +1,6 @@
 name: wpscan
-version: "3.8"
-description: "WordPress vulnerability scanner for plugins, themes, and users"
+version: "3.8.28"
+description: "WordPress security scanner (WPScan v3.8.28, Ruby-based) for comprehensive WordPress enumeration and vulnerability assessment. Detects WordPress version, enumerates plugins (vulnerable/all/popular), themes (vulnerable/all/popular), users (with configurable ID range), timthumbs, config backups (wp-config.php~, wp-config.bak, etc.), and database exports. Three detection modes: passive (minimal requests), aggressive (brute-force file detection), and mixed (default). JSON output with structured parsing of plugins, themes, users, and vulnerabilities. Supports WPVulnDB API token (25 free lookups/day via WPSCAN_API_TOKEN env var or --api-token) for mapping detected plugins/themes to known CVEs. Password brute-force via wp-login, XML-RPC, or XML-RPC multicall (500 passwords/request, WP < 4.4 only). Built-in --stealthy mode (passive detection + random user agent)."
 image: "ghcr.io/silicon-works/mcp-tools-wpscan:latest"
 image_size_mb: 300
 
@@ -26,15 +26,18 @@ resources:
 # Routing hints for tool selection
 routing:
   use_for:
-    - "WordPress vulnerability scanning"
-    - "WordPress plugin enumeration"
-    - "WordPress theme enumeration"
-    - "WordPress user enumeration"
-    - "WordPress brute-force"
+    - "scan a WordPress site for vulnerable plugins themes and outdated versions"
+    - "enumerate WordPress plugins and check for known CVEs"
+    - "enumerate WordPress users for brute-force targeting"
+    - "brute-force WordPress login passwords via wp-login or XML-RPC"
+    - "detect WordPress version and check for version-specific vulnerabilities"
+    - "find WordPress config backups and database exports"
+    - "detect outdated WordPress plugins with known exploits"
+    - "test for weak WordPress admin passwords"
   never_use_for:
-    - "non-WordPress sites"
-    - "general vulnerability scanning"
-    - "port scanning"
+    - "non-WordPress sites (use nikto or nuclei)"
+    - "general vulnerability scanning (use nuclei)"
+    - "port scanning (use nmap)"
   triggers:
     - "WordPress"
     - "wpscan"
@@ -45,160 +48,168 @@ routing:
   prefer_over:
     - nuclei  # For WordPress-specific scanning
 
+environment:
+  WPSCAN_API_TOKEN:
+    description: "WPVulnDB API token for vulnerability data lookups. 25 free requests/day at https://wpscan.com/profile. Without this, scan results will NOT include vulnerability data for detected plugins/themes — only version detection."
+    required: false
+
 methods:
   scan:
-    description: "Scan a WordPress site for vulnerabilities"
-    when_to_use: "After identifying a WordPress installation to find vulnerable plugins/themes"
+    description: "Comprehensive WordPress scan combining version detection, plugin/theme enumeration, user enumeration, and vulnerability mapping into a single operation. Runs wpscan with --format json and --random-user-agent. Parses JSON output into structured results: WordPress core version, main theme (name + version), plugins (name + version + vulnerability count), users (username + ID), and all vulnerabilities found across plugins/themes. Enumeration scope is controlled by the enumerate parameter (comma-separated flags). Uses WPVulnDB API to map detected plugin/theme versions to known CVEs — requires an API token for vulnerability data. Without a token, only version detection works (no CVE matching)."
+    when_to_use: "The first tool to run after web-fingerprint or manual inspection confirms a WordPress installation. Signs of WordPress: '/wp-content/' or '/wp-includes/' in page source, 'wp-login.php' login page, 'X-Powered-By: WordPress' header, '/xmlrpc.php' endpoint. The default enumerate='vp,vt,u' is a good starting point — finds vulnerable plugins, vulnerable themes, and users. If the default finds nothing, try enumerate='ap,at,u' to scan all plugins/themes (not just known-vulnerable ones). For thorough scans, use enumerate='ap,at,u,cb,dbe' to also check for config backups and database exports. An API token is strongly recommended — without it, the scan cannot report known CVEs for detected plugins."
     params:
       url:
         type: string
         required: true
-        description: "Target WordPress URL"
+        description: "Target WordPress URL including protocol. Examples: 'http://target.com', 'https://blog.target.com', 'http://target.com/wordpress/'. WPScan auto-detects wp-content and wp-plugins directories. If the site returns 403 or doesn't look like WordPress, use --force (not yet exposed — scan will fail on non-WordPress sites)."
       enumerate:
         type: string
         default: "vp,vt,u"
-        description: "Enumeration options: vp (plugins), vt (themes), u (users), ap (all plugins)"
+        description: "Comma-separated enumeration flags. vp=vulnerable plugins (fast, needs API token), ap=all plugins (slower, ~100 threshold), p=popular plugins. vt=vulnerable themes, at=all themes, t=popular themes. u=users (default range 1-10, customizable as u1-50). tt=timthumbs (file upload vuln). cb=config backups (wp-config.php~, .bak, .old, etc.). dbe=database exports. m=media IDs. Incompatible groups: only one of vp/ap/p and one of vt/at/t. Recommended combos: 'vp,vt,u' (quick), 'ap,at,u,cb,dbe' (thorough)."
       plugins_detection:
         type: enum
         values: [passive, aggressive, mixed]
         default: mixed
-        description: "Plugin detection mode"
+        description: "Plugin detection mode. passive=checks only known locations in page source (fast, stealthy, may miss plugins). aggressive=brute-forces plugin directory paths from the database (slow, noisy, finds more plugins). mixed=passive first, then aggressive for version detection. Use passive for stealth, aggressive when you need comprehensive results."
       api_token:
         type: string
-        description: "WPVulnDB API token for vulnerability data"
+        description: "WPVulnDB API token from https://wpscan.com/profile (25 free lookups/day). One API request per WordPress version check, per plugin, per theme. Required for vulnerability data — without it, scan only reports versions, not CVEs. Can also be set via WPSCAN_API_TOKEN environment variable."
       timeout:
         type: integer
         default: 300
-        description: "Timeout in seconds"
+        description: "Scan timeout in seconds. 300s (5 min) is usually sufficient for 'vp,vt,u'. For 'ap,at' (all plugins/themes), increase to 600-900s as aggressive detection checks hundreds of paths."
     returns:
       wordpress_version:
         type: string
-        description: "Detected WordPress version"
+        description: "Detected WordPress core version (e.g., '6.4.3'). Null if version detection failed."
       plugins:
         type: array
-        description: "Detected plugins with vulnerabilities"
+        description: "Detected plugins, each with: name (slug), version, vulnerability count. Only vulnerable plugins shown with 'vp', all with 'ap'."
       themes:
         type: array
-        description: "Detected themes"
+        description: "Detected themes including main theme, each with: name (slug), version."
       users:
         type: array
-        description: "Enumerated users"
+        description: "Enumerated users with: username, WordPress user ID. Use these usernames for bruteforce method."
+      vulnerabilities:
+        type: array
+        description: "All vulnerabilities found across plugins/themes, each with: plugin/theme name, title, vuln_type, reference URLs. Only populated when API token is provided."
 
   bruteforce:
-    description: "Brute-force WordPress login"
-    when_to_use: "After enumerating users to test for weak passwords"
+    description: "Brute-force WordPress login using wpscan's built-in password attack. Runs wpscan with --passwords and --usernames flags. WPScan auto-detects the best attack method: wp-login (POST to /wp-login.php, 1 password/request), xmlrpc (POST to /xmlrpc.php, faster), or xmlrpc-multicall (batches up to 500 passwords per request via XML-RPC system.multicall — only works on WP < 4.4). Uses --random-user-agent. Parses JSON output for cracked credentials. WARNING: the default wordlist path (/usr/share/wordlists/rockyou.txt) may not exist in the container — check the fix file for this issue."
+    when_to_use: "After enumerate_users discovers valid WordPress usernames, especially 'admin' or 'administrator'. The typical WordPress brute-force workflow: (1) enumerate_users to find usernames, (2) bruteforce with a common password list against each user. Try the admin user first — it's the most valuable target (full WordPress admin access). For CTFs, common passwords like 'admin', 'password', 'wordpress' should be tried first. For real engagements, use a targeted wordlist. Note: WordPress has no default lockout mechanism, but security plugins (Wordfence, Sucuri, etc.) may block after failed attempts. XML-RPC multicall bypasses per-request rate limiting on WP < 4.4."
     params:
       url:
         type: string
         required: true
-        description: "Target WordPress URL"
+        description: "Target WordPress URL (same as scan)."
       username:
         type: string
         required: true
-        description: "Username to brute-force"
+        description: "Username to brute-force. Use a username discovered by enumerate_users. Can also be a comma-separated list ('admin,editor,john') or a file path ('/tmp/users.txt')."
       wordlist:
         type: string
         default: "/usr/share/wordlists/rockyou.txt"
-        description: "Password wordlist path"
+        description: "Path to password wordlist file. Default rockyou.txt (14M passwords) may not exist in the container. Alternatives if available: /usr/share/seclists/Passwords/Common-Credentials/10k-most-common.txt, or create a custom wordlist in /tmp/."
       timeout:
         type: integer
         default: 600
-        description: "Timeout in seconds"
+        description: "Timeout in seconds. 600s (10 min) for small wordlists. For rockyou.txt (14M passwords), this will timeout long before completing — use a smaller targeted wordlist instead."
     returns:
       password_found:
         type: object
-        description: "Username and password if found"
+        description: "Object with username and password if a valid credential was found. Null if no password matched. On success, these credentials can be used to log into /wp-admin/ for further exploitation (theme editor RCE, plugin upload, etc.)."
 
   enumerate_users:
-    description: "Enumerate WordPress users"
-    when_to_use: "To discover valid usernames for brute-force attacks"
+    description: "Enumerate WordPress users by probing user ID endpoints. WPScan checks: /?author=N (redirects reveal usernames), /wp-json/wp/v2/users (REST API, often publicly accessible), and login error messages (reveals whether username exists). Default range is user IDs 1-10. Returns username, WordPress user ID, and slug for each discovered user. Uses --random-user-agent."
+    when_to_use: "Early in WordPress enumeration, before brute-force attempts. Even if the scan method already includes 'u' in its enumerate flags, this dedicated method provides cleaner output focused only on users. The discovered usernames feed directly into the bruteforce method. Key usernames to look for: 'admin' (default WordPress admin, often not renamed), 'administrator', and any names that suggest elevated privileges. Also useful for social engineering — author names are often real names."
     params:
       url:
         type: string
         required: true
-        description: "Target WordPress URL"
+        description: "Target WordPress URL."
       api_token:
         type: string
-        description: "WPVulnDB API token for vulnerability data"
+        description: "WPVulnDB API token. Not strictly needed for user enumeration (no vulnerability lookup), but wpscan may still use it if provided."
       timeout:
         type: integer
         default: 300
-        description: "Timeout in seconds"
+        description: "Timeout in seconds. User enumeration is fast — 300s is more than sufficient for the default 1-10 ID range."
     returns:
       users:
         type: array
-        description: "Discovered users with username, id, and slug"
+        description: "Discovered users, each with: username (login name), id (WordPress user ID), slug (URL-safe username). The username field is what you pass to bruteforce."
       count:
         type: integer
-        description: "Number of users found"
+        description: "Number of users discovered."
 
   enumerate_plugins:
-    description: "Enumerate WordPress plugins and their vulnerabilities"
-    when_to_use: "To find vulnerable plugins for exploitation"
+    description: "Enumerate WordPress plugins and map them to known vulnerabilities via WPVulnDB. Uses wpscan with --enumerate vp (vulnerable plugins only) or ap (all plugins) and --format json. Plugin detection works by checking known plugin paths under /wp-content/plugins/ — passive mode checks page source references, aggressive mode brute-forces directory names from the WPScan database. For each plugin found, returns the slug, detected version, outdated status, and vulnerability count. Vulnerabilities include title, type (SQLi, XSS, RCE, LFI, etc.), CVE IDs, and reference URLs. An API token is essential — without it, only plugin names and versions are returned, not vulnerability data."
+    when_to_use: "The highest-value WordPress enumeration step. WordPress sites average 22 installed plugins, and plugins are the #1 source of WordPress vulnerabilities. Run this after confirming WordPress to find exploitable plugins. Use aggressive detection mode for thorough results — passive mode often misses plugins that aren't referenced in the page source. If 'vp' (vulnerable-only) returns nothing, switch to all_plugins=true ('ap') to see all installed plugins, then manually research their versions. The API token is critical here — without it, you can't tell which plugins have known CVEs."
     params:
       url:
         type: string
         required: true
-        description: "Target WordPress URL"
+        description: "Target WordPress URL."
       detection_mode:
         type: enum
         values: [passive, aggressive, mixed]
         default: "aggressive"
-        description: "Plugin detection mode"
+        description: "Plugin detection mode. aggressive=brute-forces known plugin directory names (slower, finds more — recommended). passive=only checks page source for plugin references (fast, misses many). mixed=passive detection with aggressive version checking. Default 'aggressive' is correct for most use cases."
       all_plugins:
         type: boolean
         default: false
-        description: "Enumerate all plugins (not just vulnerable ones)"
+        description: "false (default) = enumerate only plugins with known vulnerabilities (--enumerate vp). true = enumerate all detected plugins (--enumerate ap) regardless of vulnerability status. Use true when vp returns no results — the plugin may be vulnerable but not in WPVulnDB, or you may lack an API token."
       api_token:
         type: string
-        description: "WPVulnDB API token for vulnerability data"
+        description: "WPVulnDB API token (25 free/day). Each detected plugin consumes one API request. Essential for vulnerability mapping — without it, only plugin names/versions are returned."
       timeout:
         type: integer
         default: 300
-        description: "Timeout in seconds"
+        description: "Timeout in seconds. aggressive mode with all_plugins=true can take 2-5 minutes. Increase to 600s if scanning large sites."
     returns:
       plugins:
         type: array
-        description: "Discovered plugins with version and vulnerability count"
+        description: "Detected plugins, each with: name (slug like 'contact-form-7'), version (detected or null), outdated (boolean), vulnerability_count."
       vulnerabilities:
         type: array
-        description: "Plugin vulnerabilities with CVE and references"
+        description: "Plugin vulnerabilities, each with: plugin name, title (vulnerability description), type (vuln_type: SQLi, XSS, RCE, etc.), cve (list of CVE IDs), references (URLs to advisories/exploits). Use CVE IDs with cve-lookup for full details."
       plugin_count:
         type: integer
-        description: "Number of plugins found"
+        description: "Total plugins detected."
       vulnerability_count:
         type: integer
-        description: "Number of vulnerabilities found"
+        description: "Total vulnerabilities found across all plugins."
 
   enumerate_themes:
-    description: "Enumerate WordPress themes and their vulnerabilities"
-    when_to_use: "To find vulnerable themes for exploitation"
+    description: "Enumerate WordPress themes and map them to known vulnerabilities via WPVulnDB. Detects the active (main) theme and any additional installed themes. Uses wpscan with --enumerate vt (vulnerable themes only) or at (all themes) and --format json. The main theme is always identified (from page source CSS/JS references). Additional themes are found by brute-forcing theme directory names under /wp-content/themes/. Returns theme slug, version, main_theme flag, and vulnerability data with CVE IDs."
+    when_to_use: "After plugin enumeration, check themes for vulnerabilities. Themes are less commonly vulnerable than plugins, but theme vulnerabilities (especially in theme framework components like timthumbs) can provide file upload, LFI, or RCE. The main theme is always detected — if it's outdated or has known CVEs, it's an immediate finding. Use all_themes=true only if vulnerable-theme enumeration returns nothing and you want to manually research installed themes."
     params:
       url:
         type: string
         required: true
-        description: "Target WordPress URL"
+        description: "Target WordPress URL."
       all_themes:
         type: boolean
         default: false
-        description: "Enumerate all themes (not just vulnerable ones)"
+        description: "false (default) = enumerate only themes with known vulnerabilities (--enumerate vt). true = enumerate all detected themes (--enumerate at). The main/active theme is always detected regardless of this setting."
       api_token:
         type: string
-        description: "WPVulnDB API token for vulnerability data"
+        description: "WPVulnDB API token. Each detected theme consumes one API request. Needed for CVE mapping."
       timeout:
         type: integer
         default: 300
-        description: "Timeout in seconds"
+        description: "Timeout in seconds. Theme enumeration is generally faster than plugin enumeration — 300s is sufficient."
     returns:
       themes:
         type: array
-        description: "Discovered themes with version and vulnerability count"
+        description: "Detected themes, each with: name (slug), version, is_main_theme (boolean — true for the active theme), vulnerability_count."
       vulnerabilities:
         type: array
-        description: "Theme vulnerabilities with CVE and references"
+        description: "Theme vulnerabilities, each with: theme name, title, type, cve (list of CVE IDs), references (URLs). Less common than plugin vulns but can be high-impact."
       theme_count:
         type: integer
-        description: "Number of themes found"
+        description: "Total themes detected."
       vulnerability_count:
         type: integer
-        description: "Number of vulnerabilities found"
+        description: "Total vulnerabilities found across all themes."

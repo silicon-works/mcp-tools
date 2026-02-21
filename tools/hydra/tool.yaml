@@ -1,6 +1,6 @@
 name: hydra
-version: "9.5"
-description: "Network authentication brute-forcing tool with service-specific thread defaults"
+version: "9.6"
+description: "Network authentication brute-forcing tool (v9.6) supporting 50+ protocols including SSH, FTP, HTTP forms, RDP, SMB, MySQL, PostgreSQL, VNC, IMAP, SMTP, Redis, MongoDB, LDAP, and more. Features service-specific thread defaults (SSH=4, HTTP=16) to avoid rate limiting. Ships with SecLists and rockyou.txt wordlists pre-installed. Supports password list attacks (-P), single password testing (-p), null/same/reversed login checks (-e nsr), and brute-force character generation (-x). HTTP form attacks use the format '/path:user=^USER^&pass=^PASS^:F=error_string'. Always runs with -V (verbose) for progress tracking."
 image: "ghcr.io/silicon-works/mcp-tools-hydra:latest"
 image_size_mb: 200
 
@@ -11,22 +11,30 @@ capabilities:
 # Routing hints for tool selection
 routing:
   use_for:
-    - "password brute-forcing"
-    - "credential testing"
-    - "SSH brute-force"
-    - "FTP brute-force"
-    - "HTTP authentication brute-force"
-    - "login testing"
+    - "password brute-forcing against network services"
+    - "credential testing and default password checking"
+    - "SSH FTP RDP VNC login brute-force"
+    - "HTTP web login form brute-force"
+    - "MySQL PostgreSQL database credential brute-force"
+    - "test known credentials against multiple services"
+    - "try default passwords on discovered services"
+    - "SMTP IMAP POP3 email credential brute-force"
+    - "SMB Windows share authentication testing"
+    - "network login attack with wordlists like rockyou"
   never_use_for:
-    - "hash cracking"
-    - "offline password cracking"
-    - "vulnerability scanning"
+    - "hash cracking (use john or hashcat)"
+    - "offline password cracking (use john)"
+    - "vulnerability scanning (use nmap or nuclei)"
+    - "SQL injection (use sqlmap)"
   triggers:
     - "brute force"
     - "password attack"
     - "credential brute"
     - "hydra"
     - "login brute"
+    - "default credentials"
+    - "rockyou"
+    - "wordlist attack"
   prefer_over: []
 
 phases:
@@ -42,326 +50,326 @@ resources:
 
 methods:
   bruteforce:
-    description: "Brute-force login credentials for a service"
-    when_to_use: "When default/weak credentials are suspected on a service"
+    description: "Brute-force login credentials for any supported network service using hydra. Supports 50+ protocols including SSH, FTP, HTTP (basic/form), RDP, SMB, MySQL, PostgreSQL, VNC, IMAP, SMTP, Redis, MongoDB, LDAP, SNMP, and more. Always runs with -V (verbose) for progress tracking. Uses service-specific default thread counts (SSH=4, FTP=8, HTTP=16, MySQL=4, RDP=4) to avoid rate limiting and account lockout. If no username or password list is provided, defaults to SecLists top-usernames-shortlist.txt and 10k-most-common.txt. Parses hydra output for credentials in the format '[port][service] host: X login: Y password: Z'. Supports graceful timeout with partial result recovery."
+    when_to_use: "When you need to test credentials against a network service — either brute-forcing with wordlists or testing known/default credentials. Common scenarios: (1) Testing default credentials on discovered services (use single username + password), (2) Brute-forcing SSH/FTP/RDP with a wordlist after finding an open port, (3) Attacking web login forms after identifying the form fields and failure string, (4) Credential stuffing with found usernames/passwords against other services. Always try default/common credentials first (fast) before large wordlists (slow). For SSH, keep threads at 4 (default) to avoid MaxStartups rate limiting. For web forms, use web_form_brute convenience method instead. For HTTP basic auth, use http-get service. Hydra is for ONLINE brute-forcing — for offline hash cracking, use john."
     params:
       target:
         type: string
         required: true
-        description: "Target IP or hostname"
+        description: "Target IP, hostname, or CIDR range (e.g., '10.10.10.1', 'target.htb', '192.168.1.0/24'). CIDR ranges attack each host in the range."
       service:
         type: enum
         required: true
         values: [ssh, ftp, http-get, http-post, http-post-form, http-get-form, https-get, https-post, https-post-form, https-get-form, smb, rdp, mysql, postgres, vnc, telnet, smtp, pop3, imap]
-        description: "Service protocol to attack"
+        description: "Service protocol to attack. Hydra supports 50+ protocols but this MCP server exposes the most common 19. For HTTP basic auth: use 'http-get'. For web login forms: use 'http-post-form' (most common) or 'http-get-form'. For HTTPS: prefix with 'https-'. For SMB/Windows shares: use 'smb'. Note: the full hydra binary also supports redis, mongodb, ldap, snmp, sshkey, smb2, and many more — those are not currently exposed."
       username:
         type: string
-        description: "Single username to test"
+        description: "Single username to test (hydra -l). Use for targeted testing of a known username. Examples: 'admin', 'root', 'user'. Mutually exclusive with userlist — if both are provided, username takes precedence."
       userlist:
         type: string
-        description: "Wordlist name (usernames, ssh-usernames) or path to username list"
+        description: "Username wordlist. Built-in names: 'usernames' (/usr/share/seclists/Usernames/top-usernames-shortlist.txt, ~17 names), 'ssh-usernames' (30 common SSH usernames: root, admin, ubuntu, etc.). Or provide an absolute path to a custom list. If neither username nor userlist is provided, defaults to 'usernames'."
       password:
         type: string
-        description: "Single password to test"
+        description: "Single password to test (hydra -p). Use for testing a known/default password. If set, passlist is ignored."
       passlist:
         type: string
-        description: "Wordlist name (rockyou, common-passwords) or path. Ignored if password is set."
+        description: "Password wordlist. Built-in names: 'rockyou' (/usr/share/wordlists/rockyou.txt, ~14M passwords — very slow), 'common-passwords' (/usr/share/seclists/Passwords/Common-Credentials/10k-most-common.txt, 10K passwords — good default), 'default-passwords' (/usr/share/seclists/Passwords/Default-Credentials/default-passwords.txt). Or provide an absolute path. If neither password nor passlist is provided, defaults to 'common-passwords'. Ignored if password is set."
       threads:
         type: integer
-        description: "Number of parallel connections (default: service-specific, e.g., SSH=4, HTTP=16)"
+        description: "Number of parallel connections (hydra -t). Defaults are service-specific: SSH=4 (avoid MaxStartups), FTP=8, MySQL=4, PostgreSQL=4, RDP=4, VNC=4, SMB=8, HTTP=16. Higher threads = faster but risks rate limiting, account lockout, or connection errors. For SSH, never exceed 4-6."
       port:
         type: integer
-        description: "Service port (uses default if not specified)"
+        description: "Service port (hydra -s). Defaults: SSH=22, FTP=21, HTTP=80, HTTPS=443, SMB=445, RDP=3389, MySQL=3306, PostgreSQL=5432, VNC=5900, Telnet=23, SMTP=25, POP3=110, IMAP=143. Override when services run on non-standard ports."
       timeout:
         type: integer
         default: 600
-        description: "Timeout in seconds"
+        description: "Process timeout in seconds. 600s (10 min) is sufficient for small wordlists (100-1000 entries). For rockyou (14M entries), you'd need hours — use common-passwords instead or narrow the username list. If timeout is reached, partial results (any credentials found so far) are returned."
       wait_time:
         type: integer
-        description: "Seconds to wait between connection attempts (hydra -W flag)"
+        description: "Seconds to wait between connection attempts per thread (hydra -W flag). Default is 0 (no wait). Use 1-3 seconds to avoid rate limiting on sensitive services like SSH or to evade IDS/IPS detection. Slows attack significantly."
       stop_on_first:
         type: boolean
         default: false
-        description: "Stop after finding first valid credential (hydra -f flag)"
+        description: "Stop after finding the first valid credential (hydra -f flag). Recommended for most scenarios — once you have one valid login, you can use it. Set to false only when you need to enumerate ALL valid credentials."
       try_common:
         type: string
         enum: [n, s, r, ns, nr, sr, nsr]
-        description: "Try common passwords: n=null, s=same as login, r=reversed login (e.g., 'nsr' for all)"
+        description: "Try common password variations before wordlist (hydra -e). n=null/empty password, s=same as login (username as password), r=reversed login. Use 'nsr' to try all three. These are tested first and are very fast. Always use 'nsr' when testing for misconfigurations."
       verbose:
         type: boolean
         default: false
-        description: "Include verbose output with each attempt (warning: can be large)"
+        description: "Include detailed verbose output with each login attempt in the response (warning: can be very large with big wordlists). The last 1000 attempt lines are captured. Useful for debugging when credentials aren't being found but expected."
       http_path:
         type: string
-        description: "Path for HTTP auth (e.g., /admin/login)"
+        description: "URL path for HTTP basic auth services (http-get, http-post). Examples: '/', '/admin', '/manager/html'. Not used for form-based attacks."
       http_form:
         type: string
-        description: "HTTP form attack string for http-post-form/http-get-form (format: '/path:user=^USER^&pass=^PASS^:F=error_message')"
+        description: "HTTP form attack specification for http-post-form/http-get-form services. Format: '/login_path:POST_body_with_^USER^_and_^PASS^:F=failure_string'. Example: '/login.php:username=^USER^&password=^PASS^:F=Invalid credentials'. The F= prefix means 'fail if this string appears in the response'. Use H= for custom headers: '/login:user=^USER^&pass=^PASS^:F=failed:H=Cookie: session=abc'. For the convenience method web_form_brute, this is auto-constructed."
     returns:
       credentials:
         type: array
-        description: "Valid username:password combinations found"
+        description: "Valid username:password combinations found. Each entry: {port, service, host, username, password}"
       found:
         type: boolean
-        description: "Whether any credentials were found"
+        description: "Whether any valid credentials were found"
       count:
         type: integer
-        description: "Number of credentials found"
+        description: "Number of valid credentials found"
       stats:
         type: object
-        description: "Attack statistics (attempts_total, attempts_completed, attempts_successful)"
+        description: "Attack statistics: attempts_total (total login combinations), attempts_completed (attempts finished), attempts_successful (credentials found)"
       warnings:
         type: array
-        description: "Warnings from hydra (e.g., rate limiting suggestions)"
+        description: "Hydra warnings (e.g., 'Restorefile found, press enter to continue' is suppressed by -I)"
       partial:
         type: boolean
-        description: "True if operation timed out with partial results"
+        description: "True if operation timed out before completing — partial results may still contain found credentials"
       verbose_output:
         type: string
-        description: "Verbose attempt log (if verbose=true)"
+        description: "Detailed attempt log (if verbose=true), last 1000 lines of [ATTEMPT] and [STATUS] lines"
       summary:
         type: object
-        description: "Operation summary with target, service, port, threads, duration"
+        description: "Operation summary: target, service, port, threads used, found (bool), duration_seconds"
 
   ssh_brute:
-    description: "Brute-force SSH login (convenience method with SSH-optimized defaults: threads=4)"
-    when_to_use: "For targeted SSH credential testing"
+    description: "Brute-force SSH login — convenience wrapper around bruteforce with SSH-optimized defaults (threads=4, port=22, service=ssh). Delegates to the bruteforce method internally. SSH servers typically enforce MaxStartups rate limiting (default: 10 unauthenticated connections), so threads=4 is the safe default. Higher thread counts may cause 'Connection refused' errors."
+    when_to_use: "When nmap discovers port 22 (SSH) open and you want to test for weak credentials. Common scenarios: (1) Try default usernames with common-passwords: set userlist='ssh-usernames' (tests 30 common users like root, admin, ubuntu, etc.), (2) Test a specific username found elsewhere: set username='admin' with passlist='common-passwords', (3) Quick default credential check: set username='root', try_common='nsr' (tests null, root, toor). Always start with a small wordlist and try_common='nsr' before moving to larger lists. SSH brute-forcing is slow due to rate limiting — 10K passwords against 1 user takes ~40 minutes at 4 threads."
     params:
       target:
         type: string
         required: true
-        description: "Target IP or hostname"
+        description: "Target IP or hostname (e.g., '10.10.10.1', 'target.htb')."
       username:
         type: string
-        description: "Single username to test"
+        description: "Single username to test. Common SSH users: 'root', 'admin', 'user', 'ubuntu', 'www-data'. Use when you know the target username."
       userlist:
         type: string
-        description: "Wordlist name (usernames, ssh-usernames) or path"
+        description: "Username wordlist. Built-in: 'ssh-usernames' (30 common SSH usernames: root, admin, user, ubuntu, debian, kali, centos, ec2-user, pi, vagrant, etc.), 'usernames' (SecLists top-usernames-shortlist, ~17 names). Or provide an absolute path."
       password:
         type: string
-        description: "Single password to test"
+        description: "Single password to test. Use for testing a known/default password against username(s). If set, passlist is ignored."
       passlist:
         type: string
-        description: "Password wordlist name or path. Ignored if password is set."
+        description: "Password wordlist. Built-in: 'common-passwords' (10K most common, good default), 'rockyou' (14M passwords, very slow for SSH). Also available: '/usr/share/seclists/Passwords/Common-Credentials/top-20-common-SSH-passwords.txt' (20 most common SSH passwords — fastest)."
       port:
         type: integer
         default: 22
-        description: "SSH port"
+        description: "SSH port. Default 22. Override for non-standard SSH ports found by nmap."
       threads:
         type: integer
         default: 4
-        description: "Parallel connections (default: 4 for SSH to avoid rate limiting)"
+        description: "Parallel connections. Default 4 for SSH. Do NOT increase above 6 — SSH MaxStartups (default 10:30:60) will drop connections, causing false negatives."
       timeout:
         type: integer
         default: 600
-        description: "Timeout in seconds"
+        description: "Process timeout in seconds. Default 600s (10 min). With 4 threads and 10K passwords, a single-user attack takes ~40 minutes — increase timeout accordingly or use a smaller wordlist."
       wait_time:
         type: integer
-        description: "Seconds to wait between connection attempts"
+        description: "Seconds to wait between connection attempts per thread (hydra -W). Use 1-2 if seeing connection refused errors."
       stop_on_first:
         type: boolean
         default: false
-        description: "Stop after finding first valid credential"
+        description: "Stop after finding the first valid credential. Recommended for most cases."
       try_common:
         type: string
         enum: [n, s, r, ns, nr, sr, nsr]
-        description: "Try common passwords: n=null, s=same as login, r=reversed login"
+        description: "Try common password variations first: n=null/empty, s=same as login (e.g., root:root), r=reversed login (e.g., root:toor). Use 'nsr' as a fast first step before wordlists."
       verbose:
         type: boolean
         default: false
-        description: "Include verbose output with each attempt"
+        description: "Include verbose attempt log in output. Warning: large with big wordlists."
     returns:
       credentials:
         type: array
-        description: "Valid username:password combinations found"
+        description: "Valid username:password combinations found. Each entry: {port, service, host, username, password}"
       stats:
         type: object
-        description: "Attack statistics including attempts_total, attempts_completed"
+        description: "Attack statistics: attempts_total, attempts_completed, attempts_successful"
 
   ftp_brute:
-    description: "Brute-force FTP login (convenience method with threads=8)"
-    when_to_use: "For targeted FTP credential testing"
+    description: "Brute-force FTP login — convenience wrapper around bruteforce with FTP defaults (threads=8, port=21, service=ftp). FTP servers are generally more tolerant of concurrent connections than SSH, so 8 threads is safe. If no username or userlist is provided, defaults to SecLists top-usernames-shortlist. Check for anonymous FTP access first (username='anonymous', password='anonymous@') before brute-forcing — nmap's ftp-anon script or manual check is faster."
+    when_to_use: "When nmap discovers port 21 (FTP) open. First check anonymous access (username='anonymous', password='anonymous@' or empty). If anonymous fails, brute-force with common credentials. FTP is commonly found on older systems, file servers, and backup systems. Also useful for vsftpd, ProFTPD, or FileZilla Server credential testing. FTP transmits credentials in cleartext, so any found credentials may also work for SSH or other services on the same target."
     params:
       target:
         type: string
         required: true
-        description: "Target IP or hostname"
+        description: "Target IP or hostname."
       username:
         type: string
-        description: "Single username to test"
+        description: "Single username to test. Try 'anonymous' first for anonymous FTP access, then 'admin', 'root', 'ftp', 'ftpuser'."
       userlist:
         type: string
-        description: "Wordlist name or path (default: tries common FTP usernames)"
+        description: "Username wordlist. Built-in: 'usernames' (SecLists top-usernames-shortlist, ~17 names). If neither username nor userlist is provided, defaults to 'usernames'."
       password:
         type: string
-        description: "Single password to test"
+        description: "Single password to test. For anonymous FTP, use 'anonymous@' or empty string. If set, passlist is ignored."
       passlist:
         type: string
-        description: "Password wordlist name or path. Ignored if password is set."
+        description: "Password wordlist. Built-in: 'common-passwords' (10K most common), 'default-passwords' (default credentials), 'rockyou' (14M — slow). Also: '/usr/share/seclists/Passwords/Default-Credentials/ftp-betterdefaultpasslist.txt' for FTP-specific defaults."
       port:
         type: integer
         default: 21
-        description: "FTP port"
+        description: "FTP port. Default 21. Override for non-standard FTP ports."
       threads:
         type: integer
         default: 8
-        description: "Parallel connections (default: 8 for FTP)"
+        description: "Parallel connections. Default 8 for FTP. Can increase to 16 for faster testing on robust servers."
       timeout:
         type: integer
         default: 600
-        description: "Timeout in seconds"
+        description: "Process timeout in seconds. Default 600s (10 min)."
       wait_time:
         type: integer
-        description: "Seconds to wait between connection attempts"
+        description: "Seconds to wait between connection attempts per thread."
       stop_on_first:
         type: boolean
         default: false
-        description: "Stop after finding first valid credential"
+        description: "Stop after finding the first valid credential."
       try_common:
         type: string
         enum: [n, s, r, ns, nr, sr, nsr]
-        description: "Try common passwords: n=null, s=same as login, r=reversed login"
+        description: "Try common password variations first: n=null/empty, s=same as login, r=reversed. Use 'nsr' as a quick first check."
       verbose:
         type: boolean
         default: false
-        description: "Include verbose output with each attempt"
+        description: "Include verbose attempt log in output."
     returns:
       credentials:
         type: array
-        description: "Valid username:password combinations found"
+        description: "Valid username:password combinations found. Each entry: {port, service, host, username, password}"
       stats:
         type: object
-        description: "Attack statistics"
+        description: "Attack statistics: attempts_total, attempts_completed, attempts_successful"
 
   web_form_brute:
-    description: "Brute-force web login form (convenience method with threads=16)"
-    when_to_use: "For web application login brute-forcing"
+    description: "Brute-force a web login form — convenience wrapper that auto-constructs the hydra http-post-form attack string from individual parameters (path, user_field, pass_field, fail_string). Internally builds the format '/path:user_field=^USER^&pass_field=^PASS^[&extra_params]:F=fail_string' and delegates to bruteforce with service=http-post-form (or https-post-form if https=true). Default 16 threads — web servers handle concurrent connections well."
+    when_to_use: "When you've identified a web login form and want to brute-force it. Before using this, you need to know: (1) the login form path ('/login.php', '/wp-login.php', '/admin/login'), (2) the username and password field names (inspect the HTML form — look for <input name='...'> attributes), (3) a string that appears ONLY on failed login attempts (e.g., 'Invalid credentials', 'Login failed', 'incorrect password'). Get these by: manually submitting a login with invalid credentials and inspecting the response. Common CMS paths: WordPress='/wp-login.php' (user='log', pass='pwd', fail='Invalid'), Drupal='/user/login', Joomla='/administrator'. For WordPress, prefer wpscan's built-in brute-force instead. Does NOT handle CSRF tokens, JavaScript-based logins, or CAPTCHAs."
     params:
       target:
         type: string
         required: true
-        description: "Target IP or hostname"
+        description: "Target IP or hostname (e.g., '10.10.10.1', 'target.htb'). Do NOT include http:// prefix — just the host."
       path:
         type: string
         required: true
-        description: "Login form path (e.g., /login.php)"
+        description: "Login form URL path including leading slash. Examples: '/login.php', '/admin/login', '/wp-login.php', '/user/login', '/index.php?page=login'. Must be the form ACTION URL (where the POST request is sent), not necessarily the page URL."
       user_field:
         type: string
         default: "username"
-        description: "Username form field name"
+        description: "HTML form field name for the username input. Common values: 'username', 'user', 'login', 'email', 'log' (WordPress), 'name' (Drupal). Find by inspecting the login form HTML: <input name='THIS_VALUE'>."
       pass_field:
         type: string
         default: "password"
-        description: "Password form field name"
+        description: "HTML form field name for the password input. Common values: 'password', 'pass', 'passwd', 'pwd' (WordPress). Find by inspecting the login form HTML."
       fail_string:
         type: string
         required: true
-        description: "String that appears on failed login (e.g., 'Invalid', 'incorrect')"
+        description: "String that appears in the HTTP response ONLY when login FAILS. Hydra uses this to distinguish success from failure (F=). Examples: 'Invalid credentials', 'Login failed', 'incorrect', 'Wrong password', 'Invalid username'. Must be unique to the failure response — if it also appears on successful login, hydra won't detect valid credentials. Test by manually submitting invalid credentials and checking the response body."
       username:
         type: string
-        description: "Single username to test"
+        description: "Single username to test. Use when you know the target user (e.g., 'admin'). Mutually exclusive with userlist."
       userlist:
         type: string
-        description: "Username wordlist name or path"
+        description: "Username wordlist. Built-in: 'usernames' (SecLists top-usernames-shortlist). Defaults to 'usernames' if neither username nor userlist is provided."
       password:
         type: string
-        description: "Single password to test"
+        description: "Single password to test. If set, passlist is ignored."
       passlist:
         type: string
-        description: "Password wordlist name or path. Ignored if password is set."
+        description: "Password wordlist. Built-in: 'common-passwords' (10K), 'rockyou' (14M). Defaults to 'common-passwords' if neither password nor passlist is provided."
       https:
         type: boolean
         default: false
-        description: "Use HTTPS"
+        description: "Use HTTPS (switches service to https-post-form and default port to 443). Set to true if the target login page is served over HTTPS."
       port:
         type: integer
-        description: "Port (default: 80 or 443 for HTTPS)"
+        description: "Port number. Defaults to 80 (HTTP) or 443 (HTTPS). Override for non-standard ports (e.g., 8080, 8443)."
       threads:
         type: integer
         default: 16
-        description: "Parallel connections (default: 16 for HTTP)"
+        description: "Parallel connections. Default 16 for HTTP. Web servers handle concurrency well. Reduce to 4-8 if seeing connection errors or if the server has rate limiting."
       extra_params:
         type: string
-        description: "Additional POST parameters (e.g., 'submit=Login&csrf=token')"
+        description: "Additional POST parameters to include in every request (appended to the form body). Format: 'param1=value1&param2=value2'. Common uses: 'submit=Login' (submit button value), 'csrf_token=STATIC_VALUE' (only works if CSRF token is static — dynamic CSRF tokens will cause every attempt to fail)."
       timeout:
         type: integer
         default: 600
-        description: "Timeout in seconds"
+        description: "Process timeout in seconds. Default 600s (10 min). Web form attacks are fast (16 threads), so 10K passwords completes in ~5 minutes."
       wait_time:
         type: integer
-        description: "Seconds to wait between connection attempts"
+        description: "Seconds to wait between connection attempts per thread. Use if the server has rate limiting."
       stop_on_first:
         type: boolean
         default: false
-        description: "Stop after finding first valid credential"
+        description: "Stop after finding the first valid credential. Recommended for most cases."
       try_common:
         type: string
         enum: [n, s, r, ns, nr, sr, nsr]
-        description: "Try common passwords: n=null, s=same as login, r=reversed login"
+        description: "Try common password variations first: n=null/empty, s=same as login, r=reversed. Use 'nsr' as a quick first check."
       verbose:
         type: boolean
         default: false
-        description: "Include verbose output with each attempt"
+        description: "Include verbose attempt log in output."
     returns:
       credentials:
         type: array
-        description: "Valid username:password combinations found"
+        description: "Valid username:password combinations found. Each entry: {port, service, host, username, password}"
       stats:
         type: object
-        description: "Attack statistics"
+        description: "Attack statistics: attempts_total, attempts_completed, attempts_successful"
 
   mysql_brute:
-    description: "Brute-force MySQL login (convenience method with threads=4)"
-    when_to_use: "For MySQL database credential testing"
+    description: "Brute-force MySQL login — convenience wrapper around bruteforce with MySQL defaults (threads=4, port=3306, service=mysql, username='root'). Database connections are expensive, so 4 threads is the safe default. Note: MySQL may block hosts after too many failed attempts (max_connect_errors, default 100) — the host must be flushed with FLUSH HOSTS or wait."
+    when_to_use: "When nmap discovers port 3306 (MySQL) or 3307 open. MySQL root with empty password is a common misconfiguration — test with username='root', try_common='n' first (null password). Then try default passwords with 'common-passwords' wordlist. Also try found credentials from other services (password reuse). If MySQL is only listening on localhost (127.0.0.1), you need SSH access or a tunnel first. For MariaDB, use the same mysql service — hydra's MySQL module works for both. Available default credential list: '/usr/share/seclists/Passwords/Default-Credentials/mysql-betterdefaultpasslist.txt'."
     params:
       target:
         type: string
         required: true
-        description: "Target IP or hostname"
+        description: "Target IP or hostname. MySQL must be listening on a network-accessible interface (not just localhost)."
       username:
         type: string
         default: "root"
-        description: "Single username to test"
+        description: "Single username to test. Defaults to 'root' (MySQL superuser). Other common MySQL users: 'admin', 'mysql', 'dbadmin', 'webapp', 'drupal', 'wordpress'. If userlist is provided, this is ignored."
       userlist:
         type: string
-        description: "Username wordlist name or path"
+        description: "Username wordlist. If provided, overrides the default username='root'. Use 'usernames' for common names."
       password:
         type: string
-        description: "Single password to test"
+        description: "Single password to test. If set, passlist is ignored."
       passlist:
         type: string
-        description: "Password wordlist name or path. Ignored if password is set."
+        description: "Password wordlist. Built-in: 'common-passwords' (10K), 'default-passwords', 'rockyou' (14M). Also: '/usr/share/seclists/Passwords/Default-Credentials/mysql-betterdefaultpasslist.txt' for MySQL-specific defaults."
       port:
         type: integer
         default: 3306
-        description: "MySQL port"
+        description: "MySQL port. Default 3306. MariaDB also typically uses 3306."
       threads:
         type: integer
         default: 4
-        description: "Parallel connections (default: 4 for MySQL)"
+        description: "Parallel connections. Default 4 for MySQL. Database connections are expensive — higher threads may cause 'Too many connections' errors."
       timeout:
         type: integer
         default: 600
-        description: "Timeout in seconds"
+        description: "Process timeout in seconds. Default 600s (10 min)."
       wait_time:
         type: integer
-        description: "Seconds to wait between connection attempts"
+        description: "Seconds to wait between connection attempts per thread."
       stop_on_first:
         type: boolean
         default: false
-        description: "Stop after finding first valid credential"
+        description: "Stop after finding the first valid credential."
       try_common:
         type: string
         enum: [n, s, r, ns, nr, sr, nsr]
-        description: "Try common passwords: n=null, s=same as login, r=reversed login"
+        description: "Try common password variations first: n=null/empty (most important for MySQL — root with no password is common), s=same as login, r=reversed. Use 'nsr' or at minimum 'n'."
       verbose:
         type: boolean
         default: false
-        description: "Include verbose output with each attempt"
+        description: "Include verbose attempt log in output."
     returns:
       credentials:
         type: array
-        description: "Valid username:password combinations found"
+        description: "Valid username:password combinations found. Each entry: {port, service, host, username, password}"
       stats:
         type: object
-        description: "Attack statistics"
+        description: "Attack statistics: attempts_total, attempts_completed, attempts_successful"

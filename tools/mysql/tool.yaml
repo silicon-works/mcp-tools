@@ -1,6 +1,6 @@
 name: mysql
 version: "8.0"
-description: "MySQL client for database enumeration and credential extraction"
+description: "MySQL/MariaDB client (mysql CLI 8.0) for direct database access, enumeration, and data extraction. 5 methods: query (execute arbitrary SQL), list_databases (SHOW DATABASES), list_tables (SHOW TABLES in database), dump_table (SELECT with column filtering and row limit), find_credentials (auto-search for user/password columns across tables). Uses the mysql CLI with JSON output for structured results. Connects per-query (no persistent sessions)."
 image: "ghcr.io/silicon-works/mcp-tools-mysql:latest"
 image_size_mb: 300
 
@@ -25,13 +25,14 @@ resources:
 # Routing hints for tool selection
 routing:
   use_for:
-    - "MySQL database access"
-    - "MySQL query execution"
-    - "database enumeration"
-    - "credential extraction from MySQL"
-    - "MySQL data exfiltration"
+    - "connect to MySQL or MariaDB and run SQL queries"
+    - "enumerate databases and tables on MySQL server"
+    - "extract credentials from MySQL user tables"
+    - "dump table contents from MySQL database"
+    - "find password hashes in MySQL database"
+    - "read files via MySQL LOAD_FILE function"
   never_use_for:
-    - "SQL injection (use sqlmap)"
+    - "SQL injection testing (use sqlmap)"
     - "port scanning"
     - "MongoDB or SQLite access"
   triggers:
@@ -41,166 +42,167 @@ routing:
     - "SQL query"
     - "database enumeration"
     - "port 3306"
+    - "dump database"
 
 methods:
   query:
-    description: "Execute a SQL query on a MySQL database"
-    when_to_use: "When you have MySQL credentials and need to query the database"
+    description: "Execute an arbitrary SQL query on a MySQL/MariaDB database. Returns results as an array of row objects with column names as keys. Supports SELECT, SHOW, DESCRIBE, and data modification queries. Output is JSON-parsed for structured results."
+    when_to_use: "For custom SQL queries beyond what the helper methods provide. Common pentest queries: (1) 'SELECT user, authentication_string FROM mysql.user' — dump MySQL user hashes, (2) 'SELECT LOAD_FILE(\"/etc/passwd\")' — read files via MySQL (requires FILE privilege), (3) 'SELECT @@version' — get MySQL version, (4) 'SHOW GRANTS FOR CURRENT_USER()' — check privileges, (5) 'SELECT * FROM information_schema.tables' — full schema enumeration. Use list_databases/list_tables/dump_table for standard enumeration instead."
     params:
       host:
         type: string
         required: true
-        description: "MySQL server hostname or IP"
+        description: "MySQL server hostname or IP. Use '127.0.0.1' with tunnel forward for localhost-only databases."
       username:
         type: string
         required: true
-        description: "MySQL username"
+        description: "MySQL username (e.g., 'root', 'admin', discovered user)."
       password:
         type: string
-        description: "MySQL password"
+        description: "MySQL password."
       database:
         type: string
-        description: "Database to use"
+        description: "Database to USE before running the query. Omit for cross-database queries."
       query:
         type: string
         required: true
-        description: "SQL query to execute"
+        description: "SQL query to execute. Semicolons handled automatically."
       port:
         type: integer
         default: 3306
-        description: "MySQL port"
+        description: "MySQL port."
       timeout:
         type: integer
         default: 30
-        description: "Query timeout in seconds"
+        description: "Query timeout in seconds."
     returns:
       rows:
         type: array
-        description: "Query results as array of objects"
+        description: "Query results as array of {column: value} objects."
       row_count:
         type: integer
-        description: "Number of rows returned"
+        description: "Number of rows returned."
 
   list_databases:
-    description: "List all databases on the server"
-    when_to_use: "Initial enumeration after gaining MySQL access"
+    description: "List all databases on the MySQL server (SHOW DATABASES). Filters out system databases or includes them based on context."
+    when_to_use: "First step after gaining MySQL credentials. Shows all databases — look for application databases (wordpress, drupal, custom_app) vs system databases (mysql, information_schema, performance_schema, sys). Application databases often contain user credentials."
     params:
       host:
         type: string
         required: true
-        description: "MySQL server hostname or IP"
+        description: "MySQL server hostname or IP."
       username:
         type: string
         required: true
-        description: "MySQL username"
+        description: "MySQL username."
       password:
         type: string
-        description: "MySQL password"
+        description: "MySQL password."
       port:
         type: integer
         default: 3306
-        description: "MySQL port"
+        description: "MySQL port."
     returns:
       databases:
         type: array
-        description: "List of database names"
+        description: "List of database names."
 
   list_tables:
-    description: "List all tables in a database"
-    when_to_use: "To enumerate tables after identifying interesting databases"
+    description: "List all tables in a specific database (SHOW TABLES)."
+    when_to_use: "After identifying an interesting database via list_databases. Look for tables named: users, accounts, credentials, admins, members, auth, sessions — these likely contain credentials. Also look for: posts, comments, messages — may contain sensitive data."
     params:
       host:
         type: string
         required: true
-        description: "MySQL server hostname or IP"
+        description: "MySQL server hostname or IP."
       username:
         type: string
         required: true
-        description: "MySQL username"
+        description: "MySQL username."
       password:
         type: string
-        description: "MySQL password"
+        description: "MySQL password."
       database:
         type: string
         required: true
-        description: "Database name"
+        description: "Database name to list tables from."
       port:
         type: integer
         default: 3306
-        description: "MySQL port"
+        description: "MySQL port."
     returns:
       tables:
         type: array
-        description: "List of table names"
+        description: "List of table names in the database."
 
   dump_table:
-    description: "Dump contents of a table"
-    when_to_use: "To extract data from a table"
+    description: "Dump contents of a specific table with optional column filtering and row limit (default 100 rows). Builds a SELECT query from the parameters."
+    when_to_use: "To extract data from a table identified via list_tables or find_credentials. Use columns param to select only relevant columns (e.g., columns=['username','password'] to avoid dumping large text fields). Increase limit for full extraction. For large tables, use query method with specific WHERE clauses instead."
     params:
       host:
         type: string
         required: true
-        description: "MySQL server hostname or IP"
+        description: "MySQL server hostname or IP."
       username:
         type: string
         required: true
-        description: "MySQL username"
+        description: "MySQL username."
       password:
         type: string
-        description: "MySQL password"
+        description: "MySQL password."
       database:
         type: string
         required: true
-        description: "Database name"
+        description: "Database name."
       table:
         type: string
         required: true
-        description: "Table name"
+        description: "Table name to dump."
       columns:
         type: array
-        description: "Specific columns to dump"
+        description: "Specific columns to select (e.g., ['username', 'password', 'email']). Omit for SELECT *."
       limit:
         type: integer
         default: 100
-        description: "Maximum rows to return"
+        description: "Maximum number of rows to return."
       port:
         type: integer
         default: 3306
-        description: "MySQL port"
+        description: "MySQL port."
     returns:
       data:
         type: array
-        description: "Table contents"
+        description: "Table rows as array of {column: value} objects."
       row_count:
         type: integer
-        description: "Number of rows returned"
+        description: "Number of rows returned."
 
   find_credentials:
-    description: "Search for credential-related tables and data"
-    when_to_use: "To find usernames and passwords in the database"
+    description: "Automatically search for tables containing credential-like data across one or all databases. Looks for tables with columns named: user, username, login, email, password, pass, pwd, hash, secret, token. Dumps matching rows."
+    when_to_use: "Quick credential discovery — faster than manually checking each table. Run this first after list_databases to find low-hanging fruit. Found hashes can be cracked with john or looked up via hash-lookup. Specify database to narrow the search, or omit to scan all accessible databases."
     params:
       host:
         type: string
         required: true
-        description: "MySQL server hostname or IP"
+        description: "MySQL server hostname or IP."
       username:
         type: string
         required: true
-        description: "MySQL username"
+        description: "MySQL username."
       password:
         type: string
-        description: "MySQL password"
+        description: "MySQL password."
       database:
         type: string
-        description: "Database to search (searches all if not specified)"
+        description: "Database to search. Omit to search all accessible databases."
       port:
         type: integer
         default: 3306
-        description: "MySQL port"
+        description: "MySQL port."
     returns:
       tables:
         type: array
-        description: "Tables that may contain credentials"
+        description: "Tables containing credential-like columns."
       credentials:
         type: array
-        description: "Found credentials (username, password/hash)"
+        description: "Extracted rows with username/password/hash data."

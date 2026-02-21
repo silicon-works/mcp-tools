@@ -1,6 +1,6 @@
 name: nmap
-version: "7.94"
-description: "Network scanner for port discovery, service detection, and OS fingerprinting"
+version: "7.98"
+description: "Network scanner (v7.98) for port discovery, service/version detection, OS fingerprinting, and NSE script-based vulnerability scanning. Supports TCP SYN/Connect/ACK/UDP scan types, 613 NSE scripts across categories (vuln, exploit, brute, auth, default, discovery, safe), timing templates T0-T5, and XML output parsing. Compiled with libssh2, openssl, lua 5.4. Requires privileged mode for SYN scans, UDP scans, and OS detection."
 image: "ghcr.io/silicon-works/mcp-tools-nmap:latest"
 image_size_mb: 150
 
@@ -14,16 +14,20 @@ capabilities:
 # Routing hints for tool selection
 routing:
   use_for:
-    - "port scanning"
-    - "service detection"
-    - "OS fingerprinting"
-    - "host discovery"
-    - "network enumeration"
-    - "initial reconnaissance"
+    - "port scanning and open port discovery"
+    - "service and version detection on open ports"
+    - "OS fingerprinting and operating system identification"
+    - "host discovery and ping sweep"
+    - "network enumeration and initial reconnaissance"
+    - "NSE vulnerability script scanning"
+    - "TCP SYN UDP ACK scan types"
+    - "determine what services are running on a target"
+    - "find open ports on IP address or CIDR range"
+    - "identify local network interfaces and LHOST IP"
   never_use_for:
-    - "web fuzzing"
-    - "SQL injection"
-    - "password cracking"
+    - "web fuzzing (use ffuf)"
+    - "SQL injection (use sqlmap)"
+    - "password cracking (use hydra or john)"
   triggers:
     - "nmap"
     - "port scan"
@@ -31,6 +35,8 @@ routing:
     - "OS fingerprint"
     - "host discovery"
     - "network scan"
+    - "open ports"
+    - "what services"
   prefer_over:
     - "masscan"  # More reliable, better service detection
 
@@ -49,8 +55,8 @@ resources:
 
 methods:
   port_scan:
-    description: "Scan for open ports on a target"
-    when_to_use: "Initial reconnaissance to discover open ports and services"
+    description: "Scan for open ports on a target using the specified scan technique. Runs nmap with XML output parsing. Supports TCP Connect (-sT, unprivileged), SYN stealth (-sS, requires privileged), UDP (-sU, requires privileged, slower), and ACK (-sA, requires privileged, for firewall rule detection). Results include port number, state (open/closed/filtered), protocol, and basic service name."
+    when_to_use: "The very first step in any engagement — run this to discover what ports are open and what services are exposed. Use tcp_connect scan type if running unprivileged, syn for faster stealth scanning with privileges. Scan common ports first (default 1-1000), then expand to all 65535 if needed. For targets behind a firewall that filter ICMP, the scan may report 'host down' — in that case the target may still be reachable but host discovery needs to be bypassed (not currently exposed as a parameter). Follow up open ports with service_scan for version detection."
     requires_privileged:
       tcp_connect: false
       syn: true
@@ -60,32 +66,35 @@ methods:
       target:
         type: string
         required: true
-        description: "IP address, hostname, or CIDR range"
+        description: "IP address, hostname, or CIDR range (e.g., '10.10.10.1', 'target.htb', '192.168.1.0/24'). For CIDR ranges, all hosts in the range are scanned."
       ports:
         type: string
         default: "1-1000"
-        description: "Port range (e.g., '22,80,443' or '1-1000')"
+        description: "Port specification. Formats: single port '80', list '22,80,443,8080', range '1-1000', all '1-65535', combined 'T:80,443,U:53,161' (TCP and UDP). Default scans ports 1-1000. Use '1-65535' for comprehensive scan (slower). Common quick targets: '21,22,23,25,53,80,110,111,135,139,143,443,445,993,995,1723,3306,3389,5900,8080'."
       scan_type:
         type: enum
         values: [tcp_connect, syn, udp, ack]
         default: tcp_connect
-        description: "Type of port scan"
+        description: "Scan technique: 'tcp_connect' (-sT, completes TCP handshake, unprivileged, logged by target), 'syn' (-sS, half-open stealth scan, requires privileged, faster and less detectable), 'udp' (-sU, UDP scan, requires privileged, much slower — combine with specific ports), 'ack' (-sA, ACK scan, requires privileged, maps firewall rules, does NOT find open ports — only filtered/unfiltered)."
       timing:
         type: enum
         values: [paranoid, sneaky, polite, normal, aggressive, insane]
         default: normal
-        description: "Scan timing template (T0-T5)"
+        description: "Timing template: 'paranoid' (T0, IDS evasion, very slow), 'sneaky' (T1, IDS evasion), 'polite' (T2, less bandwidth), 'normal' (T3, default), 'aggressive' (T4, faster, assumes reliable network — recommended for HTB/labs), 'insane' (T5, fastest, may miss ports on unreliable networks)."
     returns:
       open_ports:
         type: array
-        description: "List of open port numbers"
-      services:
+        description: "List of open port numbers (convenience summary)"
+      hosts:
         type: array
-        description: "Service information for each port"
+        description: "Full scan results per host with ports array (each port has: port, protocol, state, service name)"
+      summary:
+        type: object
+        description: "Scan summary with target, open_ports list, and total_open count"
 
   service_scan:
-    description: "Identify service versions on open ports"
-    when_to_use: "After port scan to enumerate service versions for vulnerability research"
+    description: "Probe open ports to identify service names, product names, and version numbers using nmap's -sV flag. Sends service-specific probes and matches responses against nmap's signature database. Returns structured service info: service name (e.g., 'http', 'ssh'), product (e.g., 'Apache httpd', 'OpenSSH'), version (e.g., '2.4.41', '8.2p1'), and extra info (e.g., 'Ubuntu 4ubuntu0.3', 'protocol 2.0'). Timeout is 600s (10 min) as version detection can be slow."
+    when_to_use: "After port_scan identifies open ports. Version information is critical for: finding CVEs (e.g., Apache 2.4.49 → CVE-2021-41773), choosing exploit tools, identifying technology stack. Always run this on all discovered open ports before moving to vulnerability scanning. Pass the open ports from port_scan results as a comma-separated list."
     requires_privileged: true
     params:
       target:
@@ -95,29 +104,35 @@ methods:
       ports:
         type: string
         required: true
-        description: "Ports to scan (from previous port_scan results)"
+        description: "Ports to probe (from port_scan results). Comma-separated or range: '22,80,443,8080' or '1-1000'. Only scan ports that were found open — scanning closed ports wastes time."
     returns:
-      services:
+      services_summary:
         type: array
-        description: "Detailed service and version information"
+        description: "Service details per port: port number, protocol, service name, product, version, and extrainfo"
+      hosts:
+        type: array
+        description: "Full nmap XML-parsed results per host"
 
   os_detection:
-    description: "Detect operating system of target"
-    when_to_use: "After port scan to identify target OS for targeted exploitation"
+    description: "Detect the target's operating system using nmap's TCP/IP fingerprinting (-O --osscan-guess). Sends specially crafted packets and analyzes responses to match against nmap's OS signature database. Returns ranked OS matches with confidence percentages. Requires at least one open and one closed port for reliable results. Requires privileged mode for raw socket access."
+    when_to_use: "After port_scan to identify the target OS. Useful for: choosing OS-specific exploits, identifying kernel version range (for kernel exploits like Dirty Pipe), distinguishing Linux distributions, and identifying Windows versions. Best results when the target has both open and closed ports visible. If results are inconclusive, service_scan banners often reveal the OS (e.g., 'Ubuntu' in OpenSSH version string)."
     requires_privileged: true
     params:
       target:
         type: string
         required: true
-        description: "IP address or hostname"
+        description: "IP address or hostname (single target — OS detection doesn't work well with CIDR ranges)"
     returns:
-      os_matches:
+      os_summary:
+        type: object
+        description: "Best OS match with 'best_match' (name string), 'confidence' (accuracy percentage), and 'all_matches' (array of all OS matches ranked by confidence)"
+      hosts:
         type: array
-        description: "Possible OS matches with confidence scores"
+        description: "Full nmap XML-parsed results including os_matches array"
 
   vuln_scan:
-    description: "Run NSE vulnerability scripts against target"
-    when_to_use: "After service detection to identify known vulnerabilities"
+    description: "Run NSE (Nmap Scripting Engine) scripts against a target with service version detection (-sV). Nmap has 613 NSE scripts across categories: 'vuln' (vulnerability checks with CVE references), 'exploit' (active exploitation attempts), 'brute' (brute-force login attacks), 'auth' (authentication bypass checks), 'default' (safe default scripts, same as -sC), 'discovery' (active service enumeration), 'safe' (non-intrusive information gathering). Scripts can also be specified individually (e.g., 'http-shellshock', 'smb-vuln-ms17-010'). Timeout is 900s (15 min) as scripts can be slow. Results are filtered for findings containing 'vulnerable', 'CVE-', 'exploit', 'critical', or 'high'."
+    when_to_use: "After service_scan identifies specific services and versions. Use the 'vuln' category for general vulnerability scanning. For targeted checks, use specific scripts: 'smb-vuln-ms17-010' (EternalBlue), 'http-shellshock' (Shellshock), 'ssl-heartbleed' (Heartbleed), 'http-vuln-cve2017-5638' (Struts2). Can combine categories: 'vuln and safe' for non-intrusive vuln checks. For web-specific vulnerabilities, prefer nuclei which has more templates. NSE vuln scanning is best for: SMB vulnerabilities, SSL/TLS issues, and service-specific CVEs."
     requires_privileged: true
     params:
       target:
@@ -127,24 +142,30 @@ methods:
       ports:
         type: string
         required: true
-        description: "Ports to scan"
+        description: "Ports to scan (from port_scan/service_scan results)"
       scripts:
         type: string
         default: "vuln"
-        description: "NSE script category or specific scripts"
+        description: "NSE script specification. Categories: 'vuln' (vulnerability detection), 'exploit' (active exploitation), 'brute' (brute-force), 'auth' (auth bypass), 'default' (safe defaults), 'discovery' (enumeration), 'safe' (non-intrusive). Specific scripts: 'smb-vuln-ms17-010', 'http-shellshock', 'ssl-heartbleed', 'ftp-anon'. Combine with 'and'/'or'/'not': 'vuln and safe', 'smb-vuln-*'. Comma-separated for multiple: 'http-shellshock,http-vuln-cve2017-5638'."
     returns:
       vulnerabilities:
         type: array
-        description: "Discovered vulnerabilities with CVE references"
+        description: "Findings flagged as vulnerabilities, each with: port number, script ID, and full script output (including CVE references, exploit details)"
+      vuln_count:
+        type: integer
+        description: "Number of vulnerability findings detected"
+      hosts:
+        type: array
+        description: "Full nmap XML-parsed results including all script outputs (not just vulnerabilities)"
 
   get_interfaces:
-    description: "Get local network interfaces and IP addresses (useful for LHOST)"
-    when_to_use: "To determine local IP addresses for reverse shells or LHOST configuration"
+    description: "Get local network interfaces and IP addresses using 'ip -j addr'. Returns all interfaces with their IPv4/IPv6 addresses, MAC addresses, and link state. Automatically identifies the best LHOST candidate (first non-loopback IPv4 address). Does NOT require network access or privileged mode."
+    when_to_use: "Before setting up reverse shells, listeners, or any tool that needs LHOST (your IP address). The recommended_lhost value is the Docker container's IP on the engagement network — use this for reverse shell callbacks, netcat listeners, and Metasploit LHOST. Also useful for understanding the container's network connectivity."
     params: {}
     returns:
       interfaces:
         type: array
-        description: "List of network interfaces with IP addresses"
+        description: "Network interfaces, each with: name (e.g., 'eth0'), state ('UP'/'DOWN'), mac address, ipv4 addresses array, ipv6 addresses array"
       recommended_lhost:
         type: string
-        description: "First non-loopback IPv4 address (recommended for LHOST)"
+        description: "First non-loopback IPv4 address — recommended value for LHOST in reverse shells and listeners"

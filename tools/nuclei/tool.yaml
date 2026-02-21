@@ -1,6 +1,6 @@
 name: nuclei
 version: "3.0"
-description: "Template-based vulnerability scanner with extensive CVE coverage"
+description: "Template-based vulnerability scanner (v3.7.0) with 12,000+ templates covering CVEs (3,800+), XSS (1,300+), misconfigurations (900+), RCE (900+), technology detection (810+), LFI (820+), SQLi (540+), default logins (300+), auth bypasses (250+), SSRF (180+), and more. Supports HTTP, DNS, SSL/TLS, TCP, and headless browser protocols. Templates are community-maintained by ProjectDiscovery and auto-updated."
 image: "ghcr.io/silicon-works/mcp-tools-nuclei:latest"
 image_size_mb: 500
 
@@ -13,12 +13,16 @@ capabilities:
 # Routing hints for tool selection
 routing:
   use_for:
-    - "vulnerability scanning"
-    - "CVE scanning"
-    - "known vulnerability detection"
-    - "technology fingerprinting"
-    - "misconfiguration detection"
-    - "security scanning"
+    - "vulnerability scanning and CVE detection"
+    - "known CVE exploitation check with template matching"
+    - "web application misconfiguration scanning"
+    - "technology fingerprinting via nuclei templates"
+    - "default credentials and exposed admin panel detection"
+    - "SSL TLS certificate and cipher suite analysis"
+    - "DNS misconfiguration zone takeover DKIM DMARC SPF check"
+    - "remote code execution RCE detection"
+    - "exposed sensitive files and information disclosure"
+    - "SSRF blind XSS out-of-band vulnerability detection"
   never_use_for:
     - "port scanning"
     - "directory brute-forcing"
@@ -46,76 +50,82 @@ resources:
 
 methods:
   scan:
-    description: "Scan a target using nuclei templates"
-    when_to_use: "After discovering services to check for known CVEs and misconfigurations"
+    description: "Run nuclei templates against a target. By default runs all 12,000+ templates across HTTP, DNS, SSL, and TCP protocols. Use templates param to narrow to specific directories (http/cves/, http/vulnerabilities/, http/misconfiguration/, http/exposed-panels/, http/default-logins/, http/technologies/, http/exposures/, http/takeovers/, http/token-spray/, ssl/, dns/, network/) or tags param to filter by vulnerability type. Output is structured JSONL with template ID, name, severity, matched URL, extracted data, description, and references."
+    when_to_use: "After discovering services (from nmap) to systematically check for known CVEs, misconfigurations, exposed panels, default credentials, and information disclosure. This is the primary vulnerability scanning tool — run it after web-fingerprint identifies the technology stack. Use tags to focus on relevant vulnerability types: 'cve' for known CVEs against detected software versions, 'misconfig' for server misconfigurations, 'default-login' for default credentials on admin panels, 'exposure' for exposed sensitive files/endpoints. For SSL/TLS testing use templates='ssl/' to check for deprecated TLS, expired certs, weak ciphers, self-signed certificates. For DNS issues use templates='dns/' for zone takeover, DKIM/DMARC/SPF checks."
     params:
       target:
         type: string
         required: true
-        description: "Target URL or IP"
+        description: "Target URL or IP (e.g., 'http://10.10.10.1', 'https://target.htb:8443', '10.10.10.1'). For non-HTTP protocols (dns, ssl, tcp) provide the hostname or IP."
       templates:
         type: string
-        description: "Specific template or directory (e.g., 'cves/', 'vulnerabilities/')"
+        description: "Template path or directory to run. Available directories: 'http/cves/' (known CVEs), 'http/vulnerabilities/' (generic vulns), 'http/misconfiguration/' (server misconfigs), 'http/exposed-panels/' (admin panels), 'http/default-logins/' (default creds), 'http/technologies/' (tech detection), 'http/exposures/' (sensitive files/info), 'http/takeovers/' (subdomain takeover), 'http/token-spray/' (API token testing), 'ssl/' (TLS/cert issues), 'dns/' (DNS misconfigs), 'network/' (TCP service checks). Comma-separated for multiple."
       tags:
         type: string
-        description: "Filter by tags (e.g., 'cve,rce,sqli')"
+        description: "Filter templates by tags (comma-separated). Common tags with template counts: 'cve' (~3,800), 'xss' (~1,300), 'exposure' (~1,300), 'misconfig' (~900), 'rce' (~900), 'tech' (~810), 'lfi' (~820), 'sqli' (~540), 'default-login' (~300), 'auth-bypass' (~250), 'token' (~230), 'ssrf' (~180). Combine: 'cve,rce' for CVEs and RCE only."
       severity:
         type: string
-        description: "Filter by severity (info,low,medium,high,critical)"
+        description: "Filter by severity level (comma-separated). Values: 'info', 'low', 'medium', 'high', 'critical', 'unknown'. Use 'critical,high' for quick high-impact-only scan. Use 'critical,high,medium' for a balanced scan."
       rate_limit:
         type: integer
         default: 150
-        description: "Maximum requests per second"
+        description: "Maximum requests per second. Reduce to 50-100 for stealthier scanning or if target rate-limits. Increase to 300+ for faster scanning on robust targets."
       timeout:
         type: integer
-        default: 300
-        description: "Timeout in seconds"
+        default: 600
+        description: "Total scan timeout in seconds (default 10 minutes). A full scan with all templates can take 5-15 minutes. Increase to 1800 (30min) for thorough scans. Decrease to 120-300 for focused scans with specific tags/templates."
     returns:
       findings:
         type: array
-        description: "Detected vulnerabilities with template details"
+        description: "Detected vulnerabilities, each with: template_id, name, severity (info/low/medium/high/critical), type (http/dns/ssl/tcp), host, matched_at (exact URL), extracted (extracted data like versions/tokens), description, reference (CVE/advisory URLs), tags"
       by_severity:
         type: object
-        description: "Count of findings grouped by severity"
+        description: "Finding counts grouped by severity level (e.g., {critical: 1, high: 3, medium: 5, low: 2, info: 10})"
+      total_findings:
+        type: integer
+        description: "Total number of findings across all severities"
 
   quick_scan:
-    description: "Quick scan for critical/high severity vulnerabilities only"
-    when_to_use: "For rapid initial assessment focusing on high-impact vulnerabilities"
+    description: "Fast scan focusing on critical and high severity vulnerabilities only, filtered by a specific vulnerability focus area. Uses higher rate limit (200 rps) and only runs templates tagged with the focus area AND severity critical/high. Much faster than a full scan — typically completes in 1-3 minutes."
+    when_to_use: "For rapid initial assessment when you want to quickly check for high-impact vulnerabilities without waiting for a full scan. Run this first to find quick wins, then follow up with a full scan if needed. Focus areas: 'cve' for known CVEs with public exploits, 'rce' for remote code execution, 'sqli' for SQL injection, 'xss' for cross-site scripting, 'lfi' for local file inclusion, 'ssrf' for server-side request forgery, 'auth-bypass' for authentication bypass, 'default-login' for default credentials on admin panels."
     params:
       target:
         type: string
         required: true
-        description: "Target URL or IP"
+        description: "Target URL or IP (e.g., 'http://10.10.10.1', 'https://target.htb')"
       focus:
-        type: enum
-        values: [cve, rce, lfi, sqli, xss, ssrf, auth-bypass, default-login]
+        type: string
+        enum: ["cve", "rce", "lfi", "sqli", "xss", "ssrf", "auth-bypass", "default-login"]
         default: "cve"
-        description: "Focus area for quick scan"
+        description: "Vulnerability type to focus on. Maps to nuclei tags: 'cve' (~3,800 templates, known CVEs), 'rce' (~900, remote code execution), 'lfi' (~820, local file inclusion), 'sqli' (~540, SQL injection), 'xss' (~1,300, cross-site scripting), 'ssrf' (~180, server-side request forgery), 'auth-bypass' (~250, authentication bypass), 'default-login' (~300, default credentials)"
       timeout:
         type: integer
         default: 120
-        description: "Timeout in seconds"
+        description: "Scan timeout in seconds. Quick scans typically complete in 1-3 minutes."
     returns:
       findings:
         type: array
-        description: "Critical/high severity findings"
+        description: "Critical and high severity findings matching the focus area, each with template_id, name, severity, matched_at URL, extracted data, description, and references"
+      total_findings:
+        type: integer
+        description: "Number of critical/high findings found"
 
   tech_detect:
-    description: "Detect technologies used by target (fast)"
-    when_to_use: "For quick technology fingerprinting before deeper scanning"
+    description: "Fast technology detection using nuclei's ~810 'tech' tagged templates. Identifies web technologies, frameworks, CMS platforms, server software, and infrastructure components. Uses the same template engine as vulnerability scanning but only runs detection templates — no exploitation or active testing. Faster than a full scan but slower than web-fingerprint's signature matching."
+    when_to_use: "For technology fingerprinting when web-fingerprint's 25 built-in signatures aren't sufficient. Nuclei's tech templates cover hundreds more technologies via community-maintained templates. However, web-fingerprint is faster for common technologies (WordPress, Laravel, nginx, etc.) and should be tried first. Use tech_detect when: web-fingerprint didn't identify the technology, you need more specific version detection, or you want to detect niche/uncommon technologies."
     params:
       target:
         type: string
         required: true
-        description: "Target URL or IP"
+        description: "Target URL or IP (e.g., 'http://10.10.10.1', 'https://target.htb')"
       timeout:
         type: integer
         default: 60
-        description: "Timeout in seconds"
+        description: "Scan timeout in seconds. Tech detection typically completes in 30-60 seconds."
     returns:
       technologies:
         type: array
-        description: "Detected technology names"
+        description: "List of detected technology names (deduplicated)"
       details:
         type: array
-        description: "Full detection details"
+        description: "Full detection details for each technology, including template_id, name, matched_at URL, extracted version information, and tags"
