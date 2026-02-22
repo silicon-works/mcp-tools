@@ -6,7 +6,8 @@ WordPress vulnerability scanner.
 """
 
 import json
-from typing import Any, Dict, List, Optional
+import os
+from typing import Any, Dict, Optional
 
 from mcp_common import BaseMCPServer, ToolResult, ToolError, sanitize_output
 
@@ -45,6 +46,20 @@ class WpscanServer(BaseMCPServer):
                     "type": "string",
                     "description": "WPVulnDB API token for vulnerability data",
                 },
+                "stealthy": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": "Stealthy mode — passive detection + random user agent. Equivalent to --stealthy flag.",
+                },
+                "force": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": "Force scan even if site doesn't appear to be WordPress or returns 403.",
+                },
+                "cookie_string": {
+                    "type": "string",
+                    "description": "Cookie string for authenticated scanning. Format: 'cookie1=value1; cookie2=value2'.",
+                },
                 "timeout": {
                     "type": "integer",
                     "default": 300,
@@ -72,6 +87,12 @@ class WpscanServer(BaseMCPServer):
                     "type": "string",
                     "default": "/usr/share/wordlists/rockyou.txt",
                     "description": "Password wordlist path",
+                },
+                "attack_mode": {
+                    "type": "string",
+                    "enum": ["auto", "wp-login", "xmlrpc", "xmlrpc-multicall"],
+                    "default": "auto",
+                    "description": "Password attack method. auto=WPScan picks the best. wp-login=POST to /wp-login.php. xmlrpc=via XML-RPC. xmlrpc-multicall=batch 500 pwds/req (WP < 4.4 only).",
                 },
                 "timeout": {
                     "type": "integer",
@@ -177,6 +198,9 @@ class WpscanServer(BaseMCPServer):
         enumerate: str = "vp,vt,u",
         plugins_detection: str = "mixed",
         api_token: Optional[str] = None,
+        stealthy: bool = False,
+        force: bool = False,
+        cookie_string: Optional[str] = None,
         timeout: int = 300,
     ) -> ToolResult:
         """Scan a WordPress site for vulnerabilities."""
@@ -191,8 +215,19 @@ class WpscanServer(BaseMCPServer):
             "--random-user-agent",
         ]
 
+        if not api_token:
+            api_token = os.environ.get("WPSCAN_API_TOKEN")
         if api_token:
             args.extend(["--api-token", api_token])
+
+        if stealthy:
+            args.append("--stealthy")
+
+        if force:
+            args.append("--force")
+
+        if cookie_string:
+            args.extend(["--cookie-string", cookie_string])
 
         try:
             self.logger.info(f"Running: wpscan --url {url} ...")
@@ -212,8 +247,8 @@ class WpscanServer(BaseMCPServer):
 
             if parsed:
                 # Version info
-                if "version" in parsed:
-                    version_info = parsed["version"]
+                version_info = parsed.get("version")
+                if version_info:
                     summary["wordpress_version"] = version_info.get("number")
 
                 # Theme
@@ -221,14 +256,14 @@ class WpscanServer(BaseMCPServer):
                     theme = parsed["main_theme"]
                     summary["theme"] = {
                         "name": theme.get("slug"),
-                        "version": theme.get("version", {}).get("number"),
+                        "version": (theme.get("version") or {}).get("number"),
                     }
 
                 # Plugins
                 for plugin_name, plugin_info in parsed.get("plugins", {}).items():
                     plugin_data = {
                         "name": plugin_name,
-                        "version": plugin_info.get("version", {}).get("number"),
+                        "version": (plugin_info.get("version") or {}).get("number"),
                         "vulnerabilities": len(plugin_info.get("vulnerabilities", [])),
                     }
                     summary["plugins"].append(plugin_data)
@@ -270,6 +305,7 @@ class WpscanServer(BaseMCPServer):
         url: str,
         username: str,
         wordlist: str = "/usr/share/wordlists/rockyou.txt",
+        attack_mode: str = "auto",
         timeout: int = 600,
     ) -> ToolResult:
         """Brute-force WordPress login."""
@@ -283,6 +319,9 @@ class WpscanServer(BaseMCPServer):
             "--usernames", username,
             "--random-user-agent",
         ]
+
+        if attack_mode and attack_mode != "auto":
+            args.extend(["--password-attack", attack_mode])
 
         try:
             result = await self.run_command(args, timeout=timeout)
@@ -335,6 +374,8 @@ class WpscanServer(BaseMCPServer):
             "--random-user-agent",
         ]
 
+        if not api_token:
+            api_token = os.environ.get("WPSCAN_API_TOKEN")
         if api_token:
             args.extend(["--api-token", api_token])
 
@@ -390,6 +431,8 @@ class WpscanServer(BaseMCPServer):
             "--random-user-agent",
         ]
 
+        if not api_token:
+            api_token = os.environ.get("WPSCAN_API_TOKEN")
         if api_token:
             args.extend(["--api-token", api_token])
 
@@ -404,7 +447,7 @@ class WpscanServer(BaseMCPServer):
                 plugin_vulns = plugin_info.get("vulnerabilities", [])
                 plugins.append({
                     "name": plugin_name,
-                    "version": plugin_info.get("version", {}).get("number"),
+                    "version": (plugin_info.get("version") or {}).get("number"),
                     "outdated": plugin_info.get("outdated", False),
                     "vulnerability_count": len(plugin_vulns),
                 })
@@ -458,6 +501,8 @@ class WpscanServer(BaseMCPServer):
             "--random-user-agent",
         ]
 
+        if not api_token:
+            api_token = os.environ.get("WPSCAN_API_TOKEN")
         if api_token:
             args.extend(["--api-token", api_token])
 
@@ -474,7 +519,7 @@ class WpscanServer(BaseMCPServer):
                 theme_vulns = theme.get("vulnerabilities", [])
                 themes.append({
                     "name": theme.get("slug"),
-                    "version": theme.get("version", {}).get("number"),
+                    "version": (theme.get("version") or {}).get("number"),
                     "is_main_theme": True,
                     "vulnerability_count": len(theme_vulns),
                 })
@@ -493,7 +538,7 @@ class WpscanServer(BaseMCPServer):
                 theme_vulns = theme_info.get("vulnerabilities", [])
                 themes.append({
                     "name": theme_name,
-                    "version": theme_info.get("version", {}).get("number"),
+                    "version": (theme_info.get("version") or {}).get("number"),
                     "is_main_theme": False,
                     "vulnerability_count": len(theme_vulns),
                 })

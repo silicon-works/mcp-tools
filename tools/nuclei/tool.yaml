@@ -70,6 +70,19 @@ methods:
         type: integer
         default: 150
         description: "Maximum requests per second. Reduce to 50-100 for stealthier scanning or if target rate-limits. Increase to 300+ for faster scanning on robust targets."
+      follow_redirects:
+        type: boolean
+        default: true
+        description: "Follow HTTP redirects (nuclei -fr flag). Enable for targets that redirect HTTP→HTTPS or / → /login. Disable when you want to scan the exact URL without following redirects."
+      headers:
+        type: string
+        description: "Custom headers in 'Header:Value' format, comma-separated for multiple (e.g., 'Authorization:Bearer token123,Cookie:session=abc'). Essential for authenticated scanning behind login pages or WAFs."
+      proxy:
+        type: string
+        description: "HTTP/SOCKS5 proxy URL (e.g., 'socks5://127.0.0.1:1080', 'http://127.0.0.1:8080'). Use with tunnel MCP server for scanning internal targets via SSH tunnel."
+      exclude_tags:
+        type: string
+        description: "Tags to exclude from scan (comma-separated, e.g., 'dos,fuzz' to skip denial-of-service and fuzzing templates). Useful for avoiding noisy or destructive templates."
       timeout:
         type: integer
         default: 600
@@ -98,10 +111,20 @@ methods:
         enum: ["cve", "rce", "lfi", "sqli", "xss", "ssrf", "auth-bypass", "default-login"]
         default: "cve"
         description: "Vulnerability type to focus on. Maps to nuclei tags: 'cve' (~3,800 templates, known CVEs), 'rce' (~900, remote code execution), 'lfi' (~820, local file inclusion), 'sqli' (~540, SQL injection), 'xss' (~1,300, cross-site scripting), 'ssrf' (~180, server-side request forgery), 'auth-bypass' (~250, authentication bypass), 'default-login' (~300, default credentials)"
+      follow_redirects:
+        type: boolean
+        default: true
+        description: "Follow HTTP redirects"
+      headers:
+        type: string
+        description: "Custom headers in 'Header:Value' format, comma-separated"
+      proxy:
+        type: string
+        description: "HTTP/SOCKS5 proxy URL"
       timeout:
         type: integer
-        default: 120
-        description: "Scan timeout in seconds. Quick scans typically complete in 1-3 minutes."
+        default: 300
+        description: "Scan timeout in seconds. Nuclei has ~60-90s startup overhead; quick scans typically complete in 2-4 minutes total."
     returns:
       findings:
         type: array
@@ -120,8 +143,8 @@ methods:
         description: "Target URL or IP (e.g., 'http://10.10.10.1', 'https://target.htb')"
       timeout:
         type: integer
-        default: 60
-        description: "Scan timeout in seconds. Tech detection typically completes in 30-60 seconds."
+        default: 300
+        description: "Scan timeout in seconds. Nuclei has ~60s startup overhead for template loading; ~810 tech templates need 2-3 minutes total."
     returns:
       technologies:
         type: array
@@ -129,3 +152,79 @@ methods:
       details:
         type: array
         description: "Full detection details for each technology, including template_id, name, matched_at URL, extracted version information, and tags"
+
+  auto_scan:
+    description: "Automatic vulnerability scan using Wappalyzer-based technology detection to select only relevant templates. Nuclei detects the target's technology stack (CMS, framework, server, etc.) and runs matching templates instead of all 12,000+. Much faster and more targeted than a full scan while still covering known CVEs and misconfigurations for the detected stack."
+    when_to_use: "After discovering a web service, as a smart alternative to a full scan. Auto-scan is ideal when you don't know what technology the target runs — it detects the stack first, then scans for relevant vulnerabilities. Faster than a full scan because it only runs matching templates. Use this when: you want a targeted scan without manually specifying tags/templates, web-fingerprint identified the technology but you want vulnerability scanning focused on that stack, or you want a good balance between speed and coverage."
+    params:
+      target:
+        type: string
+        required: true
+        description: "Target URL (e.g., 'http://10.10.10.1', 'https://target.htb')"
+      severity:
+        type: string
+        description: "Filter by severity (info,low,medium,high,critical). Use 'critical,high' for fast high-impact-only results."
+      rate_limit:
+        type: integer
+        default: 150
+        description: "Maximum requests per second"
+      follow_redirects:
+        type: boolean
+        default: true
+        description: "Follow HTTP redirects"
+      headers:
+        type: string
+        description: "Custom headers in 'Header:Value' format, comma-separated"
+      timeout:
+        type: integer
+        default: 600
+        description: "Timeout in seconds"
+    returns:
+      findings:
+        type: array
+        description: "Detected vulnerabilities matching the auto-detected technology stack"
+      by_severity:
+        type: object
+        description: "Finding counts grouped by severity level"
+      total_findings:
+        type: integer
+        description: "Total number of findings"
+
+  dast_scan:
+    description: "Dynamic application security testing (DAST) using nuclei's built-in fuzzer engine. Fuzzes HTTP parameters (query, body, headers, cookies) with injection payloads to discover vulnerabilities like SQLi, XSS, SSRF, command injection, and more. Aggression level controls payload count: low uses fewer payloads for faster scanning, high uses comprehensive payload sets for thorough testing."
+    when_to_use: "After initial reconnaissance and vulnerability scanning to actively test for injection vulnerabilities that template-based scanning can't find. DAST/fuzzing is more aggressive than template scanning — it sends actual attack payloads to parameters. Use this when: template scans found no vulnerabilities but the target has input parameters, you want to test for SQLi/XSS/command injection on specific endpoints, or you want to complement template-based scanning with active fuzzing. Use a lower rate_limit (50-100) to avoid overwhelming the target."
+    params:
+      target:
+        type: string
+        required: true
+        description: "Target URL to fuzz (e.g., 'http://target.htb/search?q=test'). Include parameters for targeted fuzzing."
+      aggression:
+        type: string
+        enum: ["low", "medium", "high"]
+        default: "low"
+        description: "Fuzzing aggression level controlling payload count. low=fewer payloads (faster, less noise), medium=balanced, high=comprehensive payload sets (slower, thorough). Start with low and escalate if needed."
+      headers:
+        type: string
+        description: "Custom headers in 'Header:Value' format, comma-separated. Use for authenticated fuzzing."
+      follow_redirects:
+        type: boolean
+        default: true
+        description: "Follow HTTP redirects"
+      proxy:
+        type: string
+        description: "HTTP/SOCKS5 proxy URL"
+      rate_limit:
+        type: integer
+        default: 100
+        description: "Maximum requests per second (lower default for fuzzing to avoid overwhelming targets)"
+      timeout:
+        type: integer
+        default: 600
+        description: "Timeout in seconds"
+    returns:
+      findings:
+        type: array
+        description: "Fuzzing findings with template_id, name, severity, matched_at URL, extracted data, and vulnerability details"
+      total_findings:
+        type: integer
+        description: "Total number of findings from fuzzing"

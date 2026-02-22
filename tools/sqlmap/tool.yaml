@@ -50,7 +50,7 @@ resources:
 methods:
   test_injection:
     description: "Test URL parameters for SQL injection vulnerabilities using sqlmap's detection engine. Runs with --batch (non-interactive) and 4 threads. Tests all 6 injection techniques by default (BEUSTQ). Parses output for vulnerability confirmation, injectable parameters, injection types, and detected DBMS. Sqlmap caches results in session files — subsequent calls to the same URL skip already-tested parameters."
-    when_to_use: "When you've identified a potentially injectable parameter in a web application — either from manual testing, web fuzzing (ffuf), or source code review. Mark the injection point with * in the URL (e.g., 'http://target/page?id=1*') or let sqlmap auto-detect GET parameters. For POST injection, use the data parameter. Start with level=1/risk=1 (default), increase to level=3/risk=2 if no results, and level=5/risk=3 as last resort (risk=3 may use OR-based tests that can modify data). If the target uses a WAF, the test may fail — a tamper script parameter would be needed (not currently exposed)."
+    when_to_use: "When you've identified a potentially injectable parameter in a web application — either from manual testing, web fuzzing (ffuf), or source code review. Mark the injection point with * in the URL (e.g., 'http://target/page?id=1*') or let sqlmap auto-detect GET parameters. For POST injection, use the data parameter. Start with level=1/risk=1 (default), increase to level=3/risk=2 if no results, and level=5/risk=3 as last resort (risk=3 may use OR-based tests that can modify data). If the target uses a WAF, use tamper scripts (e.g., tamper='space2comment,randomcase') to bypass filtering. Use param to test a specific parameter and skip others. Use flush_session if re-testing after changes."
     params:
       url:
         type: string
@@ -74,6 +74,29 @@ methods:
         type: string
         default: "BEUSTQ"
         description: "SQL injection techniques to test. B=Boolean-based blind, E=Error-based, U=Union query, S=Stacked queries (needed for os_shell/file_write), T=Time-based blind, Q=Inline queries. Default 'BEUSTQ' tests all. Use 'BEU' for faster testing if you don't need stacked queries. Use 'T' alone for time-based only when other methods fail."
+      param:
+        type: string
+        description: "Specific parameter to test (e.g., 'id'). Without this, sqlmap tests all parameters."
+      tamper:
+        type: string
+        description: "Tamper script(s) for WAF bypass. Comma-separated. Common: 'space2comment' (spaces→/**/), 'between' (>→BETWEEN), 'charencode' (URL-encode), 'randomcase' (random keyword case)."
+      flush_session:
+        type: boolean
+        default: false
+        description: "Clear cached session data and re-test from scratch."
+      dbms:
+        type: string
+        description: "Force DBMS type to skip detection (e.g., 'MySQL', 'PostgreSQL', 'Microsoft SQL Server')."
+      proxy:
+        type: string
+        description: "HTTP/SOCKS proxy (e.g., 'socks5://127.0.0.1:1080'). For scanning through tunnels."
+      random_agent:
+        type: boolean
+        default: false
+        description: "Use random HTTP User-Agent to avoid WAF detection."
+      headers:
+        type: string
+        description: "Additional HTTP headers, semicolon-separated (e.g., 'Authorization: Bearer eyJ...')."
       timeout:
         type: integer
         default: 300
@@ -109,6 +132,19 @@ methods:
       cookie:
         type: string
         description: "HTTP Cookie header value (must match test_injection if authentication is needed)."
+      dbms:
+        type: string
+        description: "Force DBMS type to skip detection."
+      proxy:
+        type: string
+        description: "HTTP/SOCKS proxy."
+      random_agent:
+        type: boolean
+        default: false
+        description: "Use random HTTP User-Agent."
+      headers:
+        type: string
+        description: "Additional HTTP headers, semicolon-separated."
       timeout:
         type: integer
         default: 300
@@ -121,9 +157,52 @@ methods:
         type: integer
         description: "Number of databases found"
 
+  enumerate_tables:
+    description: "List all tables in a database using sqlmap's --tables flag with -D (database). Parses pipe-delimited table name output. Sqlmap reuses cached injection from prior test_injection calls."
+    when_to_use: "After enumerate_dbs identifies databases, use this to discover table names before dumping data. The workflow: test_injection → enumerate_dbs → enumerate_tables → dump_table. Look for high-value tables: 'users', 'accounts', 'credentials', 'config', 'sessions', 'wp_users'."
+    params:
+      url:
+        type: string
+        required: true
+        description: "Target URL — same URL used in test_injection."
+      database:
+        type: string
+        required: true
+        description: "Database name from enumerate_dbs results."
+      data:
+        type: string
+        description: "POST request body data."
+      cookie:
+        type: string
+        description: "HTTP Cookie header value."
+      dbms:
+        type: string
+        description: "Force DBMS type to skip detection."
+      proxy:
+        type: string
+        description: "HTTP/SOCKS proxy."
+      random_agent:
+        type: boolean
+        default: false
+        description: "Use random HTTP User-Agent."
+      headers:
+        type: string
+        description: "Additional HTTP headers, semicolon-separated."
+      timeout:
+        type: integer
+        default: 300
+        description: "Process timeout in seconds."
+    returns:
+      tables:
+        type: array
+        description: "List of table name strings"
+      count:
+        type: integer
+        description: "Number of tables found"
+
   dump_table:
     description: "Dump contents of a specific database table using sqlmap's --dump flag with -D (database) and -T (table). Uses --dump-format CSV for structured output. Parses the pipe-delimited table output into column names and row dictionaries. Supports column selection (-C) to extract only specific fields and row limiting (--stop) to cap output. For large tables, use the columns and limit params to reduce data volume and extraction time."
-    when_to_use: "After enumerate_dbs identifies databases, use this to extract data from specific tables. The typical workflow is: enumerate_dbs → (identify interesting database) → dump_table on high-value tables like 'users', 'accounts', 'credentials', 'config', 'sessions', 'tokens'. Use the columns parameter to extract only credential fields ('username,password,email') when you know the schema. For blind injection, each row/cell requires separate requests, so limiting columns and rows dramatically reduces extraction time. Note: you need to know the table name — if you don't, the MCP server currently has no --tables enumeration method (see fix file), so use a raw sqlmap approach or check information_schema via the injection."
+    when_to_use: "After enumerate_dbs identifies databases, use enumerate_tables to list tables, then dump_table to extract data. The workflow: enumerate_dbs → enumerate_tables → dump_table on high-value tables like 'users', 'accounts', 'credentials', 'config', 'sessions', 'tokens'. Use the columns parameter to extract only credential fields ('username,password,email') when you know the schema. For blind injection, each row/cell requires separate requests, so limiting columns and rows dramatically reduces extraction time."
     params:
       url:
         type: string
@@ -150,6 +229,19 @@ methods:
         type: integer
         default: 100
         description: "Maximum rows to extract (maps to sqlmap --stop). Default 100. For blind injection, each row takes multiple requests — use 10-20 for initial sampling, then increase if needed. For UNION/error-based injection, extraction is fast so 100+ is fine."
+      dbms:
+        type: string
+        description: "Force DBMS type to skip detection."
+      proxy:
+        type: string
+        description: "HTTP/SOCKS proxy."
+      random_agent:
+        type: boolean
+        default: false
+        description: "Use random HTTP User-Agent."
+      headers:
+        type: string
+        description: "Additional HTTP headers, semicolon-separated."
       timeout:
         type: integer
         default: 600
@@ -183,6 +275,19 @@ methods:
       cookie:
         type: string
         description: "HTTP Cookie header value."
+      dbms:
+        type: string
+        description: "Force DBMS type to skip detection."
+      proxy:
+        type: string
+        description: "HTTP/SOCKS proxy."
+      random_agent:
+        type: boolean
+        default: false
+        description: "Use random HTTP User-Agent."
+      headers:
+        type: string
+        description: "Additional HTTP headers, semicolon-separated."
       timeout:
         type: integer
         default: 900
@@ -194,6 +299,45 @@ methods:
       message:
         type: string
         description: "Status message ('Database dump completed'). Actual table data is in raw_output, not structured here."
+
+  dump_passwords:
+    description: "Dump database user password hashes using sqlmap's --passwords flag. Extracts DBMS user accounts and their password hashes. For MySQL: extracts from mysql.user. For MSSQL: extracts from master.sys.sql_logins. For PostgreSQL: extracts from pg_shadow."
+    when_to_use: "After confirming SQL injection, use this to extract database user password hashes for offline cracking with john or hashcat. Useful when you need database credentials for direct DB access or to find reused passwords. The hashes can be cracked with john's identify and crack methods."
+    params:
+      url:
+        type: string
+        required: true
+        description: "Target URL — same URL used in test_injection."
+      data:
+        type: string
+        description: "POST request body data."
+      cookie:
+        type: string
+        description: "HTTP Cookie header value."
+      dbms:
+        type: string
+        description: "Force DBMS type to skip detection."
+      proxy:
+        type: string
+        description: "HTTP/SOCKS proxy."
+      random_agent:
+        type: boolean
+        default: false
+        description: "Use random HTTP User-Agent."
+      headers:
+        type: string
+        description: "Additional HTTP headers, semicolon-separated."
+      timeout:
+        type: integer
+        default: 300
+        description: "Process timeout in seconds."
+    returns:
+      hashes:
+        type: array
+        description: "List of {user, hash} objects with DBMS username and password hash"
+      count:
+        type: integer
+        description: "Number of hashes extracted"
 
   os_shell:
     description: "Execute an OS command on the target server via SQL injection using sqlmap's --os-cmd flag. The mechanism depends on the DBMS: MySQL uses User Defined Functions (UDF, requires FILE privilege and writable plugin directory), MSSQL uses xp_cmdshell (must be enabled or enableable via stacked queries), PostgreSQL uses COPY TO/FROM with large objects or PL/Python. Parses the 'command standard output' section from sqlmap's output. This is a single-command execution, not a persistent shell — each call is independent."
@@ -213,6 +357,12 @@ methods:
       cookie:
         type: string
         description: "HTTP Cookie header value."
+      dbms:
+        type: string
+        description: "Force DBMS type to skip detection."
+      proxy:
+        type: string
+        description: "HTTP/SOCKS proxy."
       timeout:
         type: integer
         default: 120
@@ -243,6 +393,12 @@ methods:
       cookie:
         type: string
         description: "HTTP Cookie header value."
+      dbms:
+        type: string
+        description: "Force DBMS type to skip detection."
+      proxy:
+        type: string
+        description: "HTTP/SOCKS proxy."
       timeout:
         type: integer
         default: 120
@@ -277,6 +433,12 @@ methods:
       cookie:
         type: string
         description: "HTTP Cookie header value."
+      dbms:
+        type: string
+        description: "Force DBMS type to skip detection."
+      proxy:
+        type: string
+        description: "HTTP/SOCKS proxy."
       timeout:
         type: integer
         default: 120

@@ -153,6 +153,10 @@ class SSHServer(BaseMCPServer):
                     "default": 60,
                     "description": "Transfer timeout in seconds",
                 },
+                "ssh_options": {
+                    "type": "string",
+                    "description": "Additional SSH options (e.g., '-o KexAlgorithms=curve25519-sha256' for VPN/MTU issues)",
+                },
             },
             handler=self.copy_from,
         )
@@ -198,6 +202,10 @@ class SSHServer(BaseMCPServer):
                     "type": "integer",
                     "default": 60,
                     "description": "Transfer timeout in seconds",
+                },
+                "ssh_options": {
+                    "type": "string",
+                    "description": "Additional SSH options (e.g., '-o KexAlgorithms=curve25519-sha256' for VPN/MTU issues)",
                 },
             },
             handler=self.copy_to,
@@ -255,6 +263,10 @@ class SSHServer(BaseMCPServer):
                     "default": 300,
                     "description": "Total timeout in seconds",
                 },
+                "ssh_options": {
+                    "type": "string",
+                    "description": "Additional SSH options (e.g., '-o KexAlgorithms=curve25519-sha256' for VPN/MTU issues)",
+                },
             },
             handler=self.upload_binary,
         )
@@ -300,6 +312,10 @@ class SSHServer(BaseMCPServer):
                     "type": "integer",
                     "default": 120,
                     "description": "Execution timeout in seconds",
+                },
+                "ssh_options": {
+                    "type": "string",
+                    "description": "Additional SSH options (e.g., '-o KexAlgorithms=curve25519-sha256' for VPN/MTU issues)",
                 },
             },
             handler=self.run_script,
@@ -1106,9 +1122,7 @@ class SSHServer(BaseMCPServer):
         if pid_file and stdout.strip():
             try:
                 pid = stdout.strip().split('\n')[-1].strip()
-                if pid.isdigit():
-                    pid = pid
-                else:
+                if not pid.isdigit():
                     pid = None
             except (IndexError, ValueError):
                 pid = None

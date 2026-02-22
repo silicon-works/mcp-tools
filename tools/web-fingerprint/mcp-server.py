@@ -6,12 +6,16 @@ Web technology fingerprinting for identifying CMS, frameworks, servers, and more
 """
 
 import asyncio
+import base64
+import hashlib
 import re
 import ssl
 import urllib.request
 import urllib.error
 from typing import Any, Dict, List, Optional
 from urllib.parse import urlparse
+
+import mmh3
 
 from mcp_common import BaseMCPServer, ToolResult
 
@@ -109,6 +113,32 @@ TECH_SIGNATURES = {
     "Varnish": {
         "headers": {"Via": r"varnish", "X-Varnish": r".*"},
     },
+    # CMS (additional)
+    "Ghost": {
+        "body": [r"ghost-url", r"ghost\.org"],
+        "meta": {"generator": r"Ghost"},
+    },
+    "Hugo": {
+        "meta": {"generator": r"Hugo"},
+    },
+    "Umbraco": {
+        "body": [r"/umbraco/", r"Umbraco"],
+    },
+    # Frameworks (additional)
+    "Flask": {
+        "headers": {"Server": r"Werkzeug"},
+        "cookies": {"session": r"eyJ"},
+    },
+    "FastAPI": {
+        "body": [r"fastapi", r"/openapi\.json"],
+    },
+    "Next.js": {
+        "headers": {"X-Powered-By": r"Next\.js"},
+        "body": [r"_next/static", r"__NEXT_DATA__"],
+    },
+    "Nuxt": {
+        "body": [r"_nuxt/", r"__NUXT__"],
+    },
     # Other
     "GitLab": {
         "body": [r"gitlab-ce", r"gitlab-ee", r"/users/sign_in"],
@@ -124,6 +154,45 @@ TECH_SIGNATURES = {
     "Kibana": {
         "body": [r"kibana", r"kbn-"],
     },
+    "Gitea": {
+        "body": [r"Gitea", r"/gitea/"],
+        "meta": {"keywords": r"gitea"},
+    },
+    "MinIO": {
+        "headers": {"Server": r"MinIO"},
+    },
+    "HashiCorp Vault": {
+        "body": [r"vault-ui", r"Vault"],
+    },
+    "Elasticsearch": {
+        "body": [r"elasticsearch", r'"cluster_name"'],
+    },
+    "Redis Commander": {
+        "body": [r"redis-commander"],
+    },
+    "Roundcube": {
+        "body": [r"roundcube", r"rcmloginuser"],
+    },
+    "HFS (HTTP File Server)": {
+        "body": [r"HttpFileServer", r"HFS"],
+    },
+}
+
+
+# Version extraction patterns (applied to response body after tech detection)
+VERSION_PATTERNS = {
+    "WordPress": r'<meta name="generator" content="WordPress ([\d.]+)"',
+    "Joomla": r'<meta name="generator" content="Joomla! ([\d.]+)"',
+    "Drupal": r'<meta name="generator" content="Drupal ([\d.]+)"',
+    "jQuery": r'jquery[.-]?([\d.]+)(?:\.min)?\.js',
+    "Angular": r'ng-version="([\d.]+)"',
+    "React": r'react@([\d.]+)',
+    "Jenkins": r'Jenkins ver\. ([\d.]+)',
+    "GitLab": r'gon\.version.*?"([\d.]+)"',
+    "Tomcat": r'Apache Tomcat/([\d.]+)',
+    "Ghost": r'<meta name="generator" content="Ghost ([\d.]+)"',
+    "Hugo": r'<meta name="generator" content="Hugo ([\d.]+)"',
+    "Grafana": r'Grafana v([\d.]+)',
 }
 
 
@@ -310,11 +379,17 @@ class WebFingerprintServer(BaseMCPServer):
                         matches.append(f"Cookie: {cookie_name}")
 
             if confidence > 0:
-                detected.append({
+                entry = {
                     "technology": tech_name,
                     "confidence": min(confidence, 100),
                     "matches": matches,
-                })
+                }
+                # Try body-based version extraction
+                if tech_name in VERSION_PATTERNS:
+                    ver_match = re.search(VERSION_PATTERNS[tech_name], body, re.IGNORECASE)
+                    if ver_match:
+                        entry["version"] = ver_match.group(1)
+                detected.append(entry)
 
         # Sort by confidence
         detected.sort(key=lambda x: x["confidence"], reverse=True)
@@ -548,9 +623,6 @@ class WebFingerprintServer(BaseMCPServer):
 
     async def favicon_hash(self, url: str, timeout: int = 30) -> ToolResult:
         """Calculate favicon hash for Shodan lookup."""
-        import base64
-        import hashlib
-
         parsed = urlparse(url if url.startswith("http") else f"http://{url}")
         favicon_url = f"{parsed.scheme}://{parsed.netloc}/favicon.ico"
 
@@ -567,12 +639,11 @@ class WebFingerprintServer(BaseMCPServer):
             response = opener.open(request, timeout=timeout)
             favicon_data = response.read()
 
-            # Calculate MurmurHash3 (Shodan uses this)
-            # Since we don't have mmh3, use a base64+md5 approach for identification
-            b64_favicon = base64.b64encode(favicon_data).decode()
+            # Shodan-compatible MurmurHash3
+            b64_data = base64.encodebytes(favicon_data)
+            mmh3_hash = mmh3.hash(b64_data)
 
-            # Shodan favicon hash calculation (simplified)
-            # Real implementation would use mmh3.hash(base64.encodebytes(favicon_data))
+            # Also keep MD5 for general identification
             md5_hash = hashlib.md5(favicon_data).hexdigest()
 
             return ToolResult(
@@ -581,10 +652,10 @@ class WebFingerprintServer(BaseMCPServer):
                     "favicon_url": favicon_url,
                     "size_bytes": len(favicon_data),
                     "md5": md5_hash,
-                    "shodan_query": f'http.favicon.hash:"{md5_hash}"',
-                    "note": "For accurate Shodan lookup, use mmh3 hash",
+                    "mmh3": mmh3_hash,
+                    "shodan_query": f"http.favicon.hash:{mmh3_hash}",
                 },
-                raw_output=f"Favicon MD5: {md5_hash}",
+                raw_output=f"Favicon mmh3: {mmh3_hash}, MD5: {md5_hash}",
             )
 
         except urllib.error.HTTPError as e:

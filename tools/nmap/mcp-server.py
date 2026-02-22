@@ -51,6 +51,15 @@ class NmapServer(BaseMCPServer):
                     "default": "normal",
                     "description": "Scan timing template (T0-T5)",
                 },
+                "skip_discovery": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": "Skip host discovery (-Pn). Use when target filters ICMP and shows as 'down'.",
+                },
+                "top_ports": {
+                    "type": "integer",
+                    "description": "Scan the N most common ports instead of a range. Mutually exclusive with 'ports'. Common values: 100 (fast), 1000 (thorough).",
+                },
             },
             handler=self.port_scan,
         )
@@ -69,6 +78,15 @@ class NmapServer(BaseMCPServer):
                     "required": True,
                     "description": "Ports to scan (from previous port_scan results)",
                 },
+                "skip_discovery": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": "Skip host discovery (-Pn). Use when target filters ICMP and shows as 'down'.",
+                },
+                "version_intensity": {
+                    "type": "integer",
+                    "description": "Version detection probe intensity 0-9. Default uses nmap's default 7. Use 2 for fast, 9 for thorough.",
+                },
             },
             handler=self.service_scan,
         )
@@ -81,6 +99,11 @@ class NmapServer(BaseMCPServer):
                     "type": "string",
                     "required": True,
                     "description": "IP address or hostname",
+                },
+                "skip_discovery": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": "Skip host discovery (-Pn). Use when target filters ICMP and shows as 'down'.",
                 },
             },
             handler=self.os_detection,
@@ -105,6 +128,15 @@ class NmapServer(BaseMCPServer):
                     "default": "vuln",
                     "description": "NSE script category or specific scripts",
                 },
+                "script_args": {
+                    "type": "string",
+                    "description": "Arguments for NSE scripts (e.g., 'userdb=users.txt,passdb=pass.txt' for brute scripts)",
+                },
+                "skip_discovery": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": "Skip host discovery (-Pn). Use when target filters ICMP and shows as 'down'.",
+                },
             },
             handler=self.vuln_scan,
         )
@@ -114,6 +146,25 @@ class NmapServer(BaseMCPServer):
             description="Get local network interfaces and IP addresses (useful for LHOST)",
             params={},
             handler=self.get_interfaces,
+        )
+
+        self.register_method(
+            name="ping_scan",
+            description="Discover live hosts on a network (no port scan)",
+            params={
+                "target": {
+                    "type": "string",
+                    "required": True,
+                    "description": "CIDR range or target (e.g., '192.168.1.0/24')",
+                },
+                "timing": {
+                    "type": "string",
+                    "enum": ["paranoid", "sneaky", "polite", "normal", "aggressive", "insane"],
+                    "default": "normal",
+                    "description": "Timing template",
+                },
+            },
+            handler=self.ping_scan,
         )
 
     def _get_timing_flag(self, timing: str) -> str:
@@ -203,6 +254,8 @@ class NmapServer(BaseMCPServer):
         ports: str = "1-1000",
         scan_type: str = "tcp_connect",
         timing: str = "normal",
+        skip_discovery: bool = False,
+        top_ports: Optional[int] = None,
     ) -> ToolResult:
         """
         Scan for open ports on a target.
@@ -212,6 +265,8 @@ class NmapServer(BaseMCPServer):
             ports: Port range to scan
             scan_type: Type of scan (tcp_connect, syn, udp, ack)
             timing: Scan timing (paranoid to insane)
+            skip_discovery: Skip host discovery (-Pn)
+            top_ports: Scan N most common ports (mutually exclusive with ports)
 
         Returns:
             ToolResult with discovered ports and services
@@ -220,7 +275,12 @@ class NmapServer(BaseMCPServer):
 
         args = self._get_scan_type_flags(scan_type)
         args.append(self._get_timing_flag(timing))
-        args.extend(["-p", ports])
+        if skip_discovery:
+            args.append("-Pn")
+        if top_ports:
+            args.extend(["--top-ports", str(top_ports)])
+        else:
+            args.extend(["-p", ports])
 
         result = await self._run_nmap(target, args)
 
@@ -243,6 +303,8 @@ class NmapServer(BaseMCPServer):
         self,
         target: str,
         ports: str,
+        skip_discovery: bool = False,
+        version_intensity: Optional[int] = None,
     ) -> ToolResult:
         """
         Identify service versions on open ports.
@@ -250,6 +312,8 @@ class NmapServer(BaseMCPServer):
         Args:
             target: IP address or hostname
             ports: Ports to scan (comma-separated or range)
+            skip_discovery: Skip host discovery (-Pn)
+            version_intensity: Version detection intensity 0-9
 
         Returns:
             ToolResult with service version information
@@ -257,6 +321,10 @@ class NmapServer(BaseMCPServer):
         self.logger.info(f"Starting service scan on {target}, ports={ports}")
 
         args = ["-sV", "-p", ports]
+        if skip_discovery:
+            args.append("-Pn")
+        if version_intensity is not None:
+            args.extend(["--version-intensity", str(version_intensity)])
 
         result = await self._run_nmap(target, args, timeout=600)
 
@@ -282,6 +350,7 @@ class NmapServer(BaseMCPServer):
     async def os_detection(
         self,
         target: str,
+        skip_discovery: bool = False,
     ) -> ToolResult:
         """
         Detect operating system of target.
@@ -290,6 +359,7 @@ class NmapServer(BaseMCPServer):
 
         Args:
             target: IP address or hostname
+            skip_discovery: Skip host discovery (-Pn)
 
         Returns:
             ToolResult with OS detection results
@@ -297,6 +367,8 @@ class NmapServer(BaseMCPServer):
         self.logger.info(f"Starting OS detection on {target}")
 
         args = ["-O", "--osscan-guess"]
+        if skip_discovery:
+            args.append("-Pn")
 
         result = await self._run_nmap(target, args, timeout=300)
 
@@ -318,6 +390,8 @@ class NmapServer(BaseMCPServer):
         target: str,
         ports: str,
         scripts: str = "vuln",
+        script_args: Optional[str] = None,
+        skip_discovery: bool = False,
     ) -> ToolResult:
         """
         Run NSE vulnerability scripts against target.
@@ -326,6 +400,8 @@ class NmapServer(BaseMCPServer):
             target: IP address or hostname
             ports: Ports to scan
             scripts: NSE script category or specific scripts
+            script_args: Arguments for NSE scripts
+            skip_discovery: Skip host discovery (-Pn)
 
         Returns:
             ToolResult with vulnerability findings
@@ -333,6 +409,10 @@ class NmapServer(BaseMCPServer):
         self.logger.info(f"Starting vuln scan on {target}, ports={ports}, scripts={scripts}")
 
         args = ["-sV", "-p", ports, "--script", scripts]
+        if script_args:
+            args.extend(["--script-args", script_args])
+        if skip_discovery:
+            args.append("-Pn")
 
         result = await self._run_nmap(target, args, timeout=900)
 
@@ -352,6 +432,39 @@ class NmapServer(BaseMCPServer):
                         })
             result.data["vulnerabilities"] = vulns
             result.data["vuln_count"] = len(vulns)
+
+        return result
+
+    async def ping_scan(
+        self,
+        target: str,
+        timing: str = "normal",
+    ) -> ToolResult:
+        """
+        Discover live hosts on a network without port scanning.
+
+        Args:
+            target: CIDR range or target (e.g., '192.168.1.0/24')
+            timing: Scan timing (paranoid to insane)
+
+        Returns:
+            ToolResult with discovered live hosts
+        """
+        self.logger.info(f"Starting ping scan on {target}")
+
+        args = ["-sn", self._get_timing_flag(timing)]
+        result = await self._run_nmap(target, args, timeout=120)
+
+        if result.success and result.data.get("hosts"):
+            live_hosts = [
+                h["addresses"][0]["addr"]
+                if h.get("addresses")
+                else "unknown"
+                for h in result.data["hosts"]
+                if h.get("status") == "up"
+            ]
+            result.data["live_hosts"] = live_hosts
+            result.data["total_live"] = len(live_hosts)
 
         return result
 

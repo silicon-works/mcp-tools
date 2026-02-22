@@ -7,7 +7,9 @@ Supports both authenticated and unauthenticated access.
 """
 
 import json
+from datetime import datetime
 from typing import Optional
+from urllib.parse import quote_plus
 
 from mcp_common import BaseMCPServer, ToolResult, ToolError
 
@@ -24,6 +26,60 @@ except ImportError:
     PYMONGO_AVAILABLE = False
 
 
+# Common connection params shared by all methods
+_CONNECTION_PARAMS = {
+    "host": {
+        "type": "string",
+        "description": "MongoDB host (not required if uri is provided)",
+    },
+    "port": {
+        "type": "integer",
+        "default": 27017,
+        "description": "MongoDB port",
+    },
+    "username": {
+        "type": "string",
+        "description": "Username for authentication (optional)",
+    },
+    "password": {
+        "type": "string",
+        "description": "Password for authentication (optional)",
+    },
+    "auth_db": {
+        "type": "string",
+        "default": "admin",
+        "description": "Authentication database",
+    },
+    "uri": {
+        "type": "string",
+        "description": "Full MongoDB connection string URI (e.g., 'mongodb://user:pass@host:27017/db?authSource=admin'). If provided, overrides host/port/username/password/auth_db params.",
+    },
+    "tls": {
+        "type": "boolean",
+        "default": False,
+        "description": "Enable TLS for the connection",
+    },
+    "tls_insecure": {
+        "type": "boolean",
+        "default": False,
+        "description": "Allow invalid TLS certificates and hostnames (for self-signed certs)",
+    },
+}
+
+
+def _conn_params(**overrides):
+    """Return a copy of connection params with optional overrides."""
+    params = {}
+    for k, v in _CONNECTION_PARAMS.items():
+        params[k] = dict(v)
+    for k, v in overrides.items():
+        if k in params:
+            params[k].update(v)
+        else:
+            params[k] = v
+    return params
+
+
 class MongoDBServer(BaseMCPServer):
     """MCP server wrapping MongoDB client for database operations."""
 
@@ -38,29 +94,7 @@ class MongoDBServer(BaseMCPServer):
             name="connect",
             description="Test connection to a MongoDB server",
             params={
-                "host": {
-                    "type": "string",
-                    "required": True,
-                    "description": "MongoDB host",
-                },
-                "port": {
-                    "type": "integer",
-                    "default": 27017,
-                    "description": "MongoDB port",
-                },
-                "username": {
-                    "type": "string",
-                    "description": "Username for authentication (optional)",
-                },
-                "password": {
-                    "type": "string",
-                    "description": "Password for authentication (optional)",
-                },
-                "auth_db": {
-                    "type": "string",
-                    "default": "admin",
-                    "description": "Authentication database",
-                },
+                **_conn_params(),
                 "timeout": {
                     "type": "integer",
                     "default": 5,
@@ -73,31 +107,7 @@ class MongoDBServer(BaseMCPServer):
         self.register_method(
             name="list_databases",
             description="List all databases on the MongoDB server",
-            params={
-                "host": {
-                    "type": "string",
-                    "required": True,
-                    "description": "MongoDB host",
-                },
-                "port": {
-                    "type": "integer",
-                    "default": 27017,
-                    "description": "MongoDB port",
-                },
-                "username": {
-                    "type": "string",
-                    "description": "Username for authentication (optional)",
-                },
-                "password": {
-                    "type": "string",
-                    "description": "Password for authentication (optional)",
-                },
-                "auth_db": {
-                    "type": "string",
-                    "default": "admin",
-                    "description": "Authentication database",
-                },
-            },
+            params=_conn_params(),
             handler=self.list_databases,
         )
 
@@ -105,33 +115,11 @@ class MongoDBServer(BaseMCPServer):
             name="list_collections",
             description="List all collections in a database",
             params={
-                "host": {
-                    "type": "string",
-                    "required": True,
-                    "description": "MongoDB host",
-                },
+                **_conn_params(),
                 "database": {
                     "type": "string",
                     "required": True,
                     "description": "Database name",
-                },
-                "port": {
-                    "type": "integer",
-                    "default": 27017,
-                    "description": "MongoDB port",
-                },
-                "username": {
-                    "type": "string",
-                    "description": "Username for authentication (optional)",
-                },
-                "password": {
-                    "type": "string",
-                    "description": "Password for authentication (optional)",
-                },
-                "auth_db": {
-                    "type": "string",
-                    "default": "admin",
-                    "description": "Authentication database",
                 },
             },
             handler=self.list_collections,
@@ -141,11 +129,7 @@ class MongoDBServer(BaseMCPServer):
             name="query",
             description="Query documents from a collection",
             params={
-                "host": {
-                    "type": "string",
-                    "required": True,
-                    "description": "MongoDB host",
-                },
+                **_conn_params(),
                 "database": {
                     "type": "string",
                     "required": True,
@@ -165,28 +149,14 @@ class MongoDBServer(BaseMCPServer):
                     "type": "object",
                     "description": "Fields to include/exclude",
                 },
+                "sort": {
+                    "type": "object",
+                    "description": "Sort order as JSON object. Example: {'created_at': -1} for newest first, {'username': 1} for alphabetical",
+                },
                 "limit": {
                     "type": "integer",
                     "default": 100,
                     "description": "Maximum documents to return",
-                },
-                "port": {
-                    "type": "integer",
-                    "default": 27017,
-                    "description": "MongoDB port",
-                },
-                "username": {
-                    "type": "string",
-                    "description": "Username for authentication (optional)",
-                },
-                "password": {
-                    "type": "string",
-                    "description": "Password for authentication (optional)",
-                },
-                "auth_db": {
-                    "type": "string",
-                    "default": "admin",
-                    "description": "Authentication database",
                 },
             },
             handler=self.query,
@@ -196,11 +166,7 @@ class MongoDBServer(BaseMCPServer):
             name="dump_collection",
             description="Dump all documents from a collection",
             params={
-                "host": {
-                    "type": "string",
-                    "required": True,
-                    "description": "MongoDB host",
-                },
+                **_conn_params(),
                 "database": {
                     "type": "string",
                     "required": True,
@@ -216,24 +182,6 @@ class MongoDBServer(BaseMCPServer):
                     "default": 100,
                     "description": "Maximum documents to return",
                 },
-                "port": {
-                    "type": "integer",
-                    "default": 27017,
-                    "description": "MongoDB port",
-                },
-                "username": {
-                    "type": "string",
-                    "description": "Username for authentication (optional)",
-                },
-                "password": {
-                    "type": "string",
-                    "description": "Password for authentication (optional)",
-                },
-                "auth_db": {
-                    "type": "string",
-                    "default": "admin",
-                    "description": "Authentication database",
-                },
             },
             handler=self.dump_collection,
         )
@@ -242,32 +190,10 @@ class MongoDBServer(BaseMCPServer):
             name="find_credentials",
             description="Search for credential-like data across collections",
             params={
-                "host": {
-                    "type": "string",
-                    "required": True,
-                    "description": "MongoDB host",
-                },
+                **_conn_params(),
                 "database": {
                     "type": "string",
                     "description": "Database to search (all if not specified)",
-                },
-                "port": {
-                    "type": "integer",
-                    "default": 27017,
-                    "description": "MongoDB port",
-                },
-                "username": {
-                    "type": "string",
-                    "description": "Username for authentication (optional)",
-                },
-                "password": {
-                    "type": "string",
-                    "description": "Password for authentication (optional)",
-                },
-                "auth_db": {
-                    "type": "string",
-                    "default": "admin",
-                    "description": "Authentication database",
                 },
             },
             handler=self.find_credentials,
@@ -276,68 +202,77 @@ class MongoDBServer(BaseMCPServer):
         self.register_method(
             name="server_info",
             description="Get MongoDB server information and version",
-            params={
-                "host": {
-                    "type": "string",
-                    "required": True,
-                    "description": "MongoDB host",
-                },
-                "port": {
-                    "type": "integer",
-                    "default": 27017,
-                    "description": "MongoDB port",
-                },
-                "username": {
-                    "type": "string",
-                    "description": "Username for authentication (optional)",
-                },
-                "password": {
-                    "type": "string",
-                    "description": "Password for authentication (optional)",
-                },
-                "auth_db": {
-                    "type": "string",
-                    "default": "admin",
-                    "description": "Authentication database",
-                },
-            },
+            params=_conn_params(),
             handler=self.server_info,
         )
 
     def _get_client(
         self,
-        host: str,
+        host: Optional[str] = None,
         port: int = 27017,
         username: Optional[str] = None,
         password: Optional[str] = None,
         auth_db: str = "admin",
         timeout: int = 5,
+        uri: Optional[str] = None,
+        tls: bool = False,
+        tls_insecure: bool = False,
     ) -> MongoClient:
         """Create a MongoDB client connection."""
         if not PYMONGO_AVAILABLE:
             raise ToolError("pymongo is not installed")
 
         # Build connection URI
-        if username and password:
-            uri = f"mongodb://{username}:{password}@{host}:{port}/?authSource={auth_db}"
+        if uri:
+            connection_uri = uri
+        elif host:
+            if username and password:
+                connection_uri = f"mongodb://{quote_plus(username)}:{quote_plus(password)}@{host}:{port}/?authSource={auth_db}"
+            else:
+                connection_uri = f"mongodb://{host}:{port}/"
         else:
-            uri = f"mongodb://{host}:{port}/"
+            raise ToolError("Either 'host' or 'uri' must be provided")
+
+        kwargs = {
+            "serverSelectionTimeoutMS": timeout * 1000,
+            "connectTimeoutMS": timeout * 1000,
+        }
+
+        if tls:
+            kwargs["tls"] = True
+            if tls_insecure:
+                kwargs["tlsAllowInvalidCertificates"] = True
+                kwargs["tlsAllowInvalidHostnames"] = True
 
         try:
-            client = MongoClient(
-                uri,
-                serverSelectionTimeoutMS=timeout * 1000,
-                connectTimeoutMS=timeout * 1000,
-            )
+            client = MongoClient(connection_uri, **kwargs)
             # Force connection check
             client.admin.command("ping")
             return client
         except ServerSelectionTimeoutError:
-            raise ToolError(f"Connection timed out to {host}:{port}")
+            target = uri or f"{host}:{port}"
+            raise ToolError(f"Connection timed out to {target}")
         except ConnectionFailure as e:
             raise ToolError(f"Connection failed: {e}")
         except OperationFailure as e:
             raise ToolError(f"Authentication failed: {e}")
+
+    def _serialize_value(self, value):
+        """Serialize a single MongoDB value to JSON-compatible format."""
+        if isinstance(value, dict):
+            return self._serialize_doc(value)
+        elif isinstance(value, list):
+            return [self._serialize_value(v) for v in value]
+        elif isinstance(value, bytes):
+            return value.hex()
+        elif isinstance(value, datetime):
+            return value.isoformat()
+        elif type(value).__name__ == "ObjectId":
+            return str(value)
+        elif isinstance(value, (str, int, float, bool)) or value is None:
+            return value
+        else:
+            return str(value)
 
     def _serialize_doc(self, doc: dict) -> dict:
         """Serialize MongoDB document to JSON-compatible format."""
@@ -345,68 +280,68 @@ class MongoDBServer(BaseMCPServer):
         for key, value in doc.items():
             if key == "_id":
                 result[key] = str(value)
-            elif isinstance(value, bytes):
-                result[key] = value.hex()
-            elif isinstance(value, dict):
-                result[key] = self._serialize_doc(value)
-            elif isinstance(value, list):
-                result[key] = [
-                    self._serialize_doc(v) if isinstance(v, dict) else str(v)
-                    for v in value
-                ]
             else:
-                result[key] = value
+                result[key] = self._serialize_value(value)
         return result
 
     async def connect(
         self,
-        host: str,
+        host: Optional[str] = None,
         port: int = 27017,
         username: Optional[str] = None,
         password: Optional[str] = None,
         auth_db: str = "admin",
         timeout: int = 5,
+        uri: Optional[str] = None,
+        tls: bool = False,
+        tls_insecure: bool = False,
     ) -> ToolResult:
         """Test connection to MongoDB server."""
-        self.logger.info(f"Testing connection to {host}:{port}")
+        target = uri or f"{host}:{port}"
+        self.logger.info(f"Testing connection to {target}")
 
         try:
-            client = self._get_client(host, port, username, password, auth_db, timeout)
+            client = self._get_client(host, port, username, password, auth_db, timeout, uri, tls, tls_insecure)
             info = client.server_info()
             client.close()
 
             return ToolResult(
                 success=True,
                 data={
-                    "host": host,
+                    "host": host or uri,
                     "port": port,
                     "connected": True,
                     "version": info.get("version", "unknown"),
-                    "authenticated": bool(username),
+                    "authenticated": bool(username) or bool(uri and "@" in uri),
+                    "tls": tls,
                 },
-                raw_output=f"Connected to MongoDB {info.get('version', 'unknown')} at {host}:{port}",
+                raw_output=f"Connected to MongoDB {info.get('version', 'unknown')} at {target}",
             )
 
         except ToolError as e:
             return ToolResult(
                 success=False,
-                data={"host": host, "port": port, "connected": False},
+                data={"host": host or uri, "port": port, "connected": False},
                 error=str(e),
             )
 
     async def list_databases(
         self,
-        host: str,
+        host: Optional[str] = None,
         port: int = 27017,
         username: Optional[str] = None,
         password: Optional[str] = None,
         auth_db: str = "admin",
+        uri: Optional[str] = None,
+        tls: bool = False,
+        tls_insecure: bool = False,
     ) -> ToolResult:
         """List all databases on the server."""
-        self.logger.info(f"Listing databases on {host}:{port}")
+        target = uri or f"{host}:{port}"
+        self.logger.info(f"Listing databases on {target}")
 
         try:
-            client = self._get_client(host, port, username, password, auth_db)
+            client = self._get_client(host, port, username, password, auth_db, uri=uri, tls=tls, tls_insecure=tls_insecure)
             databases = []
 
             for db_info in client.list_databases():
@@ -421,7 +356,7 @@ class MongoDBServer(BaseMCPServer):
             return ToolResult(
                 success=True,
                 data={
-                    "host": host,
+                    "host": host or uri,
                     "databases": databases,
                     "count": len(databases),
                 },
@@ -434,24 +369,28 @@ class MongoDBServer(BaseMCPServer):
         except ToolError as e:
             return ToolResult(
                 success=False,
-                data={"host": host},
+                data={"host": host or uri},
                 error=str(e),
             )
 
     async def list_collections(
         self,
-        host: str,
-        database: str,
+        host: Optional[str] = None,
+        database: str = "",
         port: int = 27017,
         username: Optional[str] = None,
         password: Optional[str] = None,
         auth_db: str = "admin",
+        uri: Optional[str] = None,
+        tls: bool = False,
+        tls_insecure: bool = False,
     ) -> ToolResult:
         """List all collections in a database."""
-        self.logger.info(f"Listing collections in {database} on {host}:{port}")
+        target = uri or f"{host}:{port}"
+        self.logger.info(f"Listing collections in {database} on {target}")
 
         try:
-            client = self._get_client(host, port, username, password, auth_db)
+            client = self._get_client(host, port, username, password, auth_db, uri=uri, tls=tls, tls_insecure=tls_insecure)
             db = client[database]
             collections = db.list_collection_names()
             client.close()
@@ -459,7 +398,7 @@ class MongoDBServer(BaseMCPServer):
             return ToolResult(
                 success=True,
                 data={
-                    "host": host,
+                    "host": host or uri,
                     "database": database,
                     "collections": collections,
                     "count": len(collections),
@@ -470,33 +409,41 @@ class MongoDBServer(BaseMCPServer):
         except ToolError as e:
             return ToolResult(
                 success=False,
-                data={"host": host, "database": database},
+                data={"host": host or uri, "database": database},
                 error=str(e),
             )
 
     async def query(
         self,
-        host: str,
-        database: str,
-        collection: str,
+        host: Optional[str] = None,
+        database: str = "",
+        collection: str = "",
         filter: Optional[dict] = None,
         projection: Optional[dict] = None,
+        sort: Optional[dict] = None,
         limit: int = 100,
         port: int = 27017,
         username: Optional[str] = None,
         password: Optional[str] = None,
         auth_db: str = "admin",
+        uri: Optional[str] = None,
+        tls: bool = False,
+        tls_insecure: bool = False,
     ) -> ToolResult:
         """Query documents from a collection."""
-        self.logger.info(f"Querying {database}.{collection} on {host}:{port}")
+        target = uri or f"{host}:{port}"
+        self.logger.info(f"Querying {database}.{collection} on {target}")
 
         try:
-            client = self._get_client(host, port, username, password, auth_db)
+            client = self._get_client(host, port, username, password, auth_db, uri=uri, tls=tls, tls_insecure=tls_insecure)
             db = client[database]
             coll = db[collection]
 
             query_filter = filter or {}
-            cursor = coll.find(query_filter, projection).limit(limit)
+            cursor = coll.find(query_filter, projection)
+            if sort:
+                cursor = cursor.sort(list(sort.items()))
+            cursor = cursor.limit(limit)
             documents = [self._serialize_doc(doc) for doc in cursor]
 
             client.close()
@@ -504,7 +451,7 @@ class MongoDBServer(BaseMCPServer):
             return ToolResult(
                 success=True,
                 data={
-                    "host": host,
+                    "host": host or uri,
                     "database": database,
                     "collection": collection,
                     "filter": query_filter,
@@ -517,20 +464,23 @@ class MongoDBServer(BaseMCPServer):
         except ToolError as e:
             return ToolResult(
                 success=False,
-                data={"host": host, "database": database, "collection": collection},
+                data={"host": host or uri, "database": database, "collection": collection},
                 error=str(e),
             )
 
     async def dump_collection(
         self,
-        host: str,
-        database: str,
-        collection: str,
+        host: Optional[str] = None,
+        database: str = "",
+        collection: str = "",
         limit: int = 100,
         port: int = 27017,
         username: Optional[str] = None,
         password: Optional[str] = None,
         auth_db: str = "admin",
+        uri: Optional[str] = None,
+        tls: bool = False,
+        tls_insecure: bool = False,
     ) -> ToolResult:
         """Dump all documents from a collection."""
         return await self.query(
@@ -543,19 +493,26 @@ class MongoDBServer(BaseMCPServer):
             username=username,
             password=password,
             auth_db=auth_db,
+            uri=uri,
+            tls=tls,
+            tls_insecure=tls_insecure,
         )
 
     async def find_credentials(
         self,
-        host: str,
+        host: Optional[str] = None,
         database: Optional[str] = None,
         port: int = 27017,
         username: Optional[str] = None,
         password: Optional[str] = None,
         auth_db: str = "admin",
+        uri: Optional[str] = None,
+        tls: bool = False,
+        tls_insecure: bool = False,
     ) -> ToolResult:
         """Search for credential-like data across collections."""
-        self.logger.info(f"Searching for credentials on {host}:{port}")
+        target = uri or f"{host}:{port}"
+        self.logger.info(f"Searching for credentials on {target}")
 
         findings = []
 
@@ -574,7 +531,7 @@ class MongoDBServer(BaseMCPServer):
         ]
 
         try:
-            client = self._get_client(host, port, username, password, auth_db)
+            client = self._get_client(host, port, username, password, auth_db, uri=uri, tls=tls, tls_insecure=tls_insecure)
 
             # Get databases to search
             if database:
@@ -588,22 +545,22 @@ class MongoDBServer(BaseMCPServer):
             for db_name in databases:
                 db = client[db_name]
                 collections = db.list_collection_names()
+                processed_collections = set()
 
+                # First pass: collections with credential-like names
                 for coll_name in collections:
-                    # Check if collection name matches credential patterns
                     is_credential_collection = any(
                         pattern in coll_name.lower()
                         for pattern in credential_collections
                     )
 
                     if is_credential_collection:
+                        processed_collections.add(coll_name)
                         coll = db[coll_name]
-                        # Get sample documents
                         docs = list(coll.find().limit(20))
 
                         if docs:
-                            # Check for credential-like fields
-                            sample = docs[0] if docs else {}
+                            sample = docs[0]
                             has_credential_fields = any(
                                 any(field in key.lower() for field in credential_fields)
                                 for key in sample.keys()
@@ -614,18 +571,48 @@ class MongoDBServer(BaseMCPServer):
                                 "collection": coll_name,
                                 "document_count": coll.count_documents({}),
                                 "has_credential_fields": has_credential_fields,
+                                "match_type": "collection_name",
                                 "sample_documents": [
                                     self._serialize_doc(doc)
                                     for doc in docs[:5]
                                 ],
                             })
 
+                # Second pass: scan remaining collections for credential-like fields
+                for coll_name in collections:
+                    if coll_name in processed_collections:
+                        continue
+
+                    try:
+                        coll = db[coll_name]
+                        sample = coll.find_one()
+                        if sample:
+                            has_credential_fields = any(
+                                any(field in key.lower() for field in credential_fields)
+                                for key in sample.keys()
+                            )
+                            if has_credential_fields:
+                                docs = list(coll.find().limit(20))
+                                findings.append({
+                                    "database": db_name,
+                                    "collection": coll_name,
+                                    "document_count": coll.count_documents({}),
+                                    "has_credential_fields": True,
+                                    "match_type": "field_pattern",
+                                    "sample_documents": [
+                                        self._serialize_doc(doc)
+                                        for doc in docs[:5]
+                                    ],
+                                })
+                    except Exception:
+                        continue
+
             client.close()
 
             return ToolResult(
                 success=True,
                 data={
-                    "host": host,
+                    "host": host or uri,
                     "findings": findings,
                     "databases_searched": databases,
                     "total_findings": len(findings),
@@ -636,23 +623,27 @@ class MongoDBServer(BaseMCPServer):
         except ToolError as e:
             return ToolResult(
                 success=False,
-                data={"host": host},
+                data={"host": host or uri},
                 error=str(e),
             )
 
     async def server_info(
         self,
-        host: str,
+        host: Optional[str] = None,
         port: int = 27017,
         username: Optional[str] = None,
         password: Optional[str] = None,
         auth_db: str = "admin",
+        uri: Optional[str] = None,
+        tls: bool = False,
+        tls_insecure: bool = False,
     ) -> ToolResult:
         """Get MongoDB server information."""
-        self.logger.info(f"Getting server info from {host}:{port}")
+        target = uri or f"{host}:{port}"
+        self.logger.info(f"Getting server info from {target}")
 
         try:
-            client = self._get_client(host, port, username, password, auth_db)
+            client = self._get_client(host, port, username, password, auth_db, uri=uri, tls=tls, tls_insecure=tls_insecure)
             info = client.server_info()
 
             # Get build info
@@ -666,7 +657,7 @@ class MongoDBServer(BaseMCPServer):
             return ToolResult(
                 success=True,
                 data={
-                    "host": host,
+                    "host": host or uri,
                     "port": port,
                     "version": info.get("version", "unknown"),
                     "git_version": info.get("gitVersion", "unknown"),
@@ -682,7 +673,7 @@ class MongoDBServer(BaseMCPServer):
         except ToolError as e:
             return ToolResult(
                 success=False,
-                data={"host": host, "port": port},
+                data={"host": host or uri, "port": port},
                 error=str(e),
             )
 

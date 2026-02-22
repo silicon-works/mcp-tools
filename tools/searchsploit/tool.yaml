@@ -49,17 +49,26 @@ methods:
     params:
       query:
         type: string
-        required: true
-        description: "Space-separated search terms. Each term must appear in the exploit title or path. Examples: 'apache 2.4.49' (product + version), 'wordpress 5.0' (CMS + version), 'linux kernel 5.4 privilege' (kernel + version + type), 'ms17-010' (MS bulletin), 'eternalblue' (exploit name), 'ssh' (service). Fewer, more specific terms give better results."
+        description: "Space-separated search terms. Each term must appear in the exploit title or path. Examples: 'apache 2.4.49' (product + version), 'wordpress 5.0' (CMS + version), 'linux kernel 5.4 privilege' (kernel + version + type), 'ms17-010' (MS bulletin), 'eternalblue' (exploit name), 'ssh' (service). Fewer, more specific terms give better results. Mutually exclusive with cve."
+      cve:
+        type: string
+        description: "Search by CVE ID (e.g., '2021-44228' for Log4Shell, '2021-41773' for Apache path traversal). Omit the 'CVE-' prefix. More precise than free-text search because it searches the CVE field specifically. Mutually exclusive with query."
       exact:
         type: boolean
         default: false
-        description: "Exact order match on exploit title (searchsploit --exact). With exact=false (default), terms are matched independently in any order with fuzzy version ranges. With exact=true, the query string must appear exactly as-is in the title. Use exact=true when default search returns too many irrelevant results."
+        description: "Exact order match on exploit title (searchsploit --exact). With exact=false (default), terms are matched independently in any order with fuzzy version ranges. With exact=true, the query string must appear exactly as-is in the title. Use exact=true when default search returns too many irrelevant results. Only applies to text search (query), not CVE search."
       type:
         type: enum
         values: [all, exploit, shellcode, paper]
         default: all
-        description: "Filter by result type. 'exploit' = working exploit code (Python, C, Ruby, etc.), 'shellcode' = standalone shellcode (assembly, machine code), 'paper' = writeups and advisories (no exploit code). Use 'exploit' for actionable results."
+        description: "Filter by result type. 'exploit' = working exploit code (Python, C, Ruby, etc.), 'shellcode' = standalone shellcode (assembly, machine code), 'paper' = writeups and advisories (no exploit code). Use 'exploit' for actionable results. Only applies to text search (query), not CVE search."
+      strict:
+        type: boolean
+        default: false
+        description: "Strict version matching — '1.1' only matches '1.1', not '1.0 < 1.3'. Use when the default fuzzy matching returns too many irrelevant version results. Only applies to text search (query), not CVE search."
+      exclude:
+        type: string
+        description: "Exclude results matching these terms (pipe-separated). Examples: '(PoC)|/dos/' (exclude proof-of-concepts and DoS), '/windows/' (exclude Windows exploits), '/linux/' (exclude Linux exploits). Useful for filtering out irrelevant platforms or non-functional PoCs. Only applies to text search (query), not CVE search."
     returns:
       results:
         type: array
@@ -69,10 +78,13 @@ methods:
         description: "Number of matching results"
       query:
         type: string
-        description: "The search query that was used"
+        description: "The search query or CVE ID that was used"
+      search_type:
+        type: string
+        description: "'text' for query-based search, 'cve' for CVE-based search"
 
   get_exploit:
-    description: "Retrieve the full source code of an exploit by its EDB-ID number or file path. Uses 'searchsploit -p ID' to resolve the exploit ID to a local file path (/usr/share/exploitdb/exploits/...), then reads the file. Exploit code can be Python, C, Ruby, PHP, Perl, shell script, or text. The full content is returned for review before use."
+    description: "Retrieve the full source code of an exploit by its EDB-ID number or file path. Resolves the exploit ID to a local file path (/usr/share/exploitdb/exploits/...) via JSON search, then reads the file. Exploit code can be Python, C, Ruby, PHP, Perl, shell script, or text. The full content is returned for review before use."
     when_to_use: "After search identifies a relevant exploit, use this to retrieve its source code. Review the code to understand: (1) what it does, (2) what parameters it needs (target IP, port, paths), (3) whether it needs compilation or modification, (4) any dependencies. For Python exploits: may need to be adapted and run via exploit-runner. For C exploits: need compilation (gcc). For Metasploit modules (Ruby): use the metasploit tool instead. Always review exploit code before execution — public exploits may contain backdoors or be unreliable."
     params:
       exploit_id:
@@ -89,3 +101,22 @@ methods:
       content:
         type: string
         description: "Complete exploit source code as text"
+
+  mirror:
+    description: "Copy an exploit file to the session working directory for modification. Resolves the EDB-ID to a local file path, then copies the exploit source to the current working directory. Useful when you need to modify exploit code before execution — e.g., changing hardcoded IPs, adjusting payloads, or adapting the exploit for the target environment."
+    when_to_use: "After reviewing an exploit with get_exploit and determining it needs modification before use. Common modifications: (1) changing target IP/port, (2) adjusting payload (reverse shell callback IP), (3) adding missing dependencies or imports, (4) fixing Python 2 vs 3 compatibility issues, (5) adapting for the specific target version. After mirroring, the exploit can be edited and run via exploit-runner."
+    params:
+      exploit_id:
+        type: string
+        required: true
+        description: "EDB-ID of the exploit to copy (e.g., '50383' from search results). The exploit file will be copied to the current working directory with its original filename."
+    returns:
+      exploit_id:
+        type: string
+        description: "The exploit ID that was copied"
+      source_path:
+        type: string
+        description: "Original file path in the ExploitDB mirror"
+      filename:
+        type: string
+        description: "Name of the copied file in the working directory"

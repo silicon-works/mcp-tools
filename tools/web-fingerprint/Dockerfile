@@ -9,6 +9,10 @@ WORKDIR /app
 COPY packages/mcp-common /tmp/mcp-common
 RUN pip install --no-cache-dir /tmp/mcp-common && rm -rf /tmp/mcp-common
 
+# Install dependencies
+COPY tools/web-fingerprint/requirements.txt /tmp/requirements.txt
+RUN pip install --no-cache-dir -r /tmp/requirements.txt && rm /tmp/requirements.txt
+
 # Copy server code
 COPY tools/web-fingerprint/mcp-server.py .
 

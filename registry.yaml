@@ -1,5 +1,5 @@
 version: '2.0'
-updated_at: '2026-02-21T14:16:37Z'
+updated_at: '2026-02-22T12:22:14Z'
 tools:
   curl:
     name: curl
@@ -2391,6 +2391,10 @@ tools:
       - SMTP IMAP POP3 email credential brute-force
       - SMB Windows share authentication testing
       - network login attack with wordlists like rockyou
+      - Redis MongoDB MSSQL LDAP SNMP credential brute-force
+      - Cisco device login brute-force
+      - combo file default credential testing login:pass
+      - PIN brute-force password generation
       never_use_for:
       - hash cracking (use john or hashcat)
       - offline password cracking (use john)
@@ -2451,18 +2455,38 @@ tools:
             - https-post-form
             - https-get-form
             - smb
+            - smb2
             - rdp
             - mysql
+            - mssql
             - postgres
             - vnc
             - telnet
             - smtp
             - pop3
             - imap
-            description: 'Service protocol to attack. Hydra supports 50+ protocols but this MCP server exposes the most common
-              19. For HTTP basic auth: use ''http-get''. For web login forms: use ''http-post-form'' (most common) or ''http-get-form''.
-              For HTTPS: prefix with ''https-''. For SMB/Windows shares: use ''smb''. Note: the full hydra binary also supports
-              redis, mongodb, ldap, snmp, sshkey, smb2, and many more — those are not currently exposed.'
+            - redis
+            - mongodb
+            - ldap2
+            - ldap3
+            - snmp
+            - sshkey
+            - http-proxy
+            - rtsp
+            - sip
+            - cisco
+            - cisco-enable
+            - svn
+            - firebird
+            - oracle-listener
+            - rsh
+            - rlogin
+            - rexec
+            description: 'Service protocol to attack. Exposes 37 of hydra''s 50+ protocols. For HTTP basic auth: use ''http-get''.
+              For web login forms: use ''http-post-form'' (most common) or ''http-get-form''. For HTTPS: prefix with ''https-''.
+              For SMB/Windows shares: use ''smb'' or ''smb2''. For LDAP: use ''ldap2'' (LDAPv2) or ''ldap3'' (LDAPv3). For
+              SSH key auth testing: use ''sshkey''. For Cisco devices: use ''cisco'' (telnet login) or ''cisco-enable'' (enable
+              password).'
           username:
             type: string
             description: 'Single username to test (hydra -l). Use for targeted testing of a known username. Examples: ''admin'',
@@ -2538,6 +2562,30 @@ tools:
               Example: ''/login.php:username=^USER^&password=^PASS^:F=Invalid credentials''. The F= prefix means ''fail if
               this string appears in the response''. Use H= for custom headers: ''/login:user=^USER^&pass=^PASS^:F=failed:H=Cookie:
               session=abc''. For the convenience method web_form_brute, this is auto-constructed.'
+          loop_users:
+            type: boolean
+            default: false
+            description: Loop around users instead of passwords (hydra -u). Default behavior tries all passwords for user1,
+              then user2, etc. With -u, tries password1 for ALL users, then password2 for ALL users. Critical for avoiding
+              account lockout — if lockout threshold is 5 failed attempts, this ensures each user gets only 1 attempt per
+              password cycle.
+          password_gen:
+            type: string
+            description: 'Generate passwords instead of using a wordlist (hydra -x). Format: ''MIN:MAX:CHARSET''. CHARSET
+              characters: ''a''=lowercase, ''A''=uppercase, ''1''=numbers. Examples: ''4:4:1'' (all 4-digit PINs, 10000 combos),
+              ''1:3:a1'' (1-3 char lowercase+digits), ''3:5:aA1'' (3-5 chars mixed case+digits). Overrides passlist. Warning:
+              large charsets with high MAX generate enormous keyspaces.'
+          combo_file:
+            type: string
+            description: 'Colon-separated login:pass file (hydra -C). Each line has format ''username:password''. Overrides
+              all other username/password options (-l/-L/-p/-P). Useful with default credential lists. Available lists: ''/usr/share/seclists/Passwords/Default-Credentials/ftp-betterdefaultpasslist.txt'',
+              ''/usr/share/seclists/Passwords/Default-Credentials/ssh-betterdefaultpasslist.txt'', etc.'
+          ssl:
+            type: boolean
+            default: false
+            description: Use SSL for the connection (hydra -S). Required for IMAPS (port 993), POP3S (port 995), SMTPS (port
+              465), LDAPS (port 636). Not needed for HTTPS services (use the 'https-*' service variants instead). Can also
+              be used for any service running over SSL on a non-standard port.
         returns:
           credentials:
             type: array
@@ -2636,6 +2684,16 @@ tools:
             type: boolean
             default: false
             description: 'Include verbose attempt log in output. Warning: large with big wordlists.'
+          loop_users:
+            type: boolean
+            default: false
+            description: Loop around users instead of passwords (-u). Critical for avoiding account lockout.
+          password_gen:
+            type: string
+            description: 'Generate passwords instead of using a wordlist (-x). Format: ''MIN:MAX:CHARSET''. Overrides passlist.'
+          combo_file:
+            type: string
+            description: Colon-separated login:pass file (-C). Overrides username/password options. Try '/usr/share/seclists/Passwords/Default-Credentials/ssh-betterdefaultpasslist.txt'.
         returns:
           credentials:
             type: array
@@ -2710,6 +2768,16 @@ tools:
             type: boolean
             default: false
             description: Include verbose attempt log in output.
+          loop_users:
+            type: boolean
+            default: false
+            description: Loop around users instead of passwords (-u). Critical for avoiding account lockout.
+          password_gen:
+            type: string
+            description: 'Generate passwords instead of using a wordlist (-x). Format: ''MIN:MAX:CHARSET''. Overrides passlist.'
+          combo_file:
+            type: string
+            description: Colon-separated login:pass file (-C). Overrides username/password options. Try '/usr/share/seclists/Passwords/Default-Credentials/ftp-betterdefaultpasslist.txt'.
         returns:
           credentials:
             type: array
@@ -2819,6 +2887,20 @@ tools:
             type: boolean
             default: false
             description: Include verbose attempt log in output.
+          loop_users:
+            type: boolean
+            default: false
+            description: Loop around users instead of passwords (-u). Critical for avoiding account lockout.
+          password_gen:
+            type: string
+            description: 'Generate passwords instead of using a wordlist (-x). Format: ''MIN:MAX:CHARSET''. Overrides passlist.'
+          combo_file:
+            type: string
+            description: Colon-separated login:pass file (-C). Overrides username/password options.
+          ssl:
+            type: boolean
+            default: false
+            description: Use SSL for the connection (-S). Use when the web form is served over SSL on a non-standard setup.
         returns:
           credentials:
             type: array
@@ -2894,6 +2976,16 @@ tools:
             type: boolean
             default: false
             description: Include verbose attempt log in output.
+          loop_users:
+            type: boolean
+            default: false
+            description: Loop around users instead of passwords (-u). Critical for avoiding account lockout.
+          password_gen:
+            type: string
+            description: 'Generate passwords instead of using a wordlist (-x). Format: ''MIN:MAX:CHARSET''. Overrides passlist.'
+          combo_file:
+            type: string
+            description: Colon-separated login:pass file (-C). Overrides username/password options. Try '/usr/share/seclists/Passwords/Default-Credentials/mysql-betterdefaultpasslist.txt'.
         returns:
           credentials:
             type: array
@@ -4097,6 +4189,22 @@ tools:
             description: 'Maximum cracking time in seconds. Default 300s (5 min). For MD5/SHA with rockyou: 1-2 minutes is
               usually enough. For bcrypt ($2a$, cost 10+): each hash takes ~0.01s to test, so 14M wordlist takes ~40 hours
               — use ''common'' wordlist instead. For NTLM: very fast, 300s is more than enough for rockyou.'
+          mask:
+            type: string
+            description: 'Mask pattern for targeted cracking (alternative to wordlist). Placeholders: ?l=lowercase, ?u=uppercase,
+              ?d=digit, ?s=special, ?a=all printable. Examples: ''?u?l?l?l?d?d?d?d'' (Name1234), ''Company?d?d?d?d'' (Company
+              + 4 digits), ''?d?d?d?d'' (4-digit PIN). Overrides wordlist if provided. Much faster than wordlist for known
+              password patterns.'
+          incremental:
+            type: boolean
+            default: false
+            description: Use incremental (brute-force) mode — tries all character combinations. Very slow but guaranteed to
+              find the password eventually. Only practical for short passwords (8 chars or less). Overrides both wordlist
+              and mask.
+          fork:
+            type: integer
+            description: Number of processes to fork for parallel cracking (--fork=N). Set to number of CPU cores for maximum
+              speed. Most useful for slow hash types like bcrypt and scrypt where each attempt is expensive.
         returns:
           cracked:
             type: array
@@ -4108,9 +4216,15 @@ tools:
           format:
             type: string
             description: Hash format used
+          mode:
+            type: string
+            description: 'Cracking mode used: ''wordlist'', ''mask'', or ''incremental'''
           wordlist:
             type: string
-            description: Full path to wordlist used
+            description: Full path to wordlist used (only present in wordlist mode)
+          mask:
+            type: string
+            description: Mask pattern used (only present in mask mode)
       show:
         description: 'Show previously cracked passwords from john''s pot file (~/.john/john.pot). John caches all cracked
           passwords persistently — this retrieves results without re-cracking. Writes the hashes to a temp file, runs john
@@ -4139,17 +4253,14 @@ tools:
             type: integer
             description: Number of cracked passwords found in pot file
       identify:
-        description: 'Attempt to identify the format of an unknown hash by testing it against common john formats (md5, sha1,
-          sha256, sha512, ntlm, bcrypt, raw-md5, raw-sha1). Writes the hash to a temp file and runs john --show with each
-          format to see which ones accept it. Returns a list of possible formats. Note: this is a basic implementation that
-          only tests 8 common formats — for ambiguous hashes, the hash-lookup tool may provide better identification via online
-          hash databases.'
-        when_to_use: 'When you have a hash but don''t know its format — e.g., found a hash in a config file, database, or
-          web application and need to determine the correct john format name before cracking. Common hash patterns to recognize
-          manually: starts with ''$1$'' = md5crypt, ''$5$'' = sha256crypt, ''$6$'' = sha512crypt, ''$2a$/$2b$'' = bcrypt,
-          32 hex chars = MD5 or NTLM, 40 hex chars = SHA1, 64 hex chars = SHA256, 128 hex chars = SHA512. If this method returns
-          ''unknown'', try the hash-lookup tool or check hash format references online. For hashes from specific sources (MySQL,
-          PostgreSQL, etc.), the format is usually known from context.'
+        description: Identify the format of an unknown hash using pattern matching and john format probing. First checks against
+          16 common hash patterns (md5crypt, sha256crypt, sha512crypt, bcrypt, phpass, argon2, SSHA, raw-MD5/NTLM, raw-SHA1,
+          raw-SHA256, raw-SHA512, MySQL, etc.). If no pattern matches, falls back to probing 8 john formats. Returns a list
+          of possible format names.
+        when_to_use: When you have a hash but don't know its format — e.g., found a hash in a config file, database, or web
+          application and need to determine the correct john format name before cracking. Pattern matching handles most common
+          formats instantly. If this method returns 'unknown', try the hash-lookup tool or check hash format references online.
+          For hashes from specific sources (MySQL, PostgreSQL, etc.), the format is usually known from context.
         params:
           hash:
             type: string
@@ -4161,6 +4272,67 @@ tools:
             type: array
             description: List of john format names that accepted the hash (e.g., ['raw-md5', 'ntlm']). 'unknown' if no format
               matched. Multiple matches are common for ambiguous hashes (e.g., 32 hex chars matches both raw-md5 and ntlm).
+      convert:
+        description: Extract a crackable hash from an encrypted file using john's *2john converter scripts. Supports 24 file
+          types including SSH keys, ZIP/RAR/7z archives, PDF/Office documents, password managers (KeePass, Bitwarden, LastPass,
+          1Password), crypto wallets (Bitcoin, Ethereum), disk encryption (TrueCrypt, LUKS, BitLocker, DMG), and more. The
+          output hash can be passed directly to the crack method.
+        when_to_use: 'When you have an encrypted file and need to crack its password. Common scenarios: (1) Found an encrypted
+          SSH private key — use file_type=''ssh'' to extract the hash, then crack it. (2) Found a password-protected ZIP file
+          — use file_type=''zip''. (3) Found a KeePass database — use file_type=''keepass''. (4) Found an Ansible vault —
+          use file_type=''ansible''. The workflow is always: convert → crack. The file must be accessible inside the container
+          (mount via session directory).'
+        params:
+          file_path:
+            type: string
+            required: true
+            description: 'Path to the encrypted file inside the container. Files from the session working directory are mounted
+              at /session/. Examples: ''/session/id_rsa'', ''/session/backup.zip'', ''/session/vault.kdbx''.'
+          file_type:
+            type: enum
+            required: true
+            values:
+            - ssh
+            - zip
+            - rar
+            - pdf
+            - office
+            - 7z
+            - keepass
+            - gpg
+            - bitcoin
+            - ethereum
+            - truecrypt
+            - luks
+            - ansible
+            - bitwarden
+            - lastpass
+            - 1password
+            - keychain
+            - pfx
+            - mozilla
+            - telegram
+            - signal
+            - dmg
+            - bitlocker
+            description: Type of encrypted file — determines which *2john converter to use. ssh=SSH private key, zip=ZIP archive,
+              rar=RAR archive, pdf=PDF document, office=MS Office (Word/Excel/PowerPoint), 7z=7-Zip archive, keepass=KeePass
+              database (.kdbx), gpg=GPG encrypted file, bitcoin/ethereum=crypto wallets, truecrypt/luks/bitlocker/dmg=disk
+              encryption, ansible=Ansible vault, bitwarden/lastpass/1password=password manager exports, keychain=macOS keychain,
+              pfx=PKCS#12 certificate, mozilla=Firefox/Thunderbird profiles, telegram/signal=messaging app data.
+        returns:
+          hash:
+            type: string
+            description: Extracted hash in john-compatible format. Pass this directly to crack method's 'hashes' parameter.
+          file:
+            type: string
+            description: Original file path
+          converter:
+            type: string
+            description: Name of the *2john converter script used (e.g., 'ssh2john.py', 'zip2john')
+          file_type:
+            type: string
+            description: File type that was converted
   lfi-rfi:
     name: lfi-rfi
     version: '1.0'
@@ -4798,6 +4970,8 @@ tools:
       - dump MongoDB collection contents
       - search for passwords tokens secrets in MongoDB
       - post-exploitation MongoDB data exfiltration
+      - connect to MongoDB using connection string URI
+      - MongoDB TLS encrypted connection
       never_use_for:
       - SQL databases (use mysql or sqlite)
       - NoSQL injection (use nosqlmap)
@@ -4813,16 +4987,16 @@ tools:
       connect:
         description: Test connection to a MongoDB server by sending a ping command to the admin database and retrieving server_info().
           Verifies whether the server accepts unauthenticated connections or requires credentials. Returns the MongoDB server
-          version and whether authentication was used.
+          version and whether authentication was used. Supports TLS connections and direct URI connection strings.
         when_to_use: First step when nmap discovers port 27017 (or another MongoDB port) open. Tests whether the MongoDB instance
           allows unauthenticated access (common misconfiguration) or requires credentials. Try without username/password first
           — if it succeeds, the server has no auth and you can proceed to list_databases. If it fails with 'Authentication
-          failed', try known credentials or default credentials.
+          failed', try known credentials or default credentials. If you found a MongoDB connection string in a config file,
+          pass it via the uri param.
         params:
           host:
             type: string
-            required: true
-            description: MongoDB hostname or IP (e.g., '10.10.10.1', 'target.htb')
+            description: MongoDB hostname or IP (e.g., '10.10.10.1', 'target.htb'). Not required if uri is provided.
           port:
             type: integer
             default: 27017
@@ -4839,6 +5013,19 @@ tools:
             default: admin
             description: Authentication database — the database that contains the user credentials. Default 'admin'. Some
               apps use their own database for auth (e.g., 'myapp').
+          uri:
+            type: string
+            description: Full MongoDB connection string URI (e.g., 'mongodb://user:pass@host:27017/db?authSource=admin').
+              If provided, overrides host/port/username/password/auth_db params. Useful when you find a connection string
+              in config files.
+          tls:
+            type: boolean
+            default: false
+            description: Enable TLS for the connection. Required for MongoDB instances configured with TLS/SSL.
+          tls_insecure:
+            type: boolean
+            default: false
+            description: Allow invalid TLS certificates and hostnames (for self-signed certs). Only effective when tls=true.
           timeout:
             type: integer
             default: 5
@@ -4862,8 +5049,7 @@ tools:
         params:
           host:
             type: string
-            required: true
-            description: MongoDB hostname or IP
+            description: MongoDB hostname or IP (not required if uri is provided)
           port:
             type: integer
             default: 27017
@@ -4878,6 +5064,17 @@ tools:
             type: string
             default: admin
             description: Authentication database
+          uri:
+            type: string
+            description: Full MongoDB connection string URI. Overrides host/port/username/password/auth_db.
+          tls:
+            type: boolean
+            default: false
+            description: Enable TLS for the connection
+          tls_insecure:
+            type: boolean
+            default: false
+            description: Allow invalid TLS certificates and hostnames
         returns:
           databases:
             type: array
@@ -4894,8 +5091,7 @@ tools:
         params:
           host:
             type: string
-            required: true
-            description: MongoDB hostname or IP
+            description: MongoDB hostname or IP (not required if uri is provided)
           database:
             type: string
             required: true
@@ -4914,6 +5110,17 @@ tools:
             type: string
             default: admin
             description: Authentication database
+          uri:
+            type: string
+            description: Full MongoDB connection string URI. Overrides host/port/username/password/auth_db.
+          tls:
+            type: boolean
+            default: false
+            description: Enable TLS for the connection
+          tls_insecure:
+            type: boolean
+            default: false
+            description: Allow invalid TLS certificates and hostnames
         returns:
           collections:
             type: array
@@ -4922,16 +5129,17 @@ tools:
             type: integer
             description: Number of collections in the database
       query:
-        description: Query documents from a MongoDB collection using filter and projection. Runs collection.find(filter, projection).limit(N)
-          via pymongo. ObjectIds are auto-serialized to strings, bytes to hex. Returns documents as JSON-serializable dictionaries.
+        description: Query documents from a MongoDB collection using filter, projection, and sort. Runs collection.find(filter,
+          projection).sort(sort).limit(N) via pymongo. ObjectIds are auto-serialized to strings, bytes to hex. Returns documents
+          as JSON-serializable dictionaries.
         when_to_use: When you need to retrieve specific documents matching criteria — e.g., find admin users, search for specific
           email addresses, find documents with password fields. Use filter for matching and projection to select only needed
-          fields (reduces output size). For dumping all documents without filtering, use dump_collection instead.
+          fields (reduces output size). Use sort to order results (e.g., newest first). For dumping all documents without
+          filtering, use dump_collection instead.
         params:
           host:
             type: string
-            required: true
-            description: MongoDB hostname or IP
+            description: MongoDB hostname or IP (not required if uri is provided)
           database:
             type: string
             required: true
@@ -4951,6 +5159,10 @@ tools:
             description: 'Fields to include or exclude from results. Use {"field": 1} to include or {"field": 0} to exclude.
               Examples: {"username": 1, "password": 1} (only these fields + _id), {"_id": 0, "largeBlob": 0} (exclude specific
               fields). Cannot mix include and exclude (except _id).'
+          sort:
+            type: object
+            description: 'Sort order as JSON object. Use 1 for ascending, -1 for descending. Examples: {"created_at": -1}
+              for newest first, {"username": 1} for alphabetical, {"score": -1, "name": 1} for multi-field sort.'
           limit:
             type: integer
             default: 100
@@ -4969,6 +5181,17 @@ tools:
             type: string
             default: admin
             description: Authentication database
+          uri:
+            type: string
+            description: Full MongoDB connection string URI. Overrides host/port/username/password/auth_db.
+          tls:
+            type: boolean
+            default: false
+            description: Enable TLS for the connection
+          tls_insecure:
+            type: boolean
+            default: false
+            description: Allow invalid TLS certificates and hostnames
         returns:
           documents:
             type: array
@@ -4986,8 +5209,7 @@ tools:
         params:
           host:
             type: string
-            required: true
-            description: MongoDB hostname or IP
+            description: MongoDB hostname or IP (not required if uri is provided)
           database:
             type: string
             required: true
@@ -5015,6 +5237,17 @@ tools:
             type: string
             default: admin
             description: Authentication database
+          uri:
+            type: string
+            description: Full MongoDB connection string URI. Overrides host/port/username/password/auth_db.
+          tls:
+            type: boolean
+            default: false
+            description: Enable TLS for the connection
+          tls_insecure:
+            type: boolean
+            default: false
+            description: Allow invalid TLS certificates and hostnames
         returns:
           documents:
             type: array
@@ -5023,21 +5256,21 @@ tools:
             type: integer
             description: Number of documents returned
       find_credentials:
-        description: Automatically search for credential-related data across databases and collections. Scans all non-system
-          databases (excludes admin, config, local) for collections whose names match 14 credential patterns (users, accounts,
-          members, admins, admin, credentials, auth, authentication, login, user, account, member, passwords). For matching
-          collections, samples up to 20 documents and checks for field names matching 12 password patterns (password, passwd,
-          pass, pwd, secret, hash, token, api_key, apikey, key, credential, auth). Returns up to 5 sample documents per matching
-          collection.
+        description: 'Automatically search for credential-related data across databases and collections. Two-pass search:
+          first scans collections whose names match 14 credential patterns (users, accounts, members, admins, credentials,
+          auth, login, passwords, etc.), then scans ALL remaining collections for documents containing credential-like field
+          names (password, hash, token, api_key, secret, etc.). This second pass catches credentials stored in non-obviously-named
+          collections (e.g., ''staff'', ''people'', ''data''). Returns up to 5 sample documents per matching collection with
+          match_type indicating how it was found (''collection_name'' or ''field_pattern'').'
         when_to_use: 'First thing to run after connecting to a MongoDB server to automatically find stored credentials. Searches
-          across ALL non-system databases so you don''t need to enumerate databases/collections manually first. If this returns
-          no results (no credential-pattern collection names found), fall back to manual enumeration: list_databases → list_collections
-          → dump_collection on interesting collections.'
+          across ALL non-system databases so you don''t need to enumerate databases/collections manually first. The two-pass
+          approach means it won''t miss credentials even if they''re in collections with non-obvious names. If this returns
+          no results, fall back to manual enumeration: list_databases → list_collections → dump_collection on interesting
+          collections.'
         params:
           host:
             type: string
-            required: true
-            description: MongoDB hostname or IP
+            description: MongoDB hostname or IP (not required if uri is provided)
           database:
             type: string
             description: Specific database to search. If omitted, searches ALL non-system databases (admin, config, local
@@ -5056,12 +5289,23 @@ tools:
             type: string
             default: admin
             description: Authentication database
+          uri:
+            type: string
+            description: Full MongoDB connection string URI. Overrides host/port/username/password/auth_db.
+          tls:
+            type: boolean
+            default: false
+            description: Enable TLS for the connection
+          tls_insecure:
+            type: boolean
+            default: false
+            description: Allow invalid TLS certificates and hostnames
         returns:
           findings:
             type: array
             description: 'Matching collections, each with: ''database'' name, ''collection'' name, ''document_count'' (total
-              docs in collection), ''has_credential_fields'' (boolean, whether field names match password patterns), ''sample_documents''
-              (up to 5 sample docs with all fields)'
+              docs in collection), ''has_credential_fields'' (boolean), ''match_type'' (''collection_name'' if matched by
+              name, ''field_pattern'' if matched by field content), ''sample_documents'' (up to 5 sample docs with all fields)'
           databases_searched:
             type: array
             description: List of database names that were searched
@@ -5079,8 +5323,7 @@ tools:
         params:
           host:
             type: string
-            required: true
-            description: MongoDB hostname or IP
+            description: MongoDB hostname or IP (not required if uri is provided)
           port:
             type: integer
             default: 27017
@@ -5095,6 +5338,17 @@ tools:
             type: string
             default: admin
             description: Authentication database
+          uri:
+            type: string
+            description: Full MongoDB connection string URI. Overrides host/port/username/password/auth_db.
+          tls:
+            type: boolean
+            default: false
+            description: Enable TLS for the connection
+          tls_insecure:
+            type: boolean
+            default: false
+            description: Allow invalid TLS certificates and hostnames
         returns:
           version:
             type: string
@@ -5916,8 +6170,8 @@ tools:
         when_to_use: The very first step in any engagement — run this to discover what ports are open and what services are
           exposed. Use tcp_connect scan type if running unprivileged, syn for faster stealth scanning with privileges. Scan
           common ports first (default 1-1000), then expand to all 65535 if needed. For targets behind a firewall that filter
-          ICMP, the scan may report 'host down' — in that case the target may still be reachable but host discovery needs
-          to be bypassed (not currently exposed as a parameter). Follow up open ports with service_scan for version detection.
+          ICMP, the scan may report 'host down' — use skip_discovery=true (-Pn) to bypass host discovery and scan anyway.
+          Follow up open ports with service_scan for version detection.
         requires_privileged:
           tcp_connect: false
           syn: true
@@ -5960,6 +6214,15 @@ tools:
             description: 'Timing template: ''paranoid'' (T0, IDS evasion, very slow), ''sneaky'' (T1, IDS evasion), ''polite''
               (T2, less bandwidth), ''normal'' (T3, default), ''aggressive'' (T4, faster, assumes reliable network — recommended
               for HTB/labs), ''insane'' (T5, fastest, may miss ports on unreliable networks).'
+          skip_discovery:
+            type: boolean
+            default: false
+            description: Skip host discovery (-Pn). Use when target filters ICMP and nmap reports 'host seems down'. Common
+              in HTB and firewalled environments.
+          top_ports:
+            type: integer
+            description: 'Scan the N most common ports instead of a range. Mutually exclusive with ''ports''. Common values:
+              100 (fast), 1000 (thorough).'
         returns:
           open_ports:
             type: array
@@ -5991,6 +6254,14 @@ tools:
             required: true
             description: 'Ports to probe (from port_scan results). Comma-separated or range: ''22,80,443,8080'' or ''1-1000''.
               Only scan ports that were found open — scanning closed ports wastes time.'
+          skip_discovery:
+            type: boolean
+            default: false
+            description: Skip host discovery (-Pn). Use when target filters ICMP and nmap reports 'host seems down'.
+          version_intensity:
+            type: integer
+            description: Version detection probe intensity 0-9. Default uses nmap's default 7. Use 2 for fast scan, 9 for
+              thorough.
         returns:
           services_summary:
             type: array
@@ -6013,6 +6284,10 @@ tools:
             type: string
             required: true
             description: IP address or hostname (single target — OS detection doesn't work well with CIDR ranges)
+          skip_discovery:
+            type: boolean
+            default: false
+            description: Skip host discovery (-Pn). Use when target filters ICMP and nmap reports 'host seems down'.
         returns:
           os_summary:
             type: object
@@ -6051,6 +6326,13 @@ tools:
               ''brute'' (brute-force), ''auth'' (auth bypass), ''default'' (safe defaults), ''discovery'' (enumeration), ''safe''
               (non-intrusive). Specific scripts: ''smb-vuln-ms17-010'', ''http-shellshock'', ''ssl-heartbleed'', ''ftp-anon''.
               Combine with ''and''/''or''/''not'': ''vuln and safe'', ''smb-vuln-*''. Comma-separated for multiple: ''http-shellshock,http-vuln-cve2017-5638''.'
+          script_args:
+            type: string
+            description: Arguments for NSE scripts (e.g., 'userdb=users.txt,passdb=pass.txt' for brute scripts)
+          skip_discovery:
+            type: boolean
+            default: false
+            description: Skip host discovery (-Pn). Use when target filters ICMP and nmap reports 'host seems down'.
         returns:
           vulnerabilities:
             type: array
@@ -6062,6 +6344,34 @@ tools:
           hosts:
             type: array
             description: Full nmap XML-parsed results including all script outputs (not just vulnerabilities)
+      ping_scan:
+        description: Discover live hosts on a network without port scanning (-sn). Sends ICMP echo, TCP SYN to 443, TCP ACK
+          to 80, and ICMP timestamp probes. Returns list of hosts that responded with their IP addresses.
+        when_to_use: For network host discovery before individual port scans. Use on CIDR ranges (e.g., '192.168.1.0/24')
+          to find which IPs are alive before spending time on port scanning each one.
+        params:
+          target:
+            type: string
+            required: true
+            description: CIDR range or target (e.g., '192.168.1.0/24', '10.10.10.0/24')
+          timing:
+            type: enum
+            values:
+            - paranoid
+            - sneaky
+            - polite
+            - normal
+            - aggressive
+            - insane
+            default: normal
+            description: Timing template
+        returns:
+          live_hosts:
+            type: array
+            description: IP addresses of hosts that responded
+          total_live:
+            type: integer
+            description: Number of live hosts discovered
       get_interfaces:
         description: Get local network interfaces and IP addresses using 'ip -j addr'. Returns all interfaces with their IPv4/IPv6
           addresses, MAC addresses, and link state. Automatically identifies the best LHOST candidate (first non-loopback
@@ -6085,7 +6395,7 @@ tools:
       scan (quick test with 3 basic MongoDB operator payloads per URL parameter), inject (targeted injection with 16 built-in
       MongoDB payloads for auth bypass or data extraction), test_payloads (comprehensive test with 21 payloads including baseline
       comparison, response length differential, and status code change detection). Supports GET and POST with form or JSON
-      content types. Uses curl internally.'
+      content types. Uses httpx (async HTTP client) internally.'
     image: ghcr.io/silicon-works/mcp-tools-nosqlmap:latest
     image_size_mb: 180
     capabilities:
@@ -6130,10 +6440,10 @@ tools:
           payloads ({"$ne":""}, {"$gt":""}, [$ne]=test). Uses heuristic detection: HTTP 500 (server error processing injected
           operator) or HTTP 301/302 redirect on auth-related parameters (possible auth bypass). Parses parameters from URL
           query string and POST data.'
-        when_to_use: 'First step when testing a web form or API endpoint backed by MongoDB/NoSQL. Provide the URL with query
+        when_to_use: First step when testing a web form or API endpoint backed by MongoDB/NoSQL. Provide the URL with query
           parameters for GET, or URL + data for POST. The tool auto-discovers all parameters and tests each one. Use this
           for initial detection — if it finds potential injection points, follow up with test_payloads for comprehensive confirmation
-          with baseline comparison. Note: does NOT support cookie parameter — use headers={''Cookie'': ''value''} instead.'
+          with baseline comparison. Use cookie param for authenticated scans.
         params:
           url:
             type: string
@@ -6150,7 +6460,11 @@ tools:
               both URL and data are tested.
           headers:
             type: object
-            description: 'Custom HTTP headers as key-value pairs. Use {''Cookie'': ''PHPSESSID=abc''} for authenticated scans.'
+            description: Custom HTTP headers as key-value pairs.
+          cookie:
+            type: string
+            description: Cookie header value for authenticated testing (e.g., 'PHPSESSID=abc123; session=xyz'). Convenience
+              param — alternatively use headers.
           database_type:
             type: string
             default: MongoDB
@@ -6205,7 +6519,10 @@ tools:
               payloads only), or ''blind'' (all 16 payloads).'
           headers:
             type: object
-            description: 'Custom HTTP headers. Use {''Cookie'': ''PHPSESSID=abc''} for authenticated testing.'
+            description: Custom HTTP headers.
+          cookie:
+            type: string
+            description: Cookie header value for authenticated testing (e.g., 'PHPSESSID=abc123').
           timeout:
             type: integer
             default: 60
@@ -6250,7 +6567,10 @@ tools:
               mode injects payloads as JSON objects into the request body.'
           headers:
             type: object
-            description: 'Custom HTTP headers. Use {''Cookie'': ''PHPSESSID=abc''} for authenticated testing.'
+            description: Custom HTTP headers.
+          cookie:
+            type: string
+            description: Cookie header value for authenticated testing (e.g., 'PHPSESSID=abc123').
           success_indicator:
             type: string
             description: String in the response body that indicates successful injection (e.g., 'Welcome admin', 'Dashboard',
@@ -6364,6 +6684,23 @@ tools:
             default: 150
             description: Maximum requests per second. Reduce to 50-100 for stealthier scanning or if target rate-limits. Increase
               to 300+ for faster scanning on robust targets.
+          follow_redirects:
+            type: boolean
+            default: true
+            description: Follow HTTP redirects (nuclei -fr flag). Enable for targets that redirect HTTP→HTTPS or / → /login.
+              Disable when you want to scan the exact URL without following redirects.
+          headers:
+            type: string
+            description: Custom headers in 'Header:Value' format, comma-separated for multiple (e.g., 'Authorization:Bearer
+              token123,Cookie:session=abc'). Essential for authenticated scanning behind login pages or WAFs.
+          proxy:
+            type: string
+            description: HTTP/SOCKS5 proxy URL (e.g., 'socks5://127.0.0.1:1080', 'http://127.0.0.1:8080'). Use with tunnel
+              MCP server for scanning internal targets via SSH tunnel.
+          exclude_tags:
+            type: string
+            description: Tags to exclude from scan (comma-separated, e.g., 'dos,fuzz' to skip denial-of-service and fuzzing
+              templates). Useful for avoiding noisy or destructive templates.
           timeout:
             type: integer
             default: 600
@@ -6412,10 +6749,21 @@ tools:
               (~900, remote code execution), ''lfi'' (~820, local file inclusion), ''sqli'' (~540, SQL injection), ''xss''
               (~1,300, cross-site scripting), ''ssrf'' (~180, server-side request forgery), ''auth-bypass'' (~250, authentication
               bypass), ''default-login'' (~300, default credentials)'
+          follow_redirects:
+            type: boolean
+            default: true
+            description: Follow HTTP redirects
+          headers:
+            type: string
+            description: Custom headers in 'Header:Value' format, comma-separated
+          proxy:
+            type: string
+            description: HTTP/SOCKS5 proxy URL
           timeout:
             type: integer
-            default: 120
-            description: Scan timeout in seconds. Quick scans typically complete in 1-3 minutes.
+            default: 300
+            description: Scan timeout in seconds. Nuclei has ~60-90s startup overhead; quick scans typically complete in 2-4
+              minutes total.
         returns:
           findings:
             type: array
@@ -6441,8 +6789,9 @@ tools:
             description: Target URL or IP (e.g., 'http://10.10.10.1', 'https://target.htb')
           timeout:
             type: integer
-            default: 60
-            description: Scan timeout in seconds. Tech detection typically completes in 30-60 seconds.
+            default: 300
+            description: Scan timeout in seconds. Nuclei has ~60s startup overhead for template loading; ~810 tech templates
+              need 2-3 minutes total.
         returns:
           technologies:
             type: array
@@ -6451,6 +6800,100 @@ tools:
             type: array
             description: Full detection details for each technology, including template_id, name, matched_at URL, extracted
               version information, and tags
+      auto_scan:
+        description: Automatic vulnerability scan using Wappalyzer-based technology detection to select only relevant templates.
+          Nuclei detects the target's technology stack (CMS, framework, server, etc.) and runs matching templates instead
+          of all 12,000+. Much faster and more targeted than a full scan while still covering known CVEs and misconfigurations
+          for the detected stack.
+        when_to_use: 'After discovering a web service, as a smart alternative to a full scan. Auto-scan is ideal when you
+          don''t know what technology the target runs — it detects the stack first, then scans for relevant vulnerabilities.
+          Faster than a full scan because it only runs matching templates. Use this when: you want a targeted scan without
+          manually specifying tags/templates, web-fingerprint identified the technology but you want vulnerability scanning
+          focused on that stack, or you want a good balance between speed and coverage.'
+        params:
+          target:
+            type: string
+            required: true
+            description: Target URL (e.g., 'http://10.10.10.1', 'https://target.htb')
+          severity:
+            type: string
+            description: Filter by severity (info,low,medium,high,critical). Use 'critical,high' for fast high-impact-only
+              results.
+          rate_limit:
+            type: integer
+            default: 150
+            description: Maximum requests per second
+          follow_redirects:
+            type: boolean
+            default: true
+            description: Follow HTTP redirects
+          headers:
+            type: string
+            description: Custom headers in 'Header:Value' format, comma-separated
+          timeout:
+            type: integer
+            default: 600
+            description: Timeout in seconds
+        returns:
+          findings:
+            type: array
+            description: Detected vulnerabilities matching the auto-detected technology stack
+          by_severity:
+            type: object
+            description: Finding counts grouped by severity level
+          total_findings:
+            type: integer
+            description: Total number of findings
+      dast_scan:
+        description: 'Dynamic application security testing (DAST) using nuclei''s built-in fuzzer engine. Fuzzes HTTP parameters
+          (query, body, headers, cookies) with injection payloads to discover vulnerabilities like SQLi, XSS, SSRF, command
+          injection, and more. Aggression level controls payload count: low uses fewer payloads for faster scanning, high
+          uses comprehensive payload sets for thorough testing.'
+        when_to_use: 'After initial reconnaissance and vulnerability scanning to actively test for injection vulnerabilities
+          that template-based scanning can''t find. DAST/fuzzing is more aggressive than template scanning — it sends actual
+          attack payloads to parameters. Use this when: template scans found no vulnerabilities but the target has input parameters,
+          you want to test for SQLi/XSS/command injection on specific endpoints, or you want to complement template-based
+          scanning with active fuzzing. Use a lower rate_limit (50-100) to avoid overwhelming the target.'
+        params:
+          target:
+            type: string
+            required: true
+            description: Target URL to fuzz (e.g., 'http://target.htb/search?q=test'). Include parameters for targeted fuzzing.
+          aggression:
+            type: string
+            enum:
+            - low
+            - medium
+            - high
+            default: low
+            description: Fuzzing aggression level controlling payload count. low=fewer payloads (faster, less noise), medium=balanced,
+              high=comprehensive payload sets (slower, thorough). Start with low and escalate if needed.
+          headers:
+            type: string
+            description: Custom headers in 'Header:Value' format, comma-separated. Use for authenticated fuzzing.
+          follow_redirects:
+            type: boolean
+            default: true
+            description: Follow HTTP redirects
+          proxy:
+            type: string
+            description: HTTP/SOCKS5 proxy URL
+          rate_limit:
+            type: integer
+            default: 100
+            description: Maximum requests per second (lower default for fuzzing to avoid overwhelming targets)
+          timeout:
+            type: integer
+            default: 600
+            description: Timeout in seconds
+        returns:
+          findings:
+            type: array
+            description: Fuzzing findings with template_id, name, severity, matched_at URL, extracted data, and vulnerability
+              details
+          total_findings:
+            type: integer
+            description: Total number of findings from fuzzing
   office-exploit:
     name: office-exploit
     version: '1.0'
@@ -7503,297 +7946,6 @@ tools:
           fullPage:
             type: boolean
             description: Capture full scrollable page
-  privesc:
-    name: privesc
-    version: '1.0'
-    description: Linux privilege escalation enumeration and exploit suggestion tool that checks SUID/SGID binaries against
-      GTFOBins, sudo misconfigurations, Linux capabilities, cron jobs, writable sensitive files, and matches kernel/software
-      versions against a built-in CVE database (Dirty Pipe, Dirty COW, PwnKit, Baron Samedit). Also provides linpeas.sh and
-      linux-smart-enumeration scripts for upload to target.
-    image: ghcr.io/silicon-works/mcp-tools-privesc:latest
-    image_size_mb: 200
-    capabilities:
-    - privilege_escalation_enumeration
-    - suid_analysis
-    - sudo_analysis
-    - capability_analysis
-    - cve_lookup
-    phases:
-    - post-exploitation
-    requirements:
-      network: false
-      privileged: false
-    resources:
-      memory_mb: 256
-      cpu: 0.5
-    routing:
-      use_for:
-      - privilege escalation enumeration
-      - SUID SGID binary analysis and GTFOBins check
-      - sudo misconfiguration and NOPASSWD detection
-      - Linux capability abuse detection
-      - cron job enumeration and writable script detection
-      - Linux privilege escalation
-      - kernel exploit suggestion Dirty Pipe Dirty COW
-      - writable sensitive file detection /etc/passwd /etc/shadow
-      - post-exploitation local enumeration
-      - linpeas LSE script retrieval
-      never_use_for:
-      - remote scanning
-      - initial access
-      - port scanning
-      triggers:
-      - privilege escalation
-      - privesc
-      - SUID
-      - sudo
-      - linpeas
-      - root access
-      - escalate
-    methods:
-      enumerate:
-        description: 'Run comprehensive privilege escalation enumeration combining SUID/SGID binary search with GTFOBins matching,
-          sudo permission analysis, Linux capability enumeration, cron job inspection, and writable sensitive file detection.
-          Depth controlled by level parameter: quick runs SUID+sudo only, standard adds capabilities+cron, thorough adds writable
-          file search across /etc and /var.'
-        when_to_use: After gaining initial low-privilege shell access on a Linux target to systematically identify all local
-          privilege escalation vectors. This is typically the first tool to run after initial foothold. Use before suggest_exploits
-          (which needs kernel/software info you may discover here).
-        params:
-          level:
-            type: string
-            enum:
-            - quick
-            - standard
-            - thorough
-            default: standard
-            description: 'Enumeration depth: ''quick'' checks SUID binaries and sudo permissions only (fastest, ~30s), ''standard''
-              adds capability and cron job checks (~2min), ''thorough'' adds writable file search across /etc and /var (~5min)'
-          timeout:
-            type: integer
-            default: 300
-            description: Overall timeout in seconds for the enumeration
-        returns:
-          findings:
-            type: array
-            description: Interesting findings flagged as potential privesc vectors (e.g., exploitable SUID binaries, dangerous
-              capabilities)
-          suid:
-            type: array
-            description: All SUID binaries found on the system
-          sudo:
-            type: object
-            description: Sudo permissions including NOPASSWD entries and commands the user can run
-          capabilities:
-            type: array
-            description: Files with Linux capabilities (standard and thorough levels only)
-          cron:
-            type: array
-            description: Cron jobs from /etc/crontab and /etc/cron.d/ (standard and thorough levels only)
-          writable:
-            type: array
-            description: Writable files in /etc and /var (thorough level only)
-          system_info:
-            type: object
-            description: 'Basic system info: kernel version, architecture, current user ID, hostname'
-      check_suid:
-        description: Find all SUID/SGID binaries on the filesystem using 'find / -perm -4000' and cross-reference against
-          a built-in GTFOBins list (nmap, vim, find, bash, less, more, nano, cp, mv, awk, perl, python, ruby, lua, php, node,
-          env, tar, zip, rsync, git, ftp, sftp, scp, pkexec, snap, docker, lxc, ndsudo). Also checks specifically for Netdata
-          ndsudo (CVE-2024-32019 PATH injection).
-        when_to_use: After gaining shell access to find SUID binaries that can be abused for privilege escalation. Run this
-          when you need a quick check for the most common Linux privesc vector. Results show which binaries match known GTFOBins
-          entries that have SUID exploitation techniques.
-        params:
-          timeout:
-            type: integer
-            default: 60
-            description: Timeout in seconds for the filesystem search
-        returns:
-          suid_files:
-            type: array
-            description: All SUID binary paths found on the system
-          interesting:
-            type: array
-            description: SUID binaries matching GTFOBins entries, each with file path, type, and exploitation note
-          count:
-            type: integer
-            description: Total number of SUID binaries found
-      check_sudo:
-        description: Check current user's sudo permissions by running 'sudo -l', parsing the output to identify commands runnable
-          as root and NOPASSWD entries. Can optionally supply a password for 'sudo -S -l' when the user requires password
-          authentication for sudo.
-        when_to_use: After gaining shell access to check what commands the current user can run with sudo. NOPASSWD entries
-          are immediate privesc wins. Even password-required sudo entries may be exploitable if the binary has a shell escape
-          (check GTFOBins). Run this early — it's fast and frequently yields the privesc path on HTB machines.
-        params:
-          password:
-            type: string
-            description: User's password to supply via 'sudo -S -l' for accounts that require password authentication. Omit
-              for passwordless sudo check.
-          timeout:
-            type: integer
-            default: 30
-            description: Timeout in seconds (may timeout if password is required but not provided)
-        returns:
-          can_run:
-            type: array
-            description: Commands the user can run via sudo (lines containing 'may run' or starting with '(')
-          nopasswd:
-            type: array
-            description: Commands runnable with NOPASSWD — these are immediate escalation paths
-          raw:
-            type: string
-            description: Full raw output of 'sudo -l'
-      check_capabilities:
-        description: 'Find files with Linux capabilities using ''getcap -r /'', flagging dangerous capabilities that enable
-          privilege escalation: cap_setuid (set UID to root), cap_setgid (set GID), cap_dac_override (bypass file permissions),
-          cap_dac_read_search (read any file), cap_sys_admin (mount filesystems, load kernel modules), cap_sys_ptrace (inject
-          into processes), cap_net_admin (network configuration), cap_net_raw (raw sockets).'
-        when_to_use: After gaining shell access to find binaries with Linux capabilities that can be abused for privilege
-          escalation. Capabilities are a finer-grained alternative to SUID — a binary with cap_setuid+ep can escalate to root
-          just like a SUID binary. Common on modern Linux where admins use capabilities instead of SUID. Check GTFOBins for
-          exploitation techniques for the discovered binary+capability combination.
-        params:
-          timeout:
-            type: integer
-            default: 60
-            description: Timeout in seconds for the recursive capability search
-        returns:
-          files:
-            type: array
-            description: All files with capabilities in 'path = capability' format
-          interesting:
-            type: array
-            description: Files with dangerous capabilities (cap_setuid, cap_sys_admin, etc.) flagged as potential privesc
-              vectors
-          count:
-            type: integer
-            description: Total number of files with capabilities
-      check_cron:
-        description: Enumerate cron jobs by reading /etc/crontab, listing /etc/cron.* directories, and reading all files in
-          /etc/cron.d/. Identifies scheduled tasks that may run as root with writable scripts, writable paths in the command,
-          or wildcard injection opportunities.
-        when_to_use: 'After gaining shell access to find cron-based privilege escalation opportunities. Look for: cron jobs
-          running as root that execute scripts you can write to, jobs using wildcards in directories you control (wildcard
-          injection), jobs with writable PATH directories, or jobs referencing missing scripts you can create. Pair with check_writable
-          to verify write access to discovered cron script paths.'
-        params:
-          timeout:
-            type: integer
-            default: 30
-            description: Timeout in seconds
-        returns:
-          jobs:
-            type: array
-            description: All cron entries and directory listings from /etc/crontab and /etc/cron.d/
-          writable:
-            type: array
-            description: Cron scripts identified as writable by current user
-      check_writable:
-        description: Search for writable files in sensitive directories (/etc and /var) using 'find -writable -type f', limited
-          to first 50 results per directory. Writable files in /etc (especially passwd, shadow, sudoers, crontab) or /var
-          (especially log files, web roots, database files) can enable privilege escalation or lateral movement.
-        when_to_use: 'After gaining shell access to find writable files in sensitive system directories that could be leveraged
-          for privilege escalation. Key targets: /etc/passwd (add root user), /etc/shadow (crack or replace hashes), /etc/sudoers
-          (add sudo entry), /etc/crontab (add root cron job), files in web roots (plant webshell), log files (log poisoning
-          for LFI). This is the slowest check — use as part of thorough enumeration or when other vectors haven''t yielded
-          results.'
-        params:
-          timeout:
-            type: integer
-            default: 120
-            description: Timeout in seconds for the filesystem search
-        returns:
-          files:
-            type: array
-            description: Writable file paths found in /etc and /var (up to 50 per directory)
-          count:
-            type: integer
-            description: Total number of writable files found
-      suggest_exploits:
-        description: 'Match kernel version and installed software against a built-in CVE database to suggest known privilege
-          escalation exploits. Kernel checks: Dirty Pipe (CVE-2022-0847, kernels 5.8-5.16), Dirty COW (CVE-2016-5195, kernels
-          <5.8). Software checks against database entries for: netdata/ndsudo (CVE-2024-32019), sudo/Baron Samedit (CVE-2021-3156),
-          sudo/pwfeedback (CVE-2019-18634), polkit/PwnKit (CVE-2021-4034), Docker socket escape.'
-        when_to_use: After enumerating the target system (using enumerate or manual commands) to match discovered kernel version
-          and installed software against known privilege escalation CVEs. Provide kernel_version from 'uname -r' and installed_software
-          as a list of 'name version' strings (e.g., from 'dpkg -l' or 'rpm -qa'). Best used after enumerate to complement
-          its findings with CVE-based exploit suggestions.
-        params:
-          kernel_version:
-            type: string
-            description: Kernel version string from 'uname -r' (e.g., '5.10.0-20-amd64', '5.15.0-91-generic'). Used to check
-              for kernel exploits like Dirty Pipe (5.8-5.16) and Dirty COW (<5.8).
-          distro:
-            type: string
-            description: Distribution info from /etc/os-release PRETTY_NAME (e.g., 'Ubuntu 20.04.6 LTS', 'Debian GNU/Linux
-              11'). Used for context in suggestions.
-          installed_software:
-            type: array
-            description: 'List of installed software with versions as strings. Format: ''name version'' (e.g., [''sudo 1.8.31'',
-              ''netdata 1.44.0'', ''polkit 0.105'']). Matched against CVE database categories: netdata, sudo, polkit, kernel,
-              docker.'
-        returns:
-          suggestions:
-            type: array
-            description: Matching exploits with name, CVE ID, affected versions, description, and exploitation notes
-          count:
-            type: integer
-            description: Number of matching exploit suggestions
-      get_linpeas:
-        description: 'Retrieve the bundled linpeas.sh script (PEASS-ng) as base64 for upload to target via ssh.upload or shell-session.upload.
-          Linpeas performs comprehensive Linux enumeration across 10 categories: system_information, container (Docker/lxc
-          detection), cloud (AWS/GCP/Azure metadata), procs_crons_timers_srvcs_sockets (running processes, systemd timers,
-          services, open internal ports), network_information (interfaces, routes, ARP, iptables), users_information (.bash_history,
-          SSH keys, password hashes, home directories), software_information (installed packages with versions), interesting_perms_files
-          (SUID, capabilities, ACLs, NFS), interesting_files (config files with passwords, backups, database files), and api_keys_regex
-          (credential patterns in files). Supports flags: -a (all checks including 1min process monitor + su bruteforce),
-          -s (stealth/fast), -P <password> (sudo -l with password + su bruteforce), -o <checks> (select specific categories).'
-        when_to_use: 'When the built-in enumerate/check_* methods don''t find a privilege escalation path. The built-in checks
-          only cover SUID, sudo, capabilities, cron, and writable files. Linpeas additionally checks: container escape vectors
-          (Docker socket, cgroup breakout), cloud metadata endpoints, running processes as root with writable binaries, systemd
-          timers (not just cron), internal listening services, user home directories (.bash_history, SSH keys, .git-credentials),
-          config files containing passwords (wp-config.php, .env, database configs), and regex scanning for API keys/tokens/credentials.
-          Upload to target using ssh or shell-session, decode, and run. Use -o to select specific categories if full output
-          is too large.'
-        params: {}
-        returns:
-          script:
-            type: string
-            description: Script filename ('linpeas.sh')
-          size_bytes:
-            type: integer
-            description: Script file size in bytes (~1MB)
-          base64:
-            type: string
-            description: 'Base64-encoded linpeas.sh content. Decode on target with: echo ''<base64>'' | base64 -d > linpeas.sh
-              && chmod +x linpeas.sh'
-      get_lse:
-        description: 'Retrieve the bundled linux-smart-enumeration (LSE v4.14nw) script as base64 for upload to target. LSE
-          is a lighter alternative to linpeas (~49KB vs ~1MB) with 12 test sections: usr (user tests), sud (sudo), fst (filesystem),
-          sys (system), sec (security measures — SELinux, AppArmor, grsecurity), ret (recurrent tasks — cron AND systemd timers),
-          net (network), srv (services), pro (processes with runtime monitoring), sof (software versions), ctn (container/Docker/lxc),
-          cve (CVE-specific tests). Supports verbosity levels: -l 0 (critical only, default), -l 1 (interesting), -l 2 (everything).
-          Can select specific sections with -s (e.g., ''-s sud,fst,cve'').'
-        when_to_use: 'When you need a lighter-weight alternative to linpeas for on-target enumeration. LSE is ~49KB vs linpeas
-          ~1MB, produces less output, and is faster. Advantages over linpeas: verbosity levels (-l 0/1/2) let you filter noise,
-          section selection (-s) for targeted checks, built-in CVE tests, security measures detection (SELinux/AppArmor).
-          Use this when: target has limited disk space, bandwidth is constrained (e.g., through a tunnel), you want only critical
-          findings (-l 0), or you need to check specific areas (-s sud,cve). Upload using ssh or shell-session, decode, and
-          run on target.'
-        params: {}
-        returns:
-          script:
-            type: string
-            description: Script filename ('lse.sh')
-          size_bytes:
-            type: integer
-            description: Script file size in bytes (~49KB)
-          base64:
-            type: string
-            description: 'Base64-encoded lse.sh content. Decode on target with: echo ''<base64>'' | base64 -d > lse.sh &&
-              chmod +x lse.sh'
   scapy:
     name: scapy
     version: '2.5'
@@ -8141,17 +8293,22 @@ tools:
         params:
           query:
             type: string
-            required: true
             description: 'Space-separated search terms. Each term must appear in the exploit title or path. Examples: ''apache
               2.4.49'' (product + version), ''wordpress 5.0'' (CMS + version), ''linux kernel 5.4 privilege'' (kernel + version
               + type), ''ms17-010'' (MS bulletin), ''eternalblue'' (exploit name), ''ssh'' (service). Fewer, more specific
-              terms give better results.'
+              terms give better results. Mutually exclusive with cve.'
+          cve:
+            type: string
+            description: Search by CVE ID (e.g., '2021-44228' for Log4Shell, '2021-41773' for Apache path traversal). Omit
+              the 'CVE-' prefix. More precise than free-text search because it searches the CVE field specifically. Mutually
+              exclusive with query.
           exact:
             type: boolean
             default: false
             description: Exact order match on exploit title (searchsploit --exact). With exact=false (default), terms are
               matched independently in any order with fuzzy version ranges. With exact=true, the query string must appear
-              exactly as-is in the title. Use exact=true when default search returns too many irrelevant results.
+              exactly as-is in the title. Use exact=true when default search returns too many irrelevant results. Only applies
+              to text search (query), not CVE search.
           type:
             type: enum
             values:
@@ -8162,7 +8319,17 @@ tools:
             default: all
             description: Filter by result type. 'exploit' = working exploit code (Python, C, Ruby, etc.), 'shellcode' = standalone
               shellcode (assembly, machine code), 'paper' = writeups and advisories (no exploit code). Use 'exploit' for actionable
-              results.
+              results. Only applies to text search (query), not CVE search.
+          strict:
+            type: boolean
+            default: false
+            description: Strict version matching — '1.1' only matches '1.1', not '1.0 < 1.3'. Use when the default fuzzy matching
+              returns too many irrelevant version results. Only applies to text search (query), not CVE search.
+          exclude:
+            type: string
+            description: 'Exclude results matching these terms (pipe-separated). Examples: ''(PoC)|/dos/'' (exclude proof-of-concepts
+              and DoS), ''/windows/'' (exclude Windows exploits), ''/linux/'' (exclude Linux exploits). Useful for filtering
+              out irrelevant platforms or non-functional PoCs. Only applies to text search (query), not CVE search.'
         returns:
           results:
             type: array
@@ -8173,11 +8340,14 @@ tools:
             description: Number of matching results
           query:
             type: string
-            description: The search query that was used
+            description: The search query or CVE ID that was used
+          search_type:
+            type: string
+            description: '''text'' for query-based search, ''cve'' for CVE-based search'
       get_exploit:
-        description: Retrieve the full source code of an exploit by its EDB-ID number or file path. Uses 'searchsploit -p
-          ID' to resolve the exploit ID to a local file path (/usr/share/exploitdb/exploits/...), then reads the file. Exploit
-          code can be Python, C, Ruby, PHP, Perl, shell script, or text. The full content is returned for review before use.
+        description: Retrieve the full source code of an exploit by its EDB-ID number or file path. Resolves the exploit ID
+          to a local file path (/usr/share/exploitdb/exploits/...) via JSON search, then reads the file. Exploit code can
+          be Python, C, Ruby, PHP, Perl, shell script, or text. The full content is returned for review before use.
         when_to_use: 'After search identifies a relevant exploit, use this to retrieve its source code. Review the code to
           understand: (1) what it does, (2) what parameters it needs (target IP, port, paths), (3) whether it needs compilation
           or modification, (4) any dependencies. For Python exploits: may need to be adapted and run via exploit-runner. For
@@ -8200,6 +8370,31 @@ tools:
           content:
             type: string
             description: Complete exploit source code as text
+      mirror:
+        description: Copy an exploit file to the session working directory for modification. Resolves the EDB-ID to a local
+          file path, then copies the exploit source to the current working directory. Useful when you need to modify exploit
+          code before execution — e.g., changing hardcoded IPs, adjusting payloads, or adapting the exploit for the target
+          environment.
+        when_to_use: 'After reviewing an exploit with get_exploit and determining it needs modification before use. Common
+          modifications: (1) changing target IP/port, (2) adjusting payload (reverse shell callback IP), (3) adding missing
+          dependencies or imports, (4) fixing Python 2 vs 3 compatibility issues, (5) adapting for the specific target version.
+          After mirroring, the exploit can be edited and run via exploit-runner.'
+        params:
+          exploit_id:
+            type: string
+            required: true
+            description: EDB-ID of the exploit to copy (e.g., '50383' from search results). The exploit file will be copied
+              to the current working directory with its original filename.
+        returns:
+          exploit_id:
+            type: string
+            description: The exploit ID that was copied
+          source_path:
+            type: string
+            description: Original file path in the ExploitDB mirror
+          filename:
+            type: string
+            description: Name of the copied file in the working directory
   shell-session:
     name: shell-session
     version: '1.0'
@@ -8752,8 +8947,9 @@ tools:
           web fuzzing (ffuf), or source code review. Mark the injection point with * in the URL (e.g., 'http://target/page?id=1*')
           or let sqlmap auto-detect GET parameters. For POST injection, use the data parameter. Start with level=1/risk=1
           (default), increase to level=3/risk=2 if no results, and level=5/risk=3 as last resort (risk=3 may use OR-based
-          tests that can modify data). If the target uses a WAF, the test may fail — a tamper script parameter would be needed
-          (not currently exposed).
+          tests that can modify data). If the target uses a WAF, use tamper scripts (e.g., tamper='space2comment,randomcase')
+          to bypass filtering. Use param to test a specific parameter and skip others. Use flush_session if re-testing after
+          changes.
         params:
           url:
             type: string
@@ -8786,6 +8982,30 @@ tools:
               queries (needed for os_shell/file_write), T=Time-based blind, Q=Inline queries. Default 'BEUSTQ' tests all.
               Use 'BEU' for faster testing if you don't need stacked queries. Use 'T' alone for time-based only when other
               methods fail.
+          param:
+            type: string
+            description: Specific parameter to test (e.g., 'id'). Without this, sqlmap tests all parameters.
+          tamper:
+            type: string
+            description: 'Tamper script(s) for WAF bypass. Comma-separated. Common: ''space2comment'' (spaces→/**/), ''between''
+              (>→BETWEEN), ''charencode'' (URL-encode), ''randomcase'' (random keyword case).'
+          flush_session:
+            type: boolean
+            default: false
+            description: Clear cached session data and re-test from scratch.
+          dbms:
+            type: string
+            description: Force DBMS type to skip detection (e.g., 'MySQL', 'PostgreSQL', 'Microsoft SQL Server').
+          proxy:
+            type: string
+            description: HTTP/SOCKS proxy (e.g., 'socks5://127.0.0.1:1080'). For scanning through tunnels.
+          random_agent:
+            type: boolean
+            default: false
+            description: Use random HTTP User-Agent to avoid WAF detection.
+          headers:
+            type: string
+            description: 'Additional HTTP headers, semicolon-separated (e.g., ''Authorization: Bearer eyJ...'').'
           timeout:
             type: integer
             default: 300
@@ -8831,6 +9051,19 @@ tools:
           cookie:
             type: string
             description: HTTP Cookie header value (must match test_injection if authentication is needed).
+          dbms:
+            type: string
+            description: Force DBMS type to skip detection.
+          proxy:
+            type: string
+            description: HTTP/SOCKS proxy.
+          random_agent:
+            type: boolean
+            default: false
+            description: Use random HTTP User-Agent.
+          headers:
+            type: string
+            description: Additional HTTP headers, semicolon-separated.
           timeout:
             type: integer
             default: 300
@@ -8843,18 +9076,61 @@ tools:
           count:
             type: integer
             description: Number of databases found
+      enumerate_tables:
+        description: List all tables in a database using sqlmap's --tables flag with -D (database). Parses pipe-delimited
+          table name output. Sqlmap reuses cached injection from prior test_injection calls.
+        when_to_use: 'After enumerate_dbs identifies databases, use this to discover table names before dumping data. The
+          workflow: test_injection → enumerate_dbs → enumerate_tables → dump_table. Look for high-value tables: ''users'',
+          ''accounts'', ''credentials'', ''config'', ''sessions'', ''wp_users''.'
+        params:
+          url:
+            type: string
+            required: true
+            description: Target URL — same URL used in test_injection.
+          database:
+            type: string
+            required: true
+            description: Database name from enumerate_dbs results.
+          data:
+            type: string
+            description: POST request body data.
+          cookie:
+            type: string
+            description: HTTP Cookie header value.
+          dbms:
+            type: string
+            description: Force DBMS type to skip detection.
+          proxy:
+            type: string
+            description: HTTP/SOCKS proxy.
+          random_agent:
+            type: boolean
+            default: false
+            description: Use random HTTP User-Agent.
+          headers:
+            type: string
+            description: Additional HTTP headers, semicolon-separated.
+          timeout:
+            type: integer
+            default: 300
+            description: Process timeout in seconds.
+        returns:
+          tables:
+            type: array
+            description: List of table name strings
+          count:
+            type: integer
+            description: Number of tables found
       dump_table:
         description: Dump contents of a specific database table using sqlmap's --dump flag with -D (database) and -T (table).
           Uses --dump-format CSV for structured output. Parses the pipe-delimited table output into column names and row dictionaries.
           Supports column selection (-C) to extract only specific fields and row limiting (--stop) to cap output. For large
           tables, use the columns and limit params to reduce data volume and extraction time.
-        when_to_use: 'After enumerate_dbs identifies databases, use this to extract data from specific tables. The typical
-          workflow is: enumerate_dbs → (identify interesting database) → dump_table on high-value tables like ''users'', ''accounts'',
+        when_to_use: 'After enumerate_dbs identifies databases, use enumerate_tables to list tables, then dump_table to extract
+          data. The workflow: enumerate_dbs → enumerate_tables → dump_table on high-value tables like ''users'', ''accounts'',
           ''credentials'', ''config'', ''sessions'', ''tokens''. Use the columns parameter to extract only credential fields
           (''username,password,email'') when you know the schema. For blind injection, each row/cell requires separate requests,
-          so limiting columns and rows dramatically reduces extraction time. Note: you need to know the table name — if you
-          don''t, the MCP server currently has no --tables enumeration method (see fix file), so use a raw sqlmap approach
-          or check information_schema via the injection.'
+          so limiting columns and rows dramatically reduces extraction time.'
         params:
           url:
             type: string
@@ -8886,6 +9162,19 @@ tools:
             description: Maximum rows to extract (maps to sqlmap --stop). Default 100. For blind injection, each row takes
               multiple requests — use 10-20 for initial sampling, then increase if needed. For UNION/error-based injection,
               extraction is fast so 100+ is fine.
+          dbms:
+            type: string
+            description: Force DBMS type to skip detection.
+          proxy:
+            type: string
+            description: HTTP/SOCKS proxy.
+          random_agent:
+            type: boolean
+            default: false
+            description: Use random HTTP User-Agent.
+          headers:
+            type: string
+            description: Additional HTTP headers, semicolon-separated.
           timeout:
             type: integer
             default: 600
@@ -8928,6 +9217,19 @@ tools:
           cookie:
             type: string
             description: HTTP Cookie header value.
+          dbms:
+            type: string
+            description: Force DBMS type to skip detection.
+          proxy:
+            type: string
+            description: HTTP/SOCKS proxy.
+          random_agent:
+            type: boolean
+            default: false
+            description: Use random HTTP User-Agent.
+          headers:
+            type: string
+            description: Additional HTTP headers, semicolon-separated.
           timeout:
             type: integer
             default: 900
@@ -8941,6 +9243,48 @@ tools:
           message:
             type: string
             description: Status message ('Database dump completed'). Actual table data is in raw_output, not structured here.
+      dump_passwords:
+        description: 'Dump database user password hashes using sqlmap''s --passwords flag. Extracts DBMS user accounts and
+          their password hashes. For MySQL: extracts from mysql.user. For MSSQL: extracts from master.sys.sql_logins. For
+          PostgreSQL: extracts from pg_shadow.'
+        when_to_use: After confirming SQL injection, use this to extract database user password hashes for offline cracking
+          with john or hashcat. Useful when you need database credentials for direct DB access or to find reused passwords.
+          The hashes can be cracked with john's identify and crack methods.
+        params:
+          url:
+            type: string
+            required: true
+            description: Target URL — same URL used in test_injection.
+          data:
+            type: string
+            description: POST request body data.
+          cookie:
+            type: string
+            description: HTTP Cookie header value.
+          dbms:
+            type: string
+            description: Force DBMS type to skip detection.
+          proxy:
+            type: string
+            description: HTTP/SOCKS proxy.
+          random_agent:
+            type: boolean
+            default: false
+            description: Use random HTTP User-Agent.
+          headers:
+            type: string
+            description: Additional HTTP headers, semicolon-separated.
+          timeout:
+            type: integer
+            default: 300
+            description: Process timeout in seconds.
+        returns:
+          hashes:
+            type: array
+            description: List of {user, hash} objects with DBMS username and password hash
+          count:
+            type: integer
+            description: Number of hashes extracted
       os_shell:
         description: 'Execute an OS command on the target server via SQL injection using sqlmap''s --os-cmd flag. The mechanism
           depends on the DBMS: MySQL uses User Defined Functions (UDF, requires FILE privilege and writable plugin directory),
@@ -8972,6 +9316,12 @@ tools:
           cookie:
             type: string
             description: HTTP Cookie header value.
+          dbms:
+            type: string
+            description: Force DBMS type to skip detection.
+          proxy:
+            type: string
+            description: HTTP/SOCKS proxy.
           timeout:
             type: integer
             default: 120
@@ -9014,6 +9364,12 @@ tools:
           cookie:
             type: string
             description: HTTP Cookie header value.
+          dbms:
+            type: string
+            description: Force DBMS type to skip detection.
+          proxy:
+            type: string
+            description: HTTP/SOCKS proxy.
           timeout:
             type: integer
             default: 120
@@ -9063,6 +9419,12 @@ tools:
           cookie:
             type: string
             description: HTTP Cookie header value.
+          dbms:
+            type: string
+            description: Force DBMS type to skip detection.
+          proxy:
+            type: string
+            description: HTTP/SOCKS proxy.
           timeout:
             type: integer
             default: 120
@@ -9355,6 +9717,10 @@ tools:
             type: boolean
             default: true
             description: Run chmod +x on the file after upload. Default true.
+          chunk_size:
+            type: integer
+            default: 50000
+            description: Chunk size for transfer in bytes (before base64 encoding).
           port:
             type: integer
             default: 22
@@ -9414,8 +9780,8 @@ tools:
             description: SSH port.
           timeout:
             type: integer
-            default: 300
-            description: Total timeout for upload + execution. 300s allows for long enumeration scripts.
+            default: 120
+            description: Execution timeout in seconds.
           ssh_options:
             type: string
             description: Additional SSH options string.
@@ -10318,14 +10684,14 @@ tools:
             type: string
             description: Security header compliance score as 'present/total' (e.g., '4/7')
       favicon_hash:
-        description: 'Download /favicon.ico from the target and calculate its MD5 hash for identification purposes. Note:
-          Shodan uses MurmurHash3 (mmh3) for favicon searching, not MD5 — the mmh3 library is not currently installed, so
-          the generated Shodan query may not produce accurate results. The MD5 hash is still useful for identifying and comparing
-          favicons across targets.'
+        description: Download /favicon.ico from the target and calculate its MurmurHash3 (mmh3) hash for Shodan favicon search,
+          plus MD5 for general identification. The mmh3 hash is Shodan-compatible — the generated Shodan query will produce
+          accurate results. Also returns MD5 for cross-target favicon comparison.
         when_to_use: 'During reconnaissance to identify the web application or framework by its favicon. Many default application
           installations (e.g., Spring Boot, Apache Tomcat, Grafana, Jenkins) have recognizable default favicons. The hash
-          can be used to: identify the application if no other indicators are present, find similar servers via Shodan (note
-          mmh3 limitation), and compare favicons across different ports/vhosts on the same target.'
+          can be used to: identify the application if no other indicators are present, find similar servers via Shodan using
+          the mmh3 hash (http.favicon.hash:<hash>), and compare favicons across different ports/vhosts on the same target
+          using the MD5 hash.'
         params:
           url:
             type: string
@@ -10345,13 +10711,13 @@ tools:
             description: Favicon file size in bytes
           md5:
             type: string
-            description: MD5 hash of the favicon file content
+            description: MD5 hash of the favicon file content (for general identification)
+          mmh3:
+            type: integer
+            description: MurmurHash3 hash of the base64-encoded favicon (Shodan-compatible)
           shodan_query:
             type: string
-            description: 'Shodan search query string (note: uses MD5, Shodan actually requires mmh3 hash for accurate results)'
-          note:
-            type: string
-            description: Caveat about mmh3 vs MD5 hash difference
+            description: Ready-to-use Shodan search query string (e.g., 'http.favicon.hash:-12345678')
   web-session:
     name: web-session
     version: '1.0'
@@ -10660,7 +11026,7 @@ tools:
             required: true
             description: 'Target WordPress URL including protocol. Examples: ''http://target.com'', ''https://blog.target.com'',
               ''http://target.com/wordpress/''. WPScan auto-detects wp-content and wp-plugins directories. If the site returns
-              403 or doesn''t look like WordPress, use --force (not yet exposed — scan will fail on non-WordPress sites).'
+              403 or doesn''t look like WordPress, use force=true.'
           enumerate:
             type: string
             default: vp,vt,u
@@ -10685,6 +11051,21 @@ tools:
             description: WPVulnDB API token from https://wpscan.com/profile (25 free lookups/day). One API request per WordPress
               version check, per plugin, per theme. Required for vulnerability data — without it, scan only reports versions,
               not CVEs. Can also be set via WPSCAN_API_TOKEN environment variable.
+          stealthy:
+            type: boolean
+            default: false
+            description: Stealthy mode — passive detection + random user agent. Equivalent to WPScan's --stealthy flag (alias
+              for --random-user-agent --detection-mode passive --plugins-version-detection passive). Use when avoiding detection
+              is more important than thoroughness.
+          force:
+            type: boolean
+            default: false
+            description: Force scan even if the site doesn't appear to be WordPress or returns 403. Useful when WordPress
+              is at a non-standard path, behind a WAF, or the homepage redirects.
+          cookie_string:
+            type: string
+            description: 'Cookie string for authenticated scanning. Format: ''cookie1=value1; cookie2=value2''. Useful for
+              scanning behind WAFs that require cookies, or for authenticated-only WordPress installs.'
           timeout:
             type: integer
             default: 300
@@ -10712,8 +11093,8 @@ tools:
         description: 'Brute-force WordPress login using wpscan''s built-in password attack. Runs wpscan with --passwords and
           --usernames flags. WPScan auto-detects the best attack method: wp-login (POST to /wp-login.php, 1 password/request),
           xmlrpc (POST to /xmlrpc.php, faster), or xmlrpc-multicall (batches up to 500 passwords per request via XML-RPC system.multicall
-          — only works on WP < 4.4). Uses --random-user-agent. Parses JSON output for cracked credentials. WARNING: the default
-          wordlist path (/usr/share/wordlists/rockyou.txt) may not exist in the container — check the fix file for this issue.'
+          — only works on WP < 4.4). Attack mode can be overridden with the attack_mode parameter. Uses --random-user-agent.
+          Parses JSON output for cracked credentials. Ships with rockyou.txt (14M passwords) at /usr/share/wordlists/rockyou.txt.'
         when_to_use: 'After enumerate_users discovers valid WordPress usernames, especially ''admin'' or ''administrator''.
           The typical WordPress brute-force workflow: (1) enumerate_users to find usernames, (2) bruteforce with a common
           password list against each user. Try the admin user first — it''s the most valuable target (full WordPress admin
@@ -10733,9 +11114,20 @@ tools:
           wordlist:
             type: string
             default: /usr/share/wordlists/rockyou.txt
-            description: 'Path to password wordlist file. Default rockyou.txt (14M passwords) may not exist in the container.
-              Alternatives if available: /usr/share/seclists/Passwords/Common-Credentials/10k-most-common.txt, or create a
-              custom wordlist in /tmp/.'
+            description: Path to password wordlist file. Default rockyou.txt (14M passwords) is pre-installed. For faster
+              targeted attempts, create a custom wordlist in /tmp/ or /session/.
+          attack_mode:
+            type: enum
+            values:
+            - auto
+            - wp-login
+            - xmlrpc
+            - xmlrpc-multicall
+            default: auto
+            description: Password attack method. auto=WPScan picks the best method. wp-login=POST to /wp-login.php (1 password/request,
+              always works). xmlrpc=via XML-RPC wp.getUsersBlogs (faster). xmlrpc-multicall=batches up to 500 passwords per
+              request via system.multicall (fastest, only works on WP < 4.4). Use wp-login when XML-RPC is disabled. Use xmlrpc-multicall
+              for old WordPress installs.
           timeout:
             type: integer
             default: 600

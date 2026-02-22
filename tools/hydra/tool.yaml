@@ -21,6 +21,10 @@ routing:
     - "SMTP IMAP POP3 email credential brute-force"
     - "SMB Windows share authentication testing"
     - "network login attack with wordlists like rockyou"
+    - "Redis MongoDB MSSQL LDAP SNMP credential brute-force"
+    - "Cisco device login brute-force"
+    - "combo file default credential testing login:pass"
+    - "PIN brute-force password generation"
   never_use_for:
     - "hash cracking (use john or hashcat)"
     - "offline password cracking (use john)"
@@ -60,8 +64,8 @@ methods:
       service:
         type: enum
         required: true
-        values: [ssh, ftp, http-get, http-post, http-post-form, http-get-form, https-get, https-post, https-post-form, https-get-form, smb, rdp, mysql, postgres, vnc, telnet, smtp, pop3, imap]
-        description: "Service protocol to attack. Hydra supports 50+ protocols but this MCP server exposes the most common 19. For HTTP basic auth: use 'http-get'. For web login forms: use 'http-post-form' (most common) or 'http-get-form'. For HTTPS: prefix with 'https-'. For SMB/Windows shares: use 'smb'. Note: the full hydra binary also supports redis, mongodb, ldap, snmp, sshkey, smb2, and many more — those are not currently exposed."
+        values: [ssh, ftp, http-get, http-post, http-post-form, http-get-form, https-get, https-post, https-post-form, https-get-form, smb, smb2, rdp, mysql, mssql, postgres, vnc, telnet, smtp, pop3, imap, redis, mongodb, ldap2, ldap3, snmp, sshkey, http-proxy, rtsp, sip, cisco, cisco-enable, svn, firebird, oracle-listener, rsh, rlogin, rexec]
+        description: "Service protocol to attack. Exposes 37 of hydra's 50+ protocols. For HTTP basic auth: use 'http-get'. For web login forms: use 'http-post-form' (most common) or 'http-get-form'. For HTTPS: prefix with 'https-'. For SMB/Windows shares: use 'smb' or 'smb2'. For LDAP: use 'ldap2' (LDAPv2) or 'ldap3' (LDAPv3). For SSH key auth testing: use 'sshkey'. For Cisco devices: use 'cisco' (telnet login) or 'cisco-enable' (enable password)."
       username:
         type: string
         description: "Single username to test (hydra -l). Use for targeted testing of a known username. Examples: 'admin', 'root', 'user'. Mutually exclusive with userlist — if both are provided, username takes precedence."
@@ -105,6 +109,20 @@ methods:
       http_form:
         type: string
         description: "HTTP form attack specification for http-post-form/http-get-form services. Format: '/login_path:POST_body_with_^USER^_and_^PASS^:F=failure_string'. Example: '/login.php:username=^USER^&password=^PASS^:F=Invalid credentials'. The F= prefix means 'fail if this string appears in the response'. Use H= for custom headers: '/login:user=^USER^&pass=^PASS^:F=failed:H=Cookie: session=abc'. For the convenience method web_form_brute, this is auto-constructed."
+      loop_users:
+        type: boolean
+        default: false
+        description: "Loop around users instead of passwords (hydra -u). Default behavior tries all passwords for user1, then user2, etc. With -u, tries password1 for ALL users, then password2 for ALL users. Critical for avoiding account lockout — if lockout threshold is 5 failed attempts, this ensures each user gets only 1 attempt per password cycle."
+      password_gen:
+        type: string
+        description: "Generate passwords instead of using a wordlist (hydra -x). Format: 'MIN:MAX:CHARSET'. CHARSET characters: 'a'=lowercase, 'A'=uppercase, '1'=numbers. Examples: '4:4:1' (all 4-digit PINs, 10000 combos), '1:3:a1' (1-3 char lowercase+digits), '3:5:aA1' (3-5 chars mixed case+digits). Overrides passlist. Warning: large charsets with high MAX generate enormous keyspaces."
+      combo_file:
+        type: string
+        description: "Colon-separated login:pass file (hydra -C). Each line has format 'username:password'. Overrides all other username/password options (-l/-L/-p/-P). Useful with default credential lists. Available lists: '/usr/share/seclists/Passwords/Default-Credentials/ftp-betterdefaultpasslist.txt', '/usr/share/seclists/Passwords/Default-Credentials/ssh-betterdefaultpasslist.txt', etc."
+      ssl:
+        type: boolean
+        default: false
+        description: "Use SSL for the connection (hydra -S). Required for IMAPS (port 993), POP3S (port 995), SMTPS (port 465), LDAPS (port 636). Not needed for HTTPS services (use the 'https-*' service variants instead). Can also be used for any service running over SSL on a non-standard port."
     returns:
       credentials:
         type: array
@@ -178,6 +196,16 @@ methods:
         type: boolean
         default: false
         description: "Include verbose attempt log in output. Warning: large with big wordlists."
+      loop_users:
+        type: boolean
+        default: false
+        description: "Loop around users instead of passwords (-u). Critical for avoiding account lockout."
+      password_gen:
+        type: string
+        description: "Generate passwords instead of using a wordlist (-x). Format: 'MIN:MAX:CHARSET'. Overrides passlist."
+      combo_file:
+        type: string
+        description: "Colon-separated login:pass file (-C). Overrides username/password options. Try '/usr/share/seclists/Passwords/Default-Credentials/ssh-betterdefaultpasslist.txt'."
     returns:
       credentials:
         type: array
@@ -233,6 +261,16 @@ methods:
         type: boolean
         default: false
         description: "Include verbose attempt log in output."
+      loop_users:
+        type: boolean
+        default: false
+        description: "Loop around users instead of passwords (-u). Critical for avoiding account lockout."
+      password_gen:
+        type: string
+        description: "Generate passwords instead of using a wordlist (-x). Format: 'MIN:MAX:CHARSET'. Overrides passlist."
+      combo_file:
+        type: string
+        description: "Colon-separated login:pass file (-C). Overrides username/password options. Try '/usr/share/seclists/Passwords/Default-Credentials/ftp-betterdefaultpasslist.txt'."
     returns:
       credentials:
         type: array
@@ -310,6 +348,20 @@ methods:
         type: boolean
         default: false
         description: "Include verbose attempt log in output."
+      loop_users:
+        type: boolean
+        default: false
+        description: "Loop around users instead of passwords (-u). Critical for avoiding account lockout."
+      password_gen:
+        type: string
+        description: "Generate passwords instead of using a wordlist (-x). Format: 'MIN:MAX:CHARSET'. Overrides passlist."
+      combo_file:
+        type: string
+        description: "Colon-separated login:pass file (-C). Overrides username/password options."
+      ssl:
+        type: boolean
+        default: false
+        description: "Use SSL for the connection (-S). Use when the web form is served over SSL on a non-standard setup."
     returns:
       credentials:
         type: array
@@ -366,6 +418,16 @@ methods:
         type: boolean
         default: false
         description: "Include verbose attempt log in output."
+      loop_users:
+        type: boolean
+        default: false
+        description: "Loop around users instead of passwords (-u). Critical for avoiding account lockout."
+      password_gen:
+        type: string
+        description: "Generate passwords instead of using a wordlist (-x). Format: 'MIN:MAX:CHARSET'. Overrides passlist."
+      combo_file:
+        type: string
+        description: "Colon-separated login:pass file (-C). Overrides username/password options. Try '/usr/share/seclists/Passwords/Default-Credentials/mysql-betterdefaultpasslist.txt'."
     returns:
       credentials:
         type: array

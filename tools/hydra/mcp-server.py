@@ -32,6 +32,9 @@ class HydraServer(BaseMCPServer):
         "operator", "ftpuser", "sshuser", "administrator", "support", "service",
     ]
 
+    # Password-only services (no username, only -p/-P)
+    PASSWORD_ONLY_SERVICES = {"redis", "cisco", "cisco-enable", "oracle-listener", "snmp", "vnc"}
+
     # Service default ports
     SERVICE_PORTS = {
         "ssh": 22,
@@ -45,14 +48,33 @@ class HydraServer(BaseMCPServer):
         "https-post-form": 443,
         "https-get-form": 443,
         "smb": 445,
+        "smb2": 445,
         "rdp": 3389,
         "mysql": 3306,
+        "mssql": 1433,
         "postgres": 5432,
         "vnc": 5900,
         "telnet": 23,
         "smtp": 25,
         "pop3": 110,
         "imap": 143,
+        "redis": 6379,
+        "mongodb": 27017,
+        "ldap2": 389,
+        "ldap3": 389,
+        "snmp": 161,
+        "sshkey": 22,
+        "http-proxy": 8080,
+        "rtsp": 554,
+        "sip": 5060,
+        "cisco": 23,
+        "cisco-enable": 23,
+        "svn": 3690,
+        "firebird": 3050,
+        "oracle-listener": 1521,
+        "rsh": 514,
+        "rlogin": 513,
+        "rexec": 512,
     }
 
     # Service-specific default threads (encode expert knowledge)
@@ -64,6 +86,15 @@ class HydraServer(BaseMCPServer):
         "smb": 8,       # Windows can be touchy
         "rdp": 4,       # RDP is sensitive to concurrent attempts
         "vnc": 4,
+        "redis": 8,
+        "mongodb": 4,
+        "smb2": 8,
+        "mssql": 4,
+        "ldap2": 8,
+        "ldap3": 8,
+        "sshkey": 4,
+        "oracle-listener": 4,
+        "firebird": 4,
     }
     DEFAULT_THREADS = 16  # For HTTP and other services
 
@@ -145,6 +176,24 @@ class HydraServer(BaseMCPServer):
                     "type": "string",
                     "description": "HTTP form parameters (e.g., 'user=^USER^&pass=^PASS^:F=incorrect')",
                 },
+                "loop_users": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": "Loop around users instead of passwords (-u). Try each password against all users before moving to the next password. Critical for avoiding account lockout.",
+                },
+                "password_gen": {
+                    "type": "string",
+                    "description": "Generate passwords instead of using a wordlist (hydra -x). Format: 'MIN:MAX:CHARSET'. CHARSET: 'a'=lowercase, 'A'=uppercase, '1'=numbers. Examples: '4:4:1' (4-digit PINs), '3:5:aA1' (3-5 chars mixed). Overrides passlist.",
+                },
+                "combo_file": {
+                    "type": "string",
+                    "description": "Colon-separated login:pass file (hydra -C). Each line: 'username:password'. Overrides username/userlist/password/passlist. Useful with default credential lists.",
+                },
+                "ssl": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": "Use SSL for the connection (hydra -S). Required for IMAPS (993), POP3S (995), SMTPS (465). Not needed for HTTPS (use https-* services instead).",
+                },
             },
             handler=self.bruteforce,
         )
@@ -208,6 +257,19 @@ class HydraServer(BaseMCPServer):
                     "default": False,
                     "description": "Include verbose output with each attempt",
                 },
+                "loop_users": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": "Loop around users instead of passwords (-u). Critical for avoiding account lockout.",
+                },
+                "password_gen": {
+                    "type": "string",
+                    "description": "Generate passwords instead of using a wordlist (-x). Format: 'MIN:MAX:CHARSET'. Overrides passlist.",
+                },
+                "combo_file": {
+                    "type": "string",
+                    "description": "Colon-separated login:pass file (-C). Overrides username/password options.",
+                },
             },
             handler=self.ssh_brute,
         )
@@ -270,6 +332,19 @@ class HydraServer(BaseMCPServer):
                     "type": "boolean",
                     "default": False,
                     "description": "Include verbose output with each attempt",
+                },
+                "loop_users": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": "Loop around users instead of passwords (-u). Critical for avoiding account lockout.",
+                },
+                "password_gen": {
+                    "type": "string",
+                    "description": "Generate passwords instead of using a wordlist (-x). Format: 'MIN:MAX:CHARSET'. Overrides passlist.",
+                },
+                "combo_file": {
+                    "type": "string",
+                    "description": "Colon-separated login:pass file (-C). Overrides username/password options.",
                 },
             },
             handler=self.ftp_brute,
@@ -362,6 +437,24 @@ class HydraServer(BaseMCPServer):
                     "default": False,
                     "description": "Include verbose output with each attempt",
                 },
+                "loop_users": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": "Loop around users instead of passwords (-u). Critical for avoiding account lockout.",
+                },
+                "password_gen": {
+                    "type": "string",
+                    "description": "Generate passwords instead of using a wordlist (-x). Format: 'MIN:MAX:CHARSET'. Overrides passlist.",
+                },
+                "combo_file": {
+                    "type": "string",
+                    "description": "Colon-separated login:pass file (-C). Overrides username/password options.",
+                },
+                "ssl": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": "Use SSL for the connection (-S).",
+                },
             },
             handler=self.web_form_brute,
         )
@@ -425,6 +518,19 @@ class HydraServer(BaseMCPServer):
                     "type": "boolean",
                     "default": False,
                     "description": "Include verbose output with each attempt",
+                },
+                "loop_users": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": "Loop around users instead of passwords (-u). Critical for avoiding account lockout.",
+                },
+                "password_gen": {
+                    "type": "string",
+                    "description": "Generate passwords instead of using a wordlist (-x). Format: 'MIN:MAX:CHARSET'. Overrides passlist.",
+                },
+                "combo_file": {
+                    "type": "string",
+                    "description": "Colon-separated login:pass file (-C). Overrides username/password options.",
                 },
             },
             handler=self.mysql_brute,
@@ -549,6 +655,10 @@ class HydraServer(BaseMCPServer):
         verbose: bool = False,
         http_path: Optional[str] = None,
         http_form: Optional[str] = None,
+        loop_users: bool = False,
+        password_gen: Optional[str] = None,
+        combo_file: Optional[str] = None,
+        ssl: bool = False,
     ) -> ToolResult:
         """Brute-force login credentials for a service."""
         start_time = time.time()
@@ -580,23 +690,42 @@ class HydraServer(BaseMCPServer):
         if try_common:
             args.extend(["-e", try_common])
 
-        # Username options
-        if username:
-            args.extend(["-l", username])
-        elif userlist:
-            args.extend(["-L", self._resolve_wordlist(userlist)])
-        else:
-            # Default to common usernames
-            args.extend(["-L", self.WORDLISTS["usernames"]])
+        # Loop around users instead of passwords (avoids account lockout)
+        if loop_users:
+            args.append("-u")
 
-        # Password options
-        if password:
-            args.extend(["-p", password])
-        elif passlist:
-            args.extend(["-P", self._resolve_wordlist(passlist)])
+        # SSL connection
+        if ssl:
+            args.append("-S")
+
+        # Password-only services (redis, snmp, vnc, cisco, oracle-listener)
+        # don't accept -l/-L/-C — only -p/-P
+        is_password_only = service in self.PASSWORD_ONLY_SERVICES
+
+        # Combo file overrides all username/password options
+        if combo_file and not is_password_only:
+            args.extend(["-C", self._resolve_wordlist(combo_file)])
         else:
-            # Default to common passwords if no password specified
-            args.extend(["-P", self.WORDLISTS["common-passwords"]])
+            # Username options (skip for password-only services)
+            if not is_password_only:
+                if username:
+                    args.extend(["-l", username])
+                elif userlist:
+                    args.extend(["-L", self._resolve_wordlist(userlist)])
+                else:
+                    # Default to common usernames
+                    args.extend(["-L", self.WORDLISTS["usernames"]])
+
+            # Password options (password_gen overrides passlist)
+            if password_gen:
+                args.extend(["-x", password_gen])
+            elif password:
+                args.extend(["-p", password])
+            elif passlist:
+                args.extend(["-P", self._resolve_wordlist(passlist)])
+            else:
+                # Default to common passwords if no password specified
+                args.extend(["-P", self.WORDLISTS["common-passwords"]])
 
         # Add target and service
         if port:
@@ -676,7 +805,7 @@ class HydraServer(BaseMCPServer):
                         )
                         stdout = stdout_bytes.decode('utf-8', errors='replace')
                         stderr = stderr_bytes.decode('utf-8', errors='replace')
-                    except:
+                    except Exception:
                         stdout = ""
                         stderr = ""
                 except Exception:
@@ -704,12 +833,7 @@ class HydraServer(BaseMCPServer):
                     success=False,
                     data=parsed,
                     raw_output=sanitize_output(output),
-                    error={
-                        "type": "timeout",
-                        "message": f"Operation timed out after {timeout} seconds",
-                        "partial_results": True,
-                        "credentials_found": len(parsed["credentials"]),
-                    },
+                    error=f"Operation timed out after {timeout} seconds ({len(parsed['credentials'])} credentials found in partial results)",
                 )
 
             # Check for hydra errors (connection failures, etc.)
@@ -718,11 +842,7 @@ class HydraServer(BaseMCPServer):
                     success=False,
                     data=parsed,
                     raw_output=sanitize_output(output),
-                    error={
-                        "type": "hydra_error",
-                        "message": parsed["errors"][0] if parsed["errors"] else "Unknown hydra error",
-                        "errors": parsed["errors"],
-                    },
+                    error=parsed["errors"][0] if parsed["errors"] else "Unknown hydra error",
                 )
 
             return ToolResult(
@@ -752,6 +872,9 @@ class HydraServer(BaseMCPServer):
         stop_on_first: bool = False,
         try_common: Optional[str] = None,
         verbose: bool = False,
+        loop_users: bool = False,
+        password_gen: Optional[str] = None,
+        combo_file: Optional[str] = None,
     ) -> ToolResult:
         """Brute-force SSH login (convenience method with SSH-optimized defaults)."""
         return await self.bruteforce(
@@ -768,6 +891,9 @@ class HydraServer(BaseMCPServer):
             stop_on_first=stop_on_first,
             try_common=try_common,
             verbose=verbose,
+            loop_users=loop_users,
+            password_gen=password_gen,
+            combo_file=combo_file,
         )
 
     async def ftp_brute(
@@ -784,11 +910,14 @@ class HydraServer(BaseMCPServer):
         stop_on_first: bool = False,
         try_common: Optional[str] = None,
         verbose: bool = False,
+        loop_users: bool = False,
+        password_gen: Optional[str] = None,
+        combo_file: Optional[str] = None,
     ) -> ToolResult:
         """Brute-force FTP login (convenience method)."""
         # If no username or userlist specified, try common FTP usernames
         effective_userlist = userlist
-        if not username and not userlist:
+        if not username and not userlist and not combo_file:
             effective_userlist = "usernames"
 
         return await self.bruteforce(
@@ -805,6 +934,9 @@ class HydraServer(BaseMCPServer):
             stop_on_first=stop_on_first,
             try_common=try_common,
             verbose=verbose,
+            loop_users=loop_users,
+            password_gen=password_gen,
+            combo_file=combo_file,
         )
 
     async def web_form_brute(
@@ -827,6 +959,10 @@ class HydraServer(BaseMCPServer):
         stop_on_first: bool = False,
         try_common: Optional[str] = None,
         verbose: bool = False,
+        loop_users: bool = False,
+        password_gen: Optional[str] = None,
+        combo_file: Optional[str] = None,
+        ssl: bool = False,
     ) -> ToolResult:
         """Brute-force web login form."""
         # Build the http_form string for hydra
@@ -855,6 +991,10 @@ class HydraServer(BaseMCPServer):
             try_common=try_common,
             verbose=verbose,
             http_form=form_string,
+            loop_users=loop_users,
+            password_gen=password_gen,
+            combo_file=combo_file,
+            ssl=ssl,
         )
 
     async def mysql_brute(
@@ -871,12 +1011,15 @@ class HydraServer(BaseMCPServer):
         stop_on_first: bool = False,
         try_common: Optional[str] = None,
         verbose: bool = False,
+        loop_users: bool = False,
+        password_gen: Optional[str] = None,
+        combo_file: Optional[str] = None,
     ) -> ToolResult:
         """Brute-force MySQL login."""
         return await self.bruteforce(
             target=target,
             service="mysql",
-            username=username if not userlist else None,
+            username=username if not userlist and not combo_file else None,
             userlist=userlist,
             password=password,
             passlist=passlist,
@@ -887,6 +1030,9 @@ class HydraServer(BaseMCPServer):
             stop_on_first=stop_on_first,
             try_common=try_common,
             verbose=verbose,
+            loop_users=loop_users,
+            password_gen=password_gen,
+            combo_file=combo_file,
         )
 
 

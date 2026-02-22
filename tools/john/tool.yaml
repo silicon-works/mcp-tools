@@ -77,6 +77,16 @@ methods:
         type: integer
         default: 300
         description: "Maximum cracking time in seconds. Default 300s (5 min). For MD5/SHA with rockyou: 1-2 minutes is usually enough. For bcrypt ($2a$, cost 10+): each hash takes ~0.01s to test, so 14M wordlist takes ~40 hours — use 'common' wordlist instead. For NTLM: very fast, 300s is more than enough for rockyou."
+      mask:
+        type: string
+        description: "Mask pattern for targeted cracking (alternative to wordlist). Placeholders: ?l=lowercase, ?u=uppercase, ?d=digit, ?s=special, ?a=all printable. Examples: '?u?l?l?l?d?d?d?d' (Name1234), 'Company?d?d?d?d' (Company + 4 digits), '?d?d?d?d' (4-digit PIN). Overrides wordlist if provided. Much faster than wordlist for known password patterns."
+      incremental:
+        type: boolean
+        default: false
+        description: "Use incremental (brute-force) mode — tries all character combinations. Very slow but guaranteed to find the password eventually. Only practical for short passwords (8 chars or less). Overrides both wordlist and mask."
+      fork:
+        type: integer
+        description: "Number of processes to fork for parallel cracking (--fork=N). Set to number of CPU cores for maximum speed. Most useful for slow hash types like bcrypt and scrypt where each attempt is expensive."
     returns:
       cracked:
         type: array
@@ -87,9 +97,15 @@ methods:
       format:
         type: string
         description: "Hash format used"
+      mode:
+        type: string
+        description: "Cracking mode used: 'wordlist', 'mask', or 'incremental'"
       wordlist:
         type: string
-        description: "Full path to wordlist used"
+        description: "Full path to wordlist used (only present in wordlist mode)"
+      mask:
+        type: string
+        description: "Mask pattern used (only present in mask mode)"
 
   show:
     description: "Show previously cracked passwords from john's pot file (~/.john/john.pot). John caches all cracked passwords persistently — this retrieves results without re-cracking. Writes the hashes to a temp file, runs john --show, and parses the output. Useful for: (1) checking if hashes were already cracked in a previous crack call, (2) retrieving results after a timeout, (3) checking the pot file after manual cracking."
@@ -112,8 +128,8 @@ methods:
         description: "Number of cracked passwords found in pot file"
 
   identify:
-    description: "Attempt to identify the format of an unknown hash by testing it against common john formats (md5, sha1, sha256, sha512, ntlm, bcrypt, raw-md5, raw-sha1). Writes the hash to a temp file and runs john --show with each format to see which ones accept it. Returns a list of possible formats. Note: this is a basic implementation that only tests 8 common formats — for ambiguous hashes, the hash-lookup tool may provide better identification via online hash databases."
-    when_to_use: "When you have a hash but don't know its format — e.g., found a hash in a config file, database, or web application and need to determine the correct john format name before cracking. Common hash patterns to recognize manually: starts with '$1$' = md5crypt, '$5$' = sha256crypt, '$6$' = sha512crypt, '$2a$/$2b$' = bcrypt, 32 hex chars = MD5 or NTLM, 40 hex chars = SHA1, 64 hex chars = SHA256, 128 hex chars = SHA512. If this method returns 'unknown', try the hash-lookup tool or check hash format references online. For hashes from specific sources (MySQL, PostgreSQL, etc.), the format is usually known from context."
+    description: "Identify the format of an unknown hash using pattern matching and john format probing. First checks against 16 common hash patterns (md5crypt, sha256crypt, sha512crypt, bcrypt, phpass, argon2, SSHA, raw-MD5/NTLM, raw-SHA1, raw-SHA256, raw-SHA512, MySQL, etc.). If no pattern matches, falls back to probing 8 john formats. Returns a list of possible format names."
+    when_to_use: "When you have a hash but don't know its format — e.g., found a hash in a config file, database, or web application and need to determine the correct john format name before cracking. Pattern matching handles most common formats instantly. If this method returns 'unknown', try the hash-lookup tool or check hash format references online. For hashes from specific sources (MySQL, PostgreSQL, etc.), the format is usually known from context."
     params:
       hash:
         type: string
@@ -123,3 +139,30 @@ methods:
       possible_formats:
         type: array
         description: "List of john format names that accepted the hash (e.g., ['raw-md5', 'ntlm']). 'unknown' if no format matched. Multiple matches are common for ambiguous hashes (e.g., 32 hex chars matches both raw-md5 and ntlm)."
+
+  convert:
+    description: "Extract a crackable hash from an encrypted file using john's *2john converter scripts. Supports 24 file types including SSH keys, ZIP/RAR/7z archives, PDF/Office documents, password managers (KeePass, Bitwarden, LastPass, 1Password), crypto wallets (Bitcoin, Ethereum), disk encryption (TrueCrypt, LUKS, BitLocker, DMG), and more. The output hash can be passed directly to the crack method."
+    when_to_use: "When you have an encrypted file and need to crack its password. Common scenarios: (1) Found an encrypted SSH private key — use file_type='ssh' to extract the hash, then crack it. (2) Found a password-protected ZIP file — use file_type='zip'. (3) Found a KeePass database — use file_type='keepass'. (4) Found an Ansible vault — use file_type='ansible'. The workflow is always: convert → crack. The file must be accessible inside the container (mount via session directory)."
+    params:
+      file_path:
+        type: string
+        required: true
+        description: "Path to the encrypted file inside the container. Files from the session working directory are mounted at /session/. Examples: '/session/id_rsa', '/session/backup.zip', '/session/vault.kdbx'."
+      file_type:
+        type: enum
+        required: true
+        values: [ssh, zip, rar, pdf, office, 7z, keepass, gpg, bitcoin, ethereum, truecrypt, luks, ansible, bitwarden, lastpass, 1password, keychain, pfx, mozilla, telegram, signal, dmg, bitlocker]
+        description: "Type of encrypted file — determines which *2john converter to use. ssh=SSH private key, zip=ZIP archive, rar=RAR archive, pdf=PDF document, office=MS Office (Word/Excel/PowerPoint), 7z=7-Zip archive, keepass=KeePass database (.kdbx), gpg=GPG encrypted file, bitcoin/ethereum=crypto wallets, truecrypt/luks/bitlocker/dmg=disk encryption, ansible=Ansible vault, bitwarden/lastpass/1password=password manager exports, keychain=macOS keychain, pfx=PKCS#12 certificate, mozilla=Firefox/Thunderbird profiles, telegram/signal=messaging app data."
+    returns:
+      hash:
+        type: string
+        description: "Extracted hash in john-compatible format. Pass this directly to crack method's 'hashes' parameter."
+      file:
+        type: string
+        description: "Original file path"
+      converter:
+        type: string
+        description: "Name of the *2john converter script used (e.g., 'ssh2john.py', 'zip2john')"
+      file_type:
+        type: string
+        description: "File type that was converted"

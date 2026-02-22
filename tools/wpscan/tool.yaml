@@ -61,7 +61,7 @@ methods:
       url:
         type: string
         required: true
-        description: "Target WordPress URL including protocol. Examples: 'http://target.com', 'https://blog.target.com', 'http://target.com/wordpress/'. WPScan auto-detects wp-content and wp-plugins directories. If the site returns 403 or doesn't look like WordPress, use --force (not yet exposed — scan will fail on non-WordPress sites)."
+        description: "Target WordPress URL including protocol. Examples: 'http://target.com', 'https://blog.target.com', 'http://target.com/wordpress/'. WPScan auto-detects wp-content and wp-plugins directories. If the site returns 403 or doesn't look like WordPress, use force=true."
       enumerate:
         type: string
         default: "vp,vt,u"
@@ -74,6 +74,17 @@ methods:
       api_token:
         type: string
         description: "WPVulnDB API token from https://wpscan.com/profile (25 free lookups/day). One API request per WordPress version check, per plugin, per theme. Required for vulnerability data — without it, scan only reports versions, not CVEs. Can also be set via WPSCAN_API_TOKEN environment variable."
+      stealthy:
+        type: boolean
+        default: false
+        description: "Stealthy mode — passive detection + random user agent. Equivalent to WPScan's --stealthy flag (alias for --random-user-agent --detection-mode passive --plugins-version-detection passive). Use when avoiding detection is more important than thoroughness."
+      force:
+        type: boolean
+        default: false
+        description: "Force scan even if the site doesn't appear to be WordPress or returns 403. Useful when WordPress is at a non-standard path, behind a WAF, or the homepage redirects."
+      cookie_string:
+        type: string
+        description: "Cookie string for authenticated scanning. Format: 'cookie1=value1; cookie2=value2'. Useful for scanning behind WAFs that require cookies, or for authenticated-only WordPress installs."
       timeout:
         type: integer
         default: 300
@@ -96,7 +107,7 @@ methods:
         description: "All vulnerabilities found across plugins/themes, each with: plugin/theme name, title, vuln_type, reference URLs. Only populated when API token is provided."
 
   bruteforce:
-    description: "Brute-force WordPress login using wpscan's built-in password attack. Runs wpscan with --passwords and --usernames flags. WPScan auto-detects the best attack method: wp-login (POST to /wp-login.php, 1 password/request), xmlrpc (POST to /xmlrpc.php, faster), or xmlrpc-multicall (batches up to 500 passwords per request via XML-RPC system.multicall — only works on WP < 4.4). Uses --random-user-agent. Parses JSON output for cracked credentials. WARNING: the default wordlist path (/usr/share/wordlists/rockyou.txt) may not exist in the container — check the fix file for this issue."
+    description: "Brute-force WordPress login using wpscan's built-in password attack. Runs wpscan with --passwords and --usernames flags. WPScan auto-detects the best attack method: wp-login (POST to /wp-login.php, 1 password/request), xmlrpc (POST to /xmlrpc.php, faster), or xmlrpc-multicall (batches up to 500 passwords per request via XML-RPC system.multicall — only works on WP < 4.4). Attack mode can be overridden with the attack_mode parameter. Uses --random-user-agent. Parses JSON output for cracked credentials. Ships with rockyou.txt (14M passwords) at /usr/share/wordlists/rockyou.txt."
     when_to_use: "After enumerate_users discovers valid WordPress usernames, especially 'admin' or 'administrator'. The typical WordPress brute-force workflow: (1) enumerate_users to find usernames, (2) bruteforce with a common password list against each user. Try the admin user first — it's the most valuable target (full WordPress admin access). For CTFs, common passwords like 'admin', 'password', 'wordpress' should be tried first. For real engagements, use a targeted wordlist. Note: WordPress has no default lockout mechanism, but security plugins (Wordfence, Sucuri, etc.) may block after failed attempts. XML-RPC multicall bypasses per-request rate limiting on WP < 4.4."
     params:
       url:
@@ -110,7 +121,12 @@ methods:
       wordlist:
         type: string
         default: "/usr/share/wordlists/rockyou.txt"
-        description: "Path to password wordlist file. Default rockyou.txt (14M passwords) may not exist in the container. Alternatives if available: /usr/share/seclists/Passwords/Common-Credentials/10k-most-common.txt, or create a custom wordlist in /tmp/."
+        description: "Path to password wordlist file. Default rockyou.txt (14M passwords) is pre-installed. For faster targeted attempts, create a custom wordlist in /tmp/ or /session/."
+      attack_mode:
+        type: enum
+        values: [auto, wp-login, xmlrpc, xmlrpc-multicall]
+        default: "auto"
+        description: "Password attack method. auto=WPScan picks the best method. wp-login=POST to /wp-login.php (1 password/request, always works). xmlrpc=via XML-RPC wp.getUsersBlogs (faster). xmlrpc-multicall=batches up to 500 passwords per request via system.multicall (fastest, only works on WP < 4.4). Use wp-login when XML-RPC is disabled. Use xmlrpc-multicall for old WordPress installs."
       timeout:
         type: integer
         default: 600

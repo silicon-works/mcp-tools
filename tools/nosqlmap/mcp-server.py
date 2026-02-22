@@ -5,16 +5,13 @@ OpenSploit MCP Server: nosqlmap
 NoSQL injection testing tool for MongoDB, CouchDB, and other NoSQL databases.
 """
 
-import asyncio
 import json
-import os
-import re
-import subprocess
-import tempfile
-from typing import Any, Dict, List, Optional
-from urllib.parse import urlparse, parse_qs, urlencode
+from typing import Any, Dict, Optional
+from urllib.parse import urlparse, parse_qs, urlencode, urlunparse
 
-from mcp_common import BaseMCPServer, ToolResult, ToolError, sanitize_output
+import httpx
+
+from mcp_common import BaseMCPServer, ToolResult
 
 
 class NosqlmapServer(BaseMCPServer):
@@ -53,6 +50,10 @@ class NosqlmapServer(BaseMCPServer):
                     "type": "string",
                     "default": "MongoDB",
                     "description": "Target database type: MongoDB, CouchDB, Redis",
+                },
+                "cookie": {
+                    "type": "string",
+                    "description": "Cookie header value for authenticated testing (e.g., 'session=abc123')",
                 },
                 "timeout": {
                     "type": "integer",
@@ -94,6 +95,10 @@ class NosqlmapServer(BaseMCPServer):
                 "headers": {
                     "type": "object",
                     "description": "Custom headers",
+                },
+                "cookie": {
+                    "type": "string",
+                    "description": "Cookie header value for authenticated testing (e.g., 'session=abc123')",
                 },
                 "timeout": {
                     "type": "integer",
@@ -144,6 +149,10 @@ class NosqlmapServer(BaseMCPServer):
                     "type": "string",
                     "description": "String that indicates failed attempt (e.g., 'Invalid', 'Error')",
                 },
+                "cookie": {
+                    "type": "string",
+                    "description": "Cookie header value for authenticated testing (e.g., 'session=abc123')",
+                },
                 "timeout": {
                     "type": "integer",
                     "default": 120,
@@ -185,14 +194,13 @@ class NosqlmapServer(BaseMCPServer):
         data: Optional[str] = None,
         headers: Optional[Dict[str, str]] = None,
         database_type: str = "MongoDB",
+        cookie: Optional[str] = None,
         timeout: int = 60,
     ) -> ToolResult:
         """Scan a URL for NoSQL injection vulnerabilities."""
-        try:
-            import httpx
-        except ImportError:
-            # Fall back to subprocess with curl
-            pass
+        if cookie:
+            headers = headers or {}
+            headers["Cookie"] = cookie
 
         results = {
             "target": url,
@@ -282,56 +290,42 @@ class NosqlmapServer(BaseMCPServer):
         """Test a single payload against a parameter."""
         result = {"potentially_vulnerable": False, "evidence": ""}
 
-        # Build curl command
-        cmd = ["curl", "-s", "-o", "/dev/null", "-w", "%{http_code}:%{size_download}"]
-
-        if headers:
-            for k, v in headers.items():
-                cmd.extend(["-H", f"{k}: {v}"])
-
-        cmd.extend(["--connect-timeout", str(min(timeout, 10))])
-
-        if method.upper() == "POST":
-            cmd.extend(["-X", "POST"])
-            if data:
-                # Inject payload into data
-                modified_data = self._inject_into_data(data, param, payload)
-                cmd.extend(["-d", modified_data])
-            else:
-                cmd.extend(["-d", f"{param}={payload}"])
-        else:
-            # Inject into URL
-            modified_url = self._inject_into_url(url, param, payload)
-            url = modified_url
-
-        cmd.append(url)
-
         try:
-            proc = await asyncio.create_subprocess_exec(
-                *cmd,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
-            output = stdout.decode().strip()
+            if method.upper() == "POST":
+                if data:
+                    modified_data = self._inject_into_data(data, param, payload)
+                else:
+                    modified_data = f"{param}={payload}"
+                request_url = url
+                request_data = modified_data
+            else:
+                request_url = self._inject_into_url(url, param, payload)
+                request_data = None
 
-            # Parse response
-            if ":" in output:
-                status_code, size = output.split(":", 1)
-                # Look for signs of successful injection
-                # Different response size might indicate different behavior
-                result["status_code"] = status_code
-                result["response_size"] = size
+            async with httpx.AsyncClient(timeout=min(timeout, 10), follow_redirects=False) as client:
+                if method.upper() == "POST":
+                    resp = await client.post(
+                        request_url,
+                        content=request_data,
+                        headers={**(headers or {}), "Content-Type": "application/x-www-form-urlencoded"},
+                    )
+                else:
+                    resp = await client.get(request_url, headers=headers or {})
 
-                # Heuristics for detecting injection
-                if status_code == "500":
-                    result["potentially_vulnerable"] = True
-                    result["evidence"] = "Server error (500) - may indicate injection processing"
-                elif status_code in ["302", "301"] and "auth" in param.lower():
-                    result["potentially_vulnerable"] = True
-                    result["evidence"] = "Redirect response - possible auth bypass"
+            status_code = str(resp.status_code)
+            size = str(len(resp.content))
+            result["status_code"] = status_code
+            result["response_size"] = size
 
-        except asyncio.TimeoutError:
+            # Heuristics for detecting injection
+            if status_code == "500":
+                result["potentially_vulnerable"] = True
+                result["evidence"] = "Server error (500) - may indicate injection processing"
+            elif status_code in ["302", "301"] and "auth" in param.lower():
+                result["potentially_vulnerable"] = True
+                result["evidence"] = "Redirect response - possible auth bypass"
+
+        except httpx.TimeoutException:
             result["error"] = "Timeout"
         except Exception as e:
             result["error"] = str(e)
@@ -355,8 +349,6 @@ class NosqlmapServer(BaseMCPServer):
 
     def _inject_into_url(self, url: str, param: str, payload: str) -> str:
         """Inject payload into URL parameter."""
-        from urllib.parse import urlparse, parse_qs, urlencode, urlunparse
-
         parsed = urlparse(url)
         params = parse_qs(parsed.query, keep_blank_values=True)
 
@@ -374,9 +366,13 @@ class NosqlmapServer(BaseMCPServer):
         data: Optional[str] = None,
         injection_type: str = "auth_bypass",
         headers: Optional[Dict[str, str]] = None,
+        cookie: Optional[str] = None,
         timeout: int = 60,
     ) -> ToolResult:
         """Attempt NoSQL injection with various payloads."""
+        if cookie:
+            headers = headers or {}
+            headers["Cookie"] = cookie
         results = {
             "target": url,
             "parameter": parameter,
@@ -435,11 +431,15 @@ class NosqlmapServer(BaseMCPServer):
         data: Optional[str] = None,
         content_type: str = "form",
         headers: Optional[Dict[str, str]] = None,
+        cookie: Optional[str] = None,
         success_indicator: Optional[str] = None,
         error_indicator: Optional[str] = None,
         timeout: int = 120,
     ) -> ToolResult:
         """Test comprehensive list of NoSQL injection payloads."""
+        if cookie:
+            headers = headers or {}
+            headers["Cookie"] = cookie
         results = {
             "target": url,
             "parameter": parameter,
@@ -541,56 +541,43 @@ class NosqlmapServer(BaseMCPServer):
         timeout: int,
     ) -> Dict[str, Any]:
         """Get response for a payload."""
-        cmd = ["curl", "-s", "-w", "\n%{http_code}:%{size_download}", "--connect-timeout", str(min(timeout, 10))]
-
-        if headers:
-            for k, v in headers.items():
-                cmd.extend(["-H", f"{k}: {v}"])
-
-        if method.upper() == "POST":
-            cmd.extend(["-X", "POST"])
-
-            if content_type == "json":
-                cmd.extend(["-H", "Content-Type: application/json"])
-                if data:
-                    # Try to parse and inject into JSON
-                    try:
-                        json_data = json.loads(data)
-                        json_data[param] = json.loads(payload) if payload.startswith("{") else payload
-                        cmd.extend(["-d", json.dumps(json_data)])
-                    except:
-                        cmd.extend(["-d", data.replace(f'"{param}":', f'"{param}": {payload},')])
-                else:
-                    cmd.extend(["-d", json.dumps({param: payload if not payload.startswith("{") else json.loads(payload)})])
-            else:
-                if data:
-                    modified_data = self._inject_into_data(data, param, payload)
-                    cmd.extend(["-d", modified_data])
-                else:
-                    cmd.extend(["-d", f"{param}={payload}"])
-
-        cmd.append(url)
-
         result = {"status_code": None, "length": None, "body": None}
+        req_headers = dict(headers or {})
 
         try:
-            proc = await asyncio.create_subprocess_exec(
-                *cmd,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout)
-            output = stdout.decode()
+            if method.upper() == "POST":
+                if content_type == "json":
+                    req_headers["Content-Type"] = "application/json"
+                    if data:
+                        try:
+                            json_data = json.loads(data)
+                            json_data[param] = json.loads(payload) if payload.startswith("{") else payload
+                            request_body = json.dumps(json_data)
+                        except Exception:
+                            request_body = data.replace(f'"{param}":', f'"{param}": {payload}')
+                    else:
+                        try:
+                            val = json.loads(payload) if payload.startswith("{") else payload
+                        except Exception:
+                            val = payload
+                        request_body = json.dumps({param: val})
+                else:
+                    req_headers["Content-Type"] = "application/x-www-form-urlencoded"
+                    if data:
+                        request_body = self._inject_into_data(data, param, payload)
+                    else:
+                        request_body = f"{param}={payload}"
 
-            # Parse response
-            lines = output.strip().split("\n")
-            if lines:
-                last_line = lines[-1]
-                if ":" in last_line:
-                    status, length = last_line.split(":", 1)
-                    result["status_code"] = status
-                    result["length"] = length
-                    result["body"] = "\n".join(lines[:-1])
+                async with httpx.AsyncClient(timeout=min(timeout, 10), follow_redirects=False) as client:
+                    resp = await client.post(url, content=request_body, headers=req_headers)
+            else:
+                request_url = self._inject_into_url(url, param, payload)
+                async with httpx.AsyncClient(timeout=min(timeout, 10), follow_redirects=False) as client:
+                    resp = await client.get(request_url, headers=req_headers)
+
+            result["status_code"] = str(resp.status_code)
+            result["length"] = str(len(resp.content))
+            result["body"] = resp.text
 
         except Exception as e:
             result["error"] = str(e)
@@ -599,5 +586,4 @@ class NosqlmapServer(BaseMCPServer):
 
 
 if __name__ == "__main__":
-    server = NosqlmapServer()
-    server.run()
+    NosqlmapServer.main()

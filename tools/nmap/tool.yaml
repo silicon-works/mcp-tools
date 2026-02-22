@@ -56,7 +56,7 @@ resources:
 methods:
   port_scan:
     description: "Scan for open ports on a target using the specified scan technique. Runs nmap with XML output parsing. Supports TCP Connect (-sT, unprivileged), SYN stealth (-sS, requires privileged), UDP (-sU, requires privileged, slower), and ACK (-sA, requires privileged, for firewall rule detection). Results include port number, state (open/closed/filtered), protocol, and basic service name."
-    when_to_use: "The very first step in any engagement — run this to discover what ports are open and what services are exposed. Use tcp_connect scan type if running unprivileged, syn for faster stealth scanning with privileges. Scan common ports first (default 1-1000), then expand to all 65535 if needed. For targets behind a firewall that filter ICMP, the scan may report 'host down' — in that case the target may still be reachable but host discovery needs to be bypassed (not currently exposed as a parameter). Follow up open ports with service_scan for version detection."
+    when_to_use: "The very first step in any engagement — run this to discover what ports are open and what services are exposed. Use tcp_connect scan type if running unprivileged, syn for faster stealth scanning with privileges. Scan common ports first (default 1-1000), then expand to all 65535 if needed. For targets behind a firewall that filter ICMP, the scan may report 'host down' — use skip_discovery=true (-Pn) to bypass host discovery and scan anyway. Follow up open ports with service_scan for version detection."
     requires_privileged:
       tcp_connect: false
       syn: true
@@ -81,6 +81,13 @@ methods:
         values: [paranoid, sneaky, polite, normal, aggressive, insane]
         default: normal
         description: "Timing template: 'paranoid' (T0, IDS evasion, very slow), 'sneaky' (T1, IDS evasion), 'polite' (T2, less bandwidth), 'normal' (T3, default), 'aggressive' (T4, faster, assumes reliable network — recommended for HTB/labs), 'insane' (T5, fastest, may miss ports on unreliable networks)."
+      skip_discovery:
+        type: boolean
+        default: false
+        description: "Skip host discovery (-Pn). Use when target filters ICMP and nmap reports 'host seems down'. Common in HTB and firewalled environments."
+      top_ports:
+        type: integer
+        description: "Scan the N most common ports instead of a range. Mutually exclusive with 'ports'. Common values: 100 (fast), 1000 (thorough)."
     returns:
       open_ports:
         type: array
@@ -105,6 +112,13 @@ methods:
         type: string
         required: true
         description: "Ports to probe (from port_scan results). Comma-separated or range: '22,80,443,8080' or '1-1000'. Only scan ports that were found open — scanning closed ports wastes time."
+      skip_discovery:
+        type: boolean
+        default: false
+        description: "Skip host discovery (-Pn). Use when target filters ICMP and nmap reports 'host seems down'."
+      version_intensity:
+        type: integer
+        description: "Version detection probe intensity 0-9. Default uses nmap's default 7. Use 2 for fast scan, 9 for thorough."
     returns:
       services_summary:
         type: array
@@ -122,6 +136,10 @@ methods:
         type: string
         required: true
         description: "IP address or hostname (single target — OS detection doesn't work well with CIDR ranges)"
+      skip_discovery:
+        type: boolean
+        default: false
+        description: "Skip host discovery (-Pn). Use when target filters ICMP and nmap reports 'host seems down'."
     returns:
       os_summary:
         type: object
@@ -147,6 +165,13 @@ methods:
         type: string
         default: "vuln"
         description: "NSE script specification. Categories: 'vuln' (vulnerability detection), 'exploit' (active exploitation), 'brute' (brute-force), 'auth' (auth bypass), 'default' (safe defaults), 'discovery' (enumeration), 'safe' (non-intrusive). Specific scripts: 'smb-vuln-ms17-010', 'http-shellshock', 'ssl-heartbleed', 'ftp-anon'. Combine with 'and'/'or'/'not': 'vuln and safe', 'smb-vuln-*'. Comma-separated for multiple: 'http-shellshock,http-vuln-cve2017-5638'."
+      script_args:
+        type: string
+        description: "Arguments for NSE scripts (e.g., 'userdb=users.txt,passdb=pass.txt' for brute scripts)"
+      skip_discovery:
+        type: boolean
+        default: false
+        description: "Skip host discovery (-Pn). Use when target filters ICMP and nmap reports 'host seems down'."
     returns:
       vulnerabilities:
         type: array
@@ -157,6 +182,27 @@ methods:
       hosts:
         type: array
         description: "Full nmap XML-parsed results including all script outputs (not just vulnerabilities)"
+
+  ping_scan:
+    description: "Discover live hosts on a network without port scanning (-sn). Sends ICMP echo, TCP SYN to 443, TCP ACK to 80, and ICMP timestamp probes. Returns list of hosts that responded with their IP addresses."
+    when_to_use: "For network host discovery before individual port scans. Use on CIDR ranges (e.g., '192.168.1.0/24') to find which IPs are alive before spending time on port scanning each one."
+    params:
+      target:
+        type: string
+        required: true
+        description: "CIDR range or target (e.g., '192.168.1.0/24', '10.10.10.0/24')"
+      timing:
+        type: enum
+        values: [paranoid, sneaky, polite, normal, aggressive, insane]
+        default: normal
+        description: "Timing template"
+    returns:
+      live_hosts:
+        type: array
+        description: "IP addresses of hosts that responded"
+      total_live:
+        type: integer
+        description: "Number of live hosts discovered"
 
   get_interfaces:
     description: "Get local network interfaces and IP addresses using 'ip -j addr'. Returns all interfaces with their IPv4/IPv6 addresses, MAC addresses, and link state. Automatically identifies the best LHOST candidate (first non-loopback IPv4 address). Does NOT require network access or privileged mode."

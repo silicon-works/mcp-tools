@@ -35,6 +35,8 @@ routing:
     - "dump MongoDB collection contents"
     - "search for passwords tokens secrets in MongoDB"
     - "post-exploitation MongoDB data exfiltration"
+    - "connect to MongoDB using connection string URI"
+    - "MongoDB TLS encrypted connection"
   never_use_for:
     - "SQL databases (use mysql or sqlite)"
     - "NoSQL injection (use nosqlmap)"
@@ -49,13 +51,12 @@ routing:
 
 methods:
   connect:
-    description: "Test connection to a MongoDB server by sending a ping command to the admin database and retrieving server_info(). Verifies whether the server accepts unauthenticated connections or requires credentials. Returns the MongoDB server version and whether authentication was used."
-    when_to_use: "First step when nmap discovers port 27017 (or another MongoDB port) open. Tests whether the MongoDB instance allows unauthenticated access (common misconfiguration) or requires credentials. Try without username/password first — if it succeeds, the server has no auth and you can proceed to list_databases. If it fails with 'Authentication failed', try known credentials or default credentials."
+    description: "Test connection to a MongoDB server by sending a ping command to the admin database and retrieving server_info(). Verifies whether the server accepts unauthenticated connections or requires credentials. Returns the MongoDB server version and whether authentication was used. Supports TLS connections and direct URI connection strings."
+    when_to_use: "First step when nmap discovers port 27017 (or another MongoDB port) open. Tests whether the MongoDB instance allows unauthenticated access (common misconfiguration) or requires credentials. Try without username/password first — if it succeeds, the server has no auth and you can proceed to list_databases. If it fails with 'Authentication failed', try known credentials or default credentials. If you found a MongoDB connection string in a config file, pass it via the uri param."
     params:
       host:
         type: string
-        required: true
-        description: "MongoDB hostname or IP (e.g., '10.10.10.1', 'target.htb')"
+        description: "MongoDB hostname or IP (e.g., '10.10.10.1', 'target.htb'). Not required if uri is provided."
       port:
         type: integer
         default: 27017
@@ -70,6 +71,17 @@ methods:
         type: string
         default: admin
         description: "Authentication database — the database that contains the user credentials. Default 'admin'. Some apps use their own database for auth (e.g., 'myapp')."
+      uri:
+        type: string
+        description: "Full MongoDB connection string URI (e.g., 'mongodb://user:pass@host:27017/db?authSource=admin'). If provided, overrides host/port/username/password/auth_db params. Useful when you find a connection string in config files."
+      tls:
+        type: boolean
+        default: false
+        description: "Enable TLS for the connection. Required for MongoDB instances configured with TLS/SSL."
+      tls_insecure:
+        type: boolean
+        default: false
+        description: "Allow invalid TLS certificates and hostnames (for self-signed certs). Only effective when tls=true."
       timeout:
         type: integer
         default: 5
@@ -91,8 +103,7 @@ methods:
     params:
       host:
         type: string
-        required: true
-        description: "MongoDB hostname or IP"
+        description: "MongoDB hostname or IP (not required if uri is provided)"
       port:
         type: integer
         default: 27017
@@ -107,6 +118,17 @@ methods:
         type: string
         default: admin
         description: "Authentication database"
+      uri:
+        type: string
+        description: "Full MongoDB connection string URI. Overrides host/port/username/password/auth_db."
+      tls:
+        type: boolean
+        default: false
+        description: "Enable TLS for the connection"
+      tls_insecure:
+        type: boolean
+        default: false
+        description: "Allow invalid TLS certificates and hostnames"
     returns:
       databases:
         type: array
@@ -121,8 +143,7 @@ methods:
     params:
       host:
         type: string
-        required: true
-        description: "MongoDB hostname or IP"
+        description: "MongoDB hostname or IP (not required if uri is provided)"
       database:
         type: string
         required: true
@@ -141,6 +162,17 @@ methods:
         type: string
         default: admin
         description: "Authentication database"
+      uri:
+        type: string
+        description: "Full MongoDB connection string URI. Overrides host/port/username/password/auth_db."
+      tls:
+        type: boolean
+        default: false
+        description: "Enable TLS for the connection"
+      tls_insecure:
+        type: boolean
+        default: false
+        description: "Allow invalid TLS certificates and hostnames"
     returns:
       collections:
         type: array
@@ -150,13 +182,12 @@ methods:
         description: "Number of collections in the database"
 
   query:
-    description: "Query documents from a MongoDB collection using filter and projection. Runs collection.find(filter, projection).limit(N) via pymongo. ObjectIds are auto-serialized to strings, bytes to hex. Returns documents as JSON-serializable dictionaries."
-    when_to_use: "When you need to retrieve specific documents matching criteria — e.g., find admin users, search for specific email addresses, find documents with password fields. Use filter for matching and projection to select only needed fields (reduces output size). For dumping all documents without filtering, use dump_collection instead."
+    description: "Query documents from a MongoDB collection using filter, projection, and sort. Runs collection.find(filter, projection).sort(sort).limit(N) via pymongo. ObjectIds are auto-serialized to strings, bytes to hex. Returns documents as JSON-serializable dictionaries."
+    when_to_use: "When you need to retrieve specific documents matching criteria — e.g., find admin users, search for specific email addresses, find documents with password fields. Use filter for matching and projection to select only needed fields (reduces output size). Use sort to order results (e.g., newest first). For dumping all documents without filtering, use dump_collection instead."
     params:
       host:
         type: string
-        required: true
-        description: "MongoDB hostname or IP"
+        description: "MongoDB hostname or IP (not required if uri is provided)"
       database:
         type: string
         required: true
@@ -172,6 +203,9 @@ methods:
       projection:
         type: object
         description: "Fields to include or exclude from results. Use {\"field\": 1} to include or {\"field\": 0} to exclude. Examples: {\"username\": 1, \"password\": 1} (only these fields + _id), {\"_id\": 0, \"largeBlob\": 0} (exclude specific fields). Cannot mix include and exclude (except _id)."
+      sort:
+        type: object
+        description: "Sort order as JSON object. Use 1 for ascending, -1 for descending. Examples: {\"created_at\": -1} for newest first, {\"username\": 1} for alphabetical, {\"score\": -1, \"name\": 1} for multi-field sort."
       limit:
         type: integer
         default: 100
@@ -190,6 +224,17 @@ methods:
         type: string
         default: admin
         description: "Authentication database"
+      uri:
+        type: string
+        description: "Full MongoDB connection string URI. Overrides host/port/username/password/auth_db."
+      tls:
+        type: boolean
+        default: false
+        description: "Enable TLS for the connection"
+      tls_insecure:
+        type: boolean
+        default: false
+        description: "Allow invalid TLS certificates and hostnames"
     returns:
       documents:
         type: array
@@ -204,8 +249,7 @@ methods:
     params:
       host:
         type: string
-        required: true
-        description: "MongoDB hostname or IP"
+        description: "MongoDB hostname or IP (not required if uri is provided)"
       database:
         type: string
         required: true
@@ -232,6 +276,17 @@ methods:
         type: string
         default: admin
         description: "Authentication database"
+      uri:
+        type: string
+        description: "Full MongoDB connection string URI. Overrides host/port/username/password/auth_db."
+      tls:
+        type: boolean
+        default: false
+        description: "Enable TLS for the connection"
+      tls_insecure:
+        type: boolean
+        default: false
+        description: "Allow invalid TLS certificates and hostnames"
     returns:
       documents:
         type: array
@@ -241,13 +296,12 @@ methods:
         description: "Number of documents returned"
 
   find_credentials:
-    description: "Automatically search for credential-related data across databases and collections. Scans all non-system databases (excludes admin, config, local) for collections whose names match 14 credential patterns (users, accounts, members, admins, admin, credentials, auth, authentication, login, user, account, member, passwords). For matching collections, samples up to 20 documents and checks for field names matching 12 password patterns (password, passwd, pass, pwd, secret, hash, token, api_key, apikey, key, credential, auth). Returns up to 5 sample documents per matching collection."
-    when_to_use: "First thing to run after connecting to a MongoDB server to automatically find stored credentials. Searches across ALL non-system databases so you don't need to enumerate databases/collections manually first. If this returns no results (no credential-pattern collection names found), fall back to manual enumeration: list_databases → list_collections → dump_collection on interesting collections."
+    description: "Automatically search for credential-related data across databases and collections. Two-pass search: first scans collections whose names match 14 credential patterns (users, accounts, members, admins, credentials, auth, login, passwords, etc.), then scans ALL remaining collections for documents containing credential-like field names (password, hash, token, api_key, secret, etc.). This second pass catches credentials stored in non-obviously-named collections (e.g., 'staff', 'people', 'data'). Returns up to 5 sample documents per matching collection with match_type indicating how it was found ('collection_name' or 'field_pattern')."
+    when_to_use: "First thing to run after connecting to a MongoDB server to automatically find stored credentials. Searches across ALL non-system databases so you don't need to enumerate databases/collections manually first. The two-pass approach means it won't miss credentials even if they're in collections with non-obvious names. If this returns no results, fall back to manual enumeration: list_databases → list_collections → dump_collection on interesting collections."
     params:
       host:
         type: string
-        required: true
-        description: "MongoDB hostname or IP"
+        description: "MongoDB hostname or IP (not required if uri is provided)"
       database:
         type: string
         description: "Specific database to search. If omitted, searches ALL non-system databases (admin, config, local are excluded). Specify a database to narrow the search."
@@ -265,10 +319,21 @@ methods:
         type: string
         default: admin
         description: "Authentication database"
+      uri:
+        type: string
+        description: "Full MongoDB connection string URI. Overrides host/port/username/password/auth_db."
+      tls:
+        type: boolean
+        default: false
+        description: "Enable TLS for the connection"
+      tls_insecure:
+        type: boolean
+        default: false
+        description: "Allow invalid TLS certificates and hostnames"
     returns:
       findings:
         type: array
-        description: "Matching collections, each with: 'database' name, 'collection' name, 'document_count' (total docs in collection), 'has_credential_fields' (boolean, whether field names match password patterns), 'sample_documents' (up to 5 sample docs with all fields)"
+        description: "Matching collections, each with: 'database' name, 'collection' name, 'document_count' (total docs in collection), 'has_credential_fields' (boolean), 'match_type' ('collection_name' if matched by name, 'field_pattern' if matched by field content), 'sample_documents' (up to 5 sample docs with all fields)"
       databases_searched:
         type: array
         description: "List of database names that were searched"
@@ -282,8 +347,7 @@ methods:
     params:
       host:
         type: string
-        required: true
-        description: "MongoDB hostname or IP"
+        description: "MongoDB hostname or IP (not required if uri is provided)"
       port:
         type: integer
         default: 27017
@@ -298,6 +362,17 @@ methods:
         type: string
         default: admin
         description: "Authentication database"
+      uri:
+        type: string
+        description: "Full MongoDB connection string URI. Overrides host/port/username/password/auth_db."
+      tls:
+        type: boolean
+        default: false
+        description: "Enable TLS for the connection"
+      tls_insecure:
+        type: boolean
+        default: false
+        description: "Allow invalid TLS certificates and hostnames"
     returns:
       version:
         type: string
