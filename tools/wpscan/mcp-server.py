@@ -85,8 +85,8 @@ class WpscanServer(BaseMCPServer):
                 },
                 "wordlist": {
                     "type": "string",
-                    "default": "/usr/share/wordlists/rockyou.txt",
-                    "description": "Password wordlist path",
+                    "required": True,
+                    "description": "Password wordlist path (e.g., '/session/wordlists/rockyou.txt'). Download wordlist to /session/wordlists/ first using curl.download_to_file.",
                 },
                 "attack_mode": {
                     "type": "string",
@@ -304,7 +304,7 @@ class WpscanServer(BaseMCPServer):
         self,
         url: str,
         username: str,
-        wordlist: str = "/usr/share/wordlists/rockyou.txt",
+        wordlist: str,
         attack_mode: str = "auto",
         timeout: int = 600,
     ) -> ToolResult:
