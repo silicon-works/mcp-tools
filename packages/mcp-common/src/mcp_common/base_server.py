@@ -28,7 +28,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(level
 class ToolResult:
     """Result from a tool execution."""
     success: bool
-    data: Dict[str, Any]
+    data: Dict[str, Any] = field(default_factory=dict)
     raw_output: str = ""
     error: Optional[str] = None
 

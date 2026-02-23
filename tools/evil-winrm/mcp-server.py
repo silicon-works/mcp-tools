@@ -2,12 +2,12 @@
 """
 OpenSploit MCP Server: evil-winrm
 
-WinRM command execution and file transfer using pywinrm.
-Named evil-winrm for routing discoverability, but uses pywinrm
-under the hood for reliable non-interactive execution.
+WinRM command execution and file transfer using pypsrp.
+pypsrp natively supports the PowerShell plugin URI, avoiding the CMD
+shell Invoke restriction that blocks pywinrm on Windows Server 2025
+for non-admin WinRM users.
 """
 
-import base64
 import os
 from typing import Optional
 
@@ -15,13 +15,13 @@ from mcp_common import BaseMCPServer, ToolResult, ToolError
 
 
 class EvilWinRMServer(BaseMCPServer):
-    """MCP server for WinRM operations using pywinrm."""
+    """MCP server for WinRM operations using pypsrp."""
 
     def __init__(self):
         super().__init__(
             name="evil-winrm",
             description="WinRM shell for command execution and file transfer",
-            version="1.0.0",
+            version="2.0.0",
         )
 
         self.register_method(
@@ -37,7 +37,7 @@ class EvilWinRMServer(BaseMCPServer):
                 "shell": {
                     "type": "enum",
                     "values": ["powershell", "cmd"],
-                    "description": "Shell to use: 'powershell' (run_ps) or 'cmd' (run_cmd). Default: powershell",
+                    "description": "Shell to use: 'powershell' (default, native PSRP) or 'cmd' (WinRS CMD shell)",
                 },
                 "ssl": {"type": "boolean", "description": "Use SSL (port 5986)"},
                 "port": {"type": "integer", "description": "Custom port (default: 5985 or 5986 for SSL)"},
@@ -79,27 +79,22 @@ class EvilWinRMServer(BaseMCPServer):
             handler=self.download,
         )
 
-    def _get_session(self, target: str, username: str, password: Optional[str] = None,
-                     hash: Optional[str] = None, domain: Optional[str] = None,
-                     ssl: bool = False, port: Optional[int] = None):
-        """Create a pywinrm session.
+    def _get_client(self, target: str, username: str, password: Optional[str] = None,
+                    hash: Optional[str] = None, domain: Optional[str] = None,
+                    ssl: bool = False, port: Optional[int] = None):
+        """Create a pypsrp Client.
 
         Authentication priority: hash (pass-the-hash) > password.
         When hash is provided, it is formatted as LM:NT for pyspnego
         auto-detection of NTLM hash auth.
         """
-        import winrm
+        from pypsrp.client import Client
 
-        scheme = "https" if ssl else "http"
         actual_port = port or (5986 if ssl else 5985)
-        endpoint = f"{scheme}://{target}:{actual_port}/wsman"
-
-        # Build username with domain if provided
-        auth_user = f"{domain}\\{username}" if domain else username
 
         # Determine auth credential: hash takes priority over password
         if hash:
-            # pywinrm/pyspnego auto-detects LM:NT format for pass-the-hash
+            # pypsrp/pyspnego auto-detects LM:NT format for pass-the-hash
             if ":" not in hash:
                 # Bare NT hash — prepend empty LM hash
                 auth_pass = f"00000000000000000000000000000000:{hash}"
@@ -108,43 +103,49 @@ class EvilWinRMServer(BaseMCPServer):
         else:
             auth_pass = password or ""
 
-        session = winrm.Session(
-            endpoint,
-            auth=(auth_user, auth_pass),
-            transport="ntlm",
-            server_cert_validation="ignore",
+        client = Client(
+            target,
+            username=username,
+            password=auth_pass,
+            port=actual_port,
+            ssl=ssl,
+            auth="ntlm",
+            cert_validation=False,
+            connection_timeout=30,
         )
-        return session
+        return client
 
     async def exec_cmd(self, target: str, username: str, command: str,
                        password: Optional[str] = None, hash: Optional[str] = None,
                        domain: Optional[str] = None, shell: str = "powershell",
                        ssl: bool = False, port: Optional[int] = None) -> ToolResult:
-        """Execute a command via WinRM using PowerShell or CMD."""
+        """Execute a command via WinRM using PowerShell (PSRP) or CMD (WinRS)."""
         shell_label = "CMD" if shell == "cmd" else "PowerShell"
-        self.logger.info(f"WinRM exec ({shell_label}): {target} as {username}")
+        # Prepend domain to username for NTLM auth
+        auth_user = f"{domain}\\{username}" if domain else username
+        self.logger.info(f"WinRM exec ({shell_label}): {target} as {auth_user}")
 
         try:
-            session = self._get_session(target, username, password, hash, domain, ssl, port)
+            client = self._get_client(target, auth_user, password, hash, None, ssl, port)
 
             if shell == "cmd":
-                result = session.run_cmd(command)
+                stdout, stderr, rc = client.execute_cmd(command)
             else:
-                result = session.run_ps(command)
-
-            stdout = result.std_out.decode("utf-8", errors="replace") if result.std_out else ""
-            stderr = result.std_err.decode("utf-8", errors="replace") if result.std_err else ""
+                # execute_ps returns (stdout: str, streams: PSDataStreams, had_errors: bool)
+                stdout, streams, had_errors = client.execute_ps(command)
+                stderr = "\n".join(str(e) for e in streams.error) if streams.error else ""
+                rc = 1 if had_errors else 0
 
             return ToolResult(
-                success=result.status_code == 0,
+                success=rc == 0,
                 data={
-                    "output": stdout.strip(),
-                    "stderr": stderr.strip() if stderr.strip() else None,
-                    "exit_code": result.status_code,
+                    "output": stdout.strip() if stdout else "",
+                    "stderr": stderr.strip() if stderr and stderr.strip() else None,
+                    "exit_code": rc,
                     "shell": shell_label,
                 },
-                raw_output=stdout.strip(),
-                error=stderr.strip() if result.status_code != 0 and stderr.strip() else None,
+                raw_output=stdout.strip() if stdout else "",
+                error=stderr.strip() if rc != 0 and stderr and stderr.strip() else None,
             )
         except Exception as e:
             return ToolResult(
@@ -157,79 +158,41 @@ class EvilWinRMServer(BaseMCPServer):
                      password: Optional[str] = None, hash: Optional[str] = None,
                      domain: Optional[str] = None,
                      ssl: bool = False, port: Optional[int] = None) -> ToolResult:
-        """Upload a file to the target via WinRM using PowerShell base64 transfer."""
+        """Upload a file to the target via WinRM using native PSRP copy."""
+        auth_user = f"{domain}\\{username}" if domain else username
         self.logger.info(f"WinRM upload: {local_path} -> {remote_path} on {target}")
 
         if not os.path.isfile(local_path):
-            return ToolResult(success=False, error=f"Local file not found: {local_path}")
+            return ToolResult(success=False, error=f"Local file not found: {local_path}", data={})
 
         try:
-            session = self._get_session(target, username, password, hash, domain, ssl, port)
+            client = self._get_client(target, auth_user, password, hash, None, ssl, port)
 
-            # Read and base64-encode the file
-            with open(local_path, "rb") as f:
-                content = f.read()
-
-            b64_content = base64.b64encode(content).decode("ascii")
-
-            # Upload via PowerShell in chunks (WinRM has message size limits)
-            chunk_size = 50000  # ~50KB per chunk (before base64)
-            chunks = [b64_content[i:i + chunk_size] for i in range(0, len(b64_content), chunk_size)]
-
-            # First chunk: create file
-            ps_cmd = f'$b64 = "{chunks[0]}"; [IO.File]::WriteAllBytes("{remote_path}", [Convert]::FromBase64String($b64))'
-            result = session.run_ps(ps_cmd)
-
-            if result.status_code != 0:
-                stderr = result.std_err.decode("utf-8", errors="replace")
-                return ToolResult(success=False, error=f"Upload failed: {stderr}")
-
-            # Append remaining chunks
-            for chunk in chunks[1:]:
-                ps_cmd = (
-                    f'$b64 = "{chunk}"; '
-                    f'$existing = [IO.File]::ReadAllBytes("{remote_path}"); '
-                    f'$new = [Convert]::FromBase64String($b64); '
-                    f'$combined = $existing + $new; '
-                    f'[IO.File]::WriteAllBytes("{remote_path}", $combined)'
-                )
-                result = session.run_ps(ps_cmd)
-                if result.status_code != 0:
-                    stderr = result.std_err.decode("utf-8", errors="replace")
-                    return ToolResult(success=False, error=f"Upload chunk failed: {stderr}")
+            file_size = os.path.getsize(local_path)
+            client.copy(local_path, remote_path)
 
             return ToolResult(
                 success=True,
                 data={
                     "local_path": local_path,
                     "remote_path": remote_path,
-                    "size": len(content),
+                    "size": file_size,
                 },
-                raw_output=f"Uploaded {len(content)} bytes to {remote_path}",
+                raw_output=f"Uploaded {file_size} bytes to {remote_path}",
             )
         except Exception as e:
-            return ToolResult(success=False, error=f"Upload failed: {str(e)}")
+            return ToolResult(success=False, error=f"Upload failed: {str(e)}", data={})
 
     async def download(self, target: str, username: str, remote_path: str,
                        password: Optional[str] = None, hash: Optional[str] = None,
                        domain: Optional[str] = None, local_path: Optional[str] = None,
                        ssl: bool = False, port: Optional[int] = None) -> ToolResult:
-        """Download a file from the target via WinRM using PowerShell base64 transfer."""
+        """Download a file from the target via WinRM using native PSRP fetch."""
+        auth_user = f"{domain}\\{username}" if domain else username
         self.logger.info(f"WinRM download: {remote_path} from {target}")
 
         try:
-            session = self._get_session(target, username, password, hash, domain, ssl, port)
-
-            # Download via base64 encoding
-            ps_cmd = f'[Convert]::ToBase64String([IO.File]::ReadAllBytes("{remote_path}"))'
-            result = session.run_ps(ps_cmd)
-
-            if result.status_code != 0:
-                stderr = result.std_err.decode("utf-8", errors="replace")
-                return ToolResult(success=False, error=f"Download failed: {stderr}")
-
-            b64_content = result.std_out.decode("utf-8").strip()
-            content = base64.b64decode(b64_content)
+            client = self._get_client(target, auth_user, password, hash, None, ssl, port)
 
             # Determine local save path
             if not local_path:
@@ -237,20 +200,21 @@ class EvilWinRMServer(BaseMCPServer):
                 local_path = f"/session/artifacts/{filename}"
 
             os.makedirs(os.path.dirname(local_path), exist_ok=True)
-            with open(local_path, "wb") as f:
-                f.write(content)
+            client.fetch(remote_path, local_path)
+
+            file_size = os.path.getsize(local_path)
 
             return ToolResult(
                 success=True,
                 data={
                     "remote_path": remote_path,
                     "local_path": local_path,
-                    "size": len(content),
+                    "size": file_size,
                 },
-                raw_output=f"Downloaded {len(content)} bytes from {remote_path} to {local_path}",
+                raw_output=f"Downloaded {file_size} bytes from {remote_path} to {local_path}",
             )
         except Exception as e:
-            return ToolResult(success=False, error=f"Download failed: {str(e)}")
+            return ToolResult(success=False, error=f"Download failed: {str(e)}", data={})
 
 
 if __name__ == "__main__":

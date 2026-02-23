@@ -1,6 +1,6 @@
 name: evil-winrm
-version: "0.5.0"
-description: "WinRM shell for Windows remote management using pywinrm v0.5.0 (Python). 3 methods: exec (PowerShell run_ps or CMD run_cmd), upload (base64-chunked file transfer to target), download (base64-encoded file retrieval from target). Supports NTLM pass-the-hash via pyspnego auto-detection of LM:NT hash format — bare NT hashes auto-prefixed with 32 zero bytes. Connects via HTTP (5985) or HTTPS (5986) using NTLM transport. WinRM requires membership in 'Remote Management Users' or 'Administrators' group. Named for routing discoverability; implementation uses pywinrm (not Ruby evil-winrm) for reliable non-interactive MCP execution."
+version: "2.0.0"
+description: "WinRM shell for Windows remote management using pypsrp v0.8+ (Python PowerShell Remoting Protocol). 3 methods: exec (native PowerShell via PSRP plugin URI, or CMD via WinRS), upload (native PSRP copy), download (native PSRP fetch). pypsrp uses the PowerShell plugin URI directly — works for non-admin WinRM users on Windows Server 2025 where CMD Invoke is restricted. Supports NTLM pass-the-hash via pyspnego auto-detection of LM:NT hash format — bare NT hashes auto-prefixed with 32 zero bytes. Connects via HTTP (5985) or HTTPS (5986) using NTLM transport. WinRM requires membership in 'Remote Management Users' or 'Administrators' group."
 image: "ghcr.io/silicon-works/mcp-tools-evil-winrm:latest"
 image_size_mb: 300
 timeout_seconds: 300
@@ -57,7 +57,7 @@ see_also:
 methods:
   exec:
     required_ports: [5985]
-    description: "Execute a command on a remote Windows host via WinRM using pywinrm. Two shell modes: PowerShell (run_ps, default) executes via PowerShell with CLIXML error parsing, CMD (run_cmd) executes native Windows commands. Authentication via NTLM transport — supports password or NTLM hash (pass-the-hash via pyspnego LM:NT auto-detection). Domain prefix auto-applied as DOMAIN\\username format. Returns stdout, stderr, exit code, and shell type used."
+    description: "Execute a command on a remote Windows host via WinRM using pypsrp. Two shell modes: PowerShell (default) uses native PSRP plugin URI (http://schemas.microsoft.com/powershell/Microsoft.PowerShell) — works for non-admin users on Windows Server 2025. CMD uses WinRS CMD shell URI. Authentication via NTLM transport — supports password or NTLM hash (pass-the-hash via pyspnego LM:NT auto-detection). Domain prefix auto-applied as DOMAIN\\username format. Returns stdout, stderr, exit code, and shell type used."
     when_to_use: "When you have valid Windows credentials (password or NTLM hash) and WinRM port 5985 is open. Preferred over netexec winrm when you need: (1) Reliable single-command execution with clean stdout/stderr separation, (2) PowerShell script execution with proper error handling, (3) CMD commands that don't work well in PowerShell (e.g., 'dir /s', 'type', 'reg query'), (4) Pass-the-hash execution when only WinRM is available. For multi-target credential spraying, use netexec winrm instead. For credential dumping (SAM/LSA/DPAPI), use netexec winrm which has built-in dump methods."
     params:
       target:
@@ -103,8 +103,8 @@ methods:
 
   upload:
     required_ports: [5985]
-    description: "Upload a local file to the target Windows machine via WinRM using PowerShell base64-chunked transfer. File is read locally, base64-encoded, split into ~50KB chunks, and reassembled on target using [IO.File]::WriteAllBytes and [Convert]::FromBase64String. First chunk creates the file, subsequent chunks append. Supports password and NTLM hash authentication."
-    when_to_use: "To transfer tools, scripts, exploits, or payloads to the target Windows machine when only WinRM is available. Use for: (1) Upload compiled exploits to C:\\Windows\\Temp for privilege escalation, (2) Upload enumeration scripts (PowerUp, Seatbelt, winPEAS) for post-exploitation, (3) Upload reverse shell payloads for persistent access. Files in /session/ directory are shared with the container. For large files (>10MB), transfer may be slow due to base64 overhead and WinRM message size limits."
+    description: "Upload a local file to the target Windows machine via WinRM using native PSRP copy. Uses pypsrp's built-in copy() which handles chunking and transfer natively over the PSRP protocol — faster and more reliable than base64 chunking over PowerShell commands. Supports password and NTLM hash authentication."
+    when_to_use: "To transfer tools, scripts, exploits, or payloads to the target Windows machine when only WinRM is available. Use for: (1) Upload compiled exploits to C:\\Windows\\Temp for privilege escalation, (2) Upload enumeration scripts (PowerUp, Seatbelt, winPEAS) for post-exploitation, (3) Upload reverse shell payloads for persistent access. Files in /session/ directory are shared with the container."
     params:
       target:
         type: string
@@ -145,8 +145,8 @@ methods:
 
   download:
     required_ports: [5985]
-    description: "Download a file from the target Windows machine via WinRM using PowerShell base64-encoded transfer. File is read on target using [IO.File]::ReadAllBytes, base64-encoded via [Convert]::ToBase64String, transferred via WinRM response, decoded locally, and saved to disk. Supports password and NTLM hash authentication."
-    when_to_use: "To retrieve files, flags, evidence, or loot from the target Windows machine. Use for: (1) Download CTF flags (user.txt, root.txt), (2) Retrieve configuration files with credentials, (3) Download SAM/SYSTEM/SECURITY hive files for offline cracking, (4) Collect evidence files for reporting. Default save location: /session/artifacts/. For large files, consider using SMB file transfer (netexec --get-file) which is faster."
+    description: "Download a file from the target Windows machine via WinRM using native PSRP fetch. Uses pypsrp's built-in fetch() which handles transfer natively over the PSRP protocol — faster and more reliable than base64 encoding over PowerShell commands. Supports password and NTLM hash authentication."
+    when_to_use: "To retrieve files, flags, evidence, or loot from the target Windows machine. Use for: (1) Download CTF flags (user.txt, root.txt), (2) Retrieve configuration files with credentials, (3) Download SAM/SYSTEM/SECURITY hive files for offline cracking, (4) Collect evidence files for reporting. Default save location: /session/artifacts/."
     params:
       target:
         type: string

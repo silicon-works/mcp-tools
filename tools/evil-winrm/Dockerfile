@@ -27,8 +27,9 @@ ENV PATH="/app/venv/bin:$PATH"
 COPY packages/mcp-common /app/packages/mcp-common
 RUN pip install --no-cache-dir /app/packages/mcp-common
 
-# Install pywinrm for programmatic WinRM access
-RUN pip install --no-cache-dir pywinrm
+# Install pypsrp for native PowerShell Remoting Protocol support
+# (pywinrm hardcodes CMD shell URI, blocked on Win Server 2025 for non-admins)
+RUN pip install --no-cache-dir pypsrp
 
 # Copy MCP server
 COPY tools/evil-winrm/mcp-server.py /app/mcp-server.py
