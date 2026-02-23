@@ -179,6 +179,8 @@ def build_method_rows(tools: dict, registry_hash: str) -> list[dict]:
                     "resources_json": resources_json,
                     "raw_json": tool_json,
                     "see_also_json": see_also_json,
+                    "required_ports_json": json.dumps([]),
+                    "timeout_seconds": tool.get("timeout_seconds"),
                     "registry_hash": registry_hash,
                 }
             )
@@ -203,6 +205,8 @@ def build_method_rows(tools: dict, registry_hash: str) -> list[dict]:
                         "resources_json": resources_json,
                         "raw_json": tool_json,
                         "see_also_json": see_also_json,
+                        "required_ports_json": json.dumps(method.get("required_ports", [])),
+                        "timeout_seconds": method.get("timeout_seconds", tool.get("timeout_seconds")),
                         "registry_hash": registry_hash,
                     }
                 )

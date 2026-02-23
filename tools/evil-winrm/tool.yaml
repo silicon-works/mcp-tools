@@ -1,0 +1,185 @@
+name: evil-winrm
+version: "0.5.0"
+description: "WinRM shell for Windows remote management using pywinrm v0.5.0 (Python). 3 methods: exec (PowerShell run_ps or CMD run_cmd), upload (base64-chunked file transfer to target), download (base64-encoded file retrieval from target). Supports NTLM pass-the-hash via pyspnego auto-detection of LM:NT hash format — bare NT hashes auto-prefixed with 32 zero bytes. Connects via HTTP (5985) or HTTPS (5986) using NTLM transport. WinRM requires membership in 'Remote Management Users' or 'Administrators' group. Named for routing discoverability; implementation uses pywinrm (not Ruby evil-winrm) for reliable non-interactive MCP execution."
+image: "ghcr.io/silicon-works/mcp-tools-evil-winrm:latest"
+image_size_mb: 300
+timeout_seconds: 300
+
+capabilities:
+  - winrm_shell
+  - file_transfer
+  - powershell_execution
+  - cmd_execution
+  - pass_the_hash
+
+phases:
+  - exploitation
+  - post-exploitation
+
+requirements:
+  network: true
+  privileged: false
+
+resources:
+  memory_mb: 256
+  cpu: 0.5
+
+routing:
+  use_for:
+    - "WinRM command execution with PowerShell or CMD"
+    - "Windows remote PowerShell script execution via WinRM"
+    - "file upload to Windows target via WinRM base64 chunking"
+    - "file download from Windows target via WinRM base64 encoding"
+    - "pass-the-hash remote execution via WinRM NTLM"
+    - "evil-winrm alternative for non-interactive command execution"
+    - "post-exploitation command execution when WinRM (5985) is open"
+  never_use_for:
+    - "Linux targets (WinRM is Windows-only)"
+    - "port scanning (use nmap)"
+    - "vulnerability scanning (use nuclei)"
+    - "credential spraying across multiple targets (use netexec winrm)"
+    - "SMB operations (use netexec smb or impacket)"
+  triggers:
+    - "evil-winrm"
+    - "winrm shell"
+    - "winrm exec"
+    - "winrm upload"
+    - "winrm download"
+    - "winrm file transfer"
+  prefer_over: []
+
+see_also:
+  - tool: impacket
+    reason: "wmiexec/psexec/smbexec for non-WinRM remote execution via SMB/WMI/DCOM"
+  - tool: netexec
+    reason: "Multi-protocol credential validation and WinRM command execution across multiple targets simultaneously"
+
+methods:
+  exec:
+    required_ports: [5985]
+    description: "Execute a command on a remote Windows host via WinRM using pywinrm. Two shell modes: PowerShell (run_ps, default) executes via PowerShell with CLIXML error parsing, CMD (run_cmd) executes native Windows commands. Authentication via NTLM transport — supports password or NTLM hash (pass-the-hash via pyspnego LM:NT auto-detection). Domain prefix auto-applied as DOMAIN\\username format. Returns stdout, stderr, exit code, and shell type used."
+    when_to_use: "When you have valid Windows credentials (password or NTLM hash) and WinRM port 5985 is open. Preferred over netexec winrm when you need: (1) Reliable single-command execution with clean stdout/stderr separation, (2) PowerShell script execution with proper error handling, (3) CMD commands that don't work well in PowerShell (e.g., 'dir /s', 'type', 'reg query'), (4) Pass-the-hash execution when only WinRM is available. For multi-target credential spraying, use netexec winrm instead. For credential dumping (SAM/LSA/DPAPI), use netexec winrm which has built-in dump methods."
+    params:
+      target:
+        type: string
+        required: true
+        description: "Target IP address or hostname. Single target only (not CIDR). Must have WinRM service running on port 5985 (HTTP) or 5986 (HTTPS)."
+      username:
+        type: string
+        required: true
+        description: "Username for NTLM authentication. Domain prefix auto-applied if domain parameter set (becomes DOMAIN\\username)."
+      password:
+        type: string
+        description: "Password for authentication. Provide either password or hash, not both. If neither is provided, empty password is used."
+      hash:
+        type: string
+        description: "NTLM hash for pass-the-hash. Accepts bare NT hash (32 hex chars, auto-converted to 00000000000000000000000000000000:HASH) or full LM:NT format. pyspnego auto-detects LM:NT format for NTLM auth."
+      domain:
+        type: string
+        description: "Active Directory domain. Prepended to username as DOMAIN\\username for NTLM authentication. Omit for local account authentication."
+      command:
+        type: string
+        required: true
+        description: "Command to execute on the target. For PowerShell shell: PowerShell cmdlets and scripts (e.g., 'Get-Process', 'whoami /all', 'Get-ChildItem C:\\'). For CMD shell: native CMD commands (e.g., 'dir C:\\', 'type C:\\flag.txt', 'net user')."
+      shell:
+        type: string
+        enum: [powershell, cmd]
+        default: powershell
+        description: "Shell to use. 'powershell' (default) uses run_ps() — supports PowerShell cmdlets, scripts, and pipelines. 'cmd' uses run_cmd() — for native CMD commands, batch files, and commands that fail in PowerShell context."
+      ssl:
+        type: boolean
+        default: false
+        description: "Use HTTPS/SSL transport (port 5986). Default: false (HTTP on port 5985). Enable when target requires encrypted WinRM connections."
+      port:
+        type: integer
+        description: "Custom WinRM port. Default: 5985 (HTTP) or 5986 (HTTPS when ssl=true). Override for non-standard WinRM configurations."
+    returns:
+      output:
+        type: string
+        description: "Command stdout output (decoded UTF-8)."
+      shell:
+        type: string
+        description: "Shell used for execution: 'PowerShell' or 'CMD'."
+
+  upload:
+    required_ports: [5985]
+    description: "Upload a local file to the target Windows machine via WinRM using PowerShell base64-chunked transfer. File is read locally, base64-encoded, split into ~50KB chunks, and reassembled on target using [IO.File]::WriteAllBytes and [Convert]::FromBase64String. First chunk creates the file, subsequent chunks append. Supports password and NTLM hash authentication."
+    when_to_use: "To transfer tools, scripts, exploits, or payloads to the target Windows machine when only WinRM is available. Use for: (1) Upload compiled exploits to C:\\Windows\\Temp for privilege escalation, (2) Upload enumeration scripts (PowerUp, Seatbelt, winPEAS) for post-exploitation, (3) Upload reverse shell payloads for persistent access. Files in /session/ directory are shared with the container. For large files (>10MB), transfer may be slow due to base64 overhead and WinRM message size limits."
+    params:
+      target:
+        type: string
+        required: true
+        description: "Target IP address or hostname with WinRM service running."
+      username:
+        type: string
+        required: true
+        description: "Username for NTLM authentication."
+      password:
+        type: string
+        description: "Password for authentication. Provide either password or hash, not both."
+      hash:
+        type: string
+        description: "NTLM hash for pass-the-hash. Bare NT hash or LM:NT format."
+      domain:
+        type: string
+        description: "Active Directory domain. Prepended to username as DOMAIN\\username."
+      local_path:
+        type: string
+        required: true
+        description: "Local file path to upload. Use /session/ prefix for files in the shared session directory (e.g., '/session/artifacts/exploit.exe'). File must exist and be readable."
+      remote_path:
+        type: string
+        required: true
+        description: "Destination path on the target Windows machine. Use writable directories: C:\\Windows\\Temp\\, C:\\Users\\<user>\\Desktop\\, or share paths."
+      ssl:
+        type: boolean
+        default: false
+        description: "Use HTTPS/SSL transport (port 5986)."
+      port:
+        type: integer
+        description: "Custom WinRM port (default: 5985 HTTP, 5986 HTTPS)."
+    returns:
+      success:
+        type: boolean
+        description: "Whether upload completed successfully."
+
+  download:
+    required_ports: [5985]
+    description: "Download a file from the target Windows machine via WinRM using PowerShell base64-encoded transfer. File is read on target using [IO.File]::ReadAllBytes, base64-encoded via [Convert]::ToBase64String, transferred via WinRM response, decoded locally, and saved to disk. Supports password and NTLM hash authentication."
+    when_to_use: "To retrieve files, flags, evidence, or loot from the target Windows machine. Use for: (1) Download CTF flags (user.txt, root.txt), (2) Retrieve configuration files with credentials, (3) Download SAM/SYSTEM/SECURITY hive files for offline cracking, (4) Collect evidence files for reporting. Default save location: /session/artifacts/. For large files, consider using SMB file transfer (netexec --get-file) which is faster."
+    params:
+      target:
+        type: string
+        required: true
+        description: "Target IP address or hostname with WinRM service running."
+      username:
+        type: string
+        required: true
+        description: "Username for NTLM authentication."
+      password:
+        type: string
+        description: "Password for authentication. Provide either password or hash, not both."
+      hash:
+        type: string
+        description: "NTLM hash for pass-the-hash. Bare NT hash or LM:NT format."
+      domain:
+        type: string
+        description: "Active Directory domain. Prepended to username as DOMAIN\\username."
+      remote_path:
+        type: string
+        required: true
+        description: "Path on the target to download. Use full Windows paths: 'C:\\Users\\Administrator\\Desktop\\root.txt', 'C:\\Windows\\System32\\config\\SAM'."
+      local_path:
+        type: string
+        description: "Local destination path. Default: /session/artifacts/<filename>. Use /session/ prefix to ensure file is accessible to other tools and agents."
+      ssl:
+        type: boolean
+        default: false
+        description: "Use HTTPS/SSL transport (port 5986)."
+      port:
+        type: integer
+        description: "Custom WinRM port (default: 5985 HTTP, 5986 HTTPS)."
+    returns:
+      content:
+        type: string
+        description: "File content (if text) or path where binary file was saved."

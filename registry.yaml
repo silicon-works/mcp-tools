@@ -1,5 +1,5 @@
 version: '2.0'
-updated_at: '2026-02-23T10:35:45Z'
+updated_at: '2026-02-23T15:18:07Z'
 tools:
   curl:
     name: curl
@@ -12,6 +12,7 @@ tools:
       and JS pages, use playwright-mcp instead.'
     image: ghcr.io/silicon-works/mcp-tools-curl:latest
     image_size_mb: 100
+    timeout_seconds: 60
     capabilities:
     - http_requests
     - file_download
@@ -476,6 +477,7 @@ tools:
       environment variable for higher rate limits (50 req/30s vs 5 req/30s).
     image: ghcr.io/silicon-works/mcp-tools-cve-lookup:latest
     image_size_mb: 100
+    timeout_seconds: 60
     capabilities:
     - cve_lookup
     - vulnerability_search
@@ -696,6 +698,7 @@ tools:
     description: BGE-M3 embedding model for semantic search. Internal tool for tool discovery and experience matching.
     image: ghcr.io/silicon-works/mcp-tools-embedding:latest
     image_size_mb: 2500
+    timeout_seconds: 300
     internal: true
     capabilities:
     - text_embedding
@@ -791,6 +794,7 @@ tools:
       for structured parsing.'
     image: ghcr.io/silicon-works/mcp-tools-enum4linux-ng:latest
     image_size_mb: 150
+    timeout_seconds: 300
     capabilities:
     - smb_enumeration
     - user_enumeration
@@ -1019,6 +1023,226 @@ tools:
           domain_info:
             type: object
             description: 'Domain/OS info: OS version string, domain name, server type, DNS hostname.'
+  evil-winrm:
+    name: evil-winrm
+    version: 0.5.0
+    description: 'WinRM shell for Windows remote management using pywinrm v0.5.0 (Python). 3 methods: exec (PowerShell run_ps
+      or CMD run_cmd), upload (base64-chunked file transfer to target), download (base64-encoded file retrieval from target).
+      Supports NTLM pass-the-hash via pyspnego auto-detection of LM:NT hash format — bare NT hashes auto-prefixed with 32
+      zero bytes. Connects via HTTP (5985) or HTTPS (5986) using NTLM transport. WinRM requires membership in ''Remote Management
+      Users'' or ''Administrators'' group. Named for routing discoverability; implementation uses pywinrm (not Ruby evil-winrm)
+      for reliable non-interactive MCP execution.'
+    image: ghcr.io/silicon-works/mcp-tools-evil-winrm:latest
+    image_size_mb: 300
+    timeout_seconds: 300
+    capabilities:
+    - winrm_shell
+    - file_transfer
+    - powershell_execution
+    - cmd_execution
+    - pass_the_hash
+    phases:
+    - exploitation
+    - post-exploitation
+    requirements:
+      network: true
+      privileged: false
+    resources:
+      memory_mb: 256
+      cpu: 0.5
+    routing:
+      use_for:
+      - WinRM command execution with PowerShell or CMD
+      - Windows remote PowerShell script execution via WinRM
+      - file upload to Windows target via WinRM base64 chunking
+      - file download from Windows target via WinRM base64 encoding
+      - pass-the-hash remote execution via WinRM NTLM
+      - evil-winrm alternative for non-interactive command execution
+      - post-exploitation command execution when WinRM (5985) is open
+      never_use_for:
+      - Linux targets (WinRM is Windows-only)
+      - port scanning (use nmap)
+      - vulnerability scanning (use nuclei)
+      - credential spraying across multiple targets (use netexec winrm)
+      - SMB operations (use netexec smb or impacket)
+      triggers:
+      - evil-winrm
+      - winrm shell
+      - winrm exec
+      - winrm upload
+      - winrm download
+      - winrm file transfer
+      prefer_over: []
+    see_also:
+    - tool: impacket
+      reason: wmiexec/psexec/smbexec for non-WinRM remote execution via SMB/WMI/DCOM
+    - tool: netexec
+      reason: Multi-protocol credential validation and WinRM command execution across multiple targets simultaneously
+    methods:
+      exec:
+        required_ports:
+        - 5985
+        description: 'Execute a command on a remote Windows host via WinRM using pywinrm. Two shell modes: PowerShell (run_ps,
+          default) executes via PowerShell with CLIXML error parsing, CMD (run_cmd) executes native Windows commands. Authentication
+          via NTLM transport — supports password or NTLM hash (pass-the-hash via pyspnego LM:NT auto-detection). Domain prefix
+          auto-applied as DOMAIN\username format. Returns stdout, stderr, exit code, and shell type used.'
+        when_to_use: 'When you have valid Windows credentials (password or NTLM hash) and WinRM port 5985 is open. Preferred
+          over netexec winrm when you need: (1) Reliable single-command execution with clean stdout/stderr separation, (2)
+          PowerShell script execution with proper error handling, (3) CMD commands that don''t work well in PowerShell (e.g.,
+          ''dir /s'', ''type'', ''reg query''), (4) Pass-the-hash execution when only WinRM is available. For multi-target
+          credential spraying, use netexec winrm instead. For credential dumping (SAM/LSA/DPAPI), use netexec winrm which
+          has built-in dump methods.'
+        params:
+          target:
+            type: string
+            required: true
+            description: Target IP address or hostname. Single target only (not CIDR). Must have WinRM service running on
+              port 5985 (HTTP) or 5986 (HTTPS).
+          username:
+            type: string
+            required: true
+            description: Username for NTLM authentication. Domain prefix auto-applied if domain parameter set (becomes DOMAIN\username).
+          password:
+            type: string
+            description: Password for authentication. Provide either password or hash, not both. If neither is provided, empty
+              password is used.
+          hash:
+            type: string
+            description: NTLM hash for pass-the-hash. Accepts bare NT hash (32 hex chars, auto-converted to 00000000000000000000000000000000:HASH)
+              or full LM:NT format. pyspnego auto-detects LM:NT format for NTLM auth.
+          domain:
+            type: string
+            description: Active Directory domain. Prepended to username as DOMAIN\username for NTLM authentication. Omit for
+              local account authentication.
+          command:
+            type: string
+            required: true
+            description: 'Command to execute on the target. For PowerShell shell: PowerShell cmdlets and scripts (e.g., ''Get-Process'',
+              ''whoami /all'', ''Get-ChildItem C:\''). For CMD shell: native CMD commands (e.g., ''dir C:\'', ''type C:\flag.txt'',
+              ''net user'').'
+          shell:
+            type: string
+            enum:
+            - powershell
+            - cmd
+            default: powershell
+            description: Shell to use. 'powershell' (default) uses run_ps() — supports PowerShell cmdlets, scripts, and pipelines.
+              'cmd' uses run_cmd() — for native CMD commands, batch files, and commands that fail in PowerShell context.
+          ssl:
+            type: boolean
+            default: false
+            description: 'Use HTTPS/SSL transport (port 5986). Default: false (HTTP on port 5985). Enable when target requires
+              encrypted WinRM connections.'
+          port:
+            type: integer
+            description: 'Custom WinRM port. Default: 5985 (HTTP) or 5986 (HTTPS when ssl=true). Override for non-standard
+              WinRM configurations.'
+        returns:
+          output:
+            type: string
+            description: Command stdout output (decoded UTF-8).
+          shell:
+            type: string
+            description: 'Shell used for execution: ''PowerShell'' or ''CMD''.'
+      upload:
+        required_ports:
+        - 5985
+        description: Upload a local file to the target Windows machine via WinRM using PowerShell base64-chunked transfer.
+          File is read locally, base64-encoded, split into ~50KB chunks, and reassembled on target using [IO.File]::WriteAllBytes
+          and [Convert]::FromBase64String. First chunk creates the file, subsequent chunks append. Supports password and NTLM
+          hash authentication.
+        when_to_use: 'To transfer tools, scripts, exploits, or payloads to the target Windows machine when only WinRM is available.
+          Use for: (1) Upload compiled exploits to C:\Windows\Temp for privilege escalation, (2) Upload enumeration scripts
+          (PowerUp, Seatbelt, winPEAS) for post-exploitation, (3) Upload reverse shell payloads for persistent access. Files
+          in /session/ directory are shared with the container. For large files (>10MB), transfer may be slow due to base64
+          overhead and WinRM message size limits.'
+        params:
+          target:
+            type: string
+            required: true
+            description: Target IP address or hostname with WinRM service running.
+          username:
+            type: string
+            required: true
+            description: Username for NTLM authentication.
+          password:
+            type: string
+            description: Password for authentication. Provide either password or hash, not both.
+          hash:
+            type: string
+            description: NTLM hash for pass-the-hash. Bare NT hash or LM:NT format.
+          domain:
+            type: string
+            description: Active Directory domain. Prepended to username as DOMAIN\username.
+          local_path:
+            type: string
+            required: true
+            description: Local file path to upload. Use /session/ prefix for files in the shared session directory (e.g.,
+              '/session/artifacts/exploit.exe'). File must exist and be readable.
+          remote_path:
+            type: string
+            required: true
+            description: 'Destination path on the target Windows machine. Use writable directories: C:\Windows\Temp\, C:\Users\<user>\Desktop\,
+              or share paths.'
+          ssl:
+            type: boolean
+            default: false
+            description: Use HTTPS/SSL transport (port 5986).
+          port:
+            type: integer
+            description: 'Custom WinRM port (default: 5985 HTTP, 5986 HTTPS).'
+        returns:
+          success:
+            type: boolean
+            description: Whether upload completed successfully.
+      download:
+        required_ports:
+        - 5985
+        description: Download a file from the target Windows machine via WinRM using PowerShell base64-encoded transfer. File
+          is read on target using [IO.File]::ReadAllBytes, base64-encoded via [Convert]::ToBase64String, transferred via WinRM
+          response, decoded locally, and saved to disk. Supports password and NTLM hash authentication.
+        when_to_use: 'To retrieve files, flags, evidence, or loot from the target Windows machine. Use for: (1) Download CTF
+          flags (user.txt, root.txt), (2) Retrieve configuration files with credentials, (3) Download SAM/SYSTEM/SECURITY
+          hive files for offline cracking, (4) Collect evidence files for reporting. Default save location: /session/artifacts/.
+          For large files, consider using SMB file transfer (netexec --get-file) which is faster.'
+        params:
+          target:
+            type: string
+            required: true
+            description: Target IP address or hostname with WinRM service running.
+          username:
+            type: string
+            required: true
+            description: Username for NTLM authentication.
+          password:
+            type: string
+            description: Password for authentication. Provide either password or hash, not both.
+          hash:
+            type: string
+            description: NTLM hash for pass-the-hash. Bare NT hash or LM:NT format.
+          domain:
+            type: string
+            description: Active Directory domain. Prepended to username as DOMAIN\username.
+          remote_path:
+            type: string
+            required: true
+            description: 'Path on the target to download. Use full Windows paths: ''C:\Users\Administrator\Desktop\root.txt'',
+              ''C:\Windows\System32\config\SAM''.'
+          local_path:
+            type: string
+            description: 'Local destination path. Default: /session/artifacts/<filename>. Use /session/ prefix to ensure file
+              is accessible to other tools and agents.'
+          ssl:
+            type: boolean
+            default: false
+            description: Use HTTPS/SSL transport (port 5986).
+          port:
+            type: integer
+            description: 'Custom WinRM port (default: 5985 HTTP, 5986 HTTPS).'
+        returns:
+          content:
+            type: string
+            description: File content (if text) or path where binary file was saved.
   exploit-runner:
     name: exploit-runner
     version: '1.1'
@@ -1031,6 +1255,7 @@ tools:
       matching (3 built-in: Log4Shell, Cacti RCE, Jenkins file read). Payload generation for reverse/bind shells in bash/python/php.'
     image: ghcr.io/silicon-works/mcp-tools-exploit-runner:latest
     image_size_mb: 800
+    timeout_seconds: 600
     capabilities:
     - python_exploits
     - shell_exploits
@@ -1422,6 +1647,7 @@ tools:
       Includes dirb and SecLists wordlists.'
     image: ghcr.io/silicon-works/mcp-tools-ffuf:latest
     image_size_mb: 200
+    timeout_seconds: 600
     capabilities:
     - directory_bruteforce
     - parameter_fuzzing
@@ -1606,6 +1832,7 @@ tools:
       plain text or base64-encoded binary content.'
     image: ghcr.io/silicon-works/mcp-tools-ftp:latest
     image_size_mb: 100
+    timeout_seconds: 120
     capabilities:
     - ftp_connection
     - file_transfer
@@ -1876,6 +2103,7 @@ tools:
       available via bridge).
     image: ghcr.io/silicon-works/mcp-tools-ghidra:latest
     image_size_mb: 1500
+    timeout_seconds: 600
     capabilities:
     - decompilation
     - disassembly
@@ -2183,6 +2411,7 @@ tools:
       Pure Python — no external tools, requires network access.
     image: ghcr.io/silicon-works/mcp-tools-hash-lookup:latest
     image_size_mb: 100
+    timeout_seconds: 60
     capabilities:
     - hash_lookup
     - hash_identification
@@ -2376,6 +2605,7 @@ tools:
       (verbose) for progress tracking.
     image: ghcr.io/silicon-works/mcp-tools-hydra:latest
     image_size_mb: 200
+    timeout_seconds: 600
     capabilities:
     - password_bruteforce
     - credential_testing
@@ -3003,6 +3233,7 @@ tools:
       format). Full IKEv1 main mode and aggressive mode support.'
     image: ghcr.io/silicon-works/mcp-tools-ike-scan:latest
     image_size_mb: 150
+    timeout_seconds: 120
     capabilities:
     - ike_enumeration
     - vpn_testing
@@ -3231,6 +3462,7 @@ tools:
       hash (pass-the-hash), Kerberos, and AES key authentication.'
     image: ghcr.io/silicon-works/mcp-tools-impacket:latest
     image_size_mb: 900
+    timeout_seconds: 300
     capabilities:
     - remote_execution
     - credential_dumping
@@ -3293,8 +3525,15 @@ tools:
       - lookupsid
       - getTGT
       prefer_over: []
+    see_also:
+    - tool: netexec
+      reason: Alternative for credential validation and authenticated execution
+    - tool: evil-winrm
+      reason: Alternative for WinRM shell access
     methods:
       psexec:
+        required_ports:
+        - 445
         description: Execute commands on a remote Windows host via PsExec (creates a service, most reliable but noisy)
         when_to_use: When reliable remote execution is needed and stealth is not critical. Uses SMB service creation.
         params:
@@ -3355,6 +3594,8 @@ tools:
             type: array
             description: Warning messages
       wmiexec:
+        required_ports:
+        - 135
         description: Execute commands on a remote Windows host via WMI (stealthier than psexec, no service creation)
         when_to_use: When stealth matters - no service creation, uses WMI for execution. Preferred for lateral movement.
         params:
@@ -3410,6 +3651,8 @@ tools:
             type: string
             description: Command output
       smbexec:
+        required_ports:
+        - 445
         description: Execute commands on a remote Windows host via SMB (native commands, no binary upload needed)
         when_to_use: When other methods fail or when you want native command execution without uploading binaries
         params:
@@ -3472,6 +3715,8 @@ tools:
             type: string
             description: Command output
       dcomexec:
+        required_ports:
+        - 135
         description: Execute commands on a remote Windows host via DCOM objects (MMC20, ShellWindows, ShellBrowserWindow)
         when_to_use: Alternative lateral movement using DCOM. Useful when SMB-based methods are blocked.
         params:
@@ -3538,6 +3783,8 @@ tools:
             type: string
             description: Command output
       atexec:
+        required_ports:
+        - 445
         description: Execute commands on a remote Windows host via Task Scheduler (scheduled task based execution)
         when_to_use: When other execution methods are blocked. Uses Windows Task Scheduler for command execution.
         params:
@@ -3590,6 +3837,8 @@ tools:
             type: string
             description: Command output
       secretsdump:
+        required_ports:
+        - 445
         description: Dump credentials from a Windows host (SAM, LSA secrets, cached creds, NTDS.dit via DRSUAPI/VSS)
         when_to_use: After gaining admin access to dump password hashes. Use -just-dc on domain controllers for NTDS.dit.
         params:
@@ -3668,6 +3917,8 @@ tools:
             type: integer
             description: Total number of hashes extracted
       kerberoast:
+        required_ports:
+        - 88
         description: Kerberoasting attack - extract TGS service ticket hashes for offline cracking (targets accounts with
           SPNs)
         when_to_use: With any valid domain credentials to extract service account hashes for offline cracking
@@ -3729,6 +3980,8 @@ tools:
             type: integer
             description: Number of users with SPNs found
       asreproast:
+        required_ports:
+        - 88
         description: AS-REP Roasting - extract hashes for accounts with Kerberos pre-authentication disabled
         when_to_use: To find accounts without Kerberos pre-authentication and extract their hashes for cracking
         params:
@@ -3786,6 +4039,8 @@ tools:
             type: array
             description: Users without pre-authentication
       smb_shares:
+        required_ports:
+        - 445
         description: List SMB shares on a remote Windows host with access permissions
         when_to_use: To enumerate available SMB shares before accessing files
         params:
@@ -3830,6 +4085,8 @@ tools:
             type: integer
             description: Number of shares found
       smb_get:
+        required_ports:
+        - 445
         description: Download a file from an SMB share
         when_to_use: To retrieve files from Windows shares (config files, scripts, sensitive data)
         params:
@@ -3882,6 +4139,8 @@ tools:
             type: integer
             description: File size in bytes
       smb_put:
+        required_ports:
+        - 445
         description: Upload content to an SMB share
         when_to_use: To upload files to Windows shares (payloads, scripts, tools)
         params:
@@ -3935,6 +4194,8 @@ tools:
             type: integer
             description: Uploaded content size in bytes
       get_ad_users:
+        required_ports:
+        - 389
         description: Enumerate Active Directory users via LDAP (requires domain credentials)
         when_to_use: During enumeration phase to discover domain users for targeting
         params:
@@ -3983,6 +4244,8 @@ tools:
             type: integer
             description: Number of users found
       lookupsid:
+        required_ports:
+        - 445
         description: Brute-force SID enumeration to discover domain users, groups, and aliases
         when_to_use: To enumerate domain objects when LDAP is restricted or for initial domain recon
         params:
@@ -4040,6 +4303,8 @@ tools:
             type: integer
             description: Total objects discovered
       get_tgt:
+        required_ports:
+        - 88
         description: Request a Kerberos TGT and save the ccache file for pass-the-ticket attacks
         when_to_use: To obtain a TGT for Kerberos-based attacks or when needing to authenticate via tickets
         params:
@@ -4097,6 +4362,7 @@ tools:
       and john''s built-in password.lst wordlist.'
     image: ghcr.io/silicon-works/mcp-tools-john:latest
     image_size_mb: 200
+    timeout_seconds: 900
     capabilities:
     - password_cracking
     - hash_identification
@@ -4343,6 +4609,7 @@ tools:
       Windows path traversal patterns. Uses {PAYLOAD} placeholder in URLs. Authenticated testing via cookies.'
     image: ghcr.io/silicon-works/mcp-tools-lfi-rfi:latest
     image_size_mb: 100
+    timeout_seconds: 300
     capabilities:
     - lfi_testing
     - rfi_testing
@@ -4632,6 +4899,7 @@ tools:
       a service container — msfrpcd stays running between calls.'
     image: ghcr.io/silicon-works/mcp-tools-metasploit:latest
     image_size_mb: 3000
+    timeout_seconds: 600
     service: true
     service_name: metasploit
     capabilities:
@@ -4944,6 +5212,7 @@ tools:
       server fingerprinting (version, storage engines, modules, JS engine).
     image: ghcr.io/silicon-works/mcp-tools-mongodb:latest
     image_size_mb: 250
+    timeout_seconds: 120
     capabilities:
     - database_enumeration
     - nosql_access
@@ -5380,6 +5649,7 @@ tools:
       mysql CLI with JSON output for structured results. Connects per-query (no persistent sessions).'
     image: ghcr.io/silicon-works/mcp-tools-mysql:latest
     image_size_mb: 300
+    timeout_seconds: 120
     capabilities:
     - database_enumeration
     - sql_query_execution
@@ -5603,6 +5873,7 @@ tools:
       ncat, socat, iproute2 as fallback tools.'
     image: ghcr.io/silicon-works/mcp-tools-netcat:latest
     image_size_mb: 150
+    timeout_seconds: 300
     capabilities:
     - reverse_shell_listener
     - http_server
@@ -6018,6 +6289,555 @@ tools:
           requests:
             type: array
             description: Final captured requests/packets (for HTTP servers and UDP listeners).
+  netexec:
+    name: netexec
+    version: 1.5.0
+    description: 'Network execution tool (NetExec/nxc v1.5.0, CrackMapExec successor, codename Yippie-Ki-Yay) for credential
+      validation, authenticated command execution, credential dumping, AD enumeration, and Kerberos attacks across 10 protocols:
+      SMB, WinRM, LDAP, MSSQL, WMI, RDP, SSH, FTP, NFS, VNC. 7 MCP methods covering the most critical protocols. Supports
+      password, NTLM pass-the-hash (-H), Kerberos (-k/--use-kcache), AES key, and certificate authentication. 70+ built-in
+      modules for SMB including lsassy, enum_av, spider_plus, zerologon, nopac, printnightmare, bloodhound, masky, nanodump.
+      Output markers: [+] success, [-] failure, (Pwn3d!) admin access. Default 256 concurrent threads. Maintained by @NeffIsBack,
+      @MJHallenbeck, @_zblurx.'
+    image: ghcr.io/silicon-works/mcp-tools-netexec:latest
+    image_size_mb: 800
+    timeout_seconds: 300
+    capabilities:
+    - credential_validation
+    - authenticated_execution
+    - credential_dumping
+    - share_enumeration
+    - ad_enumeration
+    - pass_the_hash
+    - kerberoasting
+    - bloodhound
+    phases:
+    - enumeration
+    - exploitation
+    - post-exploitation
+    requirements:
+      network: true
+      privileged: false
+    resources:
+      memory_mb: 512
+      cpu: 1.0
+    routing:
+      use_for:
+      - credential validation across multiple protocols (SMB, WinRM, LDAP, MSSQL, RDP, SSH, WMI)
+      - WinRM command execution and credential dumping (SAM/LSA/DPAPI)
+      - crackmapexec replacement for credential spraying and pass-the-hash
+      - pass-the-hash validation against SMB/WinRM/LDAP/MSSQL/RDP/WMI
+      - SMB authenticated share enumeration, spidering, and file transfer
+      - credential spraying with --no-bruteforce and --continue-on-success
+      - SAM/LSA/NTDS/DPAPI credential dumping from Windows targets
+      - kerberoasting and AS-REP roasting via LDAP
+      - BloodHound AD data collection (Group, LocalAdmin, Session, Trusts, All)
+      - AD user/group/computer/delegation enumeration via LDAP
+      - WMI command execution via DCOM (port 135) as SMB alternative
+      - RID brute force user discovery via SMB or MSSQL
+      - share spidering with spider_plus module for file discovery
+      - netexec module execution (lsassy, enum_av, zerologon, nopac, masky)
+      - MSSQL xp_cmdshell command execution and SQL queries
+      - RDP credential validation and screenshot capture
+      - SSH credential validation, sudo check, and command execution
+      - SMB signing check for relay attack targeting (--gen-relay-list)
+      never_use_for:
+      - port scanning (use nmap)
+      - web application testing (use ffuf, nikto, zap)
+      - SQL injection (use sqlmap)
+      - vulnerability scanning (use nuclei, nikto)
+      - SSH brute-force (use hydra for wordlist attacks)
+      triggers:
+      - netexec
+      - nxc
+      - crackmapexec
+      - cme
+      - evil-winrm
+      - winrm exec
+      - credential spray
+      - credential validation
+      - pass-the-hash
+      - sam dump
+      - lsa dump
+      - ntds dump
+      - kerberoast
+      - asreproast
+      - bloodhound
+      - wmiexec
+      - dpapi dump
+      - lsassy
+      - rid brute
+      - share spider
+      prefer_over: []
+    see_also:
+    - tool: impacket
+      reason: wmiexec/psexec/secretsdump for non-NetExec remote execution and Kerberos ticket operations
+    - tool: evil-winrm
+      reason: Dedicated WinRM shell with pywinrm for file upload/download via PowerShell base64 chunking
+    methods:
+      smb:
+        required_ports:
+        - 445
+        description: 'SMB operations via NetExec: credential validation (password/hash/Kerberos), share enumeration with access-level
+          filtering (READ/WRITE), user/group/computer enumeration, credential dumping (SAM via regdump/secdump, LSA secrets,
+          NTDS.dit via DRSUAPI/VSS, DPAPI/cookies, SCCM), command execution (CMD -x / PowerShell -X) via wmiexec/atexec/smbexec/mmcexec,
+          file transfer (--put-file/--get-file), share spidering with pattern/regex matching, RID brute force, SMB session
+          enumeration, logged-on user detection, WMI queries, and 70+ module execution. Output includes (Pwn3d!) marker when
+          admin access is confirmed.'
+        when_to_use: 'Primary Windows credential validation and post-exploitation method when port 445 is open. Use for: (1)
+          Validate discovered credentials or hashes — check for (Pwn3d!) admin marker, (2) Enumerate shares with --shares
+          to find readable/writable shares, (3) Dump credentials with --sam/--lsa/--ntds after gaining admin access, (4) Execute
+          commands via -x (CMD) or -X (PowerShell) with admin privileges, (5) Spider writable shares for sensitive files (passwords,
+          configs, keys), (6) Run modules like lsassy for in-memory credential extraction without touching disk, (7) RID brute
+          force when LDAP is not available for user discovery. For non-admin credential validation, any successful [+] output
+          confirms valid credentials.'
+        params:
+          target:
+            type: string
+            required: true
+            description: Target IP(s), hostname(s), CIDR range(s), or file containing targets (one per line). Supports NMap
+              XML and .Nessus input files.
+          username:
+            type: string
+            required: true
+            description: Username(s) or file containing usernames. Accepts single user or space-separated list. For credential
+              spraying, combine with password file.
+          password:
+            type: string
+            description: Password(s) or file containing passwords. Used with -p flag. Provide either password or hash, not
+              both.
+          hash:
+            type: string
+            description: 'NTLM hash(es) for pass-the-hash authentication (-H flag). Format: LM:NT or bare NT hash. Supports
+              file of hashes. Mutually exclusive with password.'
+          domain:
+            type: string
+            description: Active Directory domain name (-d flag). Mutually exclusive with local_auth. Omit for domain auto-detection.
+          local_auth:
+            type: boolean
+            description: Authenticate to local SAM database (--local-auth). Mutually exclusive with domain. Use for local
+              admin accounts that aren't domain accounts.
+          port:
+            type: integer
+            description: 'SMB port (default: 445). Change only for non-standard SMB configurations.'
+          command:
+            type: string
+            description: 'CMD command to execute on target via -x flag. Requires admin access (Pwn3d!). Default exec method:
+              wmiexec. Output returned unless --no-output.'
+          ps_command:
+            type: string
+            description: PowerShell command to execute on target via -X flag. Requires admin access. Supports --obfs for obfuscation,
+              --amsi-bypass, --force-ps32, --no-encode.
+          exec_method:
+            type: string
+            description: 'Execution method for commands: wmiexec (default, uses Win32_Process+StdRegProv), atexec (scheduled
+              task), smbexec (service creation), mmcexec (MMC20.Application DCOM). Each has different stealth/reliability
+              tradeoffs.'
+          shares:
+            type: boolean
+            description: Enumerate SMB shares and access levels (--shares). Shows READ/WRITE permissions per share. Low-privilege
+              operation, no admin required.
+          spider:
+            type: string
+            description: 'Spider a share for files (--spider SHARE). Default: C$. Use with --depth, --pattern/--regex for
+              targeted file search. spider_plus module recommended for large-scale spidering.'
+          sam:
+            type: boolean
+            description: 'Dump SAM hashes from target (--sam). Requires admin access. Dumps local user NTLM hashes. Methods:
+              regdump (default) or secdump.'
+          lsa:
+            type: boolean
+            description: Dump LSA secrets from target (--lsa). Requires admin access. Reveals service account passwords, cached
+              domain credentials, DPAPI keys.
+          ntds:
+            type: string
+            description: 'Dump NTDS.dit domain hashes from DC (--ntds METHOD). Methods: ''drsuapi'' (default, DCSync-like)
+              or ''vss'' (Volume Shadow Copy). Requires Domain Admin. Use --history for password history, --enabled for active
+              accounts only, --user for specific user.'
+          users:
+            type: boolean
+            description: Enumerate domain users via SMB (--users). Returns sAMAccountName, description, badPwdCount, lastLogon.
+              Use --users-export for file output.
+          groups:
+            type: string
+            description: Enumerate domain groups (--groups). Optionally specify group name to enumerate members (e.g., 'Domain
+              Admins'). Supports --local-groups for local groups.
+          rid_brute:
+            type: integer
+            description: 'RID brute force user discovery (--rid-brute MAX_RID). Default max: 4000. Works without domain credentials.
+              Use when LDAP access is blocked.'
+          pass_pol:
+            type: boolean
+            description: Dump domain password policy (--pass-pol). Shows min/max password age, length requirements, lockout
+              threshold. Essential before credential spraying.
+          put_file:
+            type: array
+            description: 'Upload local file to target (--put-file SRC DEST). Array of [local_path, remote_path]. Example:
+              [''/tmp/shell.exe'', ''C:\Windows\Temp\shell.exe'']. Requires write access to destination.'
+          get_file:
+            type: array
+            description: 'Download file from target (--get-file SRC DEST). Array of [remote_path, local_path]. Example: [''C:\Windows\Temp\flag.txt'',
+              ''/session/artifacts/flag.txt''].'
+          module:
+            type: string
+            description: 'NetExec module to run (-M MODULE). Key modules: lsassy (LSASS credential dump), enum_av (endpoint
+              protection detection), spider_plus (recursive file listing to JSON), zerologon (CVE-2020-1472 check), nopac
+              (CVE-2021-42278/42287), printnightmare, masky (ADCS credential dump), nanodump (LSASS minidump), enum_dns (WMI
+              DNS dump), keepass_discover, wcc (security config check).'
+          module_options:
+            type: string
+            description: 'Module options (-o KEY=VALUE). Example for spider_plus: ''MAX_FILE_SIZE=50000 OUTPUT_FOLDER=/session/artifacts''.
+              Multiple options space-separated.'
+      winrm:
+        required_ports:
+        - 5985
+        - 5986
+        description: 'WinRM credential validation, command execution (CMD -x / PowerShell -X), and credential dumping (SAM/LSA/DPAPI)
+          via Windows Remote Management. Checks both HTTP (5985) and HTTPS (5986) by default. Supports NTLM pass-the-hash.
+          Dump method selectable: cmd or powershell (--dump-method). Returns (Pwn3d!) when user is in Remote Management Users
+          or Administrators group.'
+        when_to_use: 'When port 5985/5986 is open and you have valid credentials. Primary use cases: (1) Validate credentials
+          against WinRM when SMB (445) is filtered or blocked, (2) Execute commands for post-exploitation when WinRM is the
+          only available protocol, (3) Dump SAM/LSA/DPAPI secrets via WinRM when SMB is not available. WinRM access requires
+          membership in ''Remote Management Users'' or ''Administrators'' group. For dedicated WinRM shell with file transfer,
+          consider evil-winrm tool instead.'
+        params:
+          target:
+            type: string
+            required: true
+            description: Target IP(s), hostname(s), CIDR range(s), or file containing targets.
+          username:
+            type: string
+            required: true
+            description: Username(s) or file containing usernames.
+          password:
+            type: string
+            description: Password for authentication. Provide either password or hash, not both.
+          hash:
+            type: string
+            description: 'NTLM hash(es) for pass-the-hash (-H flag). Format: LM:NT or bare NT hash.'
+          domain:
+            type: string
+            description: Active Directory domain name (-d flag). Mutually exclusive with local_auth.
+          local_auth:
+            type: boolean
+            description: Authenticate to local accounts (--local-auth). Mutually exclusive with domain.
+          port:
+            type: string
+            description: 'WinRM port(s) (--port). Format: ''http-port https-port'' space-separated or single port for both.
+              Default: ''5985 5986''. Use --check-proto to limit to http or https.'
+          command:
+            type: string
+            description: CMD command to execute (-x flag). Requires admin or Remote Management Users membership.
+          ps_command:
+            type: string
+            description: PowerShell command to execute (-X flag). Requires admin or Remote Management Users membership.
+          sam:
+            type: boolean
+            description: Dump SAM hashes via WinRM (--sam). Requires admin. Uses --dump-method cmd or powershell internally.
+          lsa:
+            type: boolean
+            description: Dump LSA secrets via WinRM (--lsa). Requires admin. Reveals service account passwords and cached
+              credentials.
+          dpapi:
+            type: boolean
+            description: Dump DPAPI/Credential Manager secrets via WinRM (--dpapi). Reveals saved Windows credentials, browser
+              passwords, Wi-Fi keys.
+      ldap:
+        required_ports:
+        - 389
+        - 636
+        description: 'LDAP/Active Directory enumeration: user/group/computer discovery, delegation relationships, password
+          policy, Kerberoasting (TGS hash extraction), AS-REP Roasting (AS-REP hash extraction for accounts without pre-auth),
+          BloodHound data collection (Group/LocalAdmin/Session/Trusts/Default/All), GMSA password extraction, adminCount enumeration,
+          custom LDAP queries, domain SID retrieval, and Fine-Grained Password Policy (PSO) enumeration. Supports NTLM pass-the-hash
+          and simple bind authentication.'
+        when_to_use: 'Primary Active Directory intelligence gathering protocol. Use when port 389/636 is open on a Domain
+          Controller and you have valid domain credentials. Key use cases: (1) Enumerate all domain users (--users) and groups
+          (--groups) for target identification, (2) Kerberoast service accounts (--kerberoasting) to extract TGS hashes for
+          offline cracking, (3) AS-REP roast accounts without Kerberos pre-auth (--asreproast), (4) Run BloodHound ingestor
+          (--bloodhound -c All) for attack path analysis, (5) Find delegation relationships (--find-delegation) for privilege
+          escalation, (6) Enumerate GMSA passwords (--gmsa) for service account takeover, (7) Get adminCount=1 users (--admin-count)
+          to identify high-value targets. LDAP does NOT require Kerberos port 88 — it connects directly to the DC''s LDAP
+          service.'
+        params:
+          target:
+            type: string
+            required: true
+            description: Target Domain Controller IP or hostname. Must be a DC for AD enumeration.
+          username:
+            type: string
+            required: true
+            description: Domain username for authenticated LDAP bind.
+          password:
+            type: string
+            description: Domain password. Provide either password or hash, not both.
+          hash:
+            type: string
+            description: NTLM hash for pass-the-hash (-H flag). Mutually exclusive with --simple-bind.
+          domain:
+            type: string
+            description: Active Directory domain name (-d flag). Often auto-detected from DC.
+          port:
+            type: integer
+            description: 'LDAP port (default: 389). Use 636 for LDAPS (SSL/TLS).'
+          users:
+            type: boolean
+            description: Enumerate domain users (--users). Returns sAMAccountName, description, memberOf, lastLogon, badPwdCount.
+              Use --users-export for file output.
+          groups:
+            type: boolean
+            description: Enumerate domain groups (--groups). Optionally specify group name for member enumeration.
+          computers:
+            type: boolean
+            description: Enumerate domain computers (--computers). Returns hostname, OS, OS version.
+          dc_list:
+            type: boolean
+            description: List all Domain Controllers (--dc-list). Returns DC hostnames and IPs.
+          pass_pol:
+            type: boolean
+            description: Dump domain password policy (--pass-pol). Shows lockout threshold, min length, complexity. Check
+              before credential spraying to avoid lockouts.
+          find_delegation:
+            type: boolean
+            description: Find all delegation relationships (--find-delegation). Reveals unconstrained, constrained, and resource-based
+              constrained delegation for privilege escalation paths. Only shows enabled accounts.
+          admin_count:
+            type: boolean
+            description: Get users with adminCount=1 (--admin-count). Identifies accounts that are or were members of privileged
+              AD groups (Domain Admins, Enterprise Admins, etc.).
+          gmsa:
+            type: boolean
+            description: Enumerate and extract Group Managed Service Account passwords (--gmsa). If you have read access to
+              the msDS-ManagedPassword attribute, extracts the NTLM hash.
+          kerberoasting:
+            type: string
+            description: Kerberoast — extract TGS hashes for offline cracking (--kerberoasting OUTPUT_FILE). Targets accounts
+              with SPNs set. Output in hashcat/john format. Use --kerberoast-account for targeted kerberoasting.
+          asreproast:
+            type: string
+            description: AS-REP roast — extract hashes for accounts without Kerberos pre-auth (--asreproast OUTPUT_FILE).
+              Output in hashcat format (18200). Works against accounts with 'Do not require Kerberos preauthentication' flag.
+          bloodhound:
+            type: boolean
+            description: 'Run BloodHound data ingestor (--bloodhound). Collects AD relationships for attack path analysis.
+              Default collection: Default. Outputs JSON files for BloodHound import.'
+          bloodhound_collection:
+            type: string
+            description: 'BloodHound collection type (-c flag). Options: Group, LocalAdmin, Session, Trusts, Default, DCOnly,
+              DCOM, RDP, PSRemote, LoggedOn, Container, ObjectProps, ACL, All. Comma-separated for multiple. ''All'' is most
+              comprehensive but slowest.'
+          query:
+            type: array
+            description: 'Custom LDAP query (--query FILTER ATTRIBUTES). Array of [filter, attributes]. Example: [''(servicePrincipalName=*)'',
+              ''sAMAccountName servicePrincipalName'']. Use --base-dn to change search root.'
+      mssql:
+        required_ports:
+        - 1433
+        description: MSSQL credential validation, SQL query execution (-q), OS command execution via xp_cmdshell (CMD -x /
+          PowerShell -X), file transfer (--put-file/--get-file), SAM/LSA credential dumping, and RID brute force user discovery.
+          Supports domain auth, local SQL auth (--local-auth for sa account), and NTLM pass-the-hash. xp_cmdshell requires
+          sysadmin role or xp_cmdshell enabled.
+        when_to_use: 'When port 1433 is open (MSSQL). Use for: (1) Validate SQL credentials — check for [+] and sysadmin role
+          indicator, (2) Execute SQL queries (-q ''SELECT ...'') for data extraction, (3) Run OS commands via xp_cmdshell
+          (-x) when you have sysadmin privileges, (4) Transfer files via --put-file/--get-file for payload delivery, (5) RID
+          brute force (--rid-brute) for user discovery through MSSQL, (6) Dump SAM/LSA if xp_cmdshell is available. For SQL
+          injection, use sqlmap instead.'
+        params:
+          target:
+            type: string
+            required: true
+            description: Target IP(s), hostname(s), or file containing targets.
+          username:
+            type: string
+            required: true
+            description: Username. Use 'sa' for default SQL Server admin account with --local-auth.
+          password:
+            type: string
+            description: Password for authentication.
+          hash:
+            type: string
+            description: 'NTLM hash for pass-the-hash (-H flag). Format: LM:NT or bare NT hash.'
+          domain:
+            type: string
+            description: Active Directory domain name (-d flag). Mutually exclusive with local_auth.
+          local_auth:
+            type: boolean
+            description: SQL Server authentication (--local-auth). Use for local SQL accounts like 'sa'. Mutually exclusive
+              with domain.
+          port:
+            type: integer
+            description: 'MSSQL port (default: 1433). Change for non-standard SQL Server instances.'
+          command:
+            type: string
+            description: OS command to execute via xp_cmdshell (-x flag). Requires sysadmin role. NetExec auto-enables xp_cmdshell
+              if disabled.
+          ps_command:
+            type: string
+            description: PowerShell command to execute via xp_cmdshell (-X flag). Requires sysadmin role. Supports --obfs,
+              --amsi-bypass, --force-ps32.
+          query:
+            type: string
+            description: 'SQL query to execute (-q flag). Example: ''SELECT name FROM sys.databases'' or ''SELECT * FROM openquery(...)''.
+              Returns query results in output.'
+          database:
+            type: string
+            description: List tables for a specific database (--database NAME), or omit value to list all databases (--database).
+          put_file:
+            type: array
+            description: 'Upload file to target via MSSQL (--put-file SRC DEST). Array of [local_path, remote_path]. Example:
+              [''shell.exe'', ''C:\Windows\Temp\shell.exe''].'
+          get_file:
+            type: array
+            description: Download file from target via MSSQL (--get-file SRC DEST). Array of [remote_path, local_path].
+          rid_brute:
+            type: integer
+            description: 'RID brute force user discovery via MSSQL (--rid-brute MAX_RID). Default max: 4000. Works when LDAP
+              is blocked.'
+      ssh:
+        required_ports:
+        - 22
+        description: SSH credential validation (password or private key), command execution (-x), sudo privilege check (--sudo-check
+          via sudo-stdin or mkfifo methods), and file transfer (--put-file/--get-file). Supports --key-file for private key
+          authentication where password becomes the key passphrase. Does not support NTLM or pass-the-hash (SSH uses its own
+          key-based auth).
+        when_to_use: 'When port 22 is open on Linux/Unix targets. Use for: (1) Validate discovered SSH credentials — [+] indicates
+          valid login, (2) Check if user has sudo privileges (--sudo-check), (3) Execute commands after credential validation,
+          (4) Transfer files to/from target. For SSH brute-force attacks against large wordlists, use hydra instead. For persistent
+          interactive SSH sessions with file transfer and script execution, use the dedicated ssh tool.'
+        params:
+          target:
+            type: string
+            required: true
+            description: Target IP(s), hostname(s), or file containing targets.
+          username:
+            type: string
+            required: true
+            description: SSH username (e.g., 'root', 'www-data', discovered user from web exploit).
+          password:
+            type: string
+            description: SSH password. When --key-file is used, this becomes the key's passphrase.
+          key_file:
+            type: string
+            description: Path to SSH private key file (--key-file). Password parameter becomes the key passphrase. Key must
+              be accessible inside the container (/session/ prefix for session files).
+          port:
+            type: integer
+            description: 'SSH port (default: 22). Change for non-standard SSH configurations discovered during nmap scanning.'
+          command:
+            type: string
+            description: Command to execute via SSH (-x flag). Single command execution — for multiple commands, chain with
+              && or ;.
+          sudo_check:
+            type: boolean
+            description: 'Check if user has sudo privileges (--sudo-check). Methods: sudo-stdin (default, stable) or mkfifo
+              (less stable, may need retry). Essential for privilege escalation assessment.'
+          put_file:
+            type: array
+            description: 'Upload file to target via SSH (--put-file SRC DEST). Array of [local_path, remote_path]. Example:
+              [''/session/artifacts/linpeas.sh'', ''/tmp/linpeas.sh''].'
+          get_file:
+            type: array
+            description: 'Download file from target via SSH (--get-file SRC DEST). Array of [remote_path, local_path]. Example:
+              [''/home/user/flag.txt'', ''/session/artifacts/flag.txt''].'
+      rdp:
+        required_ports:
+        - 3389
+        description: RDP credential validation, command execution (CMD -x / PowerShell -X via clipboard injection), and screenshot
+          capture on successful login. Supports NTLM pass-the-hash and domain/local authentication. Screenshots saved to screenshots/
+          directory. Command execution uses clipboard injection with configurable delays (--cmd-delay, --clipboard-delay).
+          NLA (Network Level Authentication) screenshot supported for login prompts.
+        when_to_use: 'When port 3389 is open. Use for: (1) Validate RDP credentials — [+] indicates successful RDP authentication,
+          (2) Capture screenshots of remote desktop (--screenshot) for intelligence gathering, (3) Execute commands via clipboard
+          injection (-x/-X) when other execution methods are blocked. RDP command execution is slower and less reliable than
+          SMB/WinRM/WMI — prefer those protocols for command execution when available. RDP validation confirms the user can
+          actually RDP (not just has valid creds).'
+        params:
+          target:
+            type: string
+            required: true
+            description: Target IP(s), hostname(s), or file containing targets.
+          username:
+            type: string
+            required: true
+            description: Username for RDP authentication.
+          password:
+            type: string
+            description: Password for authentication.
+          hash:
+            type: string
+            description: NTLM hash for pass-the-hash (-H flag). RDP restricted admin mode may be required for PTH.
+          domain:
+            type: string
+            description: Active Directory domain name (-d flag). Mutually exclusive with local_auth.
+          local_auth:
+            type: boolean
+            description: Authenticate with local accounts (--local-auth). Mutually exclusive with domain.
+          port:
+            type: integer
+            description: 'RDP port (default: 3389).'
+          command:
+            type: string
+            description: CMD command to execute via clipboard injection (-x flag). Slower than SMB/WinRM execution. Use --cmd-delay
+              to adjust execution timing.
+          ps_command:
+            type: string
+            description: PowerShell command to execute via clipboard injection (-X flag). Slower than SMB/WinRM execution.
+          screenshot:
+            type: boolean
+            description: 'Capture screenshot of remote desktop on successful login (--screenshot). Default screen time: 10s,
+              resolution: 1024x768. Screenshots saved to /root/.nxc/screenshots/.'
+      wmi:
+        required_ports:
+        - 135
+        description: 'WMI (Windows Management Instrumentation) credential validation, command execution (CMD -x / PowerShell
+          -X), and arbitrary WMI queries via DCOM on port 135. Stealthier alternative to SMB for command execution — uses
+          Win32_Process or WMI event subscriptions (T1546.003) instead of service creation. Two exec methods: wmiexec (default,
+          uses registry for output retrieval) and wmiexec-event (stealthier, uses WMI event subscriptions but less stable
+          on multiple hosts). Supports NTLM pass-the-hash. Port is fixed at 135 (DCOM/RPC).'
+        when_to_use: 'When SMB command execution is blocked, monitored, or generating alerts. WMI uses DCOM (port 135) which
+          is often less monitored than SMB (445). Use for: (1) Validate credentials against WMI when testing access, (2) Execute
+          commands via -x/-X as a stealthier alternative to SMB exec methods, (3) Run WMI queries (--wmi) for system enumeration
+          (processes, services, installed software), (4) Use wmiexec-event method (--exec-method wmiexec-event) for stealthiest
+          execution via T1546.003. Prefer wmiexec (default) for reliability on multiple hosts; use wmiexec-event for single-target
+          stealth.'
+        params:
+          target:
+            type: string
+            required: true
+            description: Target IP(s), hostname(s), or file containing targets.
+          username:
+            type: string
+            required: true
+            description: Username for authentication.
+          password:
+            type: string
+            description: Password for authentication.
+          hash:
+            type: string
+            description: 'NTLM hash for pass-the-hash (-H flag). Format: LM:NT or bare NT hash.'
+          domain:
+            type: string
+            description: Active Directory domain name (-d flag). Mutually exclusive with local_auth.
+          local_auth:
+            type: boolean
+            description: Authenticate with local accounts (--local-auth). Mutually exclusive with domain.
+          command:
+            type: string
+            description: CMD command to execute (-x flag). Creates Win32_Process. Output retrieved via registry (wmiexec)
+              or event subscription (wmiexec-event).
+          ps_command:
+            type: string
+            description: PowerShell command to execute (-X flag). Same execution methods as CMD.
+          wmi_query:
+            type: string
+            description: 'WMI query to execute (--wmi QUERY). Default namespace: root\cimv2. Examples: ''SELECT * FROM Win32_Process'',
+              ''SELECT * FROM Win32_Service WHERE State="Running"'', ''SELECT * FROM Win32_Product''.'
+          exec_method:
+            type: string
+            description: 'Execution method (--exec-method). Options: ''wmiexec'' (default, Win32_Process + StdRegProv registry
+              output, stable on multiple hosts) or ''wmiexec-event'' (T1546.003 WMI event subscriptions, stealthier but less
+              stable, recommend single host only).'
   nikto:
     name: nikto
     version: '2.5'
@@ -6026,6 +6846,7 @@ tools:
       including insecure HTTP methods, default credentials, and known CVEs with OSVDB references
     image: ghcr.io/silicon-works/mcp-tools-nikto:latest
     image_size_mb: 150
+    timeout_seconds: 300
     capabilities:
     - web_vulnerability_scanning
     - server_misconfiguration
@@ -6118,6 +6939,7 @@ tools:
       lua 5.4. Requires privileged mode for SYN scans, UDP scans, and OS detection.
     image: ghcr.io/silicon-works/mcp-tools-nmap:latest
     image_size_mb: 150
+    timeout_seconds: 600
     capabilities:
     - port_scanning
     - service_detection
@@ -6398,6 +7220,7 @@ tools:
       content types. Uses httpx (async HTTP client) internally.'
     image: ghcr.io/silicon-works/mcp-tools-nosqlmap:latest
     image_size_mb: 180
+    timeout_seconds: 300
     capabilities:
     - nosql_injection
     - mongodb_exploitation
@@ -6603,6 +7426,7 @@ tools:
       are community-maintained by ProjectDiscovery and auto-updated.
     image: ghcr.io/silicon-works/mcp-tools-nuclei:latest
     image_size_mb: 500
+    timeout_seconds: 600
     capabilities:
     - vulnerability_scanning
     - cve_detection
@@ -6905,6 +7729,7 @@ tools:
       base64-encoded file content for immediate delivery. No macros (use metasploit for VBA macro payloads).'
     image: ghcr.io/silicon-works/mcp-tools-office-exploit:latest
     image_size_mb: 80
+    timeout_seconds: 300
     capabilities:
     - malicious_document_generation
     - xxe_injection
@@ -7275,6 +8100,7 @@ tools:
       locally. For Metasploit msfvenom payloads, use metasploit generate_payload instead.'
     image: ghcr.io/silicon-works/mcp-tools-payload:latest
     image_size_mb: 400
+    timeout_seconds: 300
     capabilities:
     - binary_compilation
     - reverse_shell_generation
@@ -7491,6 +8317,7 @@ tools:
     source: https://github.com/microsoft/playwright-mcp
     image: ghcr.io/silicon-works/mcp-tools-playwright:latest
     image_size_mb: 1500
+    timeout_seconds: 300
     capabilities:
     - browser_automation
     - javascript_execution
@@ -7956,6 +8783,7 @@ tools:
       NET_RAW and NET_ADMIN capabilities for raw socket access.'
     image: ghcr.io/silicon-works/mcp-tools-scapy:latest
     image_size_mb: 200
+    timeout_seconds: 300
     capabilities:
     - packet_crafting
     - udp_testing
@@ -8244,6 +9072,7 @@ tools:
       Includes the full ExploitDB mirror.
     image: ghcr.io/silicon-works/mcp-tools-searchsploit:latest
     image_size_mb: 500
+    timeout_seconds: 60
     capabilities:
     - exploit_search
     - vulnerability_research
@@ -8407,6 +9236,7 @@ tools:
       by session_id.'
     image: ghcr.io/silicon-works/mcp-tools-shell-session:latest
     image_size_mb: 150
+    timeout_seconds: 600
     capabilities:
     - persistent_shell_sessions
     - ssh_session_management
@@ -8661,6 +9491,7 @@ tools:
       databases, and any web framework using SQLite as backend.'
     image: ghcr.io/silicon-works/mcp-tools-sqlite:latest
     image_size_mb: 100
+    timeout_seconds: 120
     capabilities:
     - database_extraction
     - credential_extraction
@@ -8900,6 +9731,7 @@ tools:
       Includes 60+ WAF bypass tamper scripts. Runs non-interactively with --batch flag.'
     image: ghcr.io/silicon-works/mcp-tools-sqlmap:latest
     image_size_mb: 150
+    timeout_seconds: 600
     capabilities:
     - sql_injection
     - database_enumeration
@@ -9449,6 +10281,7 @@ tools:
       for legacy ciphers, KEX algorithms, and MTU workarounds.'
     image: ghcr.io/silicon-works/mcp-tools-ssh:latest
     image_size_mb: 100
+    timeout_seconds: 300
     capabilities:
     - remote_shell_access
     - command_execution
@@ -9868,6 +10701,7 @@ tools:
       In-memory state persists across calls within a single container session. Does NOT require network — runs locally.'
     image: ghcr.io/silicon-works/mcp-tools-target-tracker:latest
     image_size_mb: 80
+    timeout_seconds: 60
     capabilities:
     - state_tracking
     - credential_management
@@ -10349,6 +11183,7 @@ tools:
       local_port=0. Requires host network mode so tunnels are accessible from other MCP containers.'
     image: ghcr.io/silicon-works/mcp-tools-tunnel:latest
     image_size_mb: 100
+    timeout_seconds: 600
     capabilities:
     - port_forwarding
     - socks_proxy
@@ -10518,6 +11353,7 @@ tools:
       headers, response body patterns, meta tags, and cookies. Also checks security headers and calculates favicon hashes.
     image: ghcr.io/silicon-works/mcp-tools-web-fingerprint:latest
     image_size_mb: 100
+    timeout_seconds: 120
     capabilities:
     - technology_detection
     - cms_identification
@@ -10729,6 +11565,7 @@ tools:
       sqlmap, etc.'
     image: ghcr.io/silicon-works/mcp-tools-web-session:latest
     image_size_mb: 100
+    timeout_seconds: 300
     capabilities:
     - session_management
     - cookie_handling
@@ -10961,6 +11798,7 @@ tools:
       mode (passive detection + random user agent).'
     image: ghcr.io/silicon-works/mcp-tools-wpscan:latest
     image_size_mb: 300
+    timeout_seconds: 300
     capabilities:
     - wordpress_scanning
     - plugin_detection
@@ -11285,6 +12123,7 @@ tools:
       Runs as a service container with persistent state. Can proxy Playwright browser traffic for combined JS app testing.'
     image: ghcr.io/silicon-works/mcp-tools-zap:latest
     image_size_mb: 1200
+    timeout_seconds: 600
     capabilities:
     - web_vulnerability_scanning
     - active_scanning
