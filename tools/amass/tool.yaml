@@ -1,0 +1,114 @@
+name: amass
+version: "5.0.0"
+description: "Subdomain discovery and external attack surface mapping — OWASP Amass v5.0 with passive and active enumeration modes. Two methods: enum_passive (certificate transparency, DNS databases, web archives, search engines — no target contact; passive is the v5 default), enum_active (passive sources plus DNS brute-force, zone transfers, certificate crawling — touches target DNS). Outputs text format (one subdomain per line) parsed into structured data with subdomain names and parent domain. For email harvesting alongside subdomain discovery use theharvester. For web technology fingerprinting on discovered subdomains use web-fingerprint. For port scanning discovered hosts use nmap."
+image: "ghcr.io/silicon-works/mcp-tools-amass:latest"
+image_size_mb: 226
+timeout_seconds: 900
+
+capabilities:
+  - subdomain_discovery
+  - dns_enumeration
+  - attack_surface_mapping
+  - osint
+
+routing:
+  use_for:
+    - "discover subdomains for a target domain"
+    - "enumerate subdomains using passive OSINT sources"
+    - "find all subdomains of a website without touching it"
+    - "active DNS brute-force subdomain enumeration"
+    - "map the external attack surface of an organization"
+    - "discover hidden subdomains before port scanning"
+    - "certificate transparency log subdomain discovery"
+  never_use_for:
+    - "port scanning discovered hosts (use nmap)"
+    - "web technology fingerprinting (use web-fingerprint)"
+    - "web vulnerability scanning (use nuclei or nikto)"
+    - "email harvesting (use theharvester)"
+    - "DNS record lookups for known hosts (use nmap or dig via bash)"
+  triggers:
+    - "amass"
+    - "subdomain"
+    - "subdomain discovery"
+    - "subdomain enumeration"
+    - "attack surface"
+    - "DNS brute force"
+    - "certificate transparency"
+    - "find subdomains"
+    - "domain enumeration"
+
+phases:
+  - reconnaissance
+
+requirements:
+  network: true
+  privileged: false
+
+resources:
+  memory_mb: 512
+  cpu: 1.0
+
+see_also:
+  - tool: nmap
+    reason: "After discovering subdomains with amass, use nmap to port scan the discovered hosts."
+  - tool: web-fingerprint
+    reason: "Use web-fingerprint to identify technologies running on discovered subdomains."
+  - tool: theharvester
+    reason: "Use theharvester for email/employee harvesting. Amass focuses on subdomains, theharvester on emails and people."
+  - tool: nuclei
+    reason: "After discovering subdomains, use nuclei to scan them for web vulnerabilities."
+  - tool: ffuf
+    reason: "After discovering subdomains, use ffuf for directory brute-forcing and content discovery on each subdomain."
+
+methods:
+  enum_passive:
+    description: "Passive subdomain enumeration — runs `amass enum -d <domain> -o <output> -nocolor -timeout <min>` (passive is the v5 default). Queries certificate transparency logs, DNS aggregators, web archives, and search engines. Does NOT touch the target's infrastructure directly — all data comes from third-party sources. Returns deduplicated subdomain list parsed from text output (one subdomain per line). Progress info and OWASP banner on stderr are filtered out."
+    when_to_use: "(1) First step in reconnaissance — discover subdomains without alerting the target. (2) Bug bounty scope expansion — find all related subdomains. (3) Before active scanning — build target list for nmap, nuclei, web-fingerprint. (4) When stealth is required — passive mode leaves no trace on target infrastructure."
+    required_ports: []
+    params:
+      domain:
+        type: string
+        required: true
+        description: "Target domain (e.g., 'example.com', 'target.htb'). Must be a valid domain name, not an IP."
+      timeout:
+        type: integer
+        default: 5
+        description: "Timeout in minutes. Default 5. Increase to 30+ for large domains with many subdomains. Partial results returned on timeout."
+    returns:
+      subdomains:
+        type: array
+        description: "Discovered subdomains (capped at 200). Each: {name: str, domain: str}."
+      total_found:
+        type: integer
+        description: "Total unique subdomains discovered."
+      mode:
+        type: string
+        description: "Enumeration mode used ('passive' or 'active')."
+      output_file:
+        type: string
+        description: "Path to text output file under /session/ (one subdomain per line)."
+
+  enum_active:
+    description: "Active subdomain enumeration — runs `amass enum -active -brute -d <domain> -o <output> -nocolor -timeout <min>`. Includes all passive sources PLUS DNS brute-force with built-in wordlist, attempted zone transfers, and certificate crawling. Directly queries the target's DNS servers."
+    when_to_use: "(1) When passive enum is not finding enough subdomains. (2) When you have authorization to actively probe the target. (3) HTB/CTF — always use active mode since targets are authorized. (4) After passive enum — active adds brute-force results to passive findings."
+    required_ports: []
+    params:
+      domain:
+        type: string
+        required: true
+        description: "Target domain."
+      brute:
+        type: boolean
+        default: true
+        description: "Enable DNS brute-force. Default true. Disable with false if only want zone transfer and cert crawling."
+      timeout:
+        type: integer
+        default: 10
+        description: "Timeout in minutes. Default 10. Active+brute takes longer than passive."
+    returns:
+      subdomains:
+        type: array
+        description: "Discovered subdomains with IPs and sources."
+      total_found:
+        type: integer
+        description: "Total unique subdomains discovered."

@@ -1,0 +1,200 @@
+name: forensics
+version: "1.0.0"
+description: "File analysis bundle — binwalk v2.4.3 (firmware extraction, signature scanning), foremost v1.5.7 (file carving from disk images), steghide v0.5.1 (steganography extraction from JPEG/BMP/WAV/AU), exiftool v13.50 (metadata extraction for 400+ file formats). Six methods: extract (binwalk recursive extraction with matryoshka depth control), analyze (binwalk signature scan without extraction), carve (foremost header/footer carving for 15+ file types), stego_extract (steghide hidden data extraction with passphrase), stego_info (steghide format/capacity/embedded detection), metadata (exiftool JSON output with EXIF/XMP/IPTC/GPS fields). All operations on files in /session/ directory. No network access required."
+image: "ghcr.io/silicon-works/mcp-tools-forensics:latest"
+image_size_mb: 309
+timeout_seconds: 600
+
+capabilities:
+  - firmware_analysis
+  - file_extraction
+  - file_carving
+  - steganography
+  - metadata_extraction
+  - signature_scanning
+
+routing:
+  use_for:
+    - "extract embedded files from a firmware binary or archive"
+    - "scan a binary file for embedded signatures like zip headers, filesystem images, certificates"
+    - "carve deleted files from a disk image or raw partition dump"
+    - "recover JPEG PNG PDF files from a forensic disk image"
+    - "extract hidden data from a steganographic image using steghide"
+    - "check if an image file has steganographic data embedded"
+    - "extract EXIF metadata GPS coordinates camera info from a photo"
+    - "extract metadata from a PDF document including author creation date"
+    - "analyze a firmware update file for embedded filesystems and compression"
+    - "extract files embedded inside a PNG or JPEG using binwalk"
+    - "perform file carving on a dd disk image to recover deleted files"
+    - "check steganographic capacity of an image file"
+    - "extract XMP IPTC metadata from media files"
+  never_use_for:
+    - "reverse engineering binary executables (use ghidra — forensics extracts files, ghidra analyzes code)"
+    - "memory forensics or RAM dump analysis (use volatility)"
+    - "network packet capture analysis (use wireshark or tshark)"
+    - "malware analysis or sandboxing (use dedicated malware tools)"
+    - "password-protected zip/rar extraction (use john.convert for hash extraction, then john/hashcat to crack)"
+  triggers:
+    - "binwalk"
+    - "foremost"
+    - "steghide"
+    - "exiftool"
+    - "firmware extract"
+    - "file carve"
+    - "steganography"
+    - "stego"
+    - "metadata"
+    - "EXIF"
+    - "embedded files"
+    - "disk image recovery"
+
+phases:
+  - post-exploitation
+
+requirements:
+  network: false
+  privileged: false
+
+resources:
+  memory_mb: 512
+  cpu: 1.0
+
+see_also:
+  - tool: ghidra
+    reason: "Use ghidra for reverse engineering extracted binaries. Forensics extracts files; ghidra analyzes code."
+  - tool: volatility
+    reason: "Use volatility for memory dump analysis (pslist, hashdump, filescan). Forensics handles file-level analysis."
+  - tool: john
+    reason: "Use john's *2john converters to extract hashes from password-protected archives, then crack."
+
+methods:
+  extract:
+    description: "Extract embedded files using binwalk's recursive extraction mode. Runs `binwalk -e -M -d <depth> -C /session/extracted_<basename>/ <file>`. The -e flag enables extraction, -M enables matryoshka (recursive) extraction of files found within extracted files, -d limits recursion depth (default 8). Detects and extracts 100+ file types including compressed archives, filesystems (squashfs, cramfs, jffs2), certificates, firmware headers, and raw compression streams. Output directory created under /session/ for retrieval."
+    when_to_use: "(1) First step in CTF forensics challenges — extract hidden files from images, binaries, or archives. (2) Firmware analysis — extract filesystem from router/IoT firmware updates. (3) After downloading suspicious files during an engagement — check for embedded payloads. (4) When a file is larger than expected for its type (might contain embedded data). (5) Use 'analyze' first to see what's embedded, then 'extract' to pull it out."
+    required_ports: []
+    params:
+      file:
+        type: string
+        required: true
+        description: "Path to file to extract from (must be accessible in container, typically under /session/)."
+      depth:
+        type: integer
+        default: 8
+        description: "Max matryoshka recursion depth (-d flag). Default 8. Reduce to 2-3 for large files to prevent long runtimes. Increase for deeply nested archives."
+    returns:
+      signatures_found:
+        type: array
+        description: "Signatures detected in the file. Each entry: {offset_decimal, offset_hex, description}."
+      extracted_files:
+        type: array
+        description: "Paths to extracted files under /session/extracted_<basename>/."
+      extracted_count:
+        type: integer
+        description: "Number of files extracted."
+      extract_directory:
+        type: string
+        description: "Root directory containing extracted files."
+
+  analyze:
+    description: "Scan file for embedded signatures without extracting (binwalk -B). Quick read-only operation that identifies file types embedded at various offsets."
+    when_to_use: "(1) Before extraction — see what's inside without modifying anything. (2) Quick triage of unknown files. (3) Verify a file contains expected embedded content."
+    required_ports: []
+    params:
+      file:
+        type: string
+        required: true
+        description: "Path to file to scan."
+    returns:
+      signatures:
+        type: array
+        description: "Signatures found. Each entry: {offset_decimal, offset_hex, description}."
+      signature_count:
+        type: integer
+        description: "Number of signatures found."
+
+  carve:
+    description: "Carve files from disk image or binary using foremost. Runs `foremost -o /session/carved_<basename>/ -i <file>` with optional type filter (-t). Foremost searches for file headers and footers to recover intact files from raw data, disk images, or partially overwritten media. Supports 15+ file types: jpg, gif, png, bmp, avi, exe, mpg, wav, riff, wmv, mov, pdf, ole, doc, zip, rar, htm, cpp. Creates subdirectories by file type in the output directory."
+    when_to_use: "(1) Recover deleted files from a dd disk image or raw partition. (2) CTF challenges involving disk forensics or file recovery. (3) After obtaining a disk image via dd or similar tool during post-exploitation. (4) When binwalk extract doesn't recover the files you need (foremost uses different carving heuristics). (5) Use '-t jpg,png,pdf' to target specific file types and reduce noise."
+    required_ports: []
+    params:
+      file:
+        type: string
+        required: true
+        description: "Path to file/image to carve from."
+      types:
+        type: string
+        description: "Comma-separated file types to carve: jpg, gif, png, bmp, avi, exe, mpg, wav, riff, wmv, mov, pdf, ole, doc, zip, rar, htm, cpp. Omit for all types."
+    returns:
+      carved_files:
+        type: array
+        description: "Paths to carved files under /session/carved_<basename>/ (excludes audit.txt)."
+      carved_count:
+        type: integer
+        description: "Number of files carved."
+      carve_directory:
+        type: string
+        description: "Root output directory."
+      audit_summary:
+        type: string
+        description: "Foremost audit log summary (first 2000 chars)."
+
+  stego_extract:
+    description: "Extract hidden data from a steganographic file using steghide. Runs `steghide extract -sf <file> -xf /session/stego_out_<basename> -p <passphrase> -f`. Supports JPEG, BMP, WAV, and AU formats. If the extracted data is text and under 4KB, the content is included directly in the response. Otherwise, returns the output file path for retrieval."
+    when_to_use: "(1) CTF steganography challenges where steghide was used to embed data. (2) When 'stego_info' confirms data is embedded. (3) Try empty passphrase first, then common passwords, then crack with stegcracker if needed. (4) After finding a suspicious image file during an engagement."
+    required_ports: []
+    params:
+      file:
+        type: string
+        required: true
+        description: "Path to stego file (JPEG, BMP, WAV, or AU format)."
+      passphrase:
+        type: string
+        default: ""
+        description: "Passphrase for extraction. Empty string for no passphrase. Try common passwords if empty fails."
+    returns:
+      output_path:
+        type: string
+        description: "Path to extracted data file under /session/."
+      size_bytes:
+        type: integer
+        description: "Size of extracted data in bytes."
+      content:
+        type: string
+        description: "Text content of extracted data (if under 4KB and readable). '(binary data)' otherwise."
+
+  stego_info:
+    description: "Display info about a potential steganographic file using steghide info. Shows file format, steganographic capacity, and whether data appears to be embedded. Quick read-only check before attempting extraction."
+    when_to_use: "(1) Before stego_extract — check if data is embedded and what format is used. (2) Triage multiple image files to find the one with hidden data. (3) Check steganographic capacity of a cover file."
+    required_ports: []
+    params:
+      file:
+        type: string
+        required: true
+        description: "Path to file to inspect."
+    returns:
+      format:
+        type: string
+        description: "File format detected by steghide (e.g., 'jpeg', 'bmp', 'wav')."
+      capacity:
+        type: string
+        description: "Steganographic capacity (e.g., '12.5 KB')."
+      embedded:
+        type: boolean
+        description: "True if steghide detects embedded data."
+
+  metadata:
+    description: "Extract all metadata from a file using exiftool -j (JSON output). Returns structured metadata including EXIF (camera, lens, settings), GPS coordinates, XMP (editing software, history), IPTC (caption, keywords), PDF properties (author, creator, pages), Office document properties, and file system metadata (dates, permissions). Supports 400+ file formats."
+    when_to_use: "(1) CTF challenges involving metadata analysis (hidden flags in EXIF comments, GPS coordinates). (2) OSINT — extract GPS coordinates, camera model, software used from photos. (3) Check PDF metadata for author/creator info during reconnaissance. (4) Verify file timestamps and creation tools. (5) Look for steganographic hints in metadata comments."
+    required_ports: []
+    params:
+      file:
+        type: string
+        required: true
+        description: "Path to file to extract metadata from."
+    returns:
+      metadata:
+        type: object
+        description: "Full metadata as key-value pairs. Keys vary by file type (e.g., 'Make', 'Model', 'GPSLatitude' for photos; 'Author', 'Creator', 'PageCount' for PDFs)."
+      field_count:
+        type: integer
+        description: "Number of metadata fields extracted."

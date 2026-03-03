@@ -1,0 +1,302 @@
+name: hashcat
+version: "7.1.2"
+description: "Advanced password cracking tool — hashcat v7.1.2 with 600+ hash modes and 6 attack modes. Six methods: crack_dictionary (-a 0, wordlist with optional rules), crack_mask (-a 3, pattern-based brute-force with up to 4 custom charsets and increment mode), crack_hybrid (-a 6/-a 7, wordlist+mask or mask+wordlist), crack_combinator (-a 1, concatenate two wordlists), show (retrieve cracked results from potfile), identify (hash type detection via pattern matching and hashcat --identify). CPU-only in Docker (no GPU passthrough) — uses -D 1 -w 3 (CPU device, high workload). Ships with rockyou.txt (14M passwords) and 28+ rule files (best66, rockyou-30000, dive, toggles1, d3ad0ne, and more). Key advantage over john: combinator attacks (-a 1), hybrid attacks (-a 6/-a 7), custom charsets (?1-?4), and 600+ hash modes with numeric identifiers. For basic wordlist cracking, try john first — it auto-detects formats and is simpler. Use hashcat when you need advanced attack modes or john doesn't support the hash type."
+image: "ghcr.io/silicon-works/mcp-tools-hashcat:latest"
+image_size_mb: 1030
+timeout_seconds: 900
+
+capabilities:
+  - password_cracking
+  - hash_identification
+  - dictionary_attack
+  - mask_attack
+  - hybrid_attack
+  - combinator_attack
+
+routing:
+  use_for:
+    - "crack password hashes using dictionary attack with wordlist and rules"
+    - "brute-force crack a hash using a mask pattern with custom charsets"
+    - "run a hybrid attack combining wordlist words with mask patterns"
+    - "crack NTLM hashes from secretsdump or SAM database"
+    - "crack MD5 SHA1 SHA256 SHA512 bcrypt scrypt hashes"
+    - "crack hashes from /etc/shadow using sha512crypt mode 1800"
+    - "run combinator attack concatenating two wordlists"
+    - "identify unknown hash type and determine the correct hashcat mode number"
+    - "retrieve previously cracked passwords from hashcat potfile"
+    - "crack WPA/WPA2 handshake captures"
+    - "crack Kerberos TGS tickets from kerberoasting (mode 13100)"
+    - "crack AS-REP roasted hashes (mode 18200)"
+    - "crack MSSQL Oracle PostgreSQL MySQL database hashes"
+    - "crack Active Directory cached domain credentials (mode 2100)"
+  never_use_for:
+    - task: "basic wordlist cracking when hash format is unknown"
+      use_instead: "john.crack"
+      reason: "John auto-detects hash formats and is simpler for basic cracking. Use hashcat when you need specific attack modes (hybrid, combinator) or know the hash mode number."
+    - "online brute-force against login pages (use hydra — hashcat is offline only)"
+    - "hash lookup in databases (use hash-lookup — try online lookup before offline cracking)"
+    - "IKE/IPsec PSK cracking (use ike-scan.crack_psk)"
+    - "extracting hashes from encrypted files (use john.convert — john has *2john converters, hashcat does not)"
+  triggers:
+    - "hashcat"
+    - "hash crack"
+    - "mask attack"
+    - "hybrid attack"
+    - "combinator attack"
+    - "brute-force crack"
+    - "custom charset"
+    - "crack ntlm"
+    - "password crack"
+    - "dictionary attack"
+    - "crack kerberoast"
+    - "crack asrep"
+
+phases:
+  - post-exploitation
+
+requirements:
+  network: false
+  privileged: false
+
+resources:
+  memory_mb: 1024
+  cpu: 2.0
+
+see_also:
+  - tool: john
+    reason: "Use john for basic wordlist cracking with auto-format detection and *2john file converters. John is simpler for standard cracking workflows."
+  - tool: hash-lookup
+    reason: "Try online hash lookup before offline cracking — may find the plaintext instantly without spending CPU time."
+  - tool: responder
+    reason: "Capture NTLMv2 hashes via LLMNR/NBT-NS poisoning, then crack with hashcat mode 5600."
+  - tool: impacket
+    reason: "Extract NTLM hashes via secretsdump (mode 1000) or Kerberos tickets via GetUserSPNs (mode 13100)."
+  - tool: certipy
+    reason: "Certipy authenticate produces NT hashes (mode 1000) from ADCS certificate-based authentication."
+  - tool: volatility
+    reason: "Volatility hashdump extracts NTLM hashes (mode 1000) from Windows memory dumps."
+
+methods:
+  crack_dictionary:
+    description: "Dictionary attack using hashcat's straight mode (-a 0). Runs `hashcat -a 0 -m <mode> <hashfile> <wordlist>` with optional rules file (-r). Each word from the wordlist is tested against the hash, optionally transformed by rule functions (capitalization, number appending, leet speak, etc.). Uses CPU-only mode (-D 1 -w 3) since Docker containers lack GPU passthrough. Ships with rockyou.txt (~14M passwords) and 28+ rule files including best66 (64 effective rules), rockyou-30000 (30K aggressive rules), dive (comprehensive), toggles1 (case toggling), d3ad0ne (community meta-rule). After cracking, runs hashcat --show to collect results from the potfile. Potfile persists across calls within the same container session."
+    when_to_use: "(1) First cracking attempt — dictionary with rockyou and best66 rules cracks most weak passwords. (2) After extracting hashes from /etc/shadow (mode 1800), SAM/secretsdump (NTLM mode 1000), or database dumps. (3) When john doesn't support the hash format (hashcat has 600+ modes vs john's ~300). (4) With rockyou-30000 rules for aggressive cracking when best66 doesn't crack it. (5) For kerberoasting results (mode 13100) or AS-REP roasting (mode 18200). Common workflow: identify → crack_dictionary with rockyou + best66 → if no results, try rockyou-30000 rules → if still no results, try crack_mask."
+    required_ports: []
+    params:
+      hashes:
+        type: string
+        required: true
+        description: "Hash(es) to crack, one per line. Bare hash ('5f4dcc3b5aa765d61d8327deb882cf99') or user:hash format ('admin:aad3b435b51404eeaad3b435b51404ee:31d6cfe0d16ae931b73c59d7e0c089c0' for NTLM). Use 'username: true' parameter if providing user:hash format."
+      hash_mode:
+        type: integer
+        required: true
+        description: "Hashcat mode number. Common: 0=MD5, 100=SHA1, 1000=NTLM, 1400=SHA256, 1700=SHA512, 1800=sha512crypt (/etc/shadow), 3200=bcrypt, 5600=NetNTLMv2, 13100=Kerberos TGS-REP (kerberoasting), 18200=Kerberos AS-REP (asreproast), 2100=MS DCC2 (cached domain creds), 300=MySQL 4.1+, 1731=MSSQL 2012+. Use 'identify' method if unknown."
+      wordlist:
+        type: string
+        default: "rockyou"
+        description: "Wordlist: 'rockyou' (~14M passwords, default) or absolute path to custom wordlist."
+      rules:
+        type: string
+        description: "Rule file: 'best66' (64 rules, fast, good coverage), 'rockyou-30000' (30K rules, aggressive), 'dive' (comprehensive), 'toggles1' (case toggling), 'd3ad0ne' (community meta-rule). Or absolute path. Omit for raw wordlist-only."
+      timeout:
+        type: integer
+        default: 300
+        description: "Max cracking time in seconds. Uses hashcat's --runtime. For MD5/SHA/NTLM with rockyou: 60-120s is usually enough. For bcrypt (mode 3200): very slow on CPU, consider 600s+."
+      username:
+        type: boolean
+        default: false
+        description: "Enable --username flag if hashes are in user:hash format (e.g., NTLM from secretsdump)."
+    returns:
+      cracked:
+        type: array
+        description: "Cracked results. Each entry: {hash: 'hash_value', plaintext: 'password'}. Empty if nothing cracked."
+      cracked_count:
+        type: integer
+        description: "Number of passwords cracked."
+      hash_mode:
+        type: integer
+        description: "Hash mode used."
+      attack_mode:
+        type: string
+        description: "Always 'dictionary' for this method."
+      exhausted:
+        type: boolean
+        description: "True if all candidates were tried (wordlist fully consumed)."
+
+  crack_mask:
+    description: "Mask/brute-force attack using hashcat's brute-force mode (-a 3). Runs `hashcat -a 3 -m <mode> <hashfile> <mask>` with optional custom charsets (-1 through -4) and increment mode (-i). Each position in the mask specifies a character set: ?l=a-z, ?u=A-Z, ?d=0-9, ?s=special, ?a=all, ?h=hex-lower, ?H=hex-upper, ?b=full-byte. Custom charsets ?1-?8 are user-defined combinations. Literal characters in the mask are used as-is. Increment mode tries all lengths from increment_min up to the full mask length."
+    when_to_use: "(1) When you know the password pattern (e.g., 'Name + 4 digits' → '?u?l?l?l?d?d?d?d'). (2) For short passwords where brute-force is feasible (4-6 chars). (3) When dictionary attack fails and you have pattern intelligence from the target (e.g., password policy hints). (4) With custom charsets for restricted character sets (e.g., only lowercase+digits: -1 ?l?d, mask ?1?1?1?1). (5) With increment mode to try all lengths (e.g., mask '?d?d?d?d?d?d' + increment tries 1-digit through 6-digit PINs). WARNING: keyspace grows exponentially — ?a?a?a?a?a?a?a?a (8 chars, all printable) is ~6.6 quadrillion candidates, infeasible on CPU."
+    required_ports: []
+    params:
+      hashes:
+        type: string
+        required: true
+        description: "Hash(es) to crack, one per line."
+      hash_mode:
+        type: integer
+        required: true
+        description: "Hashcat mode number."
+      mask:
+        type: string
+        required: true
+        description: "Mask pattern. ?l=a-z, ?u=A-Z, ?d=0-9, ?s=special, ?a=all, ?h=hex-lower, ?H=hex-upper. Custom: ?1-?8 via custom_charsets. Literals included as-is. Examples: '?u?l?l?l?d?d?d?d' (Name1234), '?d?d?d?d' (4-digit PIN), 'Qwerty?d?d?d' (Qwerty + 3 digits)."
+      custom_charsets:
+        type: object
+        description: "Custom charset definitions for ?1-?8. Keys: '1' through '8'. Values: charset strings. Example: {\"1\": \"?l?d\"} defines ?1 as lowercase+digits. Then use ?1 in mask."
+      increment:
+        type: boolean
+        default: false
+        description: "Enable increment mode (-i) — tries all lengths from increment_min up to mask length."
+      increment_min:
+        type: integer
+        default: 1
+        description: "Start increment at this length."
+      timeout:
+        type: integer
+        default: 300
+        description: "Max cracking time in seconds."
+      username:
+        type: boolean
+        default: false
+        description: "Enable --username for user:hash format."
+    returns:
+      cracked:
+        type: array
+        description: "Cracked results."
+      cracked_count:
+        type: integer
+        description: "Number of passwords cracked."
+      attack_mode:
+        type: string
+        description: "Always 'mask' for this method."
+      mask:
+        type: string
+        description: "Mask pattern used."
+      exhausted:
+        type: boolean
+        description: "True if all mask candidates were tried."
+
+  crack_hybrid:
+    description: "Hybrid attack combining a wordlist with a mask — either wordlist+mask (-a 6, appends mask to each word) or mask+wordlist (-a 7, prepends mask to each word). Example: wordlist containing 'password' with mask '?d?d?d?d' in -a 6 mode tries password0000 through password9999. In -a 7 mode with mask '?d?d?d?d', tries 0000password through 9999password."
+    when_to_use: "(1) When passwords are likely wordlist words with appended numbers/symbols (e.g., password123, admin2024!). (2) When password policy requires numbers/symbols appended to dictionary words. (3) After pure dictionary attack fails — hybrid adds pattern variations. (4) Common pattern: rockyou + '?d?d?d?d' catches word+4digits. (5) Use mask_wordlist mode (-a 7) for prepended patterns like '2024password'."
+    required_ports: []
+    params:
+      hashes:
+        type: string
+        required: true
+        description: "Hash(es) to crack, one per line."
+      hash_mode:
+        type: integer
+        required: true
+        description: "Hashcat mode number."
+      wordlist:
+        type: string
+        required: true
+        description: "Wordlist name ('rockyou') or absolute path."
+      mask:
+        type: string
+        required: true
+        description: "Mask to append (mode=wordlist_mask) or prepend (mode=mask_wordlist). Example: '?d?d?d?d' for 4 digits."
+      mode:
+        type: string
+        default: "wordlist_mask"
+        description: "'wordlist_mask' (-a 6): word+mask (password1234). 'mask_wordlist' (-a 7): mask+word (1234password)."
+      timeout:
+        type: integer
+        default: 300
+        description: "Max cracking time in seconds."
+      username:
+        type: boolean
+        default: false
+        description: "Enable --username for user:hash format."
+    returns:
+      cracked:
+        type: array
+        description: "Cracked results."
+      cracked_count:
+        type: integer
+        description: "Number of passwords cracked."
+      attack_mode:
+        type: string
+        description: "'hybrid_wordlist_mask' or 'hybrid_mask_wordlist'."
+
+  crack_combinator:
+    description: "Combinator attack (-a 1) — concatenates each word from wordlist1 with each word from wordlist2. With two 100-word lists, tests 10,000 combinations. Useful for compound passwords like 'sunflower' (sun+flower), 'bluesky' (blue+sky). Can use the same wordlist as both inputs for self-combination."
+    when_to_use: "(1) When passwords are likely two concatenated dictionary words (e.g., 'superstar', 'blackbird'). (2) When you have two themed wordlists to combine (e.g., colors+animals, first_names+years). (3) After dictionary and hybrid attacks fail. (4) With small focused wordlists — large wordlists produce huge keyspaces (14M × 14M = 196 trillion for rockyou × rockyou)."
+    required_ports: []
+    params:
+      hashes:
+        type: string
+        required: true
+        description: "Hash(es) to crack, one per line."
+      hash_mode:
+        type: integer
+        required: true
+        description: "Hashcat mode number."
+      wordlist1:
+        type: string
+        required: true
+        description: "First wordlist — name ('rockyou') or absolute path."
+      wordlist2:
+        type: string
+        required: true
+        description: "Second wordlist — name or path. Each word from list1 concatenated with each word from list2."
+      timeout:
+        type: integer
+        default: 300
+        description: "Max cracking time in seconds."
+      username:
+        type: boolean
+        default: false
+        description: "Enable --username for user:hash format."
+    returns:
+      cracked:
+        type: array
+        description: "Cracked results."
+      cracked_count:
+        type: integer
+        description: "Number of passwords cracked."
+      attack_mode:
+        type: string
+        description: "Always 'combinator'."
+
+  show:
+    description: "Retrieve previously cracked passwords from hashcat's potfile. Runs `hashcat --show -m <mode> <hashfile>` which cross-references hashes against the potfile (~/.hashcat/hashcat.potfile or configured path). Returns instantly — no cracking performed. Potfile persists across calls within the same container session."
+    when_to_use: "After a cracking attempt (especially one that timed out) to check what was cracked. Also use to check if hashes were cracked in a previous call during the same container session."
+    required_ports: []
+    params:
+      hashes:
+        type: string
+        required: true
+        description: "Hash(es) to check, same format as crack methods."
+      hash_mode:
+        type: integer
+        required: true
+        description: "Hashcat mode number — must match what was used for cracking."
+      username:
+        type: boolean
+        default: false
+        description: "Enable --username if hashes include usernames."
+    returns:
+      cracked:
+        type: array
+        description: "Previously cracked results from potfile."
+      cracked_count:
+        type: integer
+        description: "Number of cracked passwords found."
+
+  identify:
+    description: "Identify hash type and suggest hashcat mode numbers. Uses two-phase detection: (1) pattern matching against 15 common hash formats (md5crypt, sha512crypt, bcrypt, NTLM, SHA1, etc.), (2) hashcat's --identify flag which tests against all 600+ modes. Returns a list of possible mode numbers with names."
+    when_to_use: "When you have a hash but don't know the hashcat mode number. Always run identify before cracking if the hash type is uncertain. For 32-hex-char hashes, both MD5 (mode 0) and NTLM (mode 1000) match — use context to disambiguate (Windows = NTLM, web app = MD5)."
+    required_ports: []
+    params:
+      hash:
+        type: string
+        required: true
+        description: "Single hash to identify. Provide the raw hash string without username prefix."
+    returns:
+      possible_modes:
+        type: array
+        description: "Possible hashcat modes. Each entry: {mode: 1000, name: 'NTLM'}. Returns [{mode: -1, name: 'unknown'}] if no match."
+      hash:
+        type: string
+        description: "Truncated hash that was analyzed."

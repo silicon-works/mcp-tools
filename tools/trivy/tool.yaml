@@ -1,0 +1,158 @@
+name: trivy
+version: "0.69.2"
+description: "Container, filesystem, and IaC vulnerability scanner — Trivy v0.69 with CVE detection for OS packages and language dependencies (npm, pip, gem, Go, Rust, etc.), Infrastructure-as-Code misconfiguration detection (Terraform, Kubernetes, Dockerfile, CloudFormation), and SBOM generation. Five methods: scan_image (Docker image CVE scan), scan_filesystem (local path vulnerability scan), scan_iac (IaC misconfiguration detection), scan_sbom (SBOM with vulnerability cross-reference), list_vulns (quick severity summary). Pre-downloaded vulnerability database for offline use."
+image: "ghcr.io/silicon-works/mcp-tools-trivy:latest"
+image_size_mb: 1390
+timeout_seconds: 900
+
+capabilities:
+  - vulnerability_scanning
+  - container_security
+  - iac_scanning
+  - sbom_generation
+  - misconfiguration_detection
+
+routing:
+  use_for:
+    - "scan a Docker image for known CVE vulnerabilities"
+    - "find vulnerabilities in installed packages on a filesystem"
+    - "scan Terraform files for security misconfigurations"
+    - "scan Kubernetes manifests for security issues"
+    - "check a Dockerfile for best practice violations"
+    - "generate a software bill of materials for a project"
+    - "list critical vulnerabilities in a container image"
+    - "scan CloudFormation templates for misconfigurations"
+    - "check npm pip gem Go Rust dependencies for known CVEs"
+    - "audit container security posture"
+  never_use_for:
+    - "web application vulnerability scanning (use nuclei or nikto)"
+    - "network vulnerability scanning (use nmap with scripts)"
+    - "CVE research and details (use cve-lookup for NVD database queries)"
+    - "cloud account security auditing (use prowler for AWS/Azure/GCP)"
+  triggers:
+    - "trivy"
+    - "container scan"
+    - "image scan"
+    - "vulnerability scan"
+    - "CVE scan"
+    - "IaC scan"
+    - "terraform security"
+    - "kubernetes security"
+    - "SBOM"
+    - "docker security"
+
+phases:
+  - enumeration
+
+requirements:
+  network: true
+  privileged: false
+
+resources:
+  memory_mb: 512
+  cpu: 1.0
+
+see_also:
+  - tool: cve-lookup
+    reason: "Use cve-lookup to research specific CVEs found by trivy — get CVSS scores, descriptions, and references from NVD."
+  - tool: nuclei
+    reason: "Use nuclei for web application vulnerability scanning. Trivy scans containers/packages, nuclei scans running web services."
+  - tool: prowler
+    reason: "Use prowler for auditing live cloud account configurations (IAM, security groups, encryption). Trivy scans artifacts (images, IaC files), prowler audits running infrastructure."
+
+methods:
+  scan_image:
+    description: "Scan a Docker image for CVE vulnerabilities. Runs `trivy image --format json --severity <sev> <image>`. Detects vulnerabilities in OS packages (apt, rpm, apk) and language-specific packages (npm, pip, gem, Go modules, Rust crates, Java JARs). Returns vulnerability list with CVE IDs, severity, affected package, installed version, and fixed version."
+    when_to_use: "(1) Audit a Docker image before deployment. (2) Check base images for known vulnerabilities. (3) During enumeration — scan target's container images if accessible. (4) Use severity filter 'HIGH,CRITICAL' to focus on actionable findings."
+    required_ports: []
+    params:
+      image:
+        type: string
+        required: true
+        description: "Docker image to scan (e.g., 'nginx:latest', 'python:3.11-slim'). Must be pullable from a registry."
+      severity:
+        type: string
+        default: "UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL"
+        description: "Comma-separated severity filter. Use 'HIGH,CRITICAL' to only show high-impact vulnerabilities."
+    returns:
+      vulnerabilities:
+        type: array
+        description: "CVE list (capped at 100). Each: {id, severity, package, installed_version, fixed_version, title, target}."
+      total_vulnerabilities:
+        type: integer
+        description: "Total CVEs found (may exceed returned array size)."
+      summary:
+        type: object
+        description: "Counts by severity: {CRITICAL, HIGH, MEDIUM, LOW, UNKNOWN}."
+
+  scan_filesystem:
+    description: "Scan a local filesystem path for vulnerabilities. Runs `trivy filesystem --format json <path>`. Detects vulnerable packages from lock files (package-lock.json, requirements.txt, Gemfile.lock, go.sum, Cargo.lock) and OS package databases."
+    when_to_use: "(1) Scan a project directory for dependency vulnerabilities. (2) Audit a compromised filesystem. (3) Check /session/ files from post-exploitation for vulnerable software."
+    required_ports: []
+    params:
+      path:
+        type: string
+        required: true
+        description: "Directory or file to scan."
+      severity:
+        type: string
+        default: "UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL"
+        description: "Severity filter."
+    returns:
+      vulnerabilities:
+        type: array
+        description: "CVE list with package details."
+      summary:
+        type: object
+        description: "Counts by severity."
+
+  scan_iac:
+    description: "Scan IaC files for misconfigurations. Runs `trivy config --format json <path>`. Detects issues in Terraform (.tf), Kubernetes YAML, Dockerfile, CloudFormation, and Helm charts."
+    when_to_use: "(1) Audit cloud infrastructure definitions. (2) Find security misconfigurations in Kubernetes manifests. (3) Check Dockerfiles for security best practices."
+    required_ports: []
+    params:
+      path:
+        type: string
+        required: true
+        description: "Path to IaC files."
+    returns:
+      misconfigurations:
+        type: array
+        description: "Misconfiguration list. Each: {id, severity, title, description, resolution, target}."
+      summary:
+        type: object
+        description: "Counts by severity."
+
+  scan_sbom:
+    description: "Generate and scan SBOM for a filesystem path. Runs `trivy filesystem --list-all-pkgs --format json <path>`. Returns complete package inventory with vulnerability cross-reference."
+    when_to_use: "(1) Generate an inventory of all packages in a project. (2) Supply chain security — enumerate all dependencies."
+    required_ports: []
+    params:
+      path:
+        type: string
+        required: true
+        description: "Path to scan for SBOM."
+    returns:
+      packages:
+        type: array
+        description: "Package list (capped at 200). Each: {name, version, type}."
+      total_packages:
+        type: integer
+        description: "Total packages found."
+
+  list_vulns:
+    description: "Quick vulnerability summary for an image — severity counts and top critical CVEs without full details."
+    when_to_use: "Quick triage — see how many critical/high vulns before a full scan."
+    required_ports: []
+    params:
+      image:
+        type: string
+        required: true
+        description: "Docker image to summarize."
+    returns:
+      summary:
+        type: object
+        description: "Counts: {CRITICAL, HIGH, MEDIUM, LOW, UNKNOWN}."
+      top_critical:
+        type: array
+        description: "Up to 10 critical CVEs with details."

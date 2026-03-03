@@ -271,7 +271,7 @@ class BaseMCPServer(ABC):
 
     async def run(self) -> None:
         """Start the MCP server."""
-        self._server = Server(self.name)
+        self._server = Server(self.name, version=self.version)
 
         @self._server.list_tools()
         async def list_tools() -> List[Tool]:

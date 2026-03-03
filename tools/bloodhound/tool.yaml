@@ -1,0 +1,267 @@
+name: bloodhound
+version: "1.9.0"
+description: "Active Directory relationship mapping and attack path analysis via bloodhound-python v1.9.0 (dirkjanm/BloodHound.py, Kali apt package bloodhound.py). This is BloodHound LEGACY (BloodHound.py) — not BloodHound CE's built-in ingestor. Two methods: collect, collect_stealth. Ingests AD data by querying LDAP (port 389/636) and optionally enumerating computers (SMB/RPC) to map users, groups, computers, domains, GPOs, OUs, containers, ACLs, sessions, and trust relationships. Output is BloodHound-compatible JSON files (7 types: users, groups, computers, domains, gpos, ous, containers) written to /session/ for downstream analysis. Collection presets: 'Default' (Group, LocalAdmin, Session, Trusts), 'All' (everything except LoggedOn), 'DCOnly' (LDAP-only, no host contact — stealth). Supports NTLM password auth, pass-the-hash (--hashes LM:NT), Kerberos ccache (-k), and AES key auth. Requires valid domain credentials — unlike kerbrute which needs none. DNS resolution uses DC as nameserver (-ns) with TCP by default for Docker reliability. For unauthenticated AD enumeration, use kerbrute first to discover valid usernames, then use bloodhound with obtained credentials."
+image: "ghcr.io/silicon-works/mcp-tools-bloodhound:latest"
+image_size_mb: 258
+timeout_seconds: 300
+
+capabilities:
+  - ad_enumeration
+  - attack_path_analysis
+  - ldap_collection
+  - relationship_mapping
+
+routing:
+  use_for:
+    - "collect Active Directory relationship data for attack path analysis"
+    - "map AD users, groups, computers, and trust relationships using BloodHound"
+    - "enumerate AD group memberships, ACLs, and delegation rights via LDAP"
+    - "collect BloodHound-compatible JSON data from a domain controller"
+    - "stealth AD collection using DCOnly method with no computer enumeration"
+    - "discover attack paths from owned user to Domain Admin via AD relationships"
+    - "ingest AD data after obtaining valid credentials from password spray or hash dump"
+    - "enumerate local admin rights, sessions, and DCOM/RDP/PSRemote access across domain computers"
+    - "collect AD certificate services, GPO, OU, and container objects for privilege escalation analysis"
+    - "map trust relationships between domains in a multi-domain forest"
+    - "generate BloodHound JSON files for import into BloodHound CE or legacy GUI"
+  never_use_for:
+    - "username enumeration without credentials (use kerbrute — bloodhound requires valid LDAP bind creds)"
+    - "password spraying (use kerbrute — bloodhound is for data collection, not authentication brute-force)"
+    - "kerberoasting (use impacket.kerberoast — bloodhound collects relationships, not TGS tickets)"
+    - "AS-REP roasting (use impacket.asreproast)"
+    - "credential dumping from memory (use impacket.secretsdump)"
+    - "SMB enumeration without AD context (use netexec — faster for simple share/user enumeration)"
+    - "LDAP search queries (use impacket.get_ad_users or ldapsearch for targeted LDAP queries)"
+  triggers:
+    - "bloodhound"
+    - "bloodhound-python"
+    - "BloodHound.py"
+    - "AD collection"
+    - "AD relationship"
+    - "attack path"
+    - "DCOnly"
+    - "AD ingestor"
+    - "domain enumeration"
+    - "SharpHound alternative"
+
+phases:
+  - enumeration
+
+requirements:
+  network: true
+  privileged: false
+
+resources:
+  memory_mb: 256
+  cpu: 0.5
+
+see_also:
+  - tool: kerbrute
+    reason: "Enumerate valid usernames without credentials before collecting with bloodhound"
+  - tool: impacket
+    reason: "After collection, use impacket for kerberoasting (GetUserSPNs), secretsdump, or targeted LDAP queries"
+  - tool: netexec
+    reason: "Validate credentials across protocols before bloodhound collection, or use nxc ldap --bloodhound as lightweight alternative"
+  - tool: certipy
+    reason: "After bloodhound identifies ADCS, use certipy for certificate-based attack paths (ESC1-ESC8)"
+  - tool: responder
+    reason: "After BloodHound identifies forced authentication targets or relay paths, use responder to capture NTLMv2 hashes from those targets."
+  - tool: evil-winrm
+    reason: "After BloodHound shows CanPSRemote edges to target hosts, use evil-winrm for WinRM shell access."
+
+methods:
+  collect:
+    description: "Collect AD data using bloodhound-python with configurable collection methods. Runs `bloodhound-python -d <domain> -u <user> -p <pass> -c <collection> -ns <dc_ip> --dns-tcp -v -op /session/bh` with optional flags for LDAPS, channel binding, hash auth, Kerberos, workers, exclude-dcs, zip, dc_host override, and computerfile scope limiting. DC hostname is auto-discovered via DNS using dc_ip as nameserver; dc_host override only needed if auto-discovery fails. Output files written as `/session/bh_<timestamp>_<type>.json` — one file per type (users, groups, computers, domains, gpos, ous, containers). Each JSON file has `{\"data\": [...], \"meta\": {\"type\": \"<type>\", \"count\": <int>, \"methods\": 0, \"version\": 5}}` structure. Returns structured file summaries including path, filename, size, type, and object count for each file. The `collection_types` field lists which AD object types were collected. Success is determined by whether any output files were generated — empty output with valid creds usually indicates wrong domain name or DNS resolution failure. File rotation occurs at 40000 entries per type. The -v (verbose) flag is always enabled, producing indent=1 JSON output."
+    when_to_use: "(1) After obtaining valid domain credentials via password spray (kerbrute), hash dump (impacket.secretsdump), or initial foothold — collect comprehensive AD data to discover privilege escalation paths. (2) When you need to identify all members of high-value groups (Domain Admins, Enterprise Admins, Backup Operators) and the shortest attack paths to reach them. (3) When mapping ACL-based attack chains: who has GenericAll/WriteDACL/AddMember on which objects. (4) To discover Kerberoastable accounts (users with SPNs) or AS-REP-roastable accounts for further credential attacks. (5) When enumerating trust relationships in a multi-domain forest. (6) Collection='All' for maximum coverage on first run; collection='Group' or 'ACL' for targeted follow-up. (7) Use with --exclude-dcs to avoid ATA/ATP detections on domain controllers."
+    required_ports: [389]
+    params:
+      domain:
+        type: string
+        required: true
+        description: "Target AD domain name (e.g., 'corp.local', 'fries.htb'). Case-insensitive. Must resolve via the DC's DNS — if bloodhound fails with 'Could not find a domain', verify domain name via nmap LDAP scripts or ldapsearch."
+      username:
+        type: string
+        required: true
+        description: "Username for LDAP bind. Format: bare username ('admin') or UPN ('admin@corp.local'). Must have read access to AD objects — any authenticated domain user works for most collection methods."
+      password:
+        type: string
+        description: "Password for NTLM or Kerberos authentication. Mutually exclusive with hashes (provide one or the other). If both password and hashes are omitted, must use kerberos=true with a valid ccache."
+      hashes:
+        type: string
+        description: "NTLM hash in LM:NT format for pass-the-hash authentication (e.g., 'aad3b435b51404ee:31d6cfe0d16ae931b73c59d7e0c089c0'). Use when you have extracted hashes but not plaintext passwords."
+      kerberos:
+        type: boolean
+        default: false
+        description: "Use Kerberos authentication via ccache file (set KRB5CCNAME environment variable). For use after obtaining a TGT via impacket.getTGT or certipy authenticate. When kerberos=true and no password is provided, -no-pass is automatically added to the command line."
+      aes_key:
+        type: string
+        description: "AES key for Kerberos authentication (128 or 256 bit hex string). Alternative to password/hash when you have extracted AES keys from a keytab or secretsdump."
+      auth_method:
+        type: enum
+        values: ["auto", "ntlm", "kerberos"]
+        default: "auto"
+        description: "Force authentication method. 'auto' tries Kerberos then NTLM fallback. Use 'ntlm' if Kerberos is misconfigured or unavailable. Use 'kerberos' to force Kerberos-only (requires valid ccache or password)."
+      dc_ip:
+        type: string
+        required: true
+        description: "Domain controller IP address. Used as DNS nameserver (-ns) for name resolution inside the container. The DC hostname is auto-discovered via DNS. Must be an IP, not hostname — Docker containers cannot resolve AD hostnames without this nameserver."
+      dc_host:
+        type: string
+        description: "DC hostname FQDN (e.g., 'dc01.corp.local'). Optional — if omitted, bloodhound auto-discovers the DC hostname via DNS using dc_ip as nameserver. Only needed if DNS auto-discovery fails."
+      collection:
+        type: string
+        default: "Default"
+        description: "Collection method(s), comma-separated. Presets: 'All' (everything except LoggedOn — most comprehensive), 'Default' (Group, LocalAdmin, Session, Trusts — good balance), 'DCOnly' (LDAP-only queries to DC, no computer enumeration — stealthiest). Individual methods: Group, LocalAdmin, Session, Trusts, ObjectProps, ACL, DCOM, RDP, PSRemote, LoggedOn, Container. Combine with commas: 'Group,ACL,Trusts'. LoggedOn requires admin rights on target computers and is excluded from 'All' due to noise."
+      gc_host:
+        type: string
+        description: "Override Global Catalog server hostname or IP. Needed for multi-domain forest collection where the DC is not the GC. If unset, bloodhound auto-selects a GC."
+      use_ldaps:
+        type: boolean
+        default: false
+        description: "Use LDAP over TLS (port 636 instead of 389). Encrypts all LDAP queries. May bypass network IDS that only inspects cleartext LDAP. Required when DC enforces LDAPS-only."
+      ldap_channel_binding:
+        type: boolean
+        default: false
+        description: "Use LDAP Channel Binding (forces LDAPS protocol). Required when the DC enforces EPA (Extended Protection for Authentication). If collection fails with channel binding errors, enable this."
+      dns_tcp:
+        type: boolean
+        default: true
+        description: "Use TCP for DNS queries instead of UDP. Enabled by default for reliability in Docker containers where UDP DNS can be unreliable. Disable only if you need UDP DNS for specific network reasons."
+      dns_timeout:
+        type: integer
+        default: 3
+        description: "DNS query timeout in seconds (bloodhound default: 3). Increase to 10-15 if DNS resolution is slow inside Docker or across VPN tunnels."
+      workers:
+        type: integer
+        default: 10
+        description: "Number of concurrent worker threads for computer enumeration (default: 10). Reduce to 1-2 for stealth to minimize concurrent connections. Only affects methods that contact computers (LocalAdmin, Session, RDP, DCOM, PSRemote, LoggedOn). DCOnly ignores this."
+      exclude_dcs:
+        type: boolean
+        default: false
+        description: "Skip domain controllers during computer enumeration. Avoids Microsoft ATA/ATP detections that trigger on enumeration of DC resources. Recommended when stealth is important."
+      zip_output:
+        type: boolean
+        default: false
+        description: "Compress all output JSON files into a single ZIP archive. Useful for BloodHound CE import which accepts ZIP uploads directly."
+      computerfile:
+        type: string
+        description: "Path to file containing computer FQDNs (one per line) to limit enumeration scope. File must be in /session/ directory. Restricts computer-based methods (LocalAdmin, Session, etc.) to only these hosts."
+      timeout:
+        type: integer
+        default: 300
+        description: "Maximum execution time in seconds. 300s handles most single-domain collections. Increase for large domains (10K+ computers) or when using slow collection methods like LoggedOn."
+    returns:
+      files:
+        type: array
+        description: "Array of file summary objects, one per output file. Each has: path (full path in /session/), filename (basename), size_bytes, type (users/groups/computers/domains/gpos/ous/containers), count (number of AD objects in file). ZIP files have type='zip' and contents array of filenames."
+      file_count:
+        type: integer
+        description: "Total number of output files generated. Typical 'Default' collection produces 4-7 files. 'All' produces 7 files. Zero files indicates authentication or DNS failure."
+      collection_types:
+        type: array
+        description: "List of AD object types collected (e.g., ['users', 'groups', 'computers', 'domains']). Extracted from file meta.type fields. Empty when no files generated."
+      domain:
+        type: string
+        description: "Domain that was collected"
+      dc_ip:
+        type: string
+        description: "DC IP that was queried"
+      collection:
+        type: string
+        description: "Collection method(s) that were used"
+
+  collect_stealth:
+    description: "Stealth AD collection using DCOnly method — only LDAP queries to the domain controller, no SMB/RPC connections to individual computers. Hardcodes collection='DCOnly' which internally expands to group, trusts, objectprops, acl, container methods — all resolved via LDAP queries to the DC. Output files include users, groups, domains, gpos, ous, containers (but NOT computers since no computer enumeration occurs). Does NOT collect LocalAdmin, Session, DCOM, RDP, or PSRemote data (these require contacting each computer). Same JSON output format as collect (`meta.version: 5`, `meta.type`, `meta.count`). Ideal for initial reconnaissance where network noise must be minimized."
+    when_to_use: "(1) First bloodhound run after obtaining creds — minimal network footprint while still getting group memberships, ACLs, and trust relationships. (2) When ATA/ATP or EDR is monitoring for lateral movement — DCOnly only talks to the DC via LDAP. (3) Before deciding whether a noisier 'All' collection is worth the risk. (4) In CTF/HTB scenarios where you want quick results without waiting for computer enumeration."
+    required_ports: [389]
+    params:
+      domain:
+        type: string
+        required: true
+        description: "Target AD domain name (e.g., 'corp.local', 'fries.htb')."
+      username:
+        type: string
+        required: true
+        description: "Username for LDAP bind."
+      password:
+        type: string
+        description: "Password for authentication."
+      hashes:
+        type: string
+        description: "NTLM hash in LM:NT format for pass-the-hash."
+      kerberos:
+        type: boolean
+        default: false
+        description: "Use Kerberos authentication via ccache. When kerberos=true and no password is provided, -no-pass is automatically added to the command line."
+      aes_key:
+        type: string
+        description: "AES key for Kerberos auth (128 or 256 bit hex string)."
+      auth_method:
+        type: enum
+        values: ["auto", "ntlm", "kerberos"]
+        default: "auto"
+        description: "Force authentication method."
+      dc_ip:
+        type: string
+        required: true
+        description: "Domain controller IP address. Used as DNS nameserver (-ns). DC hostname auto-discovered."
+      dc_host:
+        type: string
+        description: "DC hostname FQDN. Optional — auto-discovered via DNS if omitted."
+      gc_host:
+        type: string
+        description: "Override Global Catalog server for multi-domain forest collection."
+      use_ldaps:
+        type: boolean
+        default: false
+        description: "Use LDAP over TLS (port 636)."
+      ldap_channel_binding:
+        type: boolean
+        default: false
+        description: "Use LDAP Channel Binding (forces LDAPS). Required when DC enforces EPA."
+      dns_tcp:
+        type: boolean
+        default: true
+        description: "Use TCP for DNS queries (default: true for Docker reliability)."
+      dns_timeout:
+        type: integer
+        default: 3
+        description: "DNS query timeout in seconds."
+      workers:
+        type: integer
+        default: 10
+        description: "Worker threads (mostly irrelevant for DCOnly since no computer enumeration occurs)."
+      exclude_dcs:
+        type: boolean
+        default: false
+        description: "Skip DCs during enumeration (irrelevant for DCOnly but accepted for API consistency)."
+      zip_output:
+        type: boolean
+        default: false
+        description: "Compress output JSON files into ZIP archive."
+      computerfile:
+        type: string
+        description: "Computer FQDN allowlist file (irrelevant for DCOnly)."
+      timeout:
+        type: integer
+        default: 300
+        description: "Maximum execution time in seconds."
+    returns:
+      files:
+        type: array
+        description: "Array of file summary objects (same format as collect). DCOnly typically produces fewer files — users, groups, domains, gpos, ous, containers but NOT computers (no computer enumeration)."
+      file_count:
+        type: integer
+        description: "Total output files generated."
+      collection_types:
+        type: array
+        description: "AD object types collected."
+      domain:
+        type: string
+        description: "Domain that was collected"
+      dc_ip:
+        type: string
+        description: "DC IP that was queried"
+      collection:
+        type: string
+        description: "Always 'DCOnly' for this method"

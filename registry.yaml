@@ -1,6 +1,1411 @@
 version: '2.0'
-updated_at: '2026-02-23T15:18:07Z'
+updated_at: '2026-03-03T20:18:23Z'
 tools:
+  amass:
+    name: amass
+    version: 5.0.0
+    description: 'Subdomain discovery and external attack surface mapping — OWASP Amass v5.0 with passive and active enumeration
+      modes. Two methods: enum_passive (certificate transparency, DNS databases, web archives, search engines — no target
+      contact; passive is the v5 default), enum_active (passive sources plus DNS brute-force, zone transfers, certificate
+      crawling — touches target DNS). Outputs text format (one subdomain per line) parsed into structured data with subdomain
+      names and parent domain. For email harvesting alongside subdomain discovery use theharvester. For web technology fingerprinting
+      on discovered subdomains use web-fingerprint. For port scanning discovered hosts use nmap.'
+    image: ghcr.io/silicon-works/mcp-tools-amass:latest
+    image_size_mb: 226
+    timeout_seconds: 900
+    capabilities:
+    - subdomain_discovery
+    - dns_enumeration
+    - attack_surface_mapping
+    - osint
+    routing:
+      use_for:
+      - discover subdomains for a target domain
+      - enumerate subdomains using passive OSINT sources
+      - find all subdomains of a website without touching it
+      - active DNS brute-force subdomain enumeration
+      - map the external attack surface of an organization
+      - discover hidden subdomains before port scanning
+      - certificate transparency log subdomain discovery
+      never_use_for:
+      - port scanning discovered hosts (use nmap)
+      - web technology fingerprinting (use web-fingerprint)
+      - web vulnerability scanning (use nuclei or nikto)
+      - email harvesting (use theharvester)
+      - DNS record lookups for known hosts (use nmap or dig via bash)
+      triggers:
+      - amass
+      - subdomain
+      - subdomain discovery
+      - subdomain enumeration
+      - attack surface
+      - DNS brute force
+      - certificate transparency
+      - find subdomains
+      - domain enumeration
+    phases:
+    - reconnaissance
+    requirements:
+      network: true
+      privileged: false
+    resources:
+      memory_mb: 512
+      cpu: 1.0
+    see_also:
+    - tool: nmap
+      reason: After discovering subdomains with amass, use nmap to port scan the discovered hosts.
+    - tool: web-fingerprint
+      reason: Use web-fingerprint to identify technologies running on discovered subdomains.
+    - tool: theharvester
+      reason: Use theharvester for email/employee harvesting. Amass focuses on subdomains, theharvester on emails and people.
+    - tool: nuclei
+      reason: After discovering subdomains, use nuclei to scan them for web vulnerabilities.
+    - tool: ffuf
+      reason: After discovering subdomains, use ffuf for directory brute-forcing and content discovery on each subdomain.
+    methods:
+      enum_passive:
+        description: Passive subdomain enumeration — runs `amass enum -d <domain> -o <output> -nocolor -timeout <min>` (passive
+          is the v5 default). Queries certificate transparency logs, DNS aggregators, web archives, and search engines. Does
+          NOT touch the target's infrastructure directly — all data comes from third-party sources. Returns deduplicated subdomain
+          list parsed from text output (one subdomain per line). Progress info and OWASP banner on stderr are filtered out.
+        when_to_use: (1) First step in reconnaissance — discover subdomains without alerting the target. (2) Bug bounty scope
+          expansion — find all related subdomains. (3) Before active scanning — build target list for nmap, nuclei, web-fingerprint.
+          (4) When stealth is required — passive mode leaves no trace on target infrastructure.
+        required_ports: []
+        params:
+          domain:
+            type: string
+            required: true
+            description: Target domain (e.g., 'example.com', 'target.htb'). Must be a valid domain name, not an IP.
+          timeout:
+            type: integer
+            default: 5
+            description: Timeout in minutes. Default 5. Increase to 30+ for large domains with many subdomains. Partial results
+              returned on timeout.
+        returns:
+          subdomains:
+            type: array
+            description: 'Discovered subdomains (capped at 200). Each: {name: str, domain: str}.'
+          total_found:
+            type: integer
+            description: Total unique subdomains discovered.
+          mode:
+            type: string
+            description: Enumeration mode used ('passive' or 'active').
+          output_file:
+            type: string
+            description: Path to text output file under /session/ (one subdomain per line).
+      enum_active:
+        description: Active subdomain enumeration — runs `amass enum -active -brute -d <domain> -o <output> -nocolor -timeout
+          <min>`. Includes all passive sources PLUS DNS brute-force with built-in wordlist, attempted zone transfers, and
+          certificate crawling. Directly queries the target's DNS servers.
+        when_to_use: (1) When passive enum is not finding enough subdomains. (2) When you have authorization to actively probe
+          the target. (3) HTB/CTF — always use active mode since targets are authorized. (4) After passive enum — active adds
+          brute-force results to passive findings.
+        required_ports: []
+        params:
+          domain:
+            type: string
+            required: true
+            description: Target domain.
+          brute:
+            type: boolean
+            default: true
+            description: Enable DNS brute-force. Default true. Disable with false if only want zone transfer and cert crawling.
+          timeout:
+            type: integer
+            default: 10
+            description: Timeout in minutes. Default 10. Active+brute takes longer than passive.
+        returns:
+          subdomains:
+            type: array
+            description: Discovered subdomains with IPs and sources.
+          total_found:
+            type: integer
+            description: Total unique subdomains discovered.
+  bloodhound:
+    name: bloodhound
+    version: 1.9.0
+    description: 'Active Directory relationship mapping and attack path analysis via bloodhound-python v1.9.0 (dirkjanm/BloodHound.py,
+      Kali apt package bloodhound.py). This is BloodHound LEGACY (BloodHound.py) — not BloodHound CE''s built-in ingestor.
+      Two methods: collect, collect_stealth. Ingests AD data by querying LDAP (port 389/636) and optionally enumerating computers
+      (SMB/RPC) to map users, groups, computers, domains, GPOs, OUs, containers, ACLs, sessions, and trust relationships.
+      Output is BloodHound-compatible JSON files (7 types: users, groups, computers, domains, gpos, ous, containers) written
+      to /session/ for downstream analysis. Collection presets: ''Default'' (Group, LocalAdmin, Session, Trusts), ''All''
+      (everything except LoggedOn), ''DCOnly'' (LDAP-only, no host contact — stealth). Supports NTLM password auth, pass-the-hash
+      (--hashes LM:NT), Kerberos ccache (-k), and AES key auth. Requires valid domain credentials — unlike kerbrute which
+      needs none. DNS resolution uses DC as nameserver (-ns) with TCP by default for Docker reliability. For unauthenticated
+      AD enumeration, use kerbrute first to discover valid usernames, then use bloodhound with obtained credentials.'
+    image: ghcr.io/silicon-works/mcp-tools-bloodhound:latest
+    image_size_mb: 258
+    timeout_seconds: 300
+    capabilities:
+    - ad_enumeration
+    - attack_path_analysis
+    - ldap_collection
+    - relationship_mapping
+    routing:
+      use_for:
+      - collect Active Directory relationship data for attack path analysis
+      - map AD users, groups, computers, and trust relationships using BloodHound
+      - enumerate AD group memberships, ACLs, and delegation rights via LDAP
+      - collect BloodHound-compatible JSON data from a domain controller
+      - stealth AD collection using DCOnly method with no computer enumeration
+      - discover attack paths from owned user to Domain Admin via AD relationships
+      - ingest AD data after obtaining valid credentials from password spray or hash dump
+      - enumerate local admin rights, sessions, and DCOM/RDP/PSRemote access across domain computers
+      - collect AD certificate services, GPO, OU, and container objects for privilege escalation analysis
+      - map trust relationships between domains in a multi-domain forest
+      - generate BloodHound JSON files for import into BloodHound CE or legacy GUI
+      never_use_for:
+      - username enumeration without credentials (use kerbrute — bloodhound requires valid LDAP bind creds)
+      - password spraying (use kerbrute — bloodhound is for data collection, not authentication brute-force)
+      - kerberoasting (use impacket.kerberoast — bloodhound collects relationships, not TGS tickets)
+      - AS-REP roasting (use impacket.asreproast)
+      - credential dumping from memory (use impacket.secretsdump)
+      - SMB enumeration without AD context (use netexec — faster for simple share/user enumeration)
+      - LDAP search queries (use impacket.get_ad_users or ldapsearch for targeted LDAP queries)
+      triggers:
+      - bloodhound
+      - bloodhound-python
+      - BloodHound.py
+      - AD collection
+      - AD relationship
+      - attack path
+      - DCOnly
+      - AD ingestor
+      - domain enumeration
+      - SharpHound alternative
+    phases:
+    - enumeration
+    requirements:
+      network: true
+      privileged: false
+    resources:
+      memory_mb: 256
+      cpu: 0.5
+    see_also:
+    - tool: kerbrute
+      reason: Enumerate valid usernames without credentials before collecting with bloodhound
+    - tool: impacket
+      reason: After collection, use impacket for kerberoasting (GetUserSPNs), secretsdump, or targeted LDAP queries
+    - tool: netexec
+      reason: Validate credentials across protocols before bloodhound collection, or use nxc ldap --bloodhound as lightweight
+        alternative
+    - tool: certipy
+      reason: After bloodhound identifies ADCS, use certipy for certificate-based attack paths (ESC1-ESC8)
+    - tool: responder
+      reason: After BloodHound identifies forced authentication targets or relay paths, use responder to capture NTLMv2 hashes
+        from those targets.
+    - tool: evil-winrm
+      reason: After BloodHound shows CanPSRemote edges to target hosts, use evil-winrm for WinRM shell access.
+    methods:
+      collect:
+        description: 'Collect AD data using bloodhound-python with configurable collection methods. Runs `bloodhound-python
+          -d <domain> -u <user> -p <pass> -c <collection> -ns <dc_ip> --dns-tcp -v -op /session/bh` with optional flags for
+          LDAPS, channel binding, hash auth, Kerberos, workers, exclude-dcs, zip, dc_host override, and computerfile scope
+          limiting. DC hostname is auto-discovered via DNS using dc_ip as nameserver; dc_host override only needed if auto-discovery
+          fails. Output files written as `/session/bh_<timestamp>_<type>.json` — one file per type (users, groups, computers,
+          domains, gpos, ous, containers). Each JSON file has `{"data": [...], "meta": {"type": "<type>", "count": <int>,
+          "methods": 0, "version": 5}}` structure. Returns structured file summaries including path, filename, size, type,
+          and object count for each file. The `collection_types` field lists which AD object types were collected. Success
+          is determined by whether any output files were generated — empty output with valid creds usually indicates wrong
+          domain name or DNS resolution failure. File rotation occurs at 40000 entries per type. The -v (verbose) flag is
+          always enabled, producing indent=1 JSON output.'
+        when_to_use: '(1) After obtaining valid domain credentials via password spray (kerbrute), hash dump (impacket.secretsdump),
+          or initial foothold — collect comprehensive AD data to discover privilege escalation paths. (2) When you need to
+          identify all members of high-value groups (Domain Admins, Enterprise Admins, Backup Operators) and the shortest
+          attack paths to reach them. (3) When mapping ACL-based attack chains: who has GenericAll/WriteDACL/AddMember on
+          which objects. (4) To discover Kerberoastable accounts (users with SPNs) or AS-REP-roastable accounts for further
+          credential attacks. (5) When enumerating trust relationships in a multi-domain forest. (6) Collection=''All'' for
+          maximum coverage on first run; collection=''Group'' or ''ACL'' for targeted follow-up. (7) Use with --exclude-dcs
+          to avoid ATA/ATP detections on domain controllers.'
+        required_ports:
+        - 389
+        params:
+          domain:
+            type: string
+            required: true
+            description: Target AD domain name (e.g., 'corp.local', 'fries.htb'). Case-insensitive. Must resolve via the DC's
+              DNS — if bloodhound fails with 'Could not find a domain', verify domain name via nmap LDAP scripts or ldapsearch.
+          username:
+            type: string
+            required: true
+            description: 'Username for LDAP bind. Format: bare username (''admin'') or UPN (''admin@corp.local''). Must have
+              read access to AD objects — any authenticated domain user works for most collection methods.'
+          password:
+            type: string
+            description: Password for NTLM or Kerberos authentication. Mutually exclusive with hashes (provide one or the
+              other). If both password and hashes are omitted, must use kerberos=true with a valid ccache.
+          hashes:
+            type: string
+            description: NTLM hash in LM:NT format for pass-the-hash authentication (e.g., 'aad3b435b51404ee:31d6cfe0d16ae931b73c59d7e0c089c0').
+              Use when you have extracted hashes but not plaintext passwords.
+          kerberos:
+            type: boolean
+            default: false
+            description: Use Kerberos authentication via ccache file (set KRB5CCNAME environment variable). For use after
+              obtaining a TGT via impacket.getTGT or certipy authenticate. When kerberos=true and no password is provided,
+              -no-pass is automatically added to the command line.
+          aes_key:
+            type: string
+            description: AES key for Kerberos authentication (128 or 256 bit hex string). Alternative to password/hash when
+              you have extracted AES keys from a keytab or secretsdump.
+          auth_method:
+            type: enum
+            values:
+            - auto
+            - ntlm
+            - kerberos
+            default: auto
+            description: Force authentication method. 'auto' tries Kerberos then NTLM fallback. Use 'ntlm' if Kerberos is
+              misconfigured or unavailable. Use 'kerberos' to force Kerberos-only (requires valid ccache or password).
+          dc_ip:
+            type: string
+            required: true
+            description: Domain controller IP address. Used as DNS nameserver (-ns) for name resolution inside the container.
+              The DC hostname is auto-discovered via DNS. Must be an IP, not hostname — Docker containers cannot resolve AD
+              hostnames without this nameserver.
+          dc_host:
+            type: string
+            description: DC hostname FQDN (e.g., 'dc01.corp.local'). Optional — if omitted, bloodhound auto-discovers the
+              DC hostname via DNS using dc_ip as nameserver. Only needed if DNS auto-discovery fails.
+          collection:
+            type: string
+            default: Default
+            description: 'Collection method(s), comma-separated. Presets: ''All'' (everything except LoggedOn — most comprehensive),
+              ''Default'' (Group, LocalAdmin, Session, Trusts — good balance), ''DCOnly'' (LDAP-only queries to DC, no computer
+              enumeration — stealthiest). Individual methods: Group, LocalAdmin, Session, Trusts, ObjectProps, ACL, DCOM,
+              RDP, PSRemote, LoggedOn, Container. Combine with commas: ''Group,ACL,Trusts''. LoggedOn requires admin rights
+              on target computers and is excluded from ''All'' due to noise.'
+          gc_host:
+            type: string
+            description: Override Global Catalog server hostname or IP. Needed for multi-domain forest collection where the
+              DC is not the GC. If unset, bloodhound auto-selects a GC.
+          use_ldaps:
+            type: boolean
+            default: false
+            description: Use LDAP over TLS (port 636 instead of 389). Encrypts all LDAP queries. May bypass network IDS that
+              only inspects cleartext LDAP. Required when DC enforces LDAPS-only.
+          ldap_channel_binding:
+            type: boolean
+            default: false
+            description: Use LDAP Channel Binding (forces LDAPS protocol). Required when the DC enforces EPA (Extended Protection
+              for Authentication). If collection fails with channel binding errors, enable this.
+          dns_tcp:
+            type: boolean
+            default: true
+            description: Use TCP for DNS queries instead of UDP. Enabled by default for reliability in Docker containers where
+              UDP DNS can be unreliable. Disable only if you need UDP DNS for specific network reasons.
+          dns_timeout:
+            type: integer
+            default: 3
+            description: 'DNS query timeout in seconds (bloodhound default: 3). Increase to 10-15 if DNS resolution is slow
+              inside Docker or across VPN tunnels.'
+          workers:
+            type: integer
+            default: 10
+            description: 'Number of concurrent worker threads for computer enumeration (default: 10). Reduce to 1-2 for stealth
+              to minimize concurrent connections. Only affects methods that contact computers (LocalAdmin, Session, RDP, DCOM,
+              PSRemote, LoggedOn). DCOnly ignores this.'
+          exclude_dcs:
+            type: boolean
+            default: false
+            description: Skip domain controllers during computer enumeration. Avoids Microsoft ATA/ATP detections that trigger
+              on enumeration of DC resources. Recommended when stealth is important.
+          zip_output:
+            type: boolean
+            default: false
+            description: Compress all output JSON files into a single ZIP archive. Useful for BloodHound CE import which accepts
+              ZIP uploads directly.
+          computerfile:
+            type: string
+            description: Path to file containing computer FQDNs (one per line) to limit enumeration scope. File must be in
+              /session/ directory. Restricts computer-based methods (LocalAdmin, Session, etc.) to only these hosts.
+          timeout:
+            type: integer
+            default: 300
+            description: Maximum execution time in seconds. 300s handles most single-domain collections. Increase for large
+              domains (10K+ computers) or when using slow collection methods like LoggedOn.
+        returns:
+          files:
+            type: array
+            description: 'Array of file summary objects, one per output file. Each has: path (full path in /session/), filename
+              (basename), size_bytes, type (users/groups/computers/domains/gpos/ous/containers), count (number of AD objects
+              in file). ZIP files have type=''zip'' and contents array of filenames.'
+          file_count:
+            type: integer
+            description: Total number of output files generated. Typical 'Default' collection produces 4-7 files. 'All' produces
+              7 files. Zero files indicates authentication or DNS failure.
+          collection_types:
+            type: array
+            description: List of AD object types collected (e.g., ['users', 'groups', 'computers', 'domains']). Extracted
+              from file meta.type fields. Empty when no files generated.
+          domain:
+            type: string
+            description: Domain that was collected
+          dc_ip:
+            type: string
+            description: DC IP that was queried
+          collection:
+            type: string
+            description: Collection method(s) that were used
+      collect_stealth:
+        description: 'Stealth AD collection using DCOnly method — only LDAP queries to the domain controller, no SMB/RPC connections
+          to individual computers. Hardcodes collection=''DCOnly'' which internally expands to group, trusts, objectprops,
+          acl, container methods — all resolved via LDAP queries to the DC. Output files include users, groups, domains, gpos,
+          ous, containers (but NOT computers since no computer enumeration occurs). Does NOT collect LocalAdmin, Session,
+          DCOM, RDP, or PSRemote data (these require contacting each computer). Same JSON output format as collect (`meta.version:
+          5`, `meta.type`, `meta.count`). Ideal for initial reconnaissance where network noise must be minimized.'
+        when_to_use: (1) First bloodhound run after obtaining creds — minimal network footprint while still getting group
+          memberships, ACLs, and trust relationships. (2) When ATA/ATP or EDR is monitoring for lateral movement — DCOnly
+          only talks to the DC via LDAP. (3) Before deciding whether a noisier 'All' collection is worth the risk. (4) In
+          CTF/HTB scenarios where you want quick results without waiting for computer enumeration.
+        required_ports:
+        - 389
+        params:
+          domain:
+            type: string
+            required: true
+            description: Target AD domain name (e.g., 'corp.local', 'fries.htb').
+          username:
+            type: string
+            required: true
+            description: Username for LDAP bind.
+          password:
+            type: string
+            description: Password for authentication.
+          hashes:
+            type: string
+            description: NTLM hash in LM:NT format for pass-the-hash.
+          kerberos:
+            type: boolean
+            default: false
+            description: Use Kerberos authentication via ccache. When kerberos=true and no password is provided, -no-pass
+              is automatically added to the command line.
+          aes_key:
+            type: string
+            description: AES key for Kerberos auth (128 or 256 bit hex string).
+          auth_method:
+            type: enum
+            values:
+            - auto
+            - ntlm
+            - kerberos
+            default: auto
+            description: Force authentication method.
+          dc_ip:
+            type: string
+            required: true
+            description: Domain controller IP address. Used as DNS nameserver (-ns). DC hostname auto-discovered.
+          dc_host:
+            type: string
+            description: DC hostname FQDN. Optional — auto-discovered via DNS if omitted.
+          gc_host:
+            type: string
+            description: Override Global Catalog server for multi-domain forest collection.
+          use_ldaps:
+            type: boolean
+            default: false
+            description: Use LDAP over TLS (port 636).
+          ldap_channel_binding:
+            type: boolean
+            default: false
+            description: Use LDAP Channel Binding (forces LDAPS). Required when DC enforces EPA.
+          dns_tcp:
+            type: boolean
+            default: true
+            description: 'Use TCP for DNS queries (default: true for Docker reliability).'
+          dns_timeout:
+            type: integer
+            default: 3
+            description: DNS query timeout in seconds.
+          workers:
+            type: integer
+            default: 10
+            description: Worker threads (mostly irrelevant for DCOnly since no computer enumeration occurs).
+          exclude_dcs:
+            type: boolean
+            default: false
+            description: Skip DCs during enumeration (irrelevant for DCOnly but accepted for API consistency).
+          zip_output:
+            type: boolean
+            default: false
+            description: Compress output JSON files into ZIP archive.
+          computerfile:
+            type: string
+            description: Computer FQDN allowlist file (irrelevant for DCOnly).
+          timeout:
+            type: integer
+            default: 300
+            description: Maximum execution time in seconds.
+        returns:
+          files:
+            type: array
+            description: Array of file summary objects (same format as collect). DCOnly typically produces fewer files — users,
+              groups, domains, gpos, ous, containers but NOT computers (no computer enumeration).
+          file_count:
+            type: integer
+            description: Total output files generated.
+          collection_types:
+            type: array
+            description: AD object types collected.
+          domain:
+            type: string
+            description: Domain that was collected
+          dc_ip:
+            type: string
+            description: DC IP that was queried
+          collection:
+            type: string
+            description: Always 'DCOnly' for this method
+  certipy:
+    name: certipy
+    version: 5.0.4
+    description: 'Active Directory Certificate Services (AD CS) enumeration and exploitation via Certipy v5.0.4 (ly4k/Certipy,
+      pip certipy-ad). Certipy has 11 subcommands total, but this MCP server exposes 6 methods: find, request, authenticate,
+      shadow, forge, template. The ca, account, cert, parse, and relay subcommands exist in certipy but are not yet wrapped
+      as MCP methods. Discovers Certificate Authorities and certificate templates, identifies ESC1 through ESC16 vulnerability
+      classifications, requests certificates with attacker-controlled Subject Alternative Names (ESC1), performs enrollment
+      agent abuse (ESC3), exploits template write access (ESC4), forges Golden Certificates from compromised CA keys (ESC5),
+      authenticates via PKINIT to obtain TGTs and NT hashes, and manipulates Shadow Credentials (msDS-KeyCredentialLink) for
+      account takeover. Outputs PFX certificates, ccache/kirbi Kerberos tickets, and JSON enumeration reports to /session/certipy/.
+      Authentication supports password, NTLM hash (pass-the-hash), Kerberos ccache, and AES keys. Username format is user@domain
+      (NOT domain/user). All output files use unique prefixes to avoid certipy''s interactive overwrite prompt. For NTLM relay
+      to AD CS endpoints (ESC8/ESC11), use impacket.ntlmrelayx instead — certipy''s relay subcommand is not exposed as an
+      MCP method because it requires long-running listener mode with external coercion.'
+    image: ghcr.io/silicon-works/mcp-tools-certipy:latest
+    image_size_mb: 721
+    timeout_seconds: 600
+    capabilities:
+    - adcs_enumeration
+    - certificate_request
+    - pkinit_authentication
+    - shadow_credentials
+    - golden_certificate
+    - template_manipulation
+    - esc1_exploitation
+    - esc3_exploitation
+    - esc4_exploitation
+    - esc5_exploitation
+    routing:
+      use_for:
+      - enumerate AD Certificate Services to find vulnerable certificate templates (ESC1-ESC16)
+      - request a certificate with an attacker-controlled UPN to impersonate domain admin (ESC1)
+      - authenticate to Active Directory using a PFX certificate via PKINIT to get a TGT and NT hash
+      - exploit Shadow Credentials by adding a key credential to a target account's msDS-KeyCredentialLink
+      - forge a Golden Certificate using a compromised CA private key for persistent domain access (ESC5)
+      - save and modify certificate template configurations to make them vulnerable (ESC4 exploitation)
+      - use enrollment agent certificates to request certs on behalf of other users (ESC3)
+      - identify which certificate templates allow enrollee-supplied SANs for user impersonation
+      - perform PKINIT authentication with a PFX to obtain Kerberos ccache and NT hash for pass-the-hash
+      - check if AD CS Web Enrollment or RPC enrollment interfaces are exposed for relay attacks
+      - exploit ESC7 by adding CA officer, enabling SubCA template, and approving pending requests
+      - convert a certificate-based authentication into an NT hash for use with other AD tools
+      - enumerate Certificate Authorities and their security settings in an Active Directory forest
+      - create a backup of certificate template configuration before modifying it for exploitation
+      never_use_for:
+      - NTLM relay to AD CS HTTP/RPC endpoints (use impacket.ntlmrelayx — certipy relay requires interactive long-running
+        listener with external coercion trigger)
+      - Kerberoasting or AS-REP roasting (use impacket — certipy handles certificates, not service ticket attacks)
+      - LDAP enumeration without ADCS (use bloodhound or netexec — certipy only queries ADCS objects)
+      - password spraying or brute-force (use kerbrute — certipy requires valid credentials)
+      - cracking NT hashes obtained from PKINIT auth (use john or hashcat — certipy extracts hashes, cracking tools crack
+        them)
+      - BloodHound data collection (use bloodhound — certipy v5 removed BloodHound zip output)
+      - coercing authentication for relay attacks (use PetitPotam/PrinterBug/Coercer — certipy is the relay receiver, not
+        the coercion trigger)
+      - CA management, account creation, cert conversion, or certificate parsing (not yet implemented as MCP methods — use
+        certipy directly via bash)
+      triggers:
+      - certipy
+      - ADCS
+      - AD CS
+      - certificate services
+      - ESC1
+      - ESC4
+      - ESC7
+      - ESC8
+      - shadow credentials
+      - golden certificate
+      - PKINIT
+      - certificate template
+      - PFX
+      - enrollment agent
+    phases:
+    - enumeration
+    - exploitation
+    requirements:
+      network: true
+      privileged: false
+    resources:
+      memory_mb: 512
+      cpu: 0.5
+    see_also:
+    - tool: impacket
+      reason: Use ntlmrelayx for ESC8/ESC11 relay attacks, secretsdump with obtained NT hashes, or getTGT with obtained ccache
+        files
+    - tool: bloodhound
+      reason: Collect AD relationship data to identify which users can enroll in vulnerable templates (enrollment permissions)
+    - tool: netexec
+      reason: Validate NT hashes obtained from PKINIT authentication across SMB, WinRM, LDAP, MSSQL
+    - tool: john
+      reason: Crack NT hashes if obtained via PKINIT authentication (hashcat mode 1000)
+    - tool: kerbrute
+      reason: Enumerate valid AD usernames before attempting certipy operations that require credentials
+    - tool: responder
+      reason: Capture NTLMv2 hashes via poisoning, then crack to obtain credentials for certipy authentication
+    - tool: hashcat
+      reason: Certipy authenticate extracts NT hashes (hashcat mode 1000). Use hashcat for cracking NTLM hashes, especially
+        with mask or hybrid attacks.
+    methods:
+      find:
+        description: 'Enumerate AD Certificate Services — discovers all Certificate Authorities, certificate templates, and
+          their security configurations. Identifies ESC1 through ESC16 vulnerabilities by analyzing template permissions (enrollment
+          rights, write access), EKU settings (Any Purpose, Certificate Request Agent), SAN configuration (enrollee-supplied
+          subject), CA flags (EDITF_ATTRIBUTESUBJECTALTNAME2, IF_ENFORCEENCRYPTICERTREQUEST), and issuance policies. Runs
+          `certipy find -username <user@domain> -dc-ip <ip> -json -text` with unique output prefix. Produces two output files:
+          JSON (machine-parseable with CA and template details) and TXT (human-readable summary). JSON structure: `{"Certificate
+          Authorities": {"0": {"CA Name": ..., "Vulnerabilities": {"ESC8": ...}}}, "Certificate Templates": {"0": {"Template
+          Name": ..., "Vulnerabilities": {"ESC1": ...}}}}`. Use -vulnerable flag to filter to only vulnerable templates. Use
+          -dc-only for stealth (LDAP queries to DC only, no host enumeration). The -sid flag improves vulnerability assessment
+          accuracy by checking enrollment permissions against a specific user SID.'
+        when_to_use: (1) First step in any ADCS attack — run find to discover CAs, templates, and ESC vulnerabilities before
+          attempting exploitation. (2) After obtaining valid AD credentials (password, hash, or Kerberos ticket) — enumerate
+          ADCS to check for certificate-based privilege escalation paths. (3) When bloodhound shows ADCS objects but you need
+          detailed template vulnerability analysis (ESC classifications). (4) Before requesting certificates — identify which
+          templates are vulnerable and which CA to target. (5) With -vulnerable flag to quickly filter for exploitable templates
+          in large environments. (6) With -dc-only for stealthier enumeration that avoids touching non-DC hosts. (7) After
+          exploiting other ESC vulnerabilities — re-run find to check if template modifications (ESC4) or CA changes (ESC7)
+          were successful.
+        required_ports:
+        - 389
+        params:
+          username:
+            type: string
+            required: true
+            description: Username in user@domain format (e.g., 'web@fries.htb'). The @domain suffix is required for certipy's
+              LDAP operations.
+          password:
+            type: string
+            description: Password for authentication.
+          hashes:
+            type: string
+            description: NTLM hash for pass-the-hash (e.g., 'aad3b435b51404ee:31d6cfe0d16ae931b73c59d7e0c089c0').
+          kerberos:
+            type: boolean
+            default: false
+            description: Use Kerberos authentication from ccache (KRB5CCNAME env). Requires valid TGT.
+          aes_key:
+            type: string
+            description: AES key for Kerberos auth (128 or 256 bit hex).
+          dc_ip:
+            type: string
+            required: true
+            description: Domain Controller IP. Used for LDAP connection and as DNS nameserver.
+          ns:
+            type: string
+            description: DNS nameserver IP override. Defaults to dc_ip.
+          dns_tcp:
+            type: boolean
+            default: true
+            description: Use TCP for DNS queries. Default true for Docker reliability.
+          vulnerable:
+            type: boolean
+            default: false
+            description: Only show vulnerable templates and CAs. Filters to ESC1-ESC16 findings.
+          enabled:
+            type: boolean
+            default: false
+            description: Only show enabled templates. Reduces noise.
+          dc_only:
+            type: boolean
+            default: false
+            description: DC-only collection — LDAP queries only, no host contact. Stealthier.
+          stdout:
+            type: boolean
+            default: false
+            description: Print text summary to console instead of file.
+          user_sid:
+            type: string
+            description: User SID for accurate vulnerability assessment. Certipy checks enrollment permissions against this
+              SID.
+          timeout:
+            type: integer
+            default: 300
+            description: Maximum execution time in seconds.
+        returns:
+          certificate_authorities:
+            type: array
+            description: 'Array of CA objects. Each has: name, dns_name, certificate_subject, web_enrollment (Enabled/Disabled),
+              user_specified_san, vulnerabilities (array of ESC IDs like ''ESC6'', ''ESC8'').'
+          certificate_templates:
+            type: array
+            description: 'Array of all template objects. Each has: name, display_name, enabled, client_authentication, enrollee_supplies_subject,
+              requires_manager_approval, authorized_signatures_required, enrollment_permissions, vulnerabilities.'
+          vulnerable_templates:
+            type: array
+            description: Subset of certificate_templates that have at least one ESC vulnerability. Each template includes
+              vulnerabilities array with ESC classifications.
+          vulnerable_count:
+            type: integer
+            description: Number of vulnerable templates found. Zero means no ADCS misconfigurations detected.
+          ca_count:
+            type: integer
+            description: Total number of Certificate Authorities discovered.
+          template_count:
+            type: integer
+            description: Total number of certificate templates discovered.
+          output_files:
+            type: array
+            description: Paths to output files under /session/certipy/ (JSON and TXT).
+          json_file:
+            type: string
+            description: Path to the JSON output file for programmatic analysis.
+          text_file:
+            type: string
+            description: Path to the human-readable text summary.
+      request:
+        description: 'Request a certificate from a Certificate Authority — the core exploitation method for ESC1, ESC2, ESC3,
+          ESC6, ESC7, ESC9, ESC10, ESC15, ESC16. Runs `certipy req -username <user@domain> -dc-ip <ip> -ca <ca_name> -template
+          <template>` with optional SAN injection flags. For ESC1: use -upn to specify the target UPN (e.g., administrator@corp.local)
+          to impersonate any user. For ESC3: use -on-behalf-of with an enrollment agent PFX. For ESC7: use -retrieve to fetch
+          approved pending requests. For ESC15 (EKUwu): use -application-policies with OIDs to override template EKU. Output
+          is a PFX file containing the certificate and private key, saved to /session/certipy/ with a unique prefix. If the
+          request requires manager approval (ESC7 workflow), returns a request_id instead of a PFX — the CA management subcommand
+          (''certipy ca'') is not wrapped as an MCP method, so approve pending requests via bash, then use request -retrieve
+          to fetch the certificate.'
+        when_to_use: (1) After find identifies an ESC1-vulnerable template — request a certificate with -upn set to administrator@domain
+          to impersonate domain admin. (2) For ESC3 enrollment agent abuse — first request an enrollment agent certificate,
+          then use -pfx and -on-behalf-of to request on behalf of another user. (3) For ESC7 CA manager abuse — request with
+          SubCA template (will fail with pending), note the request_id, then approve via ca method, then retrieve with -retrieve.
+          (4) For ESC15 (EKUwu) — use -application-policies to inject Client Authentication OID into the CSR, overriding template
+          EKU on v1 templates. (5) After successful request, pass the PFX to authenticate method for PKINIT auth. (6) With
+          -web flag when only Web Enrollment is available. (7) With -sid flag when StrongCertificateBindingEnforcement=2 requires
+          SID in the certificate.
+        required_ports:
+        - 389
+        params:
+          username:
+            type: string
+            required: true
+            description: Username in user@domain format.
+          password:
+            type: string
+            description: Password for authentication.
+          hashes:
+            type: string
+            description: NTLM hash for pass-the-hash.
+          kerberos:
+            type: boolean
+            default: false
+            description: Use Kerberos auth from ccache.
+          aes_key:
+            type: string
+            description: AES key for Kerberos.
+          dc_ip:
+            type: string
+            required: true
+            description: Domain Controller IP.
+          ns:
+            type: string
+            description: DNS nameserver override.
+          dns_tcp:
+            type: boolean
+            default: true
+            description: TCP DNS queries.
+          ca:
+            type: string
+            required: true
+            description: Certificate Authority name (e.g., 'CORP-CA'). Get from find method's certificate_authorities[].name.
+          template:
+            type: string
+            default: User
+            description: 'Certificate template name (case-sensitive). Get from find method''s vulnerable_templates[].name.
+              Common: ''User'', ''Machine'', ''WebServer'', ''SubCA''.'
+          upn:
+            type: string
+            description: User Principal Name for SAN injection (ESC1). Set to target user (e.g., 'administrator@corp.local')
+              to impersonate them.
+          dns:
+            type: string
+            description: DNS hostname for SAN. For machine account impersonation (e.g., 'dc01.corp.local').
+          sid:
+            type: string
+            description: Object SID for SAN. Needed when StrongCertificateBindingEnforcement=2.
+          target:
+            type: string
+            description: CA server hostname or IP. Auto-resolved from LDAP if omitted.
+          on_behalf_of:
+            type: string
+            description: 'Request on behalf of user (ESC3). Format: ''DOMAIN\user''. Requires enrollment agent PFX via pfx_path.'
+          pfx_path:
+            type: string
+            description: PFX file for enrollment agent (ESC3) or renewal. Path under /session/.
+          retrieve:
+            type: integer
+            description: Retrieve pending certificate by request ID (ESC7 workflow).
+          key_size:
+            type: integer
+            default: 2048
+            description: RSA key size in bits.
+          web:
+            type: boolean
+            default: false
+            description: Use Web Enrollment (HTTP) instead of RPC.
+          application_policies:
+            type: string
+            description: Application policy OIDs for ESC15 exploitation. Comma-separated.
+          timeout:
+            type: integer
+            default: 300
+            description: Maximum execution time in seconds.
+        returns:
+          pfx_path:
+            type: string
+            description: Path to the output PFX file under /session/certipy/. Contains certificate + private key. Pass to
+              authenticate method for PKINIT. Null if request is pending approval.
+          request_id:
+            type: integer
+            description: Request ID for pending requests (ESC7 workflow). The ca subcommand is not wrapped as an MCP method
+              — approve via bash ('certipy ca -issue-request <id>'), then use request -retrieve to fetch.
+          ca:
+            type: string
+            description: CA name used.
+          template:
+            type: string
+            description: Template name used.
+          upn:
+            type: string
+            description: UPN injected into SAN, if specified.
+          output_files:
+            type: array
+            description: All output file paths.
+      authenticate:
+        description: Authenticate using a PFX certificate via Kerberos PKINIT — obtains a Ticket Granting Ticket (TGT) and
+          extracts the NT hash via User-to-User (U2U) authentication. Runs `certipy auth -pfx <file> -dc-ip <ip>`. The NT
+          hash is extracted from the PAC in the TGT and can be used for pass-the-hash with impacket, netexec, or other tools.
+          The TGT is saved as a ccache file (default) or kirbi file (-kirbi flag). The ccache file can be used with KRB5CCNAME
+          env for Kerberos-based tools. This method does NOT require additional credentials — the PFX certificate is the authentication
+          material.
+        when_to_use: (1) After requesting a certificate via the request method — authenticate with the PFX to get a TGT and
+          NT hash. (2) After forging a Golden Certificate — authenticate to prove the forged cert works and extract the target's
+          NT hash. (3) After shadow credentials auto mode produces a PFX — authenticate to verify the shadow credential attack
+          succeeded. (4) The NT hash output is the primary value — use it with impacket secretsdump, netexec, or pass-the-hash
+          attacks. (5) The ccache output enables Kerberos-only authentication with tools that support KRB5CCNAME. (6) Use
+          -kirbi flag when the output will be used with Windows tools (Rubeus, Mimikatz).
+        required_ports:
+        - 88
+        params:
+          pfx_path:
+            type: string
+            required: true
+            description: Path to PFX certificate file (e.g., '/session/certipy/administrator.pfx'). Obtained from request,
+              forge, or shadow methods.
+          pfx_password:
+            type: string
+            description: PFX file password. Usually empty for certipy-generated files.
+          dc_ip:
+            type: string
+            required: true
+            description: Domain Controller IP for PKINIT authentication.
+          domain:
+            type: string
+            description: Domain name override. Usually auto-extracted from certificate.
+          kirbi:
+            type: boolean
+            default: false
+            description: Save TGT as .kirbi (Windows format) instead of .ccache (Linux format).
+          no_hash:
+            type: boolean
+            default: false
+            description: Skip NT hash extraction via U2U. Only obtain TGT.
+          ldap_shell:
+            type: boolean
+            default: false
+            description: Start LDAP shell after auth. NOT recommended for MCP (interactive).
+          timeout:
+            type: integer
+            default: 120
+            description: Maximum execution time in seconds.
+        returns:
+          nt_hash:
+            type: string
+            description: NT hash in LM:NT format (e.g., 'aad3b435b51404ee:31d6cfe0d16ae931b73c59d7e0c089c0'). Use with impacket
+              -hashes, netexec -H, or hashcat mode 1000.
+          ccache_path:
+            type: string
+            description: Path to Kerberos ccache file. Set KRB5CCNAME to this path for Kerberos auth with other tools.
+          kirbi_path:
+            type: string
+            description: Path to Kirbi ticket file (if -kirbi flag used).
+          username:
+            type: string
+            description: Authenticated username extracted from certificate.
+          domain:
+            type: string
+            description: Domain name.
+          output_files:
+            type: array
+            description: All output file paths.
+      shadow:
+        description: 'Shadow Credentials attack — adds a key credential to a target account''s msDS-KeyCredentialLink attribute,
+          authenticates with the resulting certificate, and extracts the NT hash. Runs `certipy shadow <action> -username
+          <user@domain> -dc-ip <ip> -account <target>`. The ''auto'' action performs the full attack chain: (1) adds key credential,
+          (2) authenticates via PKINIT, (3) extracts NT hash, (4) removes the key credential. The attacker must have write
+          access to the target''s msDS-KeyCredentialLink attribute (check with bloodhound: GenericAll, GenericWrite, WriteProperty
+          on msDS-KeyCredentialLink). Actions: ''auto'' (full chain), ''list'' (enumerate existing), ''add'' (add only), ''remove''
+          (remove by device ID), ''clear'' (remove all), ''info'' (details of specific key).'
+        when_to_use: (1) When bloodhound shows GenericAll/GenericWrite/WriteProperty over a target account — use shadow auto
+          to get the target's NT hash without knowing their password. (2) For lateral movement — compromise a user with write
+          access to a higher-privilege account's msDS-KeyCredentialLink. (3) Use 'auto' for the full attack (add → auth →
+          hash → cleanup). (4) Use 'list' to check existing key credentials before attacking (avoid disrupting legitimate
+          key credentials). (5) Use 'add' + separate 'authenticate' for more control over each step. (6) Use 'clear' with
+          caution — removes ALL key credentials, may break Windows Hello for Business. (7) Requires the domain to have a CA
+          for PKINIT — if no CA exists, shadow credentials won't work.
+        required_ports:
+        - 389
+        - 88
+        params:
+          username:
+            type: string
+            required: true
+            description: Attacker username in user@domain format. Must have write access to target's msDS-KeyCredentialLink.
+          password:
+            type: string
+            description: Attacker password.
+          hashes:
+            type: string
+            description: NTLM hash for pass-the-hash.
+          kerberos:
+            type: boolean
+            default: false
+            description: Kerberos auth from ccache.
+          aes_key:
+            type: string
+            description: AES key for Kerberos.
+          dc_ip:
+            type: string
+            required: true
+            description: Domain Controller IP.
+          ns:
+            type: string
+            description: DNS nameserver override.
+          dns_tcp:
+            type: boolean
+            default: true
+            description: TCP DNS queries.
+          account:
+            type: string
+            required: true
+            description: Target account SAM name (e.g., 'administrator', 'DC01$'). Must have write access via GenericAll/GenericWrite/WriteProperty.
+          action:
+            type: enum
+            values:
+            - auto
+            - list
+            - add
+            - remove
+            - clear
+            - info
+            default: auto
+            description: '''auto'' = full chain (add→auth→hash→remove). ''list'' = show key credentials. ''add'' = add only.
+              ''remove'' = remove by device_id. ''clear'' = remove all. ''info'' = show details.'
+          device_id:
+            type: string
+            description: Device ID UUID for 'remove'/'info' actions. Get from 'list' action.
+          timeout:
+            type: integer
+            default: 300
+            description: Maximum execution time in seconds.
+        returns:
+          nt_hash:
+            type: string
+            description: Target account's NT hash (from auto action). Use for pass-the-hash.
+          pfx_path:
+            type: string
+            description: PFX file path (from auto/add actions). Can be used with authenticate method separately.
+          device_id:
+            type: string
+            description: Device ID of the added key credential (from add action). Use with remove action for cleanup.
+          key_credentials:
+            type: array
+            description: List of existing key credentials (from list action). Each has device_id and owner.
+          output_files:
+            type: array
+            description: All output file paths.
+      forge:
+        description: 'Forge certificates using a compromised CA private key — creates Golden Certificates for persistent domain
+          access (ESC5). Runs `certipy forge -ca-pfx <ca_file> -upn <target@domain>`. Given the CA''s certificate and private
+          key (obtained from a compromised CA server via certipy''s ca subcommand or other means, or from ESC5 exploitation),
+          forges arbitrary certificates that the CA''s chain will trust. Note: the ca subcommand is not wrapped as an MCP
+          method — extract the CA private key via bash if needed. Forged certificates can impersonate any user or computer
+          in the domain. Use with authenticate method to obtain TGTs and NT hashes. This is the AD CS equivalent of a Golden
+          Ticket — persists until the CA certificate expires or is revoked. Output is a PFX file saved to /session/certipy/.'
+        when_to_use: (1) After compromising a CA server and extracting its certificate + private key — forge certificates
+          for any domain user/computer. (2) For persistent access — Golden Certificates survive password resets (unlike Golden
+          Tickets which need krbtgt hash). (3) After ESC5 exploitation where CA object ACLs allow extracting the CA private
+          key. (4) Combine with -crl for a more realistic certificate that includes a CRL distribution point. (5) Use -sid
+          when StrongCertificateBindingEnforcement=2 requires SID in the certificate. (6) After forging, use authenticate
+          method to obtain TGT + NT hash from the forged certificate.
+        required_ports: []
+        params:
+          ca_pfx:
+            type: string
+            required: true
+            description: Path to CA certificate + private key PFX file (e.g., '/session/certipy/CORP-CA.pfx'). Obtained from
+              a compromised CA server (via certipy ca subcommand in bash) or ESC5 exploitation.
+          ca_password:
+            type: string
+            description: Password for the CA PFX file.
+          upn:
+            type: string
+            description: UPN for forged cert (e.g., 'administrator@corp.local'). Primary way to impersonate users.
+          dns:
+            type: string
+            description: DNS hostname for machine impersonation (e.g., 'dc01.corp.local').
+          sid:
+            type: string
+            description: Object SID for certificate. Required for StrongCertificateBindingEnforcement=2.
+          subject:
+            type: string
+            description: Certificate subject DN.
+          crl:
+            type: string
+            description: CRL distribution point URL (e.g., 'ldap:///'). Makes certificate look legitimate.
+          serial:
+            type: string
+            description: Custom serial number.
+          key_size:
+            type: integer
+            default: 2048
+            description: RSA key size.
+          validity_period:
+            type: integer
+            default: 365
+            description: Certificate validity in days.
+          timeout:
+            type: integer
+            default: 120
+            description: Maximum execution time in seconds.
+        returns:
+          pfx_path:
+            type: string
+            description: Path to forged PFX file. Pass to authenticate method for PKINIT.
+          upn:
+            type: string
+            description: UPN embedded in the forged certificate.
+          dns:
+            type: string
+            description: DNS hostname embedded.
+          validity_days:
+            type: integer
+            description: Validity period in days.
+          output_files:
+            type: array
+            description: All output file paths.
+      template:
+        description: 'View or modify Active Directory certificate template configurations. Runs `certipy template -username
+          <user@domain> -dc-ip <ip> -template <name>` with action-specific flags. Actions: ''read'' displays current template
+          properties (default). ''save_config'' saves the template''s current configuration to a JSON file for backup before
+          exploitation. ''write_default'' overwrites the template with an ESC1-vulnerable default configuration (enables enrollee-supplied
+          subject, client authentication EKU, low-privilege enrollment — used for ESC4 exploitation). ''write_config'' restores
+          a template from a previously saved JSON file. The -force flag is automatically added for write operations to skip
+          certipy''s confirmation prompt. IMPORTANT: Always save_config before write_default so the template can be restored
+          after exploitation to avoid detection.'
+        when_to_use: '(1) ESC4 exploitation — when bloodhound/find shows write access to a template: save_config (backup)
+          → write_default (make vulnerable) → request cert via request method → write_config (restore). (2) Before any template
+          modification — save_config to create a backup JSON for later restoration. (3) To inspect template properties — use
+          read action to see enrollment permissions, EKU settings, SAN configuration. (4) After exploitation — write_config
+          with the saved JSON to restore original template settings and reduce detection footprint. (5) The read action is
+          useful for verifying that write_default or write_config changes were applied correctly.'
+        required_ports:
+        - 389
+        params:
+          username:
+            type: string
+            required: true
+            description: Username in user@domain format. Must have write access to template for modification actions.
+          password:
+            type: string
+            description: Password.
+          hashes:
+            type: string
+            description: NTLM hash for pass-the-hash.
+          kerberos:
+            type: boolean
+            default: false
+            description: Kerberos auth.
+          aes_key:
+            type: string
+            description: AES key.
+          dc_ip:
+            type: string
+            required: true
+            description: Domain Controller IP.
+          ns:
+            type: string
+            description: DNS nameserver override.
+          dns_tcp:
+            type: boolean
+            default: true
+            description: TCP DNS queries.
+          template:
+            type: string
+            required: true
+            description: Template name (case-sensitive). Get from find method.
+          action:
+            type: enum
+            values:
+            - read
+            - save_config
+            - write_default
+            - write_config
+            default: read
+            description: '''read'' = display properties. ''save_config'' = save to JSON. ''write_default'' = overwrite with
+              ESC1-vulnerable config (ESC4). ''write_config'' = restore from JSON.'
+          config_path:
+            type: string
+            description: JSON config file path for write_config action. Must be under /session/.
+          timeout:
+            type: integer
+            default: 300
+            description: Maximum execution time.
+        returns:
+          template:
+            type: string
+            description: Template name operated on.
+          action:
+            type: string
+            description: Action performed.
+          config:
+            type: object
+            description: Template configuration (from save_config action). JSON object with all template properties.
+          config_path:
+            type: string
+            description: Path to saved configuration JSON file.
+          output_files:
+            type: array
+            description: All output file paths.
+  chisel:
+    name: chisel
+    version: 1.11.4
+    description: 'HTTP-based tunneling and SOCKS proxy via Chisel v1.11.4 (jpillora/chisel). Six methods: server (start chisel
+      listener), client_forward (forward tunnel — access server-side services locally), client_reverse (reverse tunnel — expose
+      client-side services on server), client_socks (SOCKS5 proxy through server''s network), list (show active tunnels),
+      close (terminate a process). Tunnels over HTTP/WebSocket with mandatory SSH encryption, traverses proxies and firewalls
+      that block raw SSH. Single Go binary, no dependencies. Server and client run as long-lived background processes tracked
+      in-memory by PID. Supports authentication (--auth user:pass), TLS, server fingerprint verification, and backend HTTP
+      proxying to hide chisel behind legitimate web servers. Client auto-reconnects with exponential backoff (100ms to 5min).
+      For SSH-based tunneling when SSH is available, use the tunnel tool instead — chisel is for when SSH ports are blocked
+      but HTTP/HTTPS is open.'
+    image: ghcr.io/silicon-works/mcp-tools-chisel:latest
+    image_size_mb: 195
+    timeout_seconds: 600
+    capabilities:
+    - http_tunneling
+    - port_forwarding
+    - reverse_tunneling
+    - socks_proxy
+    - pivoting
+    - tunnel_management
+    routing:
+      use_for:
+      - create HTTP-based tunnel when SSH port is blocked but HTTP/HTTPS is open
+      - set up forward port forwarding through chisel to access internal services
+      - create reverse tunnel to expose a compromised host's service on the attacker machine
+      - establish SOCKS5 proxy through chisel for pivoting into internal networks via HTTP
+      - tunnel through web proxies and firewalls that only allow HTTP/HTTPS traffic
+      - set up a chisel server with --reverse to receive reverse shells tunneled over HTTP
+      - access localhost-only services on a remote host by forwarding ports through chisel
+      - create an HTTP tunnel that looks like normal web traffic to evade network detection
+      - pivot through a compromised host to reach internal network segments via HTTP tunnel
+      - hide chisel traffic behind a legitimate website using --backend reverse proxy
+      never_use_for:
+      - SSH tunneling when SSH is available (use tunnel — SSH is simpler and doesn't need a server component)
+      - port scanning through a tunnel (use nmap with proxychains after establishing SOCKS)
+      - file transfer (use ssh copy_to/copy_from or curl)
+      - reverse shell listeners (use netcat — chisel is for tunneling, not shell handling)
+      - IPsec VPN connections (use ike-scan for VPN discovery) — chisel is per-port tunneling, not full network VPN
+      triggers:
+      - chisel
+      - HTTP tunnel
+      - HTTPS tunnel
+      - WebSocket tunnel
+      - reverse tunnel HTTP
+      - SOCKS over HTTP
+      - firewall bypass tunnel
+      - pivot HTTP
+      - chisel server
+      - chisel client
+    phases:
+    - post-exploitation
+    requirements:
+      network: true
+      privileged: false
+    resources:
+      memory_mb: 128
+      cpu: 0.25
+    see_also:
+    - tool: tunnel
+      reason: Use SSH-based tunneling (ssh -L, ssh -D) when SSH is available — simpler and doesn't require running a server
+        component
+    - tool: netcat
+      reason: Use for raw reverse shell listeners, then tunnel the shell through chisel if needed
+    - tool: nmap
+      reason: After establishing a chisel SOCKS proxy, use nmap with proxychains to scan internal networks
+    methods:
+      server:
+        description: Start a chisel server that listens for client connections over HTTP/WebSocket. Runs `chisel server --host
+          <host> --port <port>` as a background process. The server accepts chisel client connections and multiplexes SSH-encrypted
+          tunnels over the HTTP transport. By default enables --reverse (allow reverse tunnels) and --socks5 (allow SOCKS
+          proxy) for maximum flexibility. Optional --auth enforces username:password authentication. Optional --backend proxies
+          non-chisel HTTP requests to a real web server, making the chisel server appear as a normal website. The server prints
+          its SSH fingerprint on startup — share this with clients for MITM detection. Runs indefinitely until closed via
+          the close method.
+        when_to_use: (1) First step before any chisel client connection — start the server on the attacker machine. (2) With
+          --reverse enabled to receive reverse tunnels from compromised hosts. (3) With --socks5 to allow clients to create
+          SOCKS proxies for pivoting. (4) With --backend to hide chisel behind a legitimate website on an engagement. (5)
+          With --auth when multiple operators share the same chisel server. (6) On a VPS or redirector that has HTTP/HTTPS
+          open when the target network blocks SSH.
+        required_ports: []
+        params:
+          port:
+            type: integer
+            default: 8080
+            description: HTTP listening port. Use 80 or 443 to blend with normal web traffic.
+          host:
+            type: string
+            default: 0.0.0.0
+            description: 'Network interface to bind to. Default: all interfaces.'
+          reverse:
+            type: boolean
+            default: true
+            description: 'Allow clients to use reverse port forwarding (R: prefix remotes).'
+          socks5:
+            type: boolean
+            default: true
+            description: Enable internal SOCKS5 proxy for clients.
+          auth:
+            type: string
+            description: Authentication in 'user:pass' format. Clients must match.
+          backend:
+            type: string
+            description: URL to proxy non-chisel requests to (e.g., 'http://example.com'). Hides chisel behind a real website.
+          verbose:
+            type: boolean
+            default: false
+            description: Enable verbose logging.
+        returns:
+          id:
+            type: string
+            description: Server process ID for list and close.
+          port:
+            type: integer
+            description: Port the server is listening on.
+          fingerprint:
+            type: string
+            description: SSH public key fingerprint (base64 SHA256). Share with clients for --fingerprint verification.
+          status:
+            type: string
+            description: Process status (running/exited).
+      client_forward:
+        description: 'Create a forward tunnel — the chisel client listens on a local port and forwards traffic through the
+          chisel server to a remote host:port. Runs `chisel client <server_url> <local_port>:<remote_host>:<remote_port>`
+          as a background process. Traffic flow: local_port → chisel client → HTTP/WebSocket → chisel server → remote_host:remote_port.
+          The remote_host is resolved from the server''s network perspective, so ''127.0.0.1'' means the server''s localhost
+          and internal IPs are reachable if the server can reach them. Auto-assigns local_port if set to 0. Client auto-reconnects
+          with exponential backoff on disconnection. Note: chisel''s --proxy flag (route client traffic through an HTTP CONNECT
+          proxy to reach the chisel server) is not exposed — use bash for proxy-chained scenarios.'
+        when_to_use: (1) To access a service on the chisel server's localhost (e.g., MySQL 3306, web app 8080) from the attacker
+          machine. (2) To reach internal network services that the chisel server can access but the attacker cannot directly.
+          (3) When SSH port forwarding is blocked but HTTP is open. (4) After running 'server' method — connect a forward
+          tunnel to it. (5) Use local_port=0 for auto-assignment when the specific port doesn't matter.
+        required_ports: []
+        params:
+          server_url:
+            type: string
+            required: true
+            description: Chisel server URL (e.g., 'http://10.10.16.24:8080'). Must be a running chisel server.
+          local_port:
+            type: integer
+            default: 0
+            description: Local port to listen on (0 = auto-assign).
+          remote_host:
+            type: string
+            default: 127.0.0.1
+            description: Remote host from server's perspective. '127.0.0.1' = server localhost. Set to internal IP for pivoting.
+          remote_port:
+            type: integer
+            required: true
+            description: Remote port to forward to.
+          auth:
+            type: string
+            description: Auth 'user:pass' matching server.
+          fingerprint:
+            type: string
+            description: Server fingerprint for MITM verification.
+          max_retry_count:
+            type: integer
+            default: 3
+            description: Max reconnection attempts. Chisel's default is unlimited retries, but this is capped to 3 to prevent
+              infinite hangs in MCP context. Set to 0 for unlimited.
+          verbose:
+            type: boolean
+            default: false
+            description: Verbose logging.
+        returns:
+          id:
+            type: string
+            description: Tunnel ID for list and close.
+          local_port:
+            type: integer
+            description: Local port the tunnel listens on.
+          connect_to:
+            type: string
+            description: Address to connect to (e.g., '127.0.0.1:9999').
+          mapping:
+            type: string
+            description: Chisel remote spec (e.g., '9999:127.0.0.1:3306').
+      client_reverse:
+        description: 'Create a reverse tunnel — the chisel SERVER listens on a port and forwards incoming traffic through
+          the tunnel to the CLIENT''s local service. Runs `chisel client <server_url> R:<remote_port>:<local_host>:<local_port>`
+          as a background process. Traffic flow: server:remote_port → HTTP/WebSocket → chisel client → local_host:local_port.
+          The chisel server must have --reverse enabled. Useful for exposing a compromised host''s local service back to the
+          attacker through HTTP. Note: chisel''s --proxy flag (route client traffic through an HTTP CONNECT proxy to reach
+          the chisel server) is not exposed — use bash for proxy-chained scenarios.'
+        when_to_use: (1) To expose a service running on the compromised host (e.g., a reverse shell listener) back to the
+          attacker via the chisel server. (2) When the compromised host can reach the chisel server over HTTP but the attacker
+          can't reach the compromised host directly. (3) For callback channels that traverse firewalls — outbound HTTP from
+          target → chisel server → reverse tunnel back to target's local service. (4) Use with R:2222:localhost:22 to get
+          SSH access to a host that only has outbound HTTP.
+        required_ports: []
+        params:
+          server_url:
+            type: string
+            required: true
+            description: Chisel server URL. Server must have --reverse enabled.
+          remote_port:
+            type: integer
+            required: true
+            description: Port the SERVER will listen on. Incoming connections here are tunneled to the client.
+          local_host:
+            type: string
+            default: 127.0.0.1
+            description: 'Local host to forward to (client-side). Default: client''s localhost.'
+          local_port:
+            type: integer
+            required: true
+            description: Local port on the client side. Traffic from server:remote_port reaches this port.
+          auth:
+            type: string
+            description: Auth 'user:pass' matching server.
+          fingerprint:
+            type: string
+            description: Server fingerprint.
+          max_retry_count:
+            type: integer
+            default: 3
+            description: Max reconnection attempts. Chisel's default is unlimited retries, but this is capped to 3 to prevent
+              infinite hangs in MCP context. Set to 0 for unlimited.
+          verbose:
+            type: boolean
+            default: false
+            description: Verbose logging.
+        returns:
+          id:
+            type: string
+            description: Tunnel ID.
+          remote_port:
+            type: integer
+            description: Port the server is listening on.
+          server_listens_on:
+            type: string
+            description: Server-side listener address (e.g., '0.0.0.0:2222').
+          mapping:
+            type: string
+            description: Chisel remote spec (e.g., 'R:2222:127.0.0.1:22').
+      client_socks:
+        description: 'Create a SOCKS5 proxy through a chisel server — all traffic sent through the local SOCKS port is tunneled
+          over HTTP to the chisel server and exits from the server''s network. Runs `chisel client <server_url> <socks_port>:socks`
+          as a background process. The chisel server must have --socks5 enabled. Use the returned proxy_url with proxychains
+          or tool-specific SOCKS settings to route traffic through the server''s network. Enables full network pivoting —
+          any tool that supports SOCKS5 can reach any host the chisel server can reach. Note: chisel''s --proxy flag (route
+          client traffic through an HTTP CONNECT proxy to reach the chisel server) is not exposed — use bash for proxy-chained
+          scenarios.'
+        when_to_use: (1) When you need to reach multiple services on an internal network through a compromised host over HTTP.
+          (2) Instead of creating individual forward tunnels — one SOCKS proxy handles all destinations. (3) For network scanning
+          through the tunnel — set up SOCKS then use nmap with proxychains. (4) When SSH is blocked but HTTP is open and you
+          need SOCKS-style pivoting. (5) Default port 1080 — configure proxychains to use socks5://127.0.0.1:1080.
+        required_ports: []
+        params:
+          server_url:
+            type: string
+            required: true
+            description: Chisel server URL. Server must have --socks5 enabled.
+          socks_port:
+            type: integer
+            default: 1080
+            description: Local port for the SOCKS5 proxy.
+          auth:
+            type: string
+            description: Auth 'user:pass' matching server.
+          fingerprint:
+            type: string
+            description: Server fingerprint.
+          max_retry_count:
+            type: integer
+            default: 3
+            description: Max reconnection attempts. Chisel's default is unlimited retries, but this is capped to 3 to prevent
+              infinite hangs in MCP context. Set to 0 for unlimited.
+          verbose:
+            type: boolean
+            default: false
+            description: Verbose logging.
+        returns:
+          id:
+            type: string
+            description: Tunnel ID.
+          socks_port:
+            type: integer
+            description: Local SOCKS5 proxy port.
+          proxy_url:
+            type: string
+            description: SOCKS5 proxy URL (e.g., 'socks5://127.0.0.1:1080'). Use in proxychains or tool configs.
+      list:
+        description: List all active chisel servers and client tunnels with their type, ports, mappings, and process status.
+          Automatically prunes dead processes from the tracking list.
+        when_to_use: To check which chisel processes are running, verify tunnel status, find local ports or process IDs.
+        required_ports: []
+        params: {}
+        returns:
+          processes:
+            type: array
+            description: 'Array of active process objects. Each has: id, type (server/forward/reverse/socks), ports, mappings,
+              status.'
+          count:
+            type: integer
+            description: Number of active processes.
+      close:
+        description: Close a specific chisel server or client tunnel by its process ID. Sends SIGTERM then SIGKILL after 5
+          seconds if needed. Frees the ports used by the process.
+        when_to_use: When a specific tunnel or server is no longer needed. Free ports for reuse.
+        required_ports: []
+        params:
+          id:
+            type: string
+            required: true
+            description: Process ID to close (from list output, e.g., 'server-1', 'fwd-2').
+        returns:
+          id:
+            type: string
+            description: ID of the closed process.
+          type:
+            type: string
+            description: Type of the closed process (server/forward/reverse/socks).
+          status:
+            type: string
+            description: Always 'closed'.
   curl:
     name: curl
     version: '8.18'
@@ -1025,13 +2430,13 @@ tools:
             description: 'Domain/OS info: OS version string, domain name, server type, DNS hostname.'
   evil-winrm:
     name: evil-winrm
-    version: 0.5.0
-    description: 'WinRM shell for Windows remote management using pywinrm v0.5.0 (Python). 3 methods: exec (PowerShell run_ps
-      or CMD run_cmd), upload (base64-chunked file transfer to target), download (base64-encoded file retrieval from target).
-      Supports NTLM pass-the-hash via pyspnego auto-detection of LM:NT hash format — bare NT hashes auto-prefixed with 32
-      zero bytes. Connects via HTTP (5985) or HTTPS (5986) using NTLM transport. WinRM requires membership in ''Remote Management
-      Users'' or ''Administrators'' group. Named for routing discoverability; implementation uses pywinrm (not Ruby evil-winrm)
-      for reliable non-interactive MCP execution.'
+    version: 2.0.0
+    description: 'WinRM shell for Windows remote management using pypsrp v0.8+ (Python PowerShell Remoting Protocol). 3 methods:
+      exec (native PowerShell via PSRP plugin URI, or CMD via WinRS), upload (native PSRP copy), download (native PSRP fetch).
+      pypsrp uses the PowerShell plugin URI directly — works for non-admin WinRM users on Windows Server 2025 where CMD Invoke
+      is restricted. Supports NTLM pass-the-hash via pyspnego auto-detection of LM:NT hash format — bare NT hashes auto-prefixed
+      with 32 zero bytes. Connects via HTTP (5985) or HTTPS (5986) using NTLM transport. WinRM requires membership in ''Remote
+      Management Users'' or ''Administrators'' group.'
     image: ghcr.io/silicon-works/mcp-tools-evil-winrm:latest
     image_size_mb: 300
     timeout_seconds: 300
@@ -1082,10 +2487,11 @@ tools:
       exec:
         required_ports:
         - 5985
-        description: 'Execute a command on a remote Windows host via WinRM using pywinrm. Two shell modes: PowerShell (run_ps,
-          default) executes via PowerShell with CLIXML error parsing, CMD (run_cmd) executes native Windows commands. Authentication
-          via NTLM transport — supports password or NTLM hash (pass-the-hash via pyspnego LM:NT auto-detection). Domain prefix
-          auto-applied as DOMAIN\username format. Returns stdout, stderr, exit code, and shell type used.'
+        description: 'Execute a command on a remote Windows host via WinRM using pypsrp. Two shell modes: PowerShell (default)
+          uses native PSRP plugin URI (http://schemas.microsoft.com/powershell/Microsoft.PowerShell) — works for non-admin
+          users on Windows Server 2025. CMD uses WinRS CMD shell URI. Authentication via NTLM transport — supports password
+          or NTLM hash (pass-the-hash via pyspnego LM:NT auto-detection). Domain prefix auto-applied as DOMAIN\username format.
+          Returns stdout, stderr, exit code, and shell type used.'
         when_to_use: 'When you have valid Windows credentials (password or NTLM hash) and WinRM port 5985 is open. Preferred
           over netexec winrm when you need: (1) Reliable single-command execution with clean stdout/stderr separation, (2)
           PowerShell script execution with proper error handling, (3) CMD commands that don''t work well in PowerShell (e.g.,
@@ -1147,15 +2553,13 @@ tools:
       upload:
         required_ports:
         - 5985
-        description: Upload a local file to the target Windows machine via WinRM using PowerShell base64-chunked transfer.
-          File is read locally, base64-encoded, split into ~50KB chunks, and reassembled on target using [IO.File]::WriteAllBytes
-          and [Convert]::FromBase64String. First chunk creates the file, subsequent chunks append. Supports password and NTLM
-          hash authentication.
+        description: Upload a local file to the target Windows machine via WinRM using native PSRP copy. Uses pypsrp's built-in
+          copy() which handles chunking and transfer natively over the PSRP protocol — faster and more reliable than base64
+          chunking over PowerShell commands. Supports password and NTLM hash authentication.
         when_to_use: 'To transfer tools, scripts, exploits, or payloads to the target Windows machine when only WinRM is available.
           Use for: (1) Upload compiled exploits to C:\Windows\Temp for privilege escalation, (2) Upload enumeration scripts
           (PowerUp, Seatbelt, winPEAS) for post-exploitation, (3) Upload reverse shell payloads for persistent access. Files
-          in /session/ directory are shared with the container. For large files (>10MB), transfer may be slow due to base64
-          overhead and WinRM message size limits.'
+          in /session/ directory are shared with the container.'
         params:
           target:
             type: string
@@ -1198,13 +2602,12 @@ tools:
       download:
         required_ports:
         - 5985
-        description: Download a file from the target Windows machine via WinRM using PowerShell base64-encoded transfer. File
-          is read on target using [IO.File]::ReadAllBytes, base64-encoded via [Convert]::ToBase64String, transferred via WinRM
-          response, decoded locally, and saved to disk. Supports password and NTLM hash authentication.
+        description: Download a file from the target Windows machine via WinRM using native PSRP fetch. Uses pypsrp's built-in
+          fetch() which handles transfer natively over the PSRP protocol — faster and more reliable than base64 encoding over
+          PowerShell commands. Supports password and NTLM hash authentication.
         when_to_use: 'To retrieve files, flags, evidence, or loot from the target Windows machine. Use for: (1) Download CTF
           flags (user.txt, root.txt), (2) Retrieve configuration files with credentials, (3) Download SAM/SYSTEM/SECURITY
-          hive files for offline cracking, (4) Collect evidence files for reporting. Default save location: /session/artifacts/.
-          For large files, consider using SMB file transfer (netexec --get-file) which is faster.'
+          hive files for offline cracking, (4) Collect evidence files for reporting. Default save location: /session/artifacts/.'
         params:
           target:
             type: string
@@ -1821,6 +3224,231 @@ tools:
           summary:
             type: object
             description: Summary with target domain and found vhosts
+  forensics:
+    name: forensics
+    version: 1.0.0
+    description: 'File analysis bundle — binwalk v2.4.3 (firmware extraction, signature scanning), foremost v1.5.7 (file carving
+      from disk images), steghide v0.5.1 (steganography extraction from JPEG/BMP/WAV/AU), exiftool v13.50 (metadata extraction
+      for 400+ file formats). Six methods: extract (binwalk recursive extraction with matryoshka depth control), analyze (binwalk
+      signature scan without extraction), carve (foremost header/footer carving for 15+ file types), stego_extract (steghide
+      hidden data extraction with passphrase), stego_info (steghide format/capacity/embedded detection), metadata (exiftool
+      JSON output with EXIF/XMP/IPTC/GPS fields). All operations on files in /session/ directory. No network access required.'
+    image: ghcr.io/silicon-works/mcp-tools-forensics:latest
+    image_size_mb: 309
+    timeout_seconds: 600
+    capabilities:
+    - firmware_analysis
+    - file_extraction
+    - file_carving
+    - steganography
+    - metadata_extraction
+    - signature_scanning
+    routing:
+      use_for:
+      - extract embedded files from a firmware binary or archive
+      - scan a binary file for embedded signatures like zip headers, filesystem images, certificates
+      - carve deleted files from a disk image or raw partition dump
+      - recover JPEG PNG PDF files from a forensic disk image
+      - extract hidden data from a steganographic image using steghide
+      - check if an image file has steganographic data embedded
+      - extract EXIF metadata GPS coordinates camera info from a photo
+      - extract metadata from a PDF document including author creation date
+      - analyze a firmware update file for embedded filesystems and compression
+      - extract files embedded inside a PNG or JPEG using binwalk
+      - perform file carving on a dd disk image to recover deleted files
+      - check steganographic capacity of an image file
+      - extract XMP IPTC metadata from media files
+      never_use_for:
+      - reverse engineering binary executables (use ghidra — forensics extracts files, ghidra analyzes code)
+      - memory forensics or RAM dump analysis (use volatility)
+      - network packet capture analysis (use wireshark or tshark)
+      - malware analysis or sandboxing (use dedicated malware tools)
+      - password-protected zip/rar extraction (use john.convert for hash extraction, then john/hashcat to crack)
+      triggers:
+      - binwalk
+      - foremost
+      - steghide
+      - exiftool
+      - firmware extract
+      - file carve
+      - steganography
+      - stego
+      - metadata
+      - EXIF
+      - embedded files
+      - disk image recovery
+    phases:
+    - post-exploitation
+    requirements:
+      network: false
+      privileged: false
+    resources:
+      memory_mb: 512
+      cpu: 1.0
+    see_also:
+    - tool: ghidra
+      reason: Use ghidra for reverse engineering extracted binaries. Forensics extracts files; ghidra analyzes code.
+    - tool: volatility
+      reason: Use volatility for memory dump analysis (pslist, hashdump, filescan). Forensics handles file-level analysis.
+    - tool: john
+      reason: Use john's *2john converters to extract hashes from password-protected archives, then crack.
+    methods:
+      extract:
+        description: Extract embedded files using binwalk's recursive extraction mode. Runs `binwalk -e -M -d <depth> -C /session/extracted_<basename>/
+          <file>`. The -e flag enables extraction, -M enables matryoshka (recursive) extraction of files found within extracted
+          files, -d limits recursion depth (default 8). Detects and extracts 100+ file types including compressed archives,
+          filesystems (squashfs, cramfs, jffs2), certificates, firmware headers, and raw compression streams. Output directory
+          created under /session/ for retrieval.
+        when_to_use: (1) First step in CTF forensics challenges — extract hidden files from images, binaries, or archives.
+          (2) Firmware analysis — extract filesystem from router/IoT firmware updates. (3) After downloading suspicious files
+          during an engagement — check for embedded payloads. (4) When a file is larger than expected for its type (might
+          contain embedded data). (5) Use 'analyze' first to see what's embedded, then 'extract' to pull it out.
+        required_ports: []
+        params:
+          file:
+            type: string
+            required: true
+            description: Path to file to extract from (must be accessible in container, typically under /session/).
+          depth:
+            type: integer
+            default: 8
+            description: Max matryoshka recursion depth (-d flag). Default 8. Reduce to 2-3 for large files to prevent long
+              runtimes. Increase for deeply nested archives.
+        returns:
+          signatures_found:
+            type: array
+            description: 'Signatures detected in the file. Each entry: {offset_decimal, offset_hex, description}.'
+          extracted_files:
+            type: array
+            description: Paths to extracted files under /session/extracted_<basename>/.
+          extracted_count:
+            type: integer
+            description: Number of files extracted.
+          extract_directory:
+            type: string
+            description: Root directory containing extracted files.
+      analyze:
+        description: Scan file for embedded signatures without extracting (binwalk -B). Quick read-only operation that identifies
+          file types embedded at various offsets.
+        when_to_use: (1) Before extraction — see what's inside without modifying anything. (2) Quick triage of unknown files.
+          (3) Verify a file contains expected embedded content.
+        required_ports: []
+        params:
+          file:
+            type: string
+            required: true
+            description: Path to file to scan.
+        returns:
+          signatures:
+            type: array
+            description: 'Signatures found. Each entry: {offset_decimal, offset_hex, description}.'
+          signature_count:
+            type: integer
+            description: Number of signatures found.
+      carve:
+        description: 'Carve files from disk image or binary using foremost. Runs `foremost -o /session/carved_<basename>/
+          -i <file>` with optional type filter (-t). Foremost searches for file headers and footers to recover intact files
+          from raw data, disk images, or partially overwritten media. Supports 15+ file types: jpg, gif, png, bmp, avi, exe,
+          mpg, wav, riff, wmv, mov, pdf, ole, doc, zip, rar, htm, cpp. Creates subdirectories by file type in the output directory.'
+        when_to_use: (1) Recover deleted files from a dd disk image or raw partition. (2) CTF challenges involving disk forensics
+          or file recovery. (3) After obtaining a disk image via dd or similar tool during post-exploitation. (4) When binwalk
+          extract doesn't recover the files you need (foremost uses different carving heuristics). (5) Use '-t jpg,png,pdf'
+          to target specific file types and reduce noise.
+        required_ports: []
+        params:
+          file:
+            type: string
+            required: true
+            description: Path to file/image to carve from.
+          types:
+            type: string
+            description: 'Comma-separated file types to carve: jpg, gif, png, bmp, avi, exe, mpg, wav, riff, wmv, mov, pdf,
+              ole, doc, zip, rar, htm, cpp. Omit for all types.'
+        returns:
+          carved_files:
+            type: array
+            description: Paths to carved files under /session/carved_<basename>/ (excludes audit.txt).
+          carved_count:
+            type: integer
+            description: Number of files carved.
+          carve_directory:
+            type: string
+            description: Root output directory.
+          audit_summary:
+            type: string
+            description: Foremost audit log summary (first 2000 chars).
+      stego_extract:
+        description: Extract hidden data from a steganographic file using steghide. Runs `steghide extract -sf <file> -xf
+          /session/stego_out_<basename> -p <passphrase> -f`. Supports JPEG, BMP, WAV, and AU formats. If the extracted data
+          is text and under 4KB, the content is included directly in the response. Otherwise, returns the output file path
+          for retrieval.
+        when_to_use: (1) CTF steganography challenges where steghide was used to embed data. (2) When 'stego_info' confirms
+          data is embedded. (3) Try empty passphrase first, then common passwords, then crack with stegcracker if needed.
+          (4) After finding a suspicious image file during an engagement.
+        required_ports: []
+        params:
+          file:
+            type: string
+            required: true
+            description: Path to stego file (JPEG, BMP, WAV, or AU format).
+          passphrase:
+            type: string
+            default: ''
+            description: Passphrase for extraction. Empty string for no passphrase. Try common passwords if empty fails.
+        returns:
+          output_path:
+            type: string
+            description: Path to extracted data file under /session/.
+          size_bytes:
+            type: integer
+            description: Size of extracted data in bytes.
+          content:
+            type: string
+            description: Text content of extracted data (if under 4KB and readable). '(binary data)' otherwise.
+      stego_info:
+        description: Display info about a potential steganographic file using steghide info. Shows file format, steganographic
+          capacity, and whether data appears to be embedded. Quick read-only check before attempting extraction.
+        when_to_use: (1) Before stego_extract — check if data is embedded and what format is used. (2) Triage multiple image
+          files to find the one with hidden data. (3) Check steganographic capacity of a cover file.
+        required_ports: []
+        params:
+          file:
+            type: string
+            required: true
+            description: Path to file to inspect.
+        returns:
+          format:
+            type: string
+            description: File format detected by steghide (e.g., 'jpeg', 'bmp', 'wav').
+          capacity:
+            type: string
+            description: Steganographic capacity (e.g., '12.5 KB').
+          embedded:
+            type: boolean
+            description: True if steghide detects embedded data.
+      metadata:
+        description: Extract all metadata from a file using exiftool -j (JSON output). Returns structured metadata including
+          EXIF (camera, lens, settings), GPS coordinates, XMP (editing software, history), IPTC (caption, keywords), PDF properties
+          (author, creator, pages), Office document properties, and file system metadata (dates, permissions). Supports 400+
+          file formats.
+        when_to_use: (1) CTF challenges involving metadata analysis (hidden flags in EXIF comments, GPS coordinates). (2)
+          OSINT — extract GPS coordinates, camera model, software used from photos. (3) Check PDF metadata for author/creator
+          info during reconnaissance. (4) Verify file timestamps and creation tools. (5) Look for steganographic hints in
+          metadata comments.
+        required_ports: []
+        params:
+          file:
+            type: string
+            required: true
+            description: Path to file to extract metadata from.
+        returns:
+          metadata:
+            type: object
+            description: Full metadata as key-value pairs. Keys vary by file type (e.g., 'Make', 'Model', 'GPSLatitude' for
+              photos; 'Author', 'Creator', 'PageCount' for PDFs).
+          field_count:
+            type: integer
+            description: Number of metadata fields extracted.
   ftp:
     name: ftp
     version: '1.0'
@@ -2594,6 +4222,357 @@ tools:
           hash_type:
             type: string
             description: Hash algorithm used
+  hashcat:
+    name: hashcat
+    version: 7.1.2
+    description: 'Advanced password cracking tool — hashcat v7.1.2 with 600+ hash modes and 6 attack modes. Six methods: crack_dictionary
+      (-a 0, wordlist with optional rules), crack_mask (-a 3, pattern-based brute-force with up to 4 custom charsets and increment
+      mode), crack_hybrid (-a 6/-a 7, wordlist+mask or mask+wordlist), crack_combinator (-a 1, concatenate two wordlists),
+      show (retrieve cracked results from potfile), identify (hash type detection via pattern matching and hashcat --identify).
+      CPU-only in Docker (no GPU passthrough) — uses -D 1 -w 3 (CPU device, high workload). Ships with rockyou.txt (14M passwords)
+      and 28+ rule files (best66, rockyou-30000, dive, toggles1, d3ad0ne, and more). Key advantage over john: combinator attacks
+      (-a 1), hybrid attacks (-a 6/-a 7), custom charsets (?1-?4), and 600+ hash modes with numeric identifiers. For basic
+      wordlist cracking, try john first — it auto-detects formats and is simpler. Use hashcat when you need advanced attack
+      modes or john doesn''t support the hash type.'
+    image: ghcr.io/silicon-works/mcp-tools-hashcat:latest
+    image_size_mb: 1030
+    timeout_seconds: 900
+    capabilities:
+    - password_cracking
+    - hash_identification
+    - dictionary_attack
+    - mask_attack
+    - hybrid_attack
+    - combinator_attack
+    routing:
+      use_for:
+      - crack password hashes using dictionary attack with wordlist and rules
+      - brute-force crack a hash using a mask pattern with custom charsets
+      - run a hybrid attack combining wordlist words with mask patterns
+      - crack NTLM hashes from secretsdump or SAM database
+      - crack MD5 SHA1 SHA256 SHA512 bcrypt scrypt hashes
+      - crack hashes from /etc/shadow using sha512crypt mode 1800
+      - run combinator attack concatenating two wordlists
+      - identify unknown hash type and determine the correct hashcat mode number
+      - retrieve previously cracked passwords from hashcat potfile
+      - crack WPA/WPA2 handshake captures
+      - crack Kerberos TGS tickets from kerberoasting (mode 13100)
+      - crack AS-REP roasted hashes (mode 18200)
+      - crack MSSQL Oracle PostgreSQL MySQL database hashes
+      - crack Active Directory cached domain credentials (mode 2100)
+      never_use_for:
+      - task: basic wordlist cracking when hash format is unknown
+        use_instead: john.crack
+        reason: John auto-detects hash formats and is simpler for basic cracking. Use hashcat when you need specific attack
+          modes (hybrid, combinator) or know the hash mode number.
+      - online brute-force against login pages (use hydra — hashcat is offline only)
+      - hash lookup in databases (use hash-lookup — try online lookup before offline cracking)
+      - IKE/IPsec PSK cracking (use ike-scan.crack_psk)
+      - extracting hashes from encrypted files (use john.convert — john has *2john converters, hashcat does not)
+      triggers:
+      - hashcat
+      - hash crack
+      - mask attack
+      - hybrid attack
+      - combinator attack
+      - brute-force crack
+      - custom charset
+      - crack ntlm
+      - password crack
+      - dictionary attack
+      - crack kerberoast
+      - crack asrep
+    phases:
+    - post-exploitation
+    requirements:
+      network: false
+      privileged: false
+    resources:
+      memory_mb: 1024
+      cpu: 2.0
+    see_also:
+    - tool: john
+      reason: Use john for basic wordlist cracking with auto-format detection and *2john file converters. John is simpler
+        for standard cracking workflows.
+    - tool: hash-lookup
+      reason: Try online hash lookup before offline cracking — may find the plaintext instantly without spending CPU time.
+    - tool: responder
+      reason: Capture NTLMv2 hashes via LLMNR/NBT-NS poisoning, then crack with hashcat mode 5600.
+    - tool: impacket
+      reason: Extract NTLM hashes via secretsdump (mode 1000) or Kerberos tickets via GetUserSPNs (mode 13100).
+    - tool: certipy
+      reason: Certipy authenticate produces NT hashes (mode 1000) from ADCS certificate-based authentication.
+    - tool: volatility
+      reason: Volatility hashdump extracts NTLM hashes (mode 1000) from Windows memory dumps.
+    methods:
+      crack_dictionary:
+        description: Dictionary attack using hashcat's straight mode (-a 0). Runs `hashcat -a 0 -m <mode> <hashfile> <wordlist>`
+          with optional rules file (-r). Each word from the wordlist is tested against the hash, optionally transformed by
+          rule functions (capitalization, number appending, leet speak, etc.). Uses CPU-only mode (-D 1 -w 3) since Docker
+          containers lack GPU passthrough. Ships with rockyou.txt (~14M passwords) and 28+ rule files including best66 (64
+          effective rules), rockyou-30000 (30K aggressive rules), dive (comprehensive), toggles1 (case toggling), d3ad0ne
+          (community meta-rule). After cracking, runs hashcat --show to collect results from the potfile. Potfile persists
+          across calls within the same container session.
+        when_to_use: '(1) First cracking attempt — dictionary with rockyou and best66 rules cracks most weak passwords. (2)
+          After extracting hashes from /etc/shadow (mode 1800), SAM/secretsdump (NTLM mode 1000), or database dumps. (3) When
+          john doesn''t support the hash format (hashcat has 600+ modes vs john''s ~300). (4) With rockyou-30000 rules for
+          aggressive cracking when best66 doesn''t crack it. (5) For kerberoasting results (mode 13100) or AS-REP roasting
+          (mode 18200). Common workflow: identify → crack_dictionary with rockyou + best66 → if no results, try rockyou-30000
+          rules → if still no results, try crack_mask.'
+        required_ports: []
+        params:
+          hashes:
+            type: string
+            required: true
+            description: 'Hash(es) to crack, one per line. Bare hash (''5f4dcc3b5aa765d61d8327deb882cf99'') or user:hash format
+              (''admin:aad3b435b51404eeaad3b435b51404ee:31d6cfe0d16ae931b73c59d7e0c089c0'' for NTLM). Use ''username: true''
+              parameter if providing user:hash format.'
+          hash_mode:
+            type: integer
+            required: true
+            description: 'Hashcat mode number. Common: 0=MD5, 100=SHA1, 1000=NTLM, 1400=SHA256, 1700=SHA512, 1800=sha512crypt
+              (/etc/shadow), 3200=bcrypt, 5600=NetNTLMv2, 13100=Kerberos TGS-REP (kerberoasting), 18200=Kerberos AS-REP (asreproast),
+              2100=MS DCC2 (cached domain creds), 300=MySQL 4.1+, 1731=MSSQL 2012+. Use ''identify'' method if unknown.'
+          wordlist:
+            type: string
+            default: rockyou
+            description: 'Wordlist: ''rockyou'' (~14M passwords, default) or absolute path to custom wordlist.'
+          rules:
+            type: string
+            description: 'Rule file: ''best66'' (64 rules, fast, good coverage), ''rockyou-30000'' (30K rules, aggressive),
+              ''dive'' (comprehensive), ''toggles1'' (case toggling), ''d3ad0ne'' (community meta-rule). Or absolute path.
+              Omit for raw wordlist-only.'
+          timeout:
+            type: integer
+            default: 300
+            description: 'Max cracking time in seconds. Uses hashcat''s --runtime. For MD5/SHA/NTLM with rockyou: 60-120s
+              is usually enough. For bcrypt (mode 3200): very slow on CPU, consider 600s+.'
+          username:
+            type: boolean
+            default: false
+            description: Enable --username flag if hashes are in user:hash format (e.g., NTLM from secretsdump).
+        returns:
+          cracked:
+            type: array
+            description: 'Cracked results. Each entry: {hash: ''hash_value'', plaintext: ''password''}. Empty if nothing cracked.'
+          cracked_count:
+            type: integer
+            description: Number of passwords cracked.
+          hash_mode:
+            type: integer
+            description: Hash mode used.
+          attack_mode:
+            type: string
+            description: Always 'dictionary' for this method.
+          exhausted:
+            type: boolean
+            description: True if all candidates were tried (wordlist fully consumed).
+      crack_mask:
+        description: 'Mask/brute-force attack using hashcat''s brute-force mode (-a 3). Runs `hashcat -a 3 -m <mode> <hashfile>
+          <mask>` with optional custom charsets (-1 through -4) and increment mode (-i). Each position in the mask specifies
+          a character set: ?l=a-z, ?u=A-Z, ?d=0-9, ?s=special, ?a=all, ?h=hex-lower, ?H=hex-upper, ?b=full-byte. Custom charsets
+          ?1-?8 are user-defined combinations. Literal characters in the mask are used as-is. Increment mode tries all lengths
+          from increment_min up to the full mask length.'
+        when_to_use: '(1) When you know the password pattern (e.g., ''Name + 4 digits'' → ''?u?l?l?l?d?d?d?d''). (2) For short
+          passwords where brute-force is feasible (4-6 chars). (3) When dictionary attack fails and you have pattern intelligence
+          from the target (e.g., password policy hints). (4) With custom charsets for restricted character sets (e.g., only
+          lowercase+digits: -1 ?l?d, mask ?1?1?1?1). (5) With increment mode to try all lengths (e.g., mask ''?d?d?d?d?d?d''
+          + increment tries 1-digit through 6-digit PINs). WARNING: keyspace grows exponentially — ?a?a?a?a?a?a?a?a (8 chars,
+          all printable) is ~6.6 quadrillion candidates, infeasible on CPU.'
+        required_ports: []
+        params:
+          hashes:
+            type: string
+            required: true
+            description: Hash(es) to crack, one per line.
+          hash_mode:
+            type: integer
+            required: true
+            description: Hashcat mode number.
+          mask:
+            type: string
+            required: true
+            description: 'Mask pattern. ?l=a-z, ?u=A-Z, ?d=0-9, ?s=special, ?a=all, ?h=hex-lower, ?H=hex-upper. Custom: ?1-?8
+              via custom_charsets. Literals included as-is. Examples: ''?u?l?l?l?d?d?d?d'' (Name1234), ''?d?d?d?d'' (4-digit
+              PIN), ''Qwerty?d?d?d'' (Qwerty + 3 digits).'
+          custom_charsets:
+            type: object
+            description: 'Custom charset definitions for ?1-?8. Keys: ''1'' through ''8''. Values: charset strings. Example:
+              {"1": "?l?d"} defines ?1 as lowercase+digits. Then use ?1 in mask.'
+          increment:
+            type: boolean
+            default: false
+            description: Enable increment mode (-i) — tries all lengths from increment_min up to mask length.
+          increment_min:
+            type: integer
+            default: 1
+            description: Start increment at this length.
+          timeout:
+            type: integer
+            default: 300
+            description: Max cracking time in seconds.
+          username:
+            type: boolean
+            default: false
+            description: Enable --username for user:hash format.
+        returns:
+          cracked:
+            type: array
+            description: Cracked results.
+          cracked_count:
+            type: integer
+            description: Number of passwords cracked.
+          attack_mode:
+            type: string
+            description: Always 'mask' for this method.
+          mask:
+            type: string
+            description: Mask pattern used.
+          exhausted:
+            type: boolean
+            description: True if all mask candidates were tried.
+      crack_hybrid:
+        description: 'Hybrid attack combining a wordlist with a mask — either wordlist+mask (-a 6, appends mask to each word)
+          or mask+wordlist (-a 7, prepends mask to each word). Example: wordlist containing ''password'' with mask ''?d?d?d?d''
+          in -a 6 mode tries password0000 through password9999. In -a 7 mode with mask ''?d?d?d?d'', tries 0000password through
+          9999password.'
+        when_to_use: '(1) When passwords are likely wordlist words with appended numbers/symbols (e.g., password123, admin2024!).
+          (2) When password policy requires numbers/symbols appended to dictionary words. (3) After pure dictionary attack
+          fails — hybrid adds pattern variations. (4) Common pattern: rockyou + ''?d?d?d?d'' catches word+4digits. (5) Use
+          mask_wordlist mode (-a 7) for prepended patterns like ''2024password''.'
+        required_ports: []
+        params:
+          hashes:
+            type: string
+            required: true
+            description: Hash(es) to crack, one per line.
+          hash_mode:
+            type: integer
+            required: true
+            description: Hashcat mode number.
+          wordlist:
+            type: string
+            required: true
+            description: Wordlist name ('rockyou') or absolute path.
+          mask:
+            type: string
+            required: true
+            description: 'Mask to append (mode=wordlist_mask) or prepend (mode=mask_wordlist). Example: ''?d?d?d?d'' for 4
+              digits.'
+          mode:
+            type: string
+            default: wordlist_mask
+            description: '''wordlist_mask'' (-a 6): word+mask (password1234). ''mask_wordlist'' (-a 7): mask+word (1234password).'
+          timeout:
+            type: integer
+            default: 300
+            description: Max cracking time in seconds.
+          username:
+            type: boolean
+            default: false
+            description: Enable --username for user:hash format.
+        returns:
+          cracked:
+            type: array
+            description: Cracked results.
+          cracked_count:
+            type: integer
+            description: Number of passwords cracked.
+          attack_mode:
+            type: string
+            description: '''hybrid_wordlist_mask'' or ''hybrid_mask_wordlist''.'
+      crack_combinator:
+        description: Combinator attack (-a 1) — concatenates each word from wordlist1 with each word from wordlist2. With
+          two 100-word lists, tests 10,000 combinations. Useful for compound passwords like 'sunflower' (sun+flower), 'bluesky'
+          (blue+sky). Can use the same wordlist as both inputs for self-combination.
+        when_to_use: (1) When passwords are likely two concatenated dictionary words (e.g., 'superstar', 'blackbird'). (2)
+          When you have two themed wordlists to combine (e.g., colors+animals, first_names+years). (3) After dictionary and
+          hybrid attacks fail. (4) With small focused wordlists — large wordlists produce huge keyspaces (14M × 14M = 196
+          trillion for rockyou × rockyou).
+        required_ports: []
+        params:
+          hashes:
+            type: string
+            required: true
+            description: Hash(es) to crack, one per line.
+          hash_mode:
+            type: integer
+            required: true
+            description: Hashcat mode number.
+          wordlist1:
+            type: string
+            required: true
+            description: First wordlist — name ('rockyou') or absolute path.
+          wordlist2:
+            type: string
+            required: true
+            description: Second wordlist — name or path. Each word from list1 concatenated with each word from list2.
+          timeout:
+            type: integer
+            default: 300
+            description: Max cracking time in seconds.
+          username:
+            type: boolean
+            default: false
+            description: Enable --username for user:hash format.
+        returns:
+          cracked:
+            type: array
+            description: Cracked results.
+          cracked_count:
+            type: integer
+            description: Number of passwords cracked.
+          attack_mode:
+            type: string
+            description: Always 'combinator'.
+      show:
+        description: Retrieve previously cracked passwords from hashcat's potfile. Runs `hashcat --show -m <mode> <hashfile>`
+          which cross-references hashes against the potfile (~/.hashcat/hashcat.potfile or configured path). Returns instantly
+          — no cracking performed. Potfile persists across calls within the same container session.
+        when_to_use: After a cracking attempt (especially one that timed out) to check what was cracked. Also use to check
+          if hashes were cracked in a previous call during the same container session.
+        required_ports: []
+        params:
+          hashes:
+            type: string
+            required: true
+            description: Hash(es) to check, same format as crack methods.
+          hash_mode:
+            type: integer
+            required: true
+            description: Hashcat mode number — must match what was used for cracking.
+          username:
+            type: boolean
+            default: false
+            description: Enable --username if hashes include usernames.
+        returns:
+          cracked:
+            type: array
+            description: Previously cracked results from potfile.
+          cracked_count:
+            type: integer
+            description: Number of cracked passwords found.
+      identify:
+        description: 'Identify hash type and suggest hashcat mode numbers. Uses two-phase detection: (1) pattern matching
+          against 15 common hash formats (md5crypt, sha512crypt, bcrypt, NTLM, SHA1, etc.), (2) hashcat''s --identify flag
+          which tests against all 600+ modes. Returns a list of possible mode numbers with names.'
+        when_to_use: When you have a hash but don't know the hashcat mode number. Always run identify before cracking if the
+          hash type is uncertain. For 32-hex-char hashes, both MD5 (mode 0) and NTLM (mode 1000) match — use context to disambiguate
+          (Windows = NTLM, web app = MD5).
+        required_ports: []
+        params:
+          hash:
+            type: string
+            required: true
+            description: Single hash to identify. Provide the raw hash string without username prefix.
+        returns:
+          possible_modes:
+            type: array
+            description: 'Possible hashcat modes. Each entry: {mode: 1000, name: ''NTLM''}. Returns [{mode: -1, name: ''unknown''}]
+              if no match.'
+          hash:
+            type: string
+            description: Truncated hash that was analyzed.
   hydra:
     name: hydra
     version: '9.6'
@@ -2640,6 +4619,9 @@ tools:
       - rockyou
       - wordlist attack
       prefer_over: []
+    see_also:
+    - tool: kerbrute
+      reason: Use kerbrute for Kerberos password spraying (port 88) — hydra doesn't support Kerberos authentication attacks.
     phases:
     - exploitation
     requirements:
@@ -3530,6 +5512,13 @@ tools:
       reason: Alternative for credential validation and authenticated execution
     - tool: evil-winrm
       reason: Alternative for WinRM shell access
+    - tool: kerbrute
+      reason: Use kerbrute for Kerberos username enumeration via AS-REQ — discovers unknown usernames without credentials.
+        Impacket's lookupsid needs SMB null session.
+    - tool: bloodhound
+      reason: Use bloodhound for AD relationship mapping and attack path discovery after obtaining initial credentials.
+    - tool: certipy
+      reason: Use certipy for AD Certificate Services (ADCS) enumeration and exploitation — covers ESC1-8 vulnerabilities.
     methods:
       psexec:
         required_ports:
@@ -4398,6 +6387,12 @@ tools:
       - kerberoast
       - hashcat
       prefer_over: []
+    see_also:
+    - tool: responder
+      reason: Use responder to capture NTLMv2 hashes via LLMNR/NBT-NS poisoning — feed captured hashes to john for cracking.
+    - tool: hashcat
+      reason: 'Use hashcat for advanced cracking modes: combinator attacks (-a 1), hybrid attacks (-a 6/-a 7), custom charsets,
+        and GPU acceleration.'
     phases:
     - post-exploitation
     requirements:
@@ -4599,6 +6594,371 @@ tools:
           file_type:
             type: string
             description: File type that was converted
+  kerbrute:
+    name: kerbrute
+    version: 1.0.3
+    description: 'Kerberos username enumeration and password spraying tool — kerbrute v1.0.3 (ropnop/kerbrute, Go binary).
+      Four methods: userenum, passwordspray, bruteforce, bruteuser. Discovers valid Active Directory usernames by sending
+      AS-REQ packets to port 88 and analyzing KDC error codes — KDC_ERR_C_PRINCIPAL_UNKNOWN means the user does not exist,
+      KDC_ERR_PREAUTH_REQUIRED means the user IS valid (pre-authentication needed), KDC_ERR_CLIENT_REVOKED means the account
+      is locked or disabled. Does NOT require any credentials for username enumeration (unlike LDAP-based enumeration which
+      needs a bind account). Supports multi-threaded operation (default 10 threads, configurable via --threads), rate-limiting
+      via --delay, and --safe mode that aborts on first lockout detection. WARNING from kerbrute: failed Kerberos pre-auth
+      counts as a failed login and WILL lock out accounts — use --safe and --delay in production environments. Operates entirely
+      over Kerberos (port 88) — does not touch SMB (445), LDAP (389), or RPC (135). For Kerberoasting or AS-REP roasting after
+      finding valid users, use impacket instead.'
+    image: ghcr.io/silicon-works/mcp-tools-kerbrute:latest
+    image_size_mb: 194
+    timeout_seconds: 300
+    capabilities:
+    - username_enumeration
+    - password_spraying
+    - kerberos_authentication
+    routing:
+      use_for:
+      - enumerate valid Active Directory usernames without credentials
+      - discover valid domain users via Kerberos AS-REQ responses on port 88
+      - spray a single password against multiple AD users to find valid logins
+      - test username:password combinations against a Kerberos KDC
+      - find valid accounts on a domain controller before further AD attacks
+      - pre-authentication username enumeration without touching SMB or LDAP
+      - brute-force a single Active Directory user's password from a wordlist
+      - check which usernames exist in an AD domain without any credentials
+      - password spraying attack against Windows domain with lockout awareness
+      - validate a list of potential usernames against a domain controller
+      - try each username as its own password across the domain (user-as-pass spray)
+      never_use_for:
+      - kerberoasting (use impacket.kerberoast — kerbrute does not request TGS tickets, it only does pre-auth)
+      - AS-REP roasting (use impacket.asreproast — kerbrute does not check for accounts with DONT_REQUIRE_PREAUTH)
+      - LDAP user enumeration (use impacket.get_ad_users or netexec — requires valid bind creds but returns richer data)
+      - SMB brute-force (use hydra — kerbrute only speaks Kerberos on port 88)
+      - online web login brute-force (use hydra)
+      - hash cracking offline (use john or hashcat)
+      - RDP brute-force (use hydra)
+      triggers:
+      - kerbrute
+      - kerberos enum
+      - kerberos brute
+      - username enumeration
+      - password spray
+      - AD user enum
+      - port 88
+      - domain user discovery
+      - bruteuser
+      - user-as-pass
+    phases:
+    - enumeration
+    requirements:
+      network: true
+      privileged: false
+    resources:
+      memory_mb: 128
+      cpu: 0.5
+    see_also:
+    - tool: impacket
+      reason: After finding valid users with kerbrute, use impacket for kerberoasting (GetUserSPNs), AS-REP roasting (GetNPUsers),
+        or secretsdump
+    - tool: bloodhound
+      reason: After confirming valid creds via password spray, collect AD relationships with bloodhound
+    - tool: netexec
+      reason: Validate found credentials across multiple protocols (SMB, WinRM, LDAP, MSSQL)
+    - tool: hydra
+      reason: For non-Kerberos brute-force — SMB, RDP, SSH, HTTP, FTP, etc.
+    - tool: enum4linux-ng
+      reason: Use enum4linux-ng for SMB/RPC-based user enumeration when you have credentials or null sessions. Kerbrute discovers
+        users without credentials via Kerberos.
+    methods:
+      userenum:
+        description: 'Enumerate valid AD usernames by sending Kerberos AS-REQ packets to the domain controller on port 88.
+          For each username, kerbrute sends a pre-authentication request and classifies the KDC response: KDC_ERR_C_PRINCIPAL_UNKNOWN
+          means the user does not exist, KDC_ERR_PREAUTH_REQUIRED means the user IS valid (pre-auth needed), and KDC_ERR_CLIENT_REVOKED
+          means the account is locked/disabled. No credentials required — this is unauthenticated enumeration. Internally:
+          writes usernames to a temp file, runs `kerbrute userenum --dc <dc> -d <domain> -v -t <threads> [--delay <ms>] [--safe]
+          <file>`, parses stdout for `[+] VALID USERNAME:` lines, cleans up temp file.'
+        when_to_use: (1) First step in AD enumeration when you have no credentials — test common usernames (administrator,
+          guest, krbtgt, svc-*, admin) against the DC. (2) After discovering a domain name from DNS, SMB, or LDAP, validate
+          a custom wordlist of potential users. (3) Before password spraying — enumerate valid users first to avoid wasting
+          spray attempts on nonexistent accounts and triggering lockouts. (4) When LDAP anonymous bind is disabled and you
+          cannot use impacket.get_ad_users or netexec --users. (5) Output valid_users list feeds directly into passwordspray
+          or impacket.asreproast.
+        required_ports:
+        - 88
+        params:
+          dc:
+            type: string
+            required: true
+            description: 'IP address of the domain controller (must have port 88/Kerberos open). Use the DC IP from nmap service
+              scan — look for ''kerberos-sec'' on port 88. Examples: ''10.10.10.100'', ''192.168.1.1''.'
+          domain:
+            type: string
+            required: true
+            description: 'Full AD domain name, used as the Kerberos realm (automatically uppercased internally). Case-insensitive.
+              Examples: ''corp.local'', ''megabank.local'', ''htb.local''. Found via: nmap LDAP scripts, SMB null session,
+              DNS SRV records, or ldapsearch.'
+          usernames:
+            type: string
+            required: true
+            description: 'Newline-separated list of usernames to test (bare names without @domain suffix). Common starter
+              list: ''administrator\nguest\nkrbtgt\nadmin\nservice\nsql_svc\nweb_svc\nbackup''. For larger enumeration, use
+              SecLists xato-net-10-million-usernames or custom wordlists. Each username is tested individually via AS-REQ.'
+          threads:
+            type: integer
+            default: 10
+            description: 'Number of concurrent goroutines (kerbrute default: 10). Reduce to 1-2 for stealth or if lockout
+              policies are aggressive. Ignored when delay is set (forces single-thread).'
+          delay:
+            type: integer
+            description: Delay in milliseconds between each attempt. When set, forces single-threaded mode regardless of threads
+              value. Use 500-1000ms to avoid detection by SIEM, or longer if lockout threshold is tight. Omit for maximum
+              speed.
+          safe:
+            type: boolean
+            default: false
+            description: Safe mode (--safe flag) — abort immediately if any account comes back as locked out. Prevents cascading
+              lockouts across the domain. Recommended when lockout policy is unknown.
+          timeout:
+            type: integer
+            default: 120
+            description: Maximum execution time in seconds. 120s handles ~10K usernames at default speed. Increase for large
+              lists or when using delay.
+        returns:
+          valid_users:
+            type: array
+            description: Usernames confirmed valid by KDC (received KDC_ERR_PREAUTH_REQUIRED response). Each element is a
+              bare username string without domain suffix (e.g., 'administrator', 'svc-sql'). Feed these into passwordspray
+              or impacket.asreproast.
+          valid_count:
+            type: integer
+            description: Number of valid usernames found
+          invalid_users:
+            type: array
+            description: Usernames confirmed invalid by KDC (received 'User does not exist' response). Useful for narrowing
+              down wordlists.
+          locked_users:
+            type: array
+            description: Accounts flagged as locked/disabled by KDC ('USER LOCKED OUT' response, possibly with 'safe mode
+              on! Aborting...'). These accounts exist but should NOT be sprayed — they would trigger immediate lockout alerts.
+          locked_count:
+            type: integer
+            description: Number of locked accounts detected
+          total_tested:
+            type: integer
+            description: Total usernames tested (parsed from kerbrute's 'Done! Tested N usernames' summary line, falls back
+              to input line count)
+          errors:
+            type: array
+            description: 'Network or KDC errors encountered during enumeration. Null when no errors occurred. Common: ''Can\''t
+              talk to KDC'' (DC unreachable), ''KDC ERROR - Wrong Realm'' (wrong domain name), encoding errors (port 88 open
+              but not Kerberos).'
+      passwordspray:
+        description: 'Test a single password against multiple usernames via Kerberos AS-REQ pre-authentication. Sends one
+          authentication attempt per user, which is safer than brute-forcing a single account (avoids rapid-fire attempts
+          that trigger lockout). The KDC response distinguishes: valid login (AS-REP with TGT), invalid password (KDC_ERR_PREAUTH_FAILED),
+          and locked account (KDC_ERR_CLIENT_REVOKED). Supports --user-as-pass mode which also tries each username as its
+          own password. Internally: writes usernames to temp file, runs `kerbrute passwordspray --dc <dc> -d <domain> -v [--user-as-pass]
+          [--safe] <file> <password>`, parses `[+] VALID LOGIN:` lines.'
+        when_to_use: (1) After userenum returns valid_users — spray the most common passwords (Season+Year like 'Winter2025!',
+          'CompanyName1!', 'Password1') against all confirmed users. (2) When you suspect a default or shared password across
+          the domain. (3) Safer than bruteforce/bruteuser for avoiding account lockout — one attempt per user per spray round.
+          (4) Run multiple spray rounds with different passwords (wait between rounds to respect lockout policies — typically
+          30 min). (5) Use user_as_pass=true to check for trivially weak accounts. (6) Valid logins can be used immediately
+          with impacket, evil-winrm, or bloodhound.
+        required_ports:
+        - 88
+        params:
+          dc:
+            type: string
+            required: true
+            description: Domain controller IP address (port 88 must be open).
+          domain:
+            type: string
+            required: true
+            description: Full AD domain name (e.g., 'corp.local').
+          usernames:
+            type: string
+            required: true
+            description: 'Newline-separated usernames to spray. Best practice: use the valid_users output from a prior userenum
+              call to avoid testing nonexistent accounts and wasting lockout budget.'
+          password:
+            type: string
+            required: true
+            description: 'Single password to test against all users. Common spray candidates for HTB: ''Password1'', ''Welcome1'',
+              ''<Season><Year>!'' (e.g., ''Spring2026!''), ''<CompanyName>1!'', ''Changeme1''. Only ONE password per spray
+              call — run multiple calls for multiple passwords with appropriate delays.'
+          user_as_pass:
+            type: boolean
+            default: false
+            description: Also try each username as its own password (kerbrute --user-as-pass flag). Catches accounts where
+              password equals username (surprisingly common in enterprise). Works alongside the password argument — both the
+              specified password and user-as-pass are tried.
+          threads:
+            type: integer
+            default: 10
+            description: Concurrent threads. Reduce for stealth. Ignored when delay is set.
+          delay:
+            type: integer
+            description: Delay in milliseconds between each attempt. Forces single-threaded. Use to space out attempts and
+              avoid lockout.
+          safe:
+            type: boolean
+            default: false
+            description: Abort immediately if any account is locked. Recommended for password spraying.
+          timeout:
+            type: integer
+            default: 120
+            description: Maximum execution time in seconds.
+        returns:
+          valid_logins:
+            type: array
+            description: 'Successful authentications. Each entry: {username: ''user'', password: ''pass''}. Empty array if
+              no valid logins found. Feed valid creds to impacket, evil-winrm, or bloodhound.'
+          valid_count:
+            type: integer
+            description: Number of valid logins found
+          failed_count:
+            type: integer
+            description: Number of failed authentication attempts (verbose [-] lines)
+          locked_users:
+            type: array
+            description: Accounts that returned locked/disabled status during spray. Stop spraying these.
+          total_tested:
+            type: integer
+            description: Total authentication attempts (parsed from 'Done! Tested N logins' line)
+          password_tested:
+            type: string
+            description: The password that was sprayed, or '(user-as-pass)' if only user_as_pass was used
+          errors:
+            type: array
+            description: Network/KDC errors. Null when no errors. 'Can\'t talk to KDC' means DC unreachable.
+      bruteforce:
+        description: 'Test specific username:password combinations via Kerberos AS-REQ. Unlike passwordspray (one password
+          across many users), bruteforce accepts explicit user:pass pairs — each line in the combo list is an independent
+          authentication attempt. Useful when you have credential dumps, leaked passwords, or targeted guesses for specific
+          accounts. WARNING: multiple attempts against the same user WILL count toward lockout. Internally: writes combos
+          to temp file, runs `kerbrute bruteforce --dc <dc> -d <domain> -v [--safe] <file>`, parses `[+] VALID LOGIN:` lines.'
+        when_to_use: (1) When you have specific username:password guesses from OSINT, credential dumps, or password reuse
+          patterns. (2) Testing credentials found in config files, scripts, or documentation against AD. (3) When you need
+          to verify multiple different passwords for different users simultaneously. (4) After finding passwords in a database
+          dump — test them against AD accounts for password reuse.
+        required_ports:
+        - 88
+        params:
+          dc:
+            type: string
+            required: true
+            description: Domain controller IP address (port 88).
+          domain:
+            type: string
+            required: true
+            description: Full AD domain name.
+          combos:
+            type: string
+            required: true
+            description: 'Newline-separated username:password pairs. Format: ''user1:pass1\nuser2:pass2\nadmin:Password1''.
+              Each line is one authentication attempt. WARNING: if same username appears multiple times, each counts toward
+              that account''s lockout threshold.'
+          threads:
+            type: integer
+            default: 10
+            description: Concurrent threads. Reduce for stealth.
+          delay:
+            type: integer
+            description: Delay in ms between attempts. Forces single-threaded.
+          safe:
+            type: boolean
+            default: false
+            description: Abort on first lockout detection.
+          timeout:
+            type: integer
+            default: 120
+            description: Maximum execution time in seconds.
+        returns:
+          valid_logins:
+            type: array
+            description: 'Successful pairs. Each entry: {username: ''user'', password: ''pass''}.'
+          valid_count:
+            type: integer
+            description: Number of valid logins found
+          failed_count:
+            type: integer
+            description: Number of failed attempts
+          locked_users:
+            type: array
+            description: Accounts that returned locked/disabled status
+          total_tested:
+            type: integer
+            description: Total combinations tested
+          errors:
+            type: array
+            description: Network/KDC errors. Null when none.
+      bruteuser:
+        description: 'Brute-force a single user''s password from a wordlist via Kerberos pre-authentication. Tests every password
+          in the list against one specific account. WARNING from kerbrute: ''only run this if there\''s no lockout policy!''
+          — each failed attempt counts toward that account''s lockout threshold. Internally: writes passwords to temp file,
+          runs `kerbrute bruteuser --dc <dc> -d <domain> -v [--safe] <file> <username>`, parses `[+] VALID LOGIN:` lines.'
+        when_to_use: '(1) When you have a known high-value username (e.g., ''administrator'', ''svc-sql'') and want to try
+          a wordlist against it. (2) When lockout policy is confirmed as disabled or very lenient (e.g., 100+ attempts). (3)
+          After userenum found valid users and password spray failed — escalate to targeted brute-force. (4) DANGEROUS: use
+          --safe and --delay to minimize lockout risk. Prefer passwordspray (one password, many users) when lockout policy
+          is in effect.'
+        required_ports:
+        - 88
+        params:
+          dc:
+            type: string
+            required: true
+            description: Domain controller IP address (port 88).
+          domain:
+            type: string
+            required: true
+            description: Full AD domain name.
+          username:
+            type: string
+            required: true
+            description: 'Single username to brute-force (without @domain). Example: ''administrator'', ''svc-sql''.'
+          passwords:
+            type: string
+            required: true
+            description: 'Newline-separated list of passwords to try against the user. Common wordlists: rockyou top-1000,
+              common enterprise passwords. Example: ''Password1\nWelcome1\nAdmin123\nChangeme1''.'
+          threads:
+            type: integer
+            default: 10
+            description: Concurrent threads. Reduce to 1 with delay for safety.
+          delay:
+            type: integer
+            description: Delay in ms between attempts. Highly recommended for bruteuser to avoid lockout.
+          safe:
+            type: boolean
+            default: false
+            description: Abort if account becomes locked. STRONGLY recommended for bruteuser.
+          timeout:
+            type: integer
+            default: 120
+            description: Maximum execution time in seconds.
+        returns:
+          valid_logins:
+            type: array
+            description: 'Successful login if found. Entry: {username: ''<target>'', password: ''<found_pass>''}. Empty if
+              no password worked.'
+          valid_count:
+            type: integer
+            description: 1 if password found, 0 if not
+          failed_count:
+            type: integer
+            description: Number of failed password attempts
+          locked_users:
+            type: array
+            description: Contains the target username if it became locked during brute-force
+          total_tested:
+            type: integer
+            description: Total passwords tested
+          target_user:
+            type: string
+            description: The username that was brute-forced
+          errors:
+            type: array
+            description: Network/KDC errors. Null when none.
   lfi-rfi:
     name: lfi-rfi
     version: '1.0'
@@ -6347,6 +8707,7 @@ tools:
       - SQL injection (use sqlmap)
       - vulnerability scanning (use nuclei, nikto)
       - SSH brute-force (use hydra for wordlist attacks)
+      - BloodHound data collection (use bloodhound — writes to /session/ unlike nxc's trapped output)
       triggers:
       - netexec
       - nxc
@@ -6374,6 +8735,12 @@ tools:
       reason: wmiexec/psexec/secretsdump for non-NetExec remote execution and Kerberos ticket operations
     - tool: evil-winrm
       reason: Dedicated WinRM shell with pywinrm for file upload/download via PowerShell base64 chunking
+    - tool: bloodhound
+      reason: Use bloodhound for BloodHound data collection — writes JSON to /session/ unlike nxc's --bloodhound which traps
+        files in container.
+    - tool: kerbrute
+      reason: Use kerbrute for Kerberos username enumeration without credentials. Netexec requires at least a username for
+        most operations.
     methods:
       smb:
         required_ports:
@@ -6973,6 +9340,10 @@ tools:
       - what services
       prefer_over:
       - masscan
+    see_also:
+    - tool: amass
+      reason: Use amass for subdomain discovery before port scanning — discover hidden subdomains via passive OSINT and DNS
+        brute-force.
     phases:
     - reconnaissance
     - enumeration
@@ -8773,6 +11144,481 @@ tools:
           fullPage:
             type: boolean
             description: Capture full scrollable page
+  prowler:
+    name: prowler
+    version: 5.18.3
+    description: 'Multi-cloud security auditing tool — Prowler v5.18 with 920+ security checks across 14 providers: AWS (572
+      checks, 84 services, 41 compliance frameworks), Azure (165 checks, 21 services), GCP (100 checks), Kubernetes (83 checks,
+      8 services), M365, GitHub, Cloudflare, Oracle Cloud, OpenStack, Alibaba Cloud, IaC, LLM, NHN, and MongoDB Atlas. Three
+      methods: scan (full provider audit with severity/service/compliance/region filtering), list_checks (enumerate checks/services/compliance
+      frameworks without credentials), scan_service (focused single-service audit for faster results). Outputs OCSF JSON findings
+      with pass/fail status, severity, resource details, and compliance mapping. Requires cloud credentials via environment
+      variables. For container/IaC scanning use trivy instead. For AWS post-exploitation enumeration use bash with AWS CLI
+      or impacket.'
+    image: ghcr.io/silicon-works/mcp-tools-prowler:latest
+    image_size_mb: 1820
+    timeout_seconds: 900
+    capabilities:
+    - cloud_security_audit
+    - compliance_scanning
+    - misconfiguration_detection
+    - multi_cloud
+    routing:
+      use_for:
+      - audit an AWS account for security misconfigurations
+      - check Azure subscription security posture
+      - scan GCP project for security issues
+      - audit Kubernetes cluster security configuration
+      - run CIS benchmark compliance checks against AWS
+      - find IAM misconfigurations in cloud accounts
+      - check S3 bucket security and public access settings
+      - audit cloud security posture across multiple providers
+      - find security groups with overly permissive rules
+      - check cloud encryption settings and key management
+      - verify cloud logging and monitoring configuration
+      - run PCI DSS compliance audit on cloud infrastructure
+      - check for publicly exposed cloud resources
+      - audit Microsoft 365 tenant security configuration
+      - scan GitHub organization for security misconfigurations
+      never_use_for:
+      - container image vulnerability scanning (use trivy)
+      - IaC file misconfiguration scanning (use trivy)
+      - web application vulnerability scanning (use nuclei or nikto)
+      - network port scanning (use nmap)
+      - AWS post-exploitation enumeration (not supported — use bash with AWS CLI or impacket)
+      - CVE research and lookup (use cve-lookup)
+      triggers:
+      - prowler
+      - cloud audit
+      - cloud security
+      - AWS security
+      - Azure security
+      - GCP security
+      - CIS benchmark
+      - compliance scan
+      - cloud misconfiguration
+      - S3 security
+      - IAM audit
+      - M365 security
+      - Microsoft 365 audit
+      - GitHub security audit
+    phases:
+    - enumeration
+    requirements:
+      network: true
+      privileged: false
+    environment:
+    - name: AWS_ACCESS_KEY_ID
+      description: AWS access key for authentication
+      required: false
+    - name: AWS_SECRET_ACCESS_KEY
+      description: AWS secret key for authentication
+      required: false
+    - name: AWS_SESSION_TOKEN
+      description: AWS session token for temporary credentials
+      required: false
+    - name: AZURE_SUBSCRIPTION_ID
+      description: Azure subscription ID
+      required: false
+    - name: AZURE_TENANT_ID
+      description: Azure tenant ID
+      required: false
+    - name: GOOGLE_APPLICATION_CREDENTIALS
+      description: Path to GCP service account JSON key file
+      required: false
+    resources:
+      memory_mb: 512
+      cpu: 1.0
+    see_also:
+    - tool: trivy
+      reason: Use trivy for container image CVE scanning and IaC misconfiguration detection. Prowler audits live cloud accounts,
+        trivy scans artifacts.
+    - tool: nmap
+      reason: After prowler finds exposed cloud resources with public IPs or open security groups, use nmap to scan those
+        exposed endpoints.
+    - tool: cve-lookup
+      reason: Use cve-lookup to research specific CVEs found in cloud audit findings.
+    methods:
+      scan:
+        description: Run a full Prowler security audit against a cloud provider. Executes `prowler <provider> --output-formats
+          json-ocsf --output-directory /session/` with optional severity, service, compliance, and region filters. Returns
+          OCSF findings parsed into structured format with pass/fail status, severity, resource details. Only failed findings
+          returned to save context (pass findings are informational noise). Output files written to /session/ for reference.
+        when_to_use: (1) Full cloud account security audit during enumeration phase — run with no filters first to get overview.
+          (2) Compliance-specific audit — use compliance parameter with framework name (e.g., 'cis_3.0_aws', 'pci_3.2.1_aws').
+          (3) Targeted audit — combine service and severity filters for focused results (e.g., service='iam', severity='critical,high').
+          (4) Multi-region AWS audit — specify regions to limit scope. (5) After gaining cloud credentials in post-exploitation
+          — audit what the compromised identity can see.
+        required_ports: []
+        params:
+          provider:
+            type: string
+            required: true
+            description: 'Cloud provider: ''aws'' (572 checks, 84 services), ''azure'' (165 checks, 21 services), ''gcp''
+              (100 checks), ''kubernetes'' (83 checks, 8 services), ''m365'', ''github'', ''cloudflare'', ''oraclecloud'',
+              ''openstack'', ''alibabacloud'', ''iac'', ''llm'', ''nhn'', or ''mongodbatlas''. Credentials must be set via
+              environment variables before scan.'
+          severity:
+            type: string
+            description: 'Comma-separated severity filter (e.g., ''critical,high''). Options: critical, high, medium, low,
+              informational. Omit for all severities.'
+          service:
+            type: string
+            description: Comma-separated services to scan (e.g., 's3,iam,ec2'). Omit for all services. Use list_checks with
+              list_type='services' to see available services for the provider.
+          compliance:
+            type: string
+            description: Compliance framework name (e.g., 'cis_3.0_aws', 'pci_3.2.1_aws', 'hipaa_aws'). Use list_checks with
+              list_type='compliance' to see available frameworks.
+          region:
+            type: string
+            description: Comma-separated AWS regions (e.g., 'us-east-1,eu-west-1'). AWS only. Omit for all regions.
+        returns:
+          findings:
+            type: array
+            description: 'Failed findings (capped at 100). Each: {check_id, check_title, severity, status, status_detail,
+              resource, service, region}.'
+          total_findings:
+            type: integer
+            description: Total findings (pass + fail + manual).
+          total_failed:
+            type: integer
+            description: Count of failed checks.
+          summary:
+            type: object
+            description: 'Breakdown: {total, by_status: {PASS, FAIL, MANUAL, MUTED}, by_severity: {CRITICAL, HIGH, ...}, failed_by_service:
+              {service: count}}.'
+          output_directory:
+            type: string
+            description: Path to /session/ subdirectory containing full OCSF JSON output files.
+      list_checks:
+        description: List available Prowler checks, services, or compliance frameworks for a provider. Runs `prowler <provider>
+          --list-checks-json` (checks), `--list-services` (services), or `--list-compliance` (compliance). Does NOT require
+          cloud credentials.
+        when_to_use: (1) Before scanning — discover what checks are available for the target provider. (2) Find service names
+          to use with scan_service. (3) Discover compliance frameworks available for targeted audits.
+        required_ports: []
+        params:
+          provider:
+            type: string
+            required: true
+            description: 'Cloud provider: ''aws'', ''azure'', ''gcp'', ''kubernetes'', ''m365'', ''github'', ''cloudflare'',
+              ''oraclecloud'', ''openstack'', ''alibabacloud'', ''iac'', ''llm'', ''nhn'', or ''mongodbatlas''.'
+          list_type:
+            type: string
+            default: checks
+            description: '''checks'' (all security checks with IDs, titles, severity), ''services'' (scannable service names),
+              or ''compliance'' (compliance framework names).'
+        returns:
+          checks:
+            type: array
+            description: 'For list_type=''checks'': array of {id, title, service, severity}. Capped at 200.'
+          items:
+            type: array
+            description: 'For list_type=''services'' or ''compliance'': array of item names.'
+          total:
+            type: integer
+            description: Total count of items.
+      scan_service:
+        description: Scan a specific cloud service — wrapper around scan with service pre-set. Faster than full scan because
+          it only runs checks for one service.
+        when_to_use: (1) Quick targeted audit of a specific service (e.g., 's3' for bucket security, 'iam' for identity misconfigs).
+          (2) When full scan is too slow — focus on high-value services first. (3) After discovering a service in enumeration
+          — deep-dive into its security posture.
+        required_ports: []
+        params:
+          provider:
+            type: string
+            required: true
+            description: Cloud provider.
+          service:
+            type: string
+            required: true
+            description: Service to audit (e.g., 's3', 'iam', 'ec2', 'rds', 'lambda', 'cloudtrail'). Use list_checks with
+              list_type='services' to see available services.
+          severity:
+            type: string
+            description: Comma-separated severity filter.
+        returns:
+          findings:
+            type: array
+            description: Failed findings for the specified service.
+          summary:
+            type: object
+            description: Status and severity breakdown for the service.
+  responder:
+    name: responder
+    version: 3.2.2.0
+    description: 'LLMNR/NBT-NS/MDNS poisoning and NTLMv2 hash capture via Responder v3.2.2 (lgandx/Responder, Kali apt package
+      responder). Three methods: poison, analyze, capture_smb. Poisons broadcast name resolution protocols (LLMNR port 5355,
+      NBT-NS port 137, MDNS port 5353) to redirect authentication to rogue servers, capturing NTLMv2/NTLMv1 hashes in hashcat-compatible
+      format (mode 5600/5500). Runs 18 rogue servers simultaneously: SMB, HTTP, HTTPS, DNS, LDAP, FTP, POP, SMTP, IMAP, MSSQL,
+      RDP, WinRM, Kerberos, DCERPC, SNMP, MQTT, MYSQL, QUIC. Analyze mode (-A) passively observes traffic without poisoning.
+      capture_smb disables all poisoners and servers except SMB for SSRF-triggered hash capture. Duration-bounded execution
+      — runs for a fixed number of seconds then terminates and returns parsed results. Hash output parsed from SQLite database
+      (Responder.db) with fallback to log file parsing. Captured hashes are hashcat-ready: NTLMv2 → mode 5600, NTLMv1 → mode
+      5500, AS-REP → mode 7500. Requires privileged mode and host networking for raw socket access and broadcast/multicast
+      visibility.'
+    image: ghcr.io/silicon-works/mcp-tools-responder:latest
+    image_size_mb: 250
+    timeout_seconds: 600
+    capabilities:
+    - hash_capture
+    - llmnr_poisoning
+    - nbtns_poisoning
+    - mdns_poisoning
+    routing:
+      use_for:
+      - capture NTLMv2 hashes via LLMNR/NBT-NS/MDNS poisoning on the local network
+      - poison broadcast name resolution to intercept Windows authentication requests
+      - set up SMB listener to capture hashes from SSRF or forced authentication attacks
+      - passively analyze broadcast protocol activity on a network segment without poisoning
+      - capture NetNTLMv2 hashes for offline cracking with hashcat or john
+      - perform LLMNR poisoning to obtain domain user credentials on an internal network
+      - capture NTLMv1 hashes with LM downgrade for easier offline cracking
+      - run rogue WPAD proxy to capture browser proxy authentication
+      - capture cleartext credentials via HTTP Basic auth downgrade
+      - set up hash capture listener for coerced authentication attacks (PetitPotam, PrinterBug, DFSCoerce)
+      - force proxy authentication on all HTTP clients with -P (ProxyAuth) to capture NTLMv2 hashes
+      - poison IPv6 name resolution via DHCPv6 or RDNSS Router Advertisement on dual-stack networks
+      - capture WebDAV authentication by returning STATUS_LOGON_FAILURE with -E (ErrorCode)
+      never_use_for:
+      - NTLM relay attacks (use impacket.ntlmrelayx — Responder captures hashes, ntlmrelayx relays them)
+      - password cracking (use john or hashcat — Responder captures hashes, cracking tools crack them)
+      - port scanning (use nmap — Responder is a listener, not a scanner)
+      - credential spraying (use kerbrute — Responder is passive capture, not active authentication)
+      - SMB enumeration (use netexec — Responder runs rogue servers, not SMB client queries)
+      - ARP poisoning (use bettercap/ettercap — Responder poisons name resolution, not ARP)
+      triggers:
+      - responder
+      - LLMNR
+      - NBT-NS
+      - MDNS poisoning
+      - hash capture
+      - NTLMv2 capture
+      - NetNTLM
+      - WPAD
+      - broadcast poisoning
+      - SMB capture
+      - forced authentication
+    phases:
+    - exploitation
+    requirements:
+      network: true
+      privileged: true
+      privileged_reason: Requires raw sockets (NET_RAW) for LLMNR/NBT-NS/MDNS poisoning, network admin (NET_ADMIN) for multicast
+        group membership, and privileged ports (<1024) for rogue servers. Must run with --network=host for Layer 2 broadcast/multicast
+        visibility.
+    resources:
+      memory_mb: 256
+      cpu: 0.5
+    see_also:
+    - tool: john
+      reason: Crack captured NTLMv2 hashes (hashcat mode 5600) or NTLMv1 hashes (mode 5500) after Responder captures them
+    - tool: impacket
+      reason: Use ntlmrelayx to relay captured authentication instead of cracking, or use secretsdump with cracked credentials
+    - tool: netexec
+      reason: Validate cracked credentials across SMB, WinRM, LDAP, MSSQL after obtaining them via Responder
+    - tool: hashcat
+      reason: Responder captures NTLMv2 hashes in hashcat mode 5600 format. Use hashcat for GPU-accelerated cracking of captured
+        hashes, especially with combinator or hybrid attacks.
+    - tool: bloodhound
+      reason: After obtaining valid credentials via hash cracking, collect AD relationship data for attack path analysis
+    methods:
+      poison:
+        description: 'Run Responder in full poisoning mode — responds to LLMNR (port 5355), NBT-NS (port 137), and MDNS (port
+          5353) broadcast queries with attacker''s IP, causing clients to authenticate to rogue servers. Runs for exactly
+          `duration` seconds then terminates. After termination, parses captured hashes from Responder''s SQLite database
+          (Responder.db) with fallback to log file parsing (logs/*-NTLMv*.txt). Captured hashes are in hashcat-compatible
+          format: NTLMv2 as `username::DOMAIN:challenge:ntproofstr:blob` (mode 5600), NTLMv1 as `username::DOMAIN:lmresponse:ntresponse:challenge`
+          (mode 5500). Copies hash files and DB to /session/responder/ for persistence. Supports WPAD poisoning (-w), HTTP
+          Basic auth downgrade (-b), LM hash downgrade (--lm), NTLMv1 downgrade (--disable-ess), DHCPv4 poisoning (-d), DHCPv6
+          poisoning (--dhcpv6), RDNSS Router Advertisement poisoning (--rdnss), forced proxy authentication (-P), custom external
+          IPv4 (-e) and IPv6 (-6), custom TTL for poisoned answers (-t), and WebDAV auth capture via STATUS_LOGON_FAILURE
+          (-E). Interface auto-detected via `ip -j addr` if not specified.'
+        when_to_use: (1) After gaining access to an internal network segment (via VPN, pivot, or initial foothold) — poison
+          LLMNR/NBT-NS to capture credentials from Windows clients resolving non-existent hostnames. (2) When a Windows client
+          tries to resolve a hostname that DNS doesn't know — LLMNR/NBT-NS fallback broadcasts the query, and Responder answers
+          with attacker IP. (3) To capture domain user NTLMv2 hashes for offline cracking with john or hashcat. (4) Combined
+          with WPAD poisoning (-w) to capture browser proxy authentication from all clients on the segment. (5) Use --disable-ess
+          to force NTLMv1 downgrade for easier cracking (hashcat mode 5500 is faster than 5600). (6) After capturing hashes,
+          crack with john/hashcat, then use credentials with bloodhound, netexec, or impacket for further AD enumeration.
+        required_ports: []
+        params:
+          interface:
+            type: string
+            description: Network interface to listen on (e.g., 'eth0', 'tun0'). If omitted, auto-detects the first non-loopback
+              interface with an IPv4 address. Use the interface on the target network segment.
+          duration:
+            type: integer
+            required: true
+            description: How long to run Responder in seconds. Minimum 5 seconds. Use 60-300s for network poisoning (need
+              time for clients to make broadcast queries). Use 15-30s for SSRF capture where the trigger is immediate.
+          verbose:
+            type: boolean
+            default: true
+            description: Enable verbose output (-v). Shows poisoning activity and captured hash details.
+          wpad:
+            type: boolean
+            default: false
+            description: Start rogue WPAD proxy server (-w). Captures HTTP proxy authentication from browsers that auto-detect
+              proxy settings.
+          force_wpad_auth:
+            type: boolean
+            default: false
+            description: Force NTLM/Basic auth on wpad.dat retrieval (-F). More aggressive — may show authentication prompt
+              to users.
+          basic_auth:
+            type: boolean
+            default: false
+            description: Return HTTP Basic auth instead of NTLM (-b). Captures cleartext passwords instead of hashes. Easier
+              to use but users see a login prompt.
+          lm_downgrade:
+            type: boolean
+            default: false
+            description: Force LM hashing downgrade (--lm). Produces weaker hashes that crack faster but only old Windows
+              clients (XP/2003) support this.
+          disable_ess:
+            type: boolean
+            default: false
+            description: Disable Extended Session Security (--disable-ess). Forces NTLMv1 downgrade — hashcat mode 5500 cracks
+              much faster than NTLMv2 mode 5600.
+          dhcp:
+            type: boolean
+            default: false
+            description: 'Enable DHCPv4 poisoning with WPAD injection (-d). WARNING: may disrupt DHCP on the network segment.'
+          external_ip:
+            type: string
+            description: Custom IPv4 address to poison responses with (-e). Use when Responder runs on a different host than
+              the one clients should connect to. Defaults to the listening interface's IP.
+          external_ip6:
+            type: string
+            description: Custom IPv6 address to poison responses with (-6). Use for IPv6-enabled networks when Responder should
+              direct authentication to a different IPv6 address.
+          proxy_auth:
+            type: boolean
+            default: false
+            description: Force NTLM/Basic proxy authentication on all HTTP requests (-P). Highly effective — forces clients
+              to authenticate to the rogue proxy. Cannot be combined with wpad (-w).
+          dhcpv6:
+            type: boolean
+            default: false
+            description: Enable DHCPv6 poisoning (--dhcpv6). Responds to DHCPv6 Solicit messages with the attacker's DNS server.
+              Effective on dual-stack networks where IPv6 is autoconfigured.
+          rdnss:
+            type: boolean
+            default: false
+            description: Enable Router Advertisement RDNSS poisoning (--rdnss). Injects attacker IP as recursive DNS server
+              via IPv6 Router Advertisements. Effective on networks with IPv6 enabled.
+          error_code:
+            type: boolean
+            default: false
+            description: Return STATUS_LOGON_FAILURE for authentication requests (-E). Forces WebDAV clients to re-authenticate,
+              enabling WebDAV NTLMv2 hash capture. Used when targeting WebDAV-enabled clients.
+          ttl:
+            type: integer
+            description: Custom TTL (time-to-live) for poisoned answers (-t). Controls how long clients cache the poisoned
+              response. Lower values mean clients re-query sooner; higher values persist longer.
+        returns:
+          captured_hashes:
+            type: array
+            description: 'Array of captured hash objects. Each has: timestamp, module (SMB/HTTP/LDAP/etc.), hash_type (NTLMv2/NTLMv1/ClearText),
+              client_ip, hostname, username, hash (hashcat-compatible full hash string). Cleartext entries also have ''cleartext''
+              field. Empty if no authentication was captured during the duration.'
+          hash_count:
+            type: integer
+            description: Number of unique hashes captured. Zero on quiet networks.
+          interface_used:
+            type: string
+            description: Network interface that was used (specified or auto-detected).
+          duration_seconds:
+            type: integer
+            description: Actual duration Responder ran for.
+          copied_files:
+            type: array
+            description: Paths of hash files, logs, and DB copied to /session/responder/ for persistence.
+      analyze:
+        description: Passive analysis mode (-A flag) — Responder listens for LLMNR/NBT-NS/MDNS broadcast queries on the network
+          but does NOT respond to them and does NOT poison. This is safe reconnaissance that identifies what hostnames clients
+          are trying to resolve, which protocols are active, and which clients are making requests. Output logged to Analyzer-Session.log.
+          No rogue servers are started. No hashes are captured.
+        when_to_use: (1) First step on an internal network — assess broadcast protocol activity before deciding whether to
+          poison. (2) When you need to understand the attack surface without triggering any alerts. (3) To identify which
+          hostnames are being queried (potential poisoning targets). (4) When the engagement rules prohibit active poisoning
+          but allow passive monitoring.
+        required_ports: []
+        params:
+          interface:
+            type: string
+            description: Network interface to listen on. Auto-detected if omitted.
+          duration:
+            type: integer
+            required: true
+            description: How long to monitor in seconds. Use 30-120s for a quick assessment.
+          verbose:
+            type: boolean
+            default: true
+            description: Enable verbose output.
+        returns:
+          detected_protocols:
+            type: array
+            description: Lines from Analyzer-Session.log showing observed broadcast protocol activity. Each line contains
+              timestamp, protocol type, queried hostname, and source IP.
+          detection_count:
+            type: integer
+            description: Number of protocol events detected.
+          interface_used:
+            type: string
+            description: Network interface that was monitored.
+          duration_seconds:
+            type: integer
+            description: Duration of the monitoring period.
+      capture_smb:
+        description: 'SMB-only hash capture mode — disables ALL poisoners (LLMNR, NBT-NS, MDNS) and ALL rogue servers except
+          SMB. Only the SMB server (port 445) listens for incoming authentication. Designed for SSRF-triggered authentication
+          capture: trigger a server-side request to \\ATTACKER_IP\share from a web app, file inclusion, or other vulnerability,
+          and Responder''s SMB server captures the NTLMv2 hash. Also used for coerced authentication attacks (PetitPotam,
+          PrinterBug, DFSCoerce) where the target machine is forced to authenticate to the attacker''s SMB server. Modifies
+          Responder.conf before execution to disable all protocols except SMB.'
+        when_to_use: (1) When you have an SSRF vulnerability that allows UNC path injection (\\attacker\share) — set up capture_smb
+          first, then trigger the SSRF. (2) When using PetitPotam, PrinterBug, or DFSCoerce to coerce machine authentication
+          — run capture_smb to catch the NTLMv2 hash. (3) When you only need SMB authentication capture and want to avoid
+          binding to other ports (prevents port conflicts and reduces noise). (4) Safer than full poison mode because no broadcast
+          poisoning occurs.
+        required_ports: []
+        params:
+          interface:
+            type: string
+            description: Network interface to listen on. Auto-detected if omitted.
+          duration:
+            type: integer
+            required: true
+            description: How long to listen in seconds. Use 15-30s for SSRF capture (trigger should be immediate). Use 60s+
+              if waiting for coerced authentication.
+          verbose:
+            type: boolean
+            default: true
+            description: Enable verbose output.
+        returns:
+          captured_hashes:
+            type: array
+            description: Array of captured SMB hash objects (same format as poison method). Only SMB hashes since other protocols
+              are disabled.
+          hash_count:
+            type: integer
+            description: Number of SMB hashes captured.
+          interface_used:
+            type: string
+            description: Network interface used.
+          duration_seconds:
+            type: integer
+            description: Duration of the capture period.
+          smb_only:
+            type: boolean
+            description: Always true for this method — confirms only SMB was enabled.
+          copied_files:
+            type: array
+            description: Paths of hash files copied to /session/responder/.
   scapy:
     name: scapy
     version: '2.5'
@@ -11173,6 +14019,304 @@ tools:
           suggestions:
             type: array
             description: List of suggested actions
+  theharvester:
+    name: theharvester
+    version: 4.10.1
+    description: 'Email and subdomain OSINT harvesting — theHarvester v4.10.1 with 51 data sources across 6 categories (certificate,
+      DNS, search engine, threat intel, code repo, email) for discovering emails, subdomains, IPs, and URLs. Two methods:
+      harvest (query certificate databases, search engines, DNS aggregators, breach databases, and threat intelligence platforms
+      for a target domain), list_sources (enumerate all 51 available data sources with API key requirements). 11 free sources
+      work without API keys (crtsh, hackertarget, rapiddns, urlscan, certspotter, otx, robtex, yahoo, duckduckgo, baidu, subdomaincenter).
+      dnsdumpster now requires an API key. ~40 paid sources need API keys (shodan, virustotal, censys, hunter, intelx, dnsdumpster,
+      etc.). For deeper subdomain enumeration with DNS brute-force use amass. For email verification or phishing use separate
+      tools.'
+    image: ghcr.io/silicon-works/mcp-tools-theharvester:latest
+    image_size_mb: 689
+    timeout_seconds: 300
+    capabilities:
+    - email_harvesting
+    - subdomain_discovery
+    - osint
+    - attack_surface_mapping
+    routing:
+      use_for:
+      - find email addresses for a domain
+      - harvest emails and subdomains from OSINT sources
+      - discover employee email addresses for a target company
+      - gather emails from certificate logs and search engines
+      - find IPs and hostnames associated with a domain
+      - passive reconnaissance on a domain using public sources
+      - collect email addresses before phishing assessment
+      - enumerate subdomains from DNS databases and certificate transparency
+      never_use_for:
+      - deep subdomain brute-force enumeration (use amass)
+      - port scanning (use nmap)
+      - web vulnerability scanning (use nuclei)
+      - active DNS zone transfers (use amass enum_active)
+      - social media profiling (not supported)
+      triggers:
+      - theharvester
+      - the harvester
+      - email harvest
+      - email enumeration
+      - email discovery
+      - harvest emails
+      - find emails
+      - OSINT emails
+    phases:
+    - reconnaissance
+    requirements:
+      network: true
+      privileged: false
+    resources:
+      memory_mb: 256
+      cpu: 0.5
+    see_also:
+    - tool: amass
+      reason: Use amass for deeper subdomain enumeration with DNS brute-force and active probing. theHarvester focuses on
+        emails + lightweight subdomain discovery.
+    - tool: nmap
+      reason: After discovering hosts with theHarvester, use nmap to port scan them.
+    - tool: nuclei
+      reason: After discovering subdomains, use nuclei to scan for web vulnerabilities.
+    - tool: web-fingerprint
+      reason: After discovering hosts and subdomains, use web-fingerprint to identify the technology stack (CMS, frameworks,
+        servers) running on each.
+    - tool: hydra
+      reason: After harvesting email addresses, use hydra for credential brute-forcing against web logins, OWA, or SSH using
+        discovered email addresses as usernames.
+    methods:
+      harvest:
+        description: 'Harvest emails, subdomains, IPs, and URLs for a target domain. Runs `theHarvester -d <domain> -b <sources>
+          -l <limit> -f /session/output`. Queries multiple OSINT sources in parallel. Output saved as JSON file under /session/.
+          Free sources (no API key): crtsh, hackertarget, rapiddns, urlscan, certspotter, otx, robtex, yahoo, duckduckgo,
+          baidu. Note: dnsdumpster now requires an API key.'
+        when_to_use: (1) Early reconnaissance — gather email addresses for phishing assessment or social engineering. (2)
+          Discover subdomains and IPs as supplement to amass. (3) Quick OSINT scan before deeper enumeration. (4) Use free
+          sources first (crtsh,hackertarget,rapiddns,urlscan,certspotter), add paid sources if API keys available.
+        required_ports: []
+        params:
+          domain:
+            type: string
+            required: true
+            description: Target domain (e.g., 'example.com'). Can also be a company name for some sources.
+          sources:
+            type: string
+            default: crtsh,hackertarget,rapiddns,urlscan,certspotter
+            description: 'Comma-separated data sources. Use ''all'' for all sources (slow, some need API keys). Recommended
+              free: ''crtsh,hackertarget,rapiddns,urlscan,certspotter''. Use list_sources to see all available.'
+          limit:
+            type: integer
+            default: 500
+            description: Maximum results per source. Default 500. Increase for thorough harvesting.
+          dns_lookup:
+            type: boolean
+            default: false
+            description: Resolve discovered hosts to IPs. Default false (faster). Enable for IP enumeration.
+        returns:
+          emails:
+            type: array
+            description: Discovered email addresses (capped at 100). Deduplicated.
+          total_emails:
+            type: integer
+            description: Total unique emails found.
+          hosts:
+            type: array
+            description: Discovered hostnames/subdomains (capped at 200). Deduplicated.
+          total_hosts:
+            type: integer
+            description: Total unique hosts found.
+          ips:
+            type: array
+            description: Discovered IP addresses (capped at 100).
+          sources_used:
+            type: array
+            description: Data sources that were queried.
+          output_file:
+            type: string
+            description: Path to full JSON output file under /session/.
+      list_sources:
+        description: List all 51 available theHarvester data sources with API key requirements.
+        when_to_use: Before harvesting — check which sources are available and which need API keys.
+        required_ports: []
+        params: {}
+        returns:
+          sources:
+            type: array
+            description: 'All sources. Each: {name, type, api_key: bool}.'
+          free_sources:
+            type: array
+            description: Sources that work without API keys.
+          recommended_free:
+            type: string
+            description: Comma-separated recommended free sources for quick scans.
+  trivy:
+    name: trivy
+    version: 0.69.2
+    description: 'Container, filesystem, and IaC vulnerability scanner — Trivy v0.69 with CVE detection for OS packages and
+      language dependencies (npm, pip, gem, Go, Rust, etc.), Infrastructure-as-Code misconfiguration detection (Terraform,
+      Kubernetes, Dockerfile, CloudFormation), and SBOM generation. Five methods: scan_image (Docker image CVE scan), scan_filesystem
+      (local path vulnerability scan), scan_iac (IaC misconfiguration detection), scan_sbom (SBOM with vulnerability cross-reference),
+      list_vulns (quick severity summary). Pre-downloaded vulnerability database for offline use.'
+    image: ghcr.io/silicon-works/mcp-tools-trivy:latest
+    image_size_mb: 1390
+    timeout_seconds: 900
+    capabilities:
+    - vulnerability_scanning
+    - container_security
+    - iac_scanning
+    - sbom_generation
+    - misconfiguration_detection
+    routing:
+      use_for:
+      - scan a Docker image for known CVE vulnerabilities
+      - find vulnerabilities in installed packages on a filesystem
+      - scan Terraform files for security misconfigurations
+      - scan Kubernetes manifests for security issues
+      - check a Dockerfile for best practice violations
+      - generate a software bill of materials for a project
+      - list critical vulnerabilities in a container image
+      - scan CloudFormation templates for misconfigurations
+      - check npm pip gem Go Rust dependencies for known CVEs
+      - audit container security posture
+      never_use_for:
+      - web application vulnerability scanning (use nuclei or nikto)
+      - network vulnerability scanning (use nmap with scripts)
+      - CVE research and details (use cve-lookup for NVD database queries)
+      - cloud account security auditing (use prowler for AWS/Azure/GCP)
+      triggers:
+      - trivy
+      - container scan
+      - image scan
+      - vulnerability scan
+      - CVE scan
+      - IaC scan
+      - terraform security
+      - kubernetes security
+      - SBOM
+      - docker security
+    phases:
+    - enumeration
+    requirements:
+      network: true
+      privileged: false
+    resources:
+      memory_mb: 512
+      cpu: 1.0
+    see_also:
+    - tool: cve-lookup
+      reason: Use cve-lookup to research specific CVEs found by trivy — get CVSS scores, descriptions, and references from
+        NVD.
+    - tool: nuclei
+      reason: Use nuclei for web application vulnerability scanning. Trivy scans containers/packages, nuclei scans running
+        web services.
+    - tool: prowler
+      reason: Use prowler for auditing live cloud account configurations (IAM, security groups, encryption). Trivy scans artifacts
+        (images, IaC files), prowler audits running infrastructure.
+    methods:
+      scan_image:
+        description: Scan a Docker image for CVE vulnerabilities. Runs `trivy image --format json --severity <sev> <image>`.
+          Detects vulnerabilities in OS packages (apt, rpm, apk) and language-specific packages (npm, pip, gem, Go modules,
+          Rust crates, Java JARs). Returns vulnerability list with CVE IDs, severity, affected package, installed version,
+          and fixed version.
+        when_to_use: (1) Audit a Docker image before deployment. (2) Check base images for known vulnerabilities. (3) During
+          enumeration — scan target's container images if accessible. (4) Use severity filter 'HIGH,CRITICAL' to focus on
+          actionable findings.
+        required_ports: []
+        params:
+          image:
+            type: string
+            required: true
+            description: Docker image to scan (e.g., 'nginx:latest', 'python:3.11-slim'). Must be pullable from a registry.
+          severity:
+            type: string
+            default: UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL
+            description: Comma-separated severity filter. Use 'HIGH,CRITICAL' to only show high-impact vulnerabilities.
+        returns:
+          vulnerabilities:
+            type: array
+            description: 'CVE list (capped at 100). Each: {id, severity, package, installed_version, fixed_version, title,
+              target}.'
+          total_vulnerabilities:
+            type: integer
+            description: Total CVEs found (may exceed returned array size).
+          summary:
+            type: object
+            description: 'Counts by severity: {CRITICAL, HIGH, MEDIUM, LOW, UNKNOWN}.'
+      scan_filesystem:
+        description: Scan a local filesystem path for vulnerabilities. Runs `trivy filesystem --format json <path>`. Detects
+          vulnerable packages from lock files (package-lock.json, requirements.txt, Gemfile.lock, go.sum, Cargo.lock) and
+          OS package databases.
+        when_to_use: (1) Scan a project directory for dependency vulnerabilities. (2) Audit a compromised filesystem. (3)
+          Check /session/ files from post-exploitation for vulnerable software.
+        required_ports: []
+        params:
+          path:
+            type: string
+            required: true
+            description: Directory or file to scan.
+          severity:
+            type: string
+            default: UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL
+            description: Severity filter.
+        returns:
+          vulnerabilities:
+            type: array
+            description: CVE list with package details.
+          summary:
+            type: object
+            description: Counts by severity.
+      scan_iac:
+        description: Scan IaC files for misconfigurations. Runs `trivy config --format json <path>`. Detects issues in Terraform
+          (.tf), Kubernetes YAML, Dockerfile, CloudFormation, and Helm charts.
+        when_to_use: (1) Audit cloud infrastructure definitions. (2) Find security misconfigurations in Kubernetes manifests.
+          (3) Check Dockerfiles for security best practices.
+        required_ports: []
+        params:
+          path:
+            type: string
+            required: true
+            description: Path to IaC files.
+        returns:
+          misconfigurations:
+            type: array
+            description: 'Misconfiguration list. Each: {id, severity, title, description, resolution, target}.'
+          summary:
+            type: object
+            description: Counts by severity.
+      scan_sbom:
+        description: Generate and scan SBOM for a filesystem path. Runs `trivy filesystem --list-all-pkgs --format json <path>`.
+          Returns complete package inventory with vulnerability cross-reference.
+        when_to_use: (1) Generate an inventory of all packages in a project. (2) Supply chain security — enumerate all dependencies.
+        required_ports: []
+        params:
+          path:
+            type: string
+            required: true
+            description: Path to scan for SBOM.
+        returns:
+          packages:
+            type: array
+            description: 'Package list (capped at 200). Each: {name, version, type}.'
+          total_packages:
+            type: integer
+            description: Total packages found.
+      list_vulns:
+        description: Quick vulnerability summary for an image — severity counts and top critical CVEs without full details.
+        when_to_use: Quick triage — see how many critical/high vulns before a full scan.
+        required_ports: []
+        params:
+          image:
+            type: string
+            required: true
+            description: Docker image to summarize.
+        returns:
+          summary:
+            type: object
+            description: 'Counts: {CRITICAL, HIGH, MEDIUM, LOW, UNKNOWN}.'
+          top_critical:
+            type: array
+            description: Up to 10 critical CVEs with details.
   tunnel:
     name: tunnel
     version: '1.0'
@@ -11222,6 +14366,9 @@ tools:
       - ssh -D
       prefer_over:
       - ssh
+    see_also:
+    - tool: chisel
+      reason: Use chisel for HTTP-based tunneling when SSH is blocked or unavailable. Chisel tunnels through HTTP/HTTPS proxies.
     methods:
       forward:
         description: Create an SSH local port forward (ssh -L) that maps a local port to a remote host:port through the SSH
@@ -11343,6 +14490,181 @@ tools:
           closed:
             type: array
             description: List of closed tunnel IDs.
+  volatility:
+    name: volatility
+    version: 2.27.0
+    description: 'Memory forensics framework — Volatility 3 v2.27.0 with 100+ plugins for Windows, Linux, and Mac memory dump
+      analysis. Five methods: analyze (generic plugin runner for any of 100+ plugins), list_plugins (discover available plugins
+      with filtering), pslist (process listing with auto OS detection), filescan (file object scanning), hashdump (SAM hash
+      extraction). Supports raw, vmem, dmp, and lime dump formats. Operates on dump files in /session/ directory. No network
+      access required.'
+    image: ghcr.io/silicon-works/mcp-tools-volatility:latest
+    image_size_mb: 214
+    timeout_seconds: 900
+    capabilities:
+    - memory_forensics
+    - process_analysis
+    - hash_extraction
+    - file_scanning
+    - malware_detection
+    routing:
+      use_for:
+      - analyze a memory dump for running processes and malware
+      - extract password hashes from a Windows memory dump
+      - list running processes from a RAM capture
+      - scan memory for file objects and open file handles
+      - extract command line history from a memory dump
+      - analyze network connections from a memory image
+      - detect rootkits and hidden processes in memory
+      - dump the SAM registry hive hashes from memory
+      - analyze a vmem or dmp memory snapshot
+      - list loaded kernel modules from a memory dump
+      - extract registry keys from memory
+      - timeline system activity from a memory capture
+      never_use_for:
+      - file-level forensics like binwalk extraction or steganography (use forensics)
+      - disk image file carving (use forensics.carve with foremost)
+      - live system analysis (volatility operates on memory dumps, not live systems)
+      - network packet analysis (use wireshark/tshark)
+      - YARA-based memory scanning (yarascan plugin is unavailable — the yara-python dependency is not installed in this image)
+      triggers:
+      - volatility
+      - memory dump
+      - memory forensics
+      - RAM analysis
+      - pslist
+      - hashdump
+      - filescan
+      - vmem
+      - memdump
+    phases:
+    - post-exploitation
+    requirements:
+      network: false
+      privileged: false
+    resources:
+      memory_mb: 1024
+      cpu: 1.0
+    see_also:
+    - tool: forensics
+      reason: Use forensics for file-level analysis (binwalk extraction, steghide, exiftool metadata). Volatility handles
+        memory dumps.
+    - tool: hashcat
+      reason: After extracting hashes with hashdump, crack them with hashcat (NTLM mode 1000) or john.
+    - tool: john
+      reason: After hashdump extracts NTLM hashes from memory, use john for quick dictionary/mask cracking. John is simpler
+        for basic cracking; hashcat for advanced modes.
+    - tool: impacket
+      reason: After extracting hashes or credentials from memory, use impacket secretsdump for further hash extraction, or
+        psexec/wmiexec for pass-the-hash lateral movement.
+    - tool: ghidra
+      reason: After identifying suspicious processes in memory, dump the executable and use ghidra for reverse engineering.
+    methods:
+      analyze:
+        description: Run any Volatility 3 plugin against a memory dump. Runs `vol -f <dump> -q -r json <plugin> [extra_args]`.
+          The generic method supports all 100+ Volatility plugins. Output is parsed as JSON when available, falling back to
+          text table parsing. Use list_plugins to discover available plugins.
+        when_to_use: '(1) When you need a plugin not covered by the convenience methods (pslist, filescan, hashdump). (2)
+          For advanced analysis: windows.netscan (network connections), windows.cmdline (command history), windows.malfind
+          (malware detection), windows.dlllist (loaded DLLs). (3) For Linux dumps: linux.bash (bash history), linux.pslist,
+          linux.proc.Maps. (4) Pass extra_args for plugin-specific options like ''--pid 1234''.'
+        required_ports: []
+        params:
+          dump_file:
+            type: string
+            required: true
+            description: 'Path to memory dump file (under /session/). Supported formats: raw, vmem, dmp, lime.'
+          plugin:
+            type: string
+            required: true
+            description: Volatility 3 plugin name (e.g., 'windows.pslist', 'windows.netscan', 'windows.cmdline', 'linux.bash').
+              Dot-separated namespace. Use list_plugins to see all.
+          extra_args:
+            type: string
+            description: Additional arguments for the plugin (e.g., '--pid 1234'). Space-separated.
+        returns:
+          plugin:
+            type: string
+            description: Plugin name that was run.
+          results:
+            type: array
+            description: Plugin output as array of objects. Structure varies by plugin.
+          result_count:
+            type: integer
+            description: Number of result rows.
+      list_plugins:
+        description: List all available Volatility 3 plugins by parsing vol --help output. Includes Windows, Linux, and Mac
+          plugins.
+        when_to_use: Before analyze — discover which plugins are available and their descriptions. Filter by OS or keyword.
+        required_ports: []
+        params:
+          filter:
+            type: string
+            description: Filter plugins by name or description substring (e.g., 'windows', 'hash', 'net', 'linux'). Case-insensitive.
+        returns:
+          plugins:
+            type: array
+            description: 'Available plugins. Each entry: {name, description}.'
+          plugin_count:
+            type: integer
+            description: Number of matching plugins.
+      pslist:
+        description: List running processes from a memory dump. Auto-selects windows.pslist or linux.pslist based on os_type
+          parameter. Returns process name, PID, PPID, threads, handles, and creation time.
+        when_to_use: (1) First step in memory analysis — see what was running. (2) Look for suspicious processes. (3) Find
+          PIDs for further analysis with other plugins.
+        required_ports: []
+        params:
+          dump_file:
+            type: string
+            required: true
+            description: Path to memory dump file.
+          os_type:
+            type: string
+            default: windows
+            description: '''windows'', ''linux'', or ''mac''. Determines which pslist plugin to use (windows.pslist, linux.pslist,
+              or mac.pslist).'
+        returns:
+          results:
+            type: array
+            description: Process list. Each entry contains PID, PPID, process name, creation time.
+          process_count:
+            type: integer
+            description: Total number of processes found.
+      filescan:
+        description: Scan memory for file objects (Windows only). Runs windows.filescan. Returns file paths and their memory
+          offsets.
+        when_to_use: (1) Find files that were open when the dump was taken. (2) Locate files for extraction with windows.dumpfiles.
+          (3) Search for specific file types or paths.
+        required_ports: []
+        params:
+          dump_file:
+            type: string
+            required: true
+            description: Path to memory dump file.
+        returns:
+          results:
+            type: array
+            description: File objects found. Each entry contains offset and filename.
+      hashdump:
+        description: Extract NTLM password hashes from a Windows memory dump by reading the SAM registry hive. Runs windows.registry.hashdump
+          (the non-deprecated plugin; windows.hashdump is deprecated). Returns username:rid:lmhash:nthash format suitable
+          for cracking with hashcat (mode 1000) or john.
+        when_to_use: (1) After obtaining a memory dump during post-exploitation. (2) To extract local account password hashes.
+          (3) Results feed directly into hashcat -m 1000 or john --format=NT.
+        required_ports: []
+        params:
+          dump_file:
+            type: string
+            required: true
+            description: Path to Windows memory dump file.
+        returns:
+          results:
+            type: array
+            description: 'Extracted hashes. Each entry: {User, rid, lmhash, nthash}.'
+          hash_count:
+            type: integer
+            description: Number of hashes extracted.
   web-fingerprint:
     name: web-fingerprint
     version: '1.0'

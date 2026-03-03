@@ -1,0 +1,178 @@
+name: prowler
+version: "5.18.3"
+description: "Multi-cloud security auditing tool — Prowler v5.18 with 920+ security checks across 14 providers: AWS (572 checks, 84 services, 41 compliance frameworks), Azure (165 checks, 21 services), GCP (100 checks), Kubernetes (83 checks, 8 services), M365, GitHub, Cloudflare, Oracle Cloud, OpenStack, Alibaba Cloud, IaC, LLM, NHN, and MongoDB Atlas. Three methods: scan (full provider audit with severity/service/compliance/region filtering), list_checks (enumerate checks/services/compliance frameworks without credentials), scan_service (focused single-service audit for faster results). Outputs OCSF JSON findings with pass/fail status, severity, resource details, and compliance mapping. Requires cloud credentials via environment variables. For container/IaC scanning use trivy instead. For AWS post-exploitation enumeration use bash with AWS CLI or impacket."
+image: "ghcr.io/silicon-works/mcp-tools-prowler:latest"
+image_size_mb: 1820
+timeout_seconds: 900
+
+capabilities:
+  - cloud_security_audit
+  - compliance_scanning
+  - misconfiguration_detection
+  - multi_cloud
+
+routing:
+  use_for:
+    - "audit an AWS account for security misconfigurations"
+    - "check Azure subscription security posture"
+    - "scan GCP project for security issues"
+    - "audit Kubernetes cluster security configuration"
+    - "run CIS benchmark compliance checks against AWS"
+    - "find IAM misconfigurations in cloud accounts"
+    - "check S3 bucket security and public access settings"
+    - "audit cloud security posture across multiple providers"
+    - "find security groups with overly permissive rules"
+    - "check cloud encryption settings and key management"
+    - "verify cloud logging and monitoring configuration"
+    - "run PCI DSS compliance audit on cloud infrastructure"
+    - "check for publicly exposed cloud resources"
+    - "audit Microsoft 365 tenant security configuration"
+    - "scan GitHub organization for security misconfigurations"
+  never_use_for:
+    - "container image vulnerability scanning (use trivy)"
+    - "IaC file misconfiguration scanning (use trivy)"
+    - "web application vulnerability scanning (use nuclei or nikto)"
+    - "network port scanning (use nmap)"
+    - "AWS post-exploitation enumeration (not supported — use bash with AWS CLI or impacket)"
+    - "CVE research and lookup (use cve-lookup)"
+  triggers:
+    - "prowler"
+    - "cloud audit"
+    - "cloud security"
+    - "AWS security"
+    - "Azure security"
+    - "GCP security"
+    - "CIS benchmark"
+    - "compliance scan"
+    - "cloud misconfiguration"
+    - "S3 security"
+    - "IAM audit"
+    - "M365 security"
+    - "Microsoft 365 audit"
+    - "GitHub security audit"
+
+phases:
+  - enumeration
+
+requirements:
+  network: true
+  privileged: false
+
+environment:
+  - name: AWS_ACCESS_KEY_ID
+    description: "AWS access key for authentication"
+    required: false
+  - name: AWS_SECRET_ACCESS_KEY
+    description: "AWS secret key for authentication"
+    required: false
+  - name: AWS_SESSION_TOKEN
+    description: "AWS session token for temporary credentials"
+    required: false
+  - name: AZURE_SUBSCRIPTION_ID
+    description: "Azure subscription ID"
+    required: false
+  - name: AZURE_TENANT_ID
+    description: "Azure tenant ID"
+    required: false
+  - name: GOOGLE_APPLICATION_CREDENTIALS
+    description: "Path to GCP service account JSON key file"
+    required: false
+
+resources:
+  memory_mb: 512
+  cpu: 1.0
+
+see_also:
+  - tool: trivy
+    reason: "Use trivy for container image CVE scanning and IaC misconfiguration detection. Prowler audits live cloud accounts, trivy scans artifacts."
+  - tool: nmap
+    reason: "After prowler finds exposed cloud resources with public IPs or open security groups, use nmap to scan those exposed endpoints."
+  - tool: cve-lookup
+    reason: "Use cve-lookup to research specific CVEs found in cloud audit findings."
+
+methods:
+  scan:
+    description: "Run a full Prowler security audit against a cloud provider. Executes `prowler <provider> --output-formats json-ocsf --output-directory /session/` with optional severity, service, compliance, and region filters. Returns OCSF findings parsed into structured format with pass/fail status, severity, resource details. Only failed findings returned to save context (pass findings are informational noise). Output files written to /session/ for reference."
+    when_to_use: "(1) Full cloud account security audit during enumeration phase — run with no filters first to get overview. (2) Compliance-specific audit — use compliance parameter with framework name (e.g., 'cis_3.0_aws', 'pci_3.2.1_aws'). (3) Targeted audit — combine service and severity filters for focused results (e.g., service='iam', severity='critical,high'). (4) Multi-region AWS audit — specify regions to limit scope. (5) After gaining cloud credentials in post-exploitation — audit what the compromised identity can see."
+    required_ports: []
+    params:
+      provider:
+        type: string
+        required: true
+        description: "Cloud provider: 'aws' (572 checks, 84 services), 'azure' (165 checks, 21 services), 'gcp' (100 checks), 'kubernetes' (83 checks, 8 services), 'm365', 'github', 'cloudflare', 'oraclecloud', 'openstack', 'alibabacloud', 'iac', 'llm', 'nhn', or 'mongodbatlas'. Credentials must be set via environment variables before scan."
+      severity:
+        type: string
+        description: "Comma-separated severity filter (e.g., 'critical,high'). Options: critical, high, medium, low, informational. Omit for all severities."
+      service:
+        type: string
+        description: "Comma-separated services to scan (e.g., 's3,iam,ec2'). Omit for all services. Use list_checks with list_type='services' to see available services for the provider."
+      compliance:
+        type: string
+        description: "Compliance framework name (e.g., 'cis_3.0_aws', 'pci_3.2.1_aws', 'hipaa_aws'). Use list_checks with list_type='compliance' to see available frameworks."
+      region:
+        type: string
+        description: "Comma-separated AWS regions (e.g., 'us-east-1,eu-west-1'). AWS only. Omit for all regions."
+    returns:
+      findings:
+        type: array
+        description: "Failed findings (capped at 100). Each: {check_id, check_title, severity, status, status_detail, resource, service, region}."
+      total_findings:
+        type: integer
+        description: "Total findings (pass + fail + manual)."
+      total_failed:
+        type: integer
+        description: "Count of failed checks."
+      summary:
+        type: object
+        description: "Breakdown: {total, by_status: {PASS, FAIL, MANUAL, MUTED}, by_severity: {CRITICAL, HIGH, ...}, failed_by_service: {service: count}}."
+      output_directory:
+        type: string
+        description: "Path to /session/ subdirectory containing full OCSF JSON output files."
+
+  list_checks:
+    description: "List available Prowler checks, services, or compliance frameworks for a provider. Runs `prowler <provider> --list-checks-json` (checks), `--list-services` (services), or `--list-compliance` (compliance). Does NOT require cloud credentials."
+    when_to_use: "(1) Before scanning — discover what checks are available for the target provider. (2) Find service names to use with scan_service. (3) Discover compliance frameworks available for targeted audits."
+    required_ports: []
+    params:
+      provider:
+        type: string
+        required: true
+        description: "Cloud provider: 'aws', 'azure', 'gcp', 'kubernetes', 'm365', 'github', 'cloudflare', 'oraclecloud', 'openstack', 'alibabacloud', 'iac', 'llm', 'nhn', or 'mongodbatlas'."
+      list_type:
+        type: string
+        default: "checks"
+        description: "'checks' (all security checks with IDs, titles, severity), 'services' (scannable service names), or 'compliance' (compliance framework names)."
+    returns:
+      checks:
+        type: array
+        description: "For list_type='checks': array of {id, title, service, severity}. Capped at 200."
+      items:
+        type: array
+        description: "For list_type='services' or 'compliance': array of item names."
+      total:
+        type: integer
+        description: "Total count of items."
+
+  scan_service:
+    description: "Scan a specific cloud service — wrapper around scan with service pre-set. Faster than full scan because it only runs checks for one service."
+    when_to_use: "(1) Quick targeted audit of a specific service (e.g., 's3' for bucket security, 'iam' for identity misconfigs). (2) When full scan is too slow — focus on high-value services first. (3) After discovering a service in enumeration — deep-dive into its security posture."
+    required_ports: []
+    params:
+      provider:
+        type: string
+        required: true
+        description: "Cloud provider."
+      service:
+        type: string
+        required: true
+        description: "Service to audit (e.g., 's3', 'iam', 'ec2', 'rds', 'lambda', 'cloudtrail'). Use list_checks with list_type='services' to see available services."
+      severity:
+        type: string
+        description: "Comma-separated severity filter."
+    returns:
+      findings:
+        type: array
+        description: "Failed findings for the specified service."
+      summary:
+        type: object
+        description: "Status and severity breakdown for the service."

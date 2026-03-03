@@ -1,0 +1,163 @@
+name: volatility
+version: "2.27.0"
+description: "Memory forensics framework — Volatility 3 v2.27.0 with 100+ plugins for Windows, Linux, and Mac memory dump analysis. Five methods: analyze (generic plugin runner for any of 100+ plugins), list_plugins (discover available plugins with filtering), pslist (process listing with auto OS detection), filescan (file object scanning), hashdump (SAM hash extraction). Supports raw, vmem, dmp, and lime dump formats. Operates on dump files in /session/ directory. No network access required."
+image: "ghcr.io/silicon-works/mcp-tools-volatility:latest"
+image_size_mb: 214
+timeout_seconds: 900
+
+capabilities:
+  - memory_forensics
+  - process_analysis
+  - hash_extraction
+  - file_scanning
+  - malware_detection
+
+routing:
+  use_for:
+    - "analyze a memory dump for running processes and malware"
+    - "extract password hashes from a Windows memory dump"
+    - "list running processes from a RAM capture"
+    - "scan memory for file objects and open file handles"
+    - "extract command line history from a memory dump"
+    - "analyze network connections from a memory image"
+    - "detect rootkits and hidden processes in memory"
+    - "dump the SAM registry hive hashes from memory"
+    - "analyze a vmem or dmp memory snapshot"
+    - "list loaded kernel modules from a memory dump"
+    - "extract registry keys from memory"
+    - "timeline system activity from a memory capture"
+  never_use_for:
+    - "file-level forensics like binwalk extraction or steganography (use forensics)"
+    - "disk image file carving (use forensics.carve with foremost)"
+    - "live system analysis (volatility operates on memory dumps, not live systems)"
+    - "network packet analysis (use wireshark/tshark)"
+    - "YARA-based memory scanning (yarascan plugin is unavailable — the yara-python dependency is not installed in this image)"
+  triggers:
+    - "volatility"
+    - "memory dump"
+    - "memory forensics"
+    - "RAM analysis"
+    - "pslist"
+    - "hashdump"
+    - "filescan"
+    - "vmem"
+    - "memdump"
+
+phases:
+  - post-exploitation
+
+requirements:
+  network: false
+  privileged: false
+
+resources:
+  memory_mb: 1024
+  cpu: 1.0
+
+see_also:
+  - tool: forensics
+    reason: "Use forensics for file-level analysis (binwalk extraction, steghide, exiftool metadata). Volatility handles memory dumps."
+  - tool: hashcat
+    reason: "After extracting hashes with hashdump, crack them with hashcat (NTLM mode 1000) or john."
+  - tool: john
+    reason: "After hashdump extracts NTLM hashes from memory, use john for quick dictionary/mask cracking. John is simpler for basic cracking; hashcat for advanced modes."
+  - tool: impacket
+    reason: "After extracting hashes or credentials from memory, use impacket secretsdump for further hash extraction, or psexec/wmiexec for pass-the-hash lateral movement."
+  - tool: ghidra
+    reason: "After identifying suspicious processes in memory, dump the executable and use ghidra for reverse engineering."
+
+methods:
+  analyze:
+    description: "Run any Volatility 3 plugin against a memory dump. Runs `vol -f <dump> -q -r json <plugin> [extra_args]`. The generic method supports all 100+ Volatility plugins. Output is parsed as JSON when available, falling back to text table parsing. Use list_plugins to discover available plugins."
+    when_to_use: "(1) When you need a plugin not covered by the convenience methods (pslist, filescan, hashdump). (2) For advanced analysis: windows.netscan (network connections), windows.cmdline (command history), windows.malfind (malware detection), windows.dlllist (loaded DLLs). (3) For Linux dumps: linux.bash (bash history), linux.pslist, linux.proc.Maps. (4) Pass extra_args for plugin-specific options like '--pid 1234'."
+    required_ports: []
+    params:
+      dump_file:
+        type: string
+        required: true
+        description: "Path to memory dump file (under /session/). Supported formats: raw, vmem, dmp, lime."
+      plugin:
+        type: string
+        required: true
+        description: "Volatility 3 plugin name (e.g., 'windows.pslist', 'windows.netscan', 'windows.cmdline', 'linux.bash'). Dot-separated namespace. Use list_plugins to see all."
+      extra_args:
+        type: string
+        description: "Additional arguments for the plugin (e.g., '--pid 1234'). Space-separated."
+    returns:
+      plugin:
+        type: string
+        description: "Plugin name that was run."
+      results:
+        type: array
+        description: "Plugin output as array of objects. Structure varies by plugin."
+      result_count:
+        type: integer
+        description: "Number of result rows."
+
+  list_plugins:
+    description: "List all available Volatility 3 plugins by parsing vol --help output. Includes Windows, Linux, and Mac plugins."
+    when_to_use: "Before analyze — discover which plugins are available and their descriptions. Filter by OS or keyword."
+    required_ports: []
+    params:
+      filter:
+        type: string
+        description: "Filter plugins by name or description substring (e.g., 'windows', 'hash', 'net', 'linux'). Case-insensitive."
+    returns:
+      plugins:
+        type: array
+        description: "Available plugins. Each entry: {name, description}."
+      plugin_count:
+        type: integer
+        description: "Number of matching plugins."
+
+  pslist:
+    description: "List running processes from a memory dump. Auto-selects windows.pslist or linux.pslist based on os_type parameter. Returns process name, PID, PPID, threads, handles, and creation time."
+    when_to_use: "(1) First step in memory analysis — see what was running. (2) Look for suspicious processes. (3) Find PIDs for further analysis with other plugins."
+    required_ports: []
+    params:
+      dump_file:
+        type: string
+        required: true
+        description: "Path to memory dump file."
+      os_type:
+        type: string
+        default: "windows"
+        description: "'windows', 'linux', or 'mac'. Determines which pslist plugin to use (windows.pslist, linux.pslist, or mac.pslist)."
+    returns:
+      results:
+        type: array
+        description: "Process list. Each entry contains PID, PPID, process name, creation time."
+      process_count:
+        type: integer
+        description: "Total number of processes found."
+
+  filescan:
+    description: "Scan memory for file objects (Windows only). Runs windows.filescan. Returns file paths and their memory offsets."
+    when_to_use: "(1) Find files that were open when the dump was taken. (2) Locate files for extraction with windows.dumpfiles. (3) Search for specific file types or paths."
+    required_ports: []
+    params:
+      dump_file:
+        type: string
+        required: true
+        description: "Path to memory dump file."
+    returns:
+      results:
+        type: array
+        description: "File objects found. Each entry contains offset and filename."
+
+  hashdump:
+    description: "Extract NTLM password hashes from a Windows memory dump by reading the SAM registry hive. Runs windows.registry.hashdump (the non-deprecated plugin; windows.hashdump is deprecated). Returns username:rid:lmhash:nthash format suitable for cracking with hashcat (mode 1000) or john."
+    when_to_use: "(1) After obtaining a memory dump during post-exploitation. (2) To extract local account password hashes. (3) Results feed directly into hashcat -m 1000 or john --format=NT."
+    required_ports: []
+    params:
+      dump_file:
+        type: string
+        required: true
+        description: "Path to Windows memory dump file."
+    returns:
+      results:
+        type: array
+        description: "Extracted hashes. Each entry: {User, rid, lmhash, nthash}."
+      hash_count:
+        type: integer
+        description: "Number of hashes extracted."

@@ -1,0 +1,278 @@
+name: chisel
+version: "1.11.4"
+description: "HTTP-based tunneling and SOCKS proxy via Chisel v1.11.4 (jpillora/chisel). Six methods: server (start chisel listener), client_forward (forward tunnel — access server-side services locally), client_reverse (reverse tunnel — expose client-side services on server), client_socks (SOCKS5 proxy through server's network), list (show active tunnels), close (terminate a process). Tunnels over HTTP/WebSocket with mandatory SSH encryption, traverses proxies and firewalls that block raw SSH. Single Go binary, no dependencies. Server and client run as long-lived background processes tracked in-memory by PID. Supports authentication (--auth user:pass), TLS, server fingerprint verification, and backend HTTP proxying to hide chisel behind legitimate web servers. Client auto-reconnects with exponential backoff (100ms to 5min). For SSH-based tunneling when SSH is available, use the tunnel tool instead — chisel is for when SSH ports are blocked but HTTP/HTTPS is open."
+image: "ghcr.io/silicon-works/mcp-tools-chisel:latest"
+image_size_mb: 195
+timeout_seconds: 600
+
+capabilities:
+  - http_tunneling
+  - port_forwarding
+  - reverse_tunneling
+  - socks_proxy
+  - pivoting
+  - tunnel_management
+
+routing:
+  use_for:
+    - "create HTTP-based tunnel when SSH port is blocked but HTTP/HTTPS is open"
+    - "set up forward port forwarding through chisel to access internal services"
+    - "create reverse tunnel to expose a compromised host's service on the attacker machine"
+    - "establish SOCKS5 proxy through chisel for pivoting into internal networks via HTTP"
+    - "tunnel through web proxies and firewalls that only allow HTTP/HTTPS traffic"
+    - "set up a chisel server with --reverse to receive reverse shells tunneled over HTTP"
+    - "access localhost-only services on a remote host by forwarding ports through chisel"
+    - "create an HTTP tunnel that looks like normal web traffic to evade network detection"
+    - "pivot through a compromised host to reach internal network segments via HTTP tunnel"
+    - "hide chisel traffic behind a legitimate website using --backend reverse proxy"
+  never_use_for:
+    - "SSH tunneling when SSH is available (use tunnel — SSH is simpler and doesn't need a server component)"
+    - "port scanning through a tunnel (use nmap with proxychains after establishing SOCKS)"
+    - "file transfer (use ssh copy_to/copy_from or curl)"
+    - "reverse shell listeners (use netcat — chisel is for tunneling, not shell handling)"
+    - "IPsec VPN connections (use ike-scan for VPN discovery) — chisel is per-port tunneling, not full network VPN"
+  triggers:
+    - "chisel"
+    - "HTTP tunnel"
+    - "HTTPS tunnel"
+    - "WebSocket tunnel"
+    - "reverse tunnel HTTP"
+    - "SOCKS over HTTP"
+    - "firewall bypass tunnel"
+    - "pivot HTTP"
+    - "chisel server"
+    - "chisel client"
+
+phases:
+  - post-exploitation
+
+requirements:
+  network: true
+  privileged: false
+
+resources:
+  memory_mb: 128
+  cpu: 0.25
+
+see_also:
+  - tool: tunnel
+    reason: "Use SSH-based tunneling (ssh -L, ssh -D) when SSH is available — simpler and doesn't require running a server component"
+  - tool: netcat
+    reason: "Use for raw reverse shell listeners, then tunnel the shell through chisel if needed"
+  - tool: nmap
+    reason: "After establishing a chisel SOCKS proxy, use nmap with proxychains to scan internal networks"
+
+methods:
+  server:
+    description: "Start a chisel server that listens for client connections over HTTP/WebSocket. Runs `chisel server --host <host> --port <port>` as a background process. The server accepts chisel client connections and multiplexes SSH-encrypted tunnels over the HTTP transport. By default enables --reverse (allow reverse tunnels) and --socks5 (allow SOCKS proxy) for maximum flexibility. Optional --auth enforces username:password authentication. Optional --backend proxies non-chisel HTTP requests to a real web server, making the chisel server appear as a normal website. The server prints its SSH fingerprint on startup — share this with clients for MITM detection. Runs indefinitely until closed via the close method."
+    when_to_use: "(1) First step before any chisel client connection — start the server on the attacker machine. (2) With --reverse enabled to receive reverse tunnels from compromised hosts. (3) With --socks5 to allow clients to create SOCKS proxies for pivoting. (4) With --backend to hide chisel behind a legitimate website on an engagement. (5) With --auth when multiple operators share the same chisel server. (6) On a VPS or redirector that has HTTP/HTTPS open when the target network blocks SSH."
+    required_ports: []
+    params:
+      port:
+        type: integer
+        default: 8080
+        description: "HTTP listening port. Use 80 or 443 to blend with normal web traffic."
+      host:
+        type: string
+        default: "0.0.0.0"
+        description: "Network interface to bind to. Default: all interfaces."
+      reverse:
+        type: boolean
+        default: true
+        description: "Allow clients to use reverse port forwarding (R: prefix remotes)."
+      socks5:
+        type: boolean
+        default: true
+        description: "Enable internal SOCKS5 proxy for clients."
+      auth:
+        type: string
+        description: "Authentication in 'user:pass' format. Clients must match."
+      backend:
+        type: string
+        description: "URL to proxy non-chisel requests to (e.g., 'http://example.com'). Hides chisel behind a real website."
+      verbose:
+        type: boolean
+        default: false
+        description: "Enable verbose logging."
+    returns:
+      id:
+        type: string
+        description: "Server process ID for list and close."
+      port:
+        type: integer
+        description: "Port the server is listening on."
+      fingerprint:
+        type: string
+        description: "SSH public key fingerprint (base64 SHA256). Share with clients for --fingerprint verification."
+      status:
+        type: string
+        description: "Process status (running/exited)."
+
+  client_forward:
+    description: "Create a forward tunnel — the chisel client listens on a local port and forwards traffic through the chisel server to a remote host:port. Runs `chisel client <server_url> <local_port>:<remote_host>:<remote_port>` as a background process. Traffic flow: local_port → chisel client → HTTP/WebSocket → chisel server → remote_host:remote_port. The remote_host is resolved from the server's network perspective, so '127.0.0.1' means the server's localhost and internal IPs are reachable if the server can reach them. Auto-assigns local_port if set to 0. Client auto-reconnects with exponential backoff on disconnection. Note: chisel's --proxy flag (route client traffic through an HTTP CONNECT proxy to reach the chisel server) is not exposed — use bash for proxy-chained scenarios."
+    when_to_use: "(1) To access a service on the chisel server's localhost (e.g., MySQL 3306, web app 8080) from the attacker machine. (2) To reach internal network services that the chisel server can access but the attacker cannot directly. (3) When SSH port forwarding is blocked but HTTP is open. (4) After running 'server' method — connect a forward tunnel to it. (5) Use local_port=0 for auto-assignment when the specific port doesn't matter."
+    required_ports: []
+    params:
+      server_url:
+        type: string
+        required: true
+        description: "Chisel server URL (e.g., 'http://10.10.16.24:8080'). Must be a running chisel server."
+      local_port:
+        type: integer
+        default: 0
+        description: "Local port to listen on (0 = auto-assign)."
+      remote_host:
+        type: string
+        default: "127.0.0.1"
+        description: "Remote host from server's perspective. '127.0.0.1' = server localhost. Set to internal IP for pivoting."
+      remote_port:
+        type: integer
+        required: true
+        description: "Remote port to forward to."
+      auth:
+        type: string
+        description: "Auth 'user:pass' matching server."
+      fingerprint:
+        type: string
+        description: "Server fingerprint for MITM verification."
+      max_retry_count:
+        type: integer
+        default: 3
+        description: "Max reconnection attempts. Chisel's default is unlimited retries, but this is capped to 3 to prevent infinite hangs in MCP context. Set to 0 for unlimited."
+      verbose:
+        type: boolean
+        default: false
+        description: "Verbose logging."
+    returns:
+      id:
+        type: string
+        description: "Tunnel ID for list and close."
+      local_port:
+        type: integer
+        description: "Local port the tunnel listens on."
+      connect_to:
+        type: string
+        description: "Address to connect to (e.g., '127.0.0.1:9999')."
+      mapping:
+        type: string
+        description: "Chisel remote spec (e.g., '9999:127.0.0.1:3306')."
+
+  client_reverse:
+    description: "Create a reverse tunnel — the chisel SERVER listens on a port and forwards incoming traffic through the tunnel to the CLIENT's local service. Runs `chisel client <server_url> R:<remote_port>:<local_host>:<local_port>` as a background process. Traffic flow: server:remote_port → HTTP/WebSocket → chisel client → local_host:local_port. The chisel server must have --reverse enabled. Useful for exposing a compromised host's local service back to the attacker through HTTP. Note: chisel's --proxy flag (route client traffic through an HTTP CONNECT proxy to reach the chisel server) is not exposed — use bash for proxy-chained scenarios."
+    when_to_use: "(1) To expose a service running on the compromised host (e.g., a reverse shell listener) back to the attacker via the chisel server. (2) When the compromised host can reach the chisel server over HTTP but the attacker can't reach the compromised host directly. (3) For callback channels that traverse firewalls — outbound HTTP from target → chisel server → reverse tunnel back to target's local service. (4) Use with R:2222:localhost:22 to get SSH access to a host that only has outbound HTTP."
+    required_ports: []
+    params:
+      server_url:
+        type: string
+        required: true
+        description: "Chisel server URL. Server must have --reverse enabled."
+      remote_port:
+        type: integer
+        required: true
+        description: "Port the SERVER will listen on. Incoming connections here are tunneled to the client."
+      local_host:
+        type: string
+        default: "127.0.0.1"
+        description: "Local host to forward to (client-side). Default: client's localhost."
+      local_port:
+        type: integer
+        required: true
+        description: "Local port on the client side. Traffic from server:remote_port reaches this port."
+      auth:
+        type: string
+        description: "Auth 'user:pass' matching server."
+      fingerprint:
+        type: string
+        description: "Server fingerprint."
+      max_retry_count:
+        type: integer
+        default: 3
+        description: "Max reconnection attempts. Chisel's default is unlimited retries, but this is capped to 3 to prevent infinite hangs in MCP context. Set to 0 for unlimited."
+      verbose:
+        type: boolean
+        default: false
+        description: "Verbose logging."
+    returns:
+      id:
+        type: string
+        description: "Tunnel ID."
+      remote_port:
+        type: integer
+        description: "Port the server is listening on."
+      server_listens_on:
+        type: string
+        description: "Server-side listener address (e.g., '0.0.0.0:2222')."
+      mapping:
+        type: string
+        description: "Chisel remote spec (e.g., 'R:2222:127.0.0.1:22')."
+
+  client_socks:
+    description: "Create a SOCKS5 proxy through a chisel server — all traffic sent through the local SOCKS port is tunneled over HTTP to the chisel server and exits from the server's network. Runs `chisel client <server_url> <socks_port>:socks` as a background process. The chisel server must have --socks5 enabled. Use the returned proxy_url with proxychains or tool-specific SOCKS settings to route traffic through the server's network. Enables full network pivoting — any tool that supports SOCKS5 can reach any host the chisel server can reach. Note: chisel's --proxy flag (route client traffic through an HTTP CONNECT proxy to reach the chisel server) is not exposed — use bash for proxy-chained scenarios."
+    when_to_use: "(1) When you need to reach multiple services on an internal network through a compromised host over HTTP. (2) Instead of creating individual forward tunnels — one SOCKS proxy handles all destinations. (3) For network scanning through the tunnel — set up SOCKS then use nmap with proxychains. (4) When SSH is blocked but HTTP is open and you need SOCKS-style pivoting. (5) Default port 1080 — configure proxychains to use socks5://127.0.0.1:1080."
+    required_ports: []
+    params:
+      server_url:
+        type: string
+        required: true
+        description: "Chisel server URL. Server must have --socks5 enabled."
+      socks_port:
+        type: integer
+        default: 1080
+        description: "Local port for the SOCKS5 proxy."
+      auth:
+        type: string
+        description: "Auth 'user:pass' matching server."
+      fingerprint:
+        type: string
+        description: "Server fingerprint."
+      max_retry_count:
+        type: integer
+        default: 3
+        description: "Max reconnection attempts. Chisel's default is unlimited retries, but this is capped to 3 to prevent infinite hangs in MCP context. Set to 0 for unlimited."
+      verbose:
+        type: boolean
+        default: false
+        description: "Verbose logging."
+    returns:
+      id:
+        type: string
+        description: "Tunnel ID."
+      socks_port:
+        type: integer
+        description: "Local SOCKS5 proxy port."
+      proxy_url:
+        type: string
+        description: "SOCKS5 proxy URL (e.g., 'socks5://127.0.0.1:1080'). Use in proxychains or tool configs."
+
+  list:
+    description: "List all active chisel servers and client tunnels with their type, ports, mappings, and process status. Automatically prunes dead processes from the tracking list."
+    when_to_use: "To check which chisel processes are running, verify tunnel status, find local ports or process IDs."
+    required_ports: []
+    params: {}
+    returns:
+      processes:
+        type: array
+        description: "Array of active process objects. Each has: id, type (server/forward/reverse/socks), ports, mappings, status."
+      count:
+        type: integer
+        description: "Number of active processes."
+
+  close:
+    description: "Close a specific chisel server or client tunnel by its process ID. Sends SIGTERM then SIGKILL after 5 seconds if needed. Frees the ports used by the process."
+    when_to_use: "When a specific tunnel or server is no longer needed. Free ports for reuse."
+    required_ports: []
+    params:
+      id:
+        type: string
+        required: true
+        description: "Process ID to close (from list output, e.g., 'server-1', 'fwd-2')."
+    returns:
+      id:
+        type: string
+        description: "ID of the closed process."
+      type:
+        type: string
+        description: "Type of the closed process (server/forward/reverse/socks)."
+      status:
+        type: string
+        description: "Always 'closed'."

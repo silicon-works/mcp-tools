@@ -1,0 +1,220 @@
+name: responder
+version: "3.2.2.0"
+description: "LLMNR/NBT-NS/MDNS poisoning and NTLMv2 hash capture via Responder v3.2.2 (lgandx/Responder, Kali apt package responder). Three methods: poison, analyze, capture_smb. Poisons broadcast name resolution protocols (LLMNR port 5355, NBT-NS port 137, MDNS port 5353) to redirect authentication to rogue servers, capturing NTLMv2/NTLMv1 hashes in hashcat-compatible format (mode 5600/5500). Runs 18 rogue servers simultaneously: SMB, HTTP, HTTPS, DNS, LDAP, FTP, POP, SMTP, IMAP, MSSQL, RDP, WinRM, Kerberos, DCERPC, SNMP, MQTT, MYSQL, QUIC. Analyze mode (-A) passively observes traffic without poisoning. capture_smb disables all poisoners and servers except SMB for SSRF-triggered hash capture. Duration-bounded execution — runs for a fixed number of seconds then terminates and returns parsed results. Hash output parsed from SQLite database (Responder.db) with fallback to log file parsing. Captured hashes are hashcat-ready: NTLMv2 → mode 5600, NTLMv1 → mode 5500, AS-REP → mode 7500. Requires privileged mode and host networking for raw socket access and broadcast/multicast visibility."
+image: "ghcr.io/silicon-works/mcp-tools-responder:latest"
+image_size_mb: 250
+timeout_seconds: 600
+
+capabilities:
+  - hash_capture
+  - llmnr_poisoning
+  - nbtns_poisoning
+  - mdns_poisoning
+
+routing:
+  use_for:
+    - "capture NTLMv2 hashes via LLMNR/NBT-NS/MDNS poisoning on the local network"
+    - "poison broadcast name resolution to intercept Windows authentication requests"
+    - "set up SMB listener to capture hashes from SSRF or forced authentication attacks"
+    - "passively analyze broadcast protocol activity on a network segment without poisoning"
+    - "capture NetNTLMv2 hashes for offline cracking with hashcat or john"
+    - "perform LLMNR poisoning to obtain domain user credentials on an internal network"
+    - "capture NTLMv1 hashes with LM downgrade for easier offline cracking"
+    - "run rogue WPAD proxy to capture browser proxy authentication"
+    - "capture cleartext credentials via HTTP Basic auth downgrade"
+    - "set up hash capture listener for coerced authentication attacks (PetitPotam, PrinterBug, DFSCoerce)"
+    - "force proxy authentication on all HTTP clients with -P (ProxyAuth) to capture NTLMv2 hashes"
+    - "poison IPv6 name resolution via DHCPv6 or RDNSS Router Advertisement on dual-stack networks"
+    - "capture WebDAV authentication by returning STATUS_LOGON_FAILURE with -E (ErrorCode)"
+  never_use_for:
+    - "NTLM relay attacks (use impacket.ntlmrelayx — Responder captures hashes, ntlmrelayx relays them)"
+    - "password cracking (use john or hashcat — Responder captures hashes, cracking tools crack them)"
+    - "port scanning (use nmap — Responder is a listener, not a scanner)"
+    - "credential spraying (use kerbrute — Responder is passive capture, not active authentication)"
+    - "SMB enumeration (use netexec — Responder runs rogue servers, not SMB client queries)"
+    - "ARP poisoning (use bettercap/ettercap — Responder poisons name resolution, not ARP)"
+  triggers:
+    - "responder"
+    - "LLMNR"
+    - "NBT-NS"
+    - "MDNS poisoning"
+    - "hash capture"
+    - "NTLMv2 capture"
+    - "NetNTLM"
+    - "WPAD"
+    - "broadcast poisoning"
+    - "SMB capture"
+    - "forced authentication"
+
+phases:
+  - exploitation
+
+requirements:
+  network: true
+  privileged: true
+  privileged_reason: "Requires raw sockets (NET_RAW) for LLMNR/NBT-NS/MDNS poisoning, network admin (NET_ADMIN) for multicast group membership, and privileged ports (<1024) for rogue servers. Must run with --network=host for Layer 2 broadcast/multicast visibility."
+
+resources:
+  memory_mb: 256
+  cpu: 0.5
+
+see_also:
+  - tool: john
+    reason: "Crack captured NTLMv2 hashes (hashcat mode 5600) or NTLMv1 hashes (mode 5500) after Responder captures them"
+  - tool: impacket
+    reason: "Use ntlmrelayx to relay captured authentication instead of cracking, or use secretsdump with cracked credentials"
+  - tool: netexec
+    reason: "Validate cracked credentials across SMB, WinRM, LDAP, MSSQL after obtaining them via Responder"
+  - tool: hashcat
+    reason: "Responder captures NTLMv2 hashes in hashcat mode 5600 format. Use hashcat for GPU-accelerated cracking of captured hashes, especially with combinator or hybrid attacks."
+  - tool: bloodhound
+    reason: "After obtaining valid credentials via hash cracking, collect AD relationship data for attack path analysis"
+
+methods:
+  poison:
+    description: "Run Responder in full poisoning mode — responds to LLMNR (port 5355), NBT-NS (port 137), and MDNS (port 5353) broadcast queries with attacker's IP, causing clients to authenticate to rogue servers. Runs for exactly `duration` seconds then terminates. After termination, parses captured hashes from Responder's SQLite database (Responder.db) with fallback to log file parsing (logs/*-NTLMv*.txt). Captured hashes are in hashcat-compatible format: NTLMv2 as `username::DOMAIN:challenge:ntproofstr:blob` (mode 5600), NTLMv1 as `username::DOMAIN:lmresponse:ntresponse:challenge` (mode 5500). Copies hash files and DB to /session/responder/ for persistence. Supports WPAD poisoning (-w), HTTP Basic auth downgrade (-b), LM hash downgrade (--lm), NTLMv1 downgrade (--disable-ess), DHCPv4 poisoning (-d), DHCPv6 poisoning (--dhcpv6), RDNSS Router Advertisement poisoning (--rdnss), forced proxy authentication (-P), custom external IPv4 (-e) and IPv6 (-6), custom TTL for poisoned answers (-t), and WebDAV auth capture via STATUS_LOGON_FAILURE (-E). Interface auto-detected via `ip -j addr` if not specified."
+    when_to_use: "(1) After gaining access to an internal network segment (via VPN, pivot, or initial foothold) — poison LLMNR/NBT-NS to capture credentials from Windows clients resolving non-existent hostnames. (2) When a Windows client tries to resolve a hostname that DNS doesn't know — LLMNR/NBT-NS fallback broadcasts the query, and Responder answers with attacker IP. (3) To capture domain user NTLMv2 hashes for offline cracking with john or hashcat. (4) Combined with WPAD poisoning (-w) to capture browser proxy authentication from all clients on the segment. (5) Use --disable-ess to force NTLMv1 downgrade for easier cracking (hashcat mode 5500 is faster than 5600). (6) After capturing hashes, crack with john/hashcat, then use credentials with bloodhound, netexec, or impacket for further AD enumeration."
+    required_ports: []
+    params:
+      interface:
+        type: string
+        description: "Network interface to listen on (e.g., 'eth0', 'tun0'). If omitted, auto-detects the first non-loopback interface with an IPv4 address. Use the interface on the target network segment."
+      duration:
+        type: integer
+        required: true
+        description: "How long to run Responder in seconds. Minimum 5 seconds. Use 60-300s for network poisoning (need time for clients to make broadcast queries). Use 15-30s for SSRF capture where the trigger is immediate."
+      verbose:
+        type: boolean
+        default: true
+        description: "Enable verbose output (-v). Shows poisoning activity and captured hash details."
+      wpad:
+        type: boolean
+        default: false
+        description: "Start rogue WPAD proxy server (-w). Captures HTTP proxy authentication from browsers that auto-detect proxy settings."
+      force_wpad_auth:
+        type: boolean
+        default: false
+        description: "Force NTLM/Basic auth on wpad.dat retrieval (-F). More aggressive — may show authentication prompt to users."
+      basic_auth:
+        type: boolean
+        default: false
+        description: "Return HTTP Basic auth instead of NTLM (-b). Captures cleartext passwords instead of hashes. Easier to use but users see a login prompt."
+      lm_downgrade:
+        type: boolean
+        default: false
+        description: "Force LM hashing downgrade (--lm). Produces weaker hashes that crack faster but only old Windows clients (XP/2003) support this."
+      disable_ess:
+        type: boolean
+        default: false
+        description: "Disable Extended Session Security (--disable-ess). Forces NTLMv1 downgrade — hashcat mode 5500 cracks much faster than NTLMv2 mode 5600."
+      dhcp:
+        type: boolean
+        default: false
+        description: "Enable DHCPv4 poisoning with WPAD injection (-d). WARNING: may disrupt DHCP on the network segment."
+      external_ip:
+        type: string
+        description: "Custom IPv4 address to poison responses with (-e). Use when Responder runs on a different host than the one clients should connect to. Defaults to the listening interface's IP."
+      external_ip6:
+        type: string
+        description: "Custom IPv6 address to poison responses with (-6). Use for IPv6-enabled networks when Responder should direct authentication to a different IPv6 address."
+      proxy_auth:
+        type: boolean
+        default: false
+        description: "Force NTLM/Basic proxy authentication on all HTTP requests (-P). Highly effective — forces clients to authenticate to the rogue proxy. Cannot be combined with wpad (-w)."
+      dhcpv6:
+        type: boolean
+        default: false
+        description: "Enable DHCPv6 poisoning (--dhcpv6). Responds to DHCPv6 Solicit messages with the attacker's DNS server. Effective on dual-stack networks where IPv6 is autoconfigured."
+      rdnss:
+        type: boolean
+        default: false
+        description: "Enable Router Advertisement RDNSS poisoning (--rdnss). Injects attacker IP as recursive DNS server via IPv6 Router Advertisements. Effective on networks with IPv6 enabled."
+      error_code:
+        type: boolean
+        default: false
+        description: "Return STATUS_LOGON_FAILURE for authentication requests (-E). Forces WebDAV clients to re-authenticate, enabling WebDAV NTLMv2 hash capture. Used when targeting WebDAV-enabled clients."
+      ttl:
+        type: integer
+        description: "Custom TTL (time-to-live) for poisoned answers (-t). Controls how long clients cache the poisoned response. Lower values mean clients re-query sooner; higher values persist longer."
+    returns:
+      captured_hashes:
+        type: array
+        description: "Array of captured hash objects. Each has: timestamp, module (SMB/HTTP/LDAP/etc.), hash_type (NTLMv2/NTLMv1/ClearText), client_ip, hostname, username, hash (hashcat-compatible full hash string). Cleartext entries also have 'cleartext' field. Empty if no authentication was captured during the duration."
+      hash_count:
+        type: integer
+        description: "Number of unique hashes captured. Zero on quiet networks."
+      interface_used:
+        type: string
+        description: "Network interface that was used (specified or auto-detected)."
+      duration_seconds:
+        type: integer
+        description: "Actual duration Responder ran for."
+      copied_files:
+        type: array
+        description: "Paths of hash files, logs, and DB copied to /session/responder/ for persistence."
+
+  analyze:
+    description: "Passive analysis mode (-A flag) — Responder listens for LLMNR/NBT-NS/MDNS broadcast queries on the network but does NOT respond to them and does NOT poison. This is safe reconnaissance that identifies what hostnames clients are trying to resolve, which protocols are active, and which clients are making requests. Output logged to Analyzer-Session.log. No rogue servers are started. No hashes are captured."
+    when_to_use: "(1) First step on an internal network — assess broadcast protocol activity before deciding whether to poison. (2) When you need to understand the attack surface without triggering any alerts. (3) To identify which hostnames are being queried (potential poisoning targets). (4) When the engagement rules prohibit active poisoning but allow passive monitoring."
+    required_ports: []
+    params:
+      interface:
+        type: string
+        description: "Network interface to listen on. Auto-detected if omitted."
+      duration:
+        type: integer
+        required: true
+        description: "How long to monitor in seconds. Use 30-120s for a quick assessment."
+      verbose:
+        type: boolean
+        default: true
+        description: "Enable verbose output."
+    returns:
+      detected_protocols:
+        type: array
+        description: "Lines from Analyzer-Session.log showing observed broadcast protocol activity. Each line contains timestamp, protocol type, queried hostname, and source IP."
+      detection_count:
+        type: integer
+        description: "Number of protocol events detected."
+      interface_used:
+        type: string
+        description: "Network interface that was monitored."
+      duration_seconds:
+        type: integer
+        description: "Duration of the monitoring period."
+
+  capture_smb:
+    description: "SMB-only hash capture mode — disables ALL poisoners (LLMNR, NBT-NS, MDNS) and ALL rogue servers except SMB. Only the SMB server (port 445) listens for incoming authentication. Designed for SSRF-triggered authentication capture: trigger a server-side request to \\\\ATTACKER_IP\\share from a web app, file inclusion, or other vulnerability, and Responder's SMB server captures the NTLMv2 hash. Also used for coerced authentication attacks (PetitPotam, PrinterBug, DFSCoerce) where the target machine is forced to authenticate to the attacker's SMB server. Modifies Responder.conf before execution to disable all protocols except SMB."
+    when_to_use: "(1) When you have an SSRF vulnerability that allows UNC path injection (\\\\attacker\\share) — set up capture_smb first, then trigger the SSRF. (2) When using PetitPotam, PrinterBug, or DFSCoerce to coerce machine authentication — run capture_smb to catch the NTLMv2 hash. (3) When you only need SMB authentication capture and want to avoid binding to other ports (prevents port conflicts and reduces noise). (4) Safer than full poison mode because no broadcast poisoning occurs."
+    required_ports: []
+    params:
+      interface:
+        type: string
+        description: "Network interface to listen on. Auto-detected if omitted."
+      duration:
+        type: integer
+        required: true
+        description: "How long to listen in seconds. Use 15-30s for SSRF capture (trigger should be immediate). Use 60s+ if waiting for coerced authentication."
+      verbose:
+        type: boolean
+        default: true
+        description: "Enable verbose output."
+    returns:
+      captured_hashes:
+        type: array
+        description: "Array of captured SMB hash objects (same format as poison method). Only SMB hashes since other protocols are disabled."
+      hash_count:
+        type: integer
+        description: "Number of SMB hashes captured."
+      interface_used:
+        type: string
+        description: "Network interface used."
+      duration_seconds:
+        type: integer
+        description: "Duration of the capture period."
+      smb_only:
+        type: boolean
+        description: "Always true for this method — confirms only SMB was enabled."
+      copied_files:
+        type: array
+        description: "Paths of hash files copied to /session/responder/."

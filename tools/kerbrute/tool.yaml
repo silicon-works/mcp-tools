@@ -1,0 +1,297 @@
+name: kerbrute
+version: "1.0.3"
+description: "Kerberos username enumeration and password spraying tool — kerbrute v1.0.3 (ropnop/kerbrute, Go binary). Four methods: userenum, passwordspray, bruteforce, bruteuser. Discovers valid Active Directory usernames by sending AS-REQ packets to port 88 and analyzing KDC error codes — KDC_ERR_C_PRINCIPAL_UNKNOWN means the user does not exist, KDC_ERR_PREAUTH_REQUIRED means the user IS valid (pre-authentication needed), KDC_ERR_CLIENT_REVOKED means the account is locked or disabled. Does NOT require any credentials for username enumeration (unlike LDAP-based enumeration which needs a bind account). Supports multi-threaded operation (default 10 threads, configurable via --threads), rate-limiting via --delay, and --safe mode that aborts on first lockout detection. WARNING from kerbrute: failed Kerberos pre-auth counts as a failed login and WILL lock out accounts — use --safe and --delay in production environments. Operates entirely over Kerberos (port 88) — does not touch SMB (445), LDAP (389), or RPC (135). For Kerberoasting or AS-REP roasting after finding valid users, use impacket instead."
+image: "ghcr.io/silicon-works/mcp-tools-kerbrute:latest"
+image_size_mb: 194
+timeout_seconds: 300
+
+capabilities:
+  - username_enumeration
+  - password_spraying
+  - kerberos_authentication
+
+routing:
+  use_for:
+    - "enumerate valid Active Directory usernames without credentials"
+    - "discover valid domain users via Kerberos AS-REQ responses on port 88"
+    - "spray a single password against multiple AD users to find valid logins"
+    - "test username:password combinations against a Kerberos KDC"
+    - "find valid accounts on a domain controller before further AD attacks"
+    - "pre-authentication username enumeration without touching SMB or LDAP"
+    - "brute-force a single Active Directory user's password from a wordlist"
+    - "check which usernames exist in an AD domain without any credentials"
+    - "password spraying attack against Windows domain with lockout awareness"
+    - "validate a list of potential usernames against a domain controller"
+    - "try each username as its own password across the domain (user-as-pass spray)"
+  never_use_for:
+    - "kerberoasting (use impacket.kerberoast — kerbrute does not request TGS tickets, it only does pre-auth)"
+    - "AS-REP roasting (use impacket.asreproast — kerbrute does not check for accounts with DONT_REQUIRE_PREAUTH)"
+    - "LDAP user enumeration (use impacket.get_ad_users or netexec — requires valid bind creds but returns richer data)"
+    - "SMB brute-force (use hydra — kerbrute only speaks Kerberos on port 88)"
+    - "online web login brute-force (use hydra)"
+    - "hash cracking offline (use john or hashcat)"
+    - "RDP brute-force (use hydra)"
+  triggers:
+    - "kerbrute"
+    - "kerberos enum"
+    - "kerberos brute"
+    - "username enumeration"
+    - "password spray"
+    - "AD user enum"
+    - "port 88"
+    - "domain user discovery"
+    - "bruteuser"
+    - "user-as-pass"
+
+phases:
+  - enumeration
+
+requirements:
+  network: true
+  privileged: false
+
+resources:
+  memory_mb: 128
+  cpu: 0.5
+
+see_also:
+  - tool: impacket
+    reason: "After finding valid users with kerbrute, use impacket for kerberoasting (GetUserSPNs), AS-REP roasting (GetNPUsers), or secretsdump"
+  - tool: bloodhound
+    reason: "After confirming valid creds via password spray, collect AD relationships with bloodhound"
+  - tool: netexec
+    reason: "Validate found credentials across multiple protocols (SMB, WinRM, LDAP, MSSQL)"
+  - tool: hydra
+    reason: "For non-Kerberos brute-force — SMB, RDP, SSH, HTTP, FTP, etc."
+  - tool: enum4linux-ng
+    reason: "Use enum4linux-ng for SMB/RPC-based user enumeration when you have credentials or null sessions. Kerbrute discovers users without credentials via Kerberos."
+
+methods:
+  userenum:
+    description: "Enumerate valid AD usernames by sending Kerberos AS-REQ packets to the domain controller on port 88. For each username, kerbrute sends a pre-authentication request and classifies the KDC response: KDC_ERR_C_PRINCIPAL_UNKNOWN means the user does not exist, KDC_ERR_PREAUTH_REQUIRED means the user IS valid (pre-auth needed), and KDC_ERR_CLIENT_REVOKED means the account is locked/disabled. No credentials required — this is unauthenticated enumeration. Internally: writes usernames to a temp file, runs `kerbrute userenum --dc <dc> -d <domain> -v -t <threads> [--delay <ms>] [--safe] <file>`, parses stdout for `[+] VALID USERNAME:` lines, cleans up temp file."
+    when_to_use: "(1) First step in AD enumeration when you have no credentials — test common usernames (administrator, guest, krbtgt, svc-*, admin) against the DC. (2) After discovering a domain name from DNS, SMB, or LDAP, validate a custom wordlist of potential users. (3) Before password spraying — enumerate valid users first to avoid wasting spray attempts on nonexistent accounts and triggering lockouts. (4) When LDAP anonymous bind is disabled and you cannot use impacket.get_ad_users or netexec --users. (5) Output valid_users list feeds directly into passwordspray or impacket.asreproast."
+    required_ports: [88]
+    params:
+      dc:
+        type: string
+        required: true
+        description: "IP address of the domain controller (must have port 88/Kerberos open). Use the DC IP from nmap service scan — look for 'kerberos-sec' on port 88. Examples: '10.10.10.100', '192.168.1.1'."
+      domain:
+        type: string
+        required: true
+        description: "Full AD domain name, used as the Kerberos realm (automatically uppercased internally). Case-insensitive. Examples: 'corp.local', 'megabank.local', 'htb.local'. Found via: nmap LDAP scripts, SMB null session, DNS SRV records, or ldapsearch."
+      usernames:
+        type: string
+        required: true
+        description: "Newline-separated list of usernames to test (bare names without @domain suffix). Common starter list: 'administrator\\nguest\\nkrbtgt\\nadmin\\nservice\\nsql_svc\\nweb_svc\\nbackup'. For larger enumeration, use SecLists xato-net-10-million-usernames or custom wordlists. Each username is tested individually via AS-REQ."
+      threads:
+        type: integer
+        default: 10
+        description: "Number of concurrent goroutines (kerbrute default: 10). Reduce to 1-2 for stealth or if lockout policies are aggressive. Ignored when delay is set (forces single-thread)."
+      delay:
+        type: integer
+        description: "Delay in milliseconds between each attempt. When set, forces single-threaded mode regardless of threads value. Use 500-1000ms to avoid detection by SIEM, or longer if lockout threshold is tight. Omit for maximum speed."
+      safe:
+        type: boolean
+        default: false
+        description: "Safe mode (--safe flag) — abort immediately if any account comes back as locked out. Prevents cascading lockouts across the domain. Recommended when lockout policy is unknown."
+      timeout:
+        type: integer
+        default: 120
+        description: "Maximum execution time in seconds. 120s handles ~10K usernames at default speed. Increase for large lists or when using delay."
+    returns:
+      valid_users:
+        type: array
+        description: "Usernames confirmed valid by KDC (received KDC_ERR_PREAUTH_REQUIRED response). Each element is a bare username string without domain suffix (e.g., 'administrator', 'svc-sql'). Feed these into passwordspray or impacket.asreproast."
+      valid_count:
+        type: integer
+        description: "Number of valid usernames found"
+      invalid_users:
+        type: array
+        description: "Usernames confirmed invalid by KDC (received 'User does not exist' response). Useful for narrowing down wordlists."
+      locked_users:
+        type: array
+        description: "Accounts flagged as locked/disabled by KDC ('USER LOCKED OUT' response, possibly with 'safe mode on! Aborting...'). These accounts exist but should NOT be sprayed — they would trigger immediate lockout alerts."
+      locked_count:
+        type: integer
+        description: "Number of locked accounts detected"
+      total_tested:
+        type: integer
+        description: "Total usernames tested (parsed from kerbrute's 'Done! Tested N usernames' summary line, falls back to input line count)"
+      errors:
+        type: array
+        description: "Network or KDC errors encountered during enumeration. Null when no errors occurred. Common: 'Can\\'t talk to KDC' (DC unreachable), 'KDC ERROR - Wrong Realm' (wrong domain name), encoding errors (port 88 open but not Kerberos)."
+
+  passwordspray:
+    description: "Test a single password against multiple usernames via Kerberos AS-REQ pre-authentication. Sends one authentication attempt per user, which is safer than brute-forcing a single account (avoids rapid-fire attempts that trigger lockout). The KDC response distinguishes: valid login (AS-REP with TGT), invalid password (KDC_ERR_PREAUTH_FAILED), and locked account (KDC_ERR_CLIENT_REVOKED). Supports --user-as-pass mode which also tries each username as its own password. Internally: writes usernames to temp file, runs `kerbrute passwordspray --dc <dc> -d <domain> -v [--user-as-pass] [--safe] <file> <password>`, parses `[+] VALID LOGIN:` lines."
+    when_to_use: "(1) After userenum returns valid_users — spray the most common passwords (Season+Year like 'Winter2025!', 'CompanyName1!', 'Password1') against all confirmed users. (2) When you suspect a default or shared password across the domain. (3) Safer than bruteforce/bruteuser for avoiding account lockout — one attempt per user per spray round. (4) Run multiple spray rounds with different passwords (wait between rounds to respect lockout policies — typically 30 min). (5) Use user_as_pass=true to check for trivially weak accounts. (6) Valid logins can be used immediately with impacket, evil-winrm, or bloodhound."
+    required_ports: [88]
+    params:
+      dc:
+        type: string
+        required: true
+        description: "Domain controller IP address (port 88 must be open)."
+      domain:
+        type: string
+        required: true
+        description: "Full AD domain name (e.g., 'corp.local')."
+      usernames:
+        type: string
+        required: true
+        description: "Newline-separated usernames to spray. Best practice: use the valid_users output from a prior userenum call to avoid testing nonexistent accounts and wasting lockout budget."
+      password:
+        type: string
+        required: true
+        description: "Single password to test against all users. Common spray candidates for HTB: 'Password1', 'Welcome1', '<Season><Year>!' (e.g., 'Spring2026!'), '<CompanyName>1!', 'Changeme1'. Only ONE password per spray call — run multiple calls for multiple passwords with appropriate delays."
+      user_as_pass:
+        type: boolean
+        default: false
+        description: "Also try each username as its own password (kerbrute --user-as-pass flag). Catches accounts where password equals username (surprisingly common in enterprise). Works alongside the password argument — both the specified password and user-as-pass are tried."
+      threads:
+        type: integer
+        default: 10
+        description: "Concurrent threads. Reduce for stealth. Ignored when delay is set."
+      delay:
+        type: integer
+        description: "Delay in milliseconds between each attempt. Forces single-threaded. Use to space out attempts and avoid lockout."
+      safe:
+        type: boolean
+        default: false
+        description: "Abort immediately if any account is locked. Recommended for password spraying."
+      timeout:
+        type: integer
+        default: 120
+        description: "Maximum execution time in seconds."
+    returns:
+      valid_logins:
+        type: array
+        description: "Successful authentications. Each entry: {username: 'user', password: 'pass'}. Empty array if no valid logins found. Feed valid creds to impacket, evil-winrm, or bloodhound."
+      valid_count:
+        type: integer
+        description: "Number of valid logins found"
+      failed_count:
+        type: integer
+        description: "Number of failed authentication attempts (verbose [-] lines)"
+      locked_users:
+        type: array
+        description: "Accounts that returned locked/disabled status during spray. Stop spraying these."
+      total_tested:
+        type: integer
+        description: "Total authentication attempts (parsed from 'Done! Tested N logins' line)"
+      password_tested:
+        type: string
+        description: "The password that was sprayed, or '(user-as-pass)' if only user_as_pass was used"
+      errors:
+        type: array
+        description: "Network/KDC errors. Null when no errors. 'Can\\'t talk to KDC' means DC unreachable."
+
+  bruteforce:
+    description: "Test specific username:password combinations via Kerberos AS-REQ. Unlike passwordspray (one password across many users), bruteforce accepts explicit user:pass pairs — each line in the combo list is an independent authentication attempt. Useful when you have credential dumps, leaked passwords, or targeted guesses for specific accounts. WARNING: multiple attempts against the same user WILL count toward lockout. Internally: writes combos to temp file, runs `kerbrute bruteforce --dc <dc> -d <domain> -v [--safe] <file>`, parses `[+] VALID LOGIN:` lines."
+    when_to_use: "(1) When you have specific username:password guesses from OSINT, credential dumps, or password reuse patterns. (2) Testing credentials found in config files, scripts, or documentation against AD. (3) When you need to verify multiple different passwords for different users simultaneously. (4) After finding passwords in a database dump — test them against AD accounts for password reuse."
+    required_ports: [88]
+    params:
+      dc:
+        type: string
+        required: true
+        description: "Domain controller IP address (port 88)."
+      domain:
+        type: string
+        required: true
+        description: "Full AD domain name."
+      combos:
+        type: string
+        required: true
+        description: "Newline-separated username:password pairs. Format: 'user1:pass1\\nuser2:pass2\\nadmin:Password1'. Each line is one authentication attempt. WARNING: if same username appears multiple times, each counts toward that account's lockout threshold."
+      threads:
+        type: integer
+        default: 10
+        description: "Concurrent threads. Reduce for stealth."
+      delay:
+        type: integer
+        description: "Delay in ms between attempts. Forces single-threaded."
+      safe:
+        type: boolean
+        default: false
+        description: "Abort on first lockout detection."
+      timeout:
+        type: integer
+        default: 120
+        description: "Maximum execution time in seconds."
+    returns:
+      valid_logins:
+        type: array
+        description: "Successful pairs. Each entry: {username: 'user', password: 'pass'}."
+      valid_count:
+        type: integer
+        description: "Number of valid logins found"
+      failed_count:
+        type: integer
+        description: "Number of failed attempts"
+      locked_users:
+        type: array
+        description: "Accounts that returned locked/disabled status"
+      total_tested:
+        type: integer
+        description: "Total combinations tested"
+      errors:
+        type: array
+        description: "Network/KDC errors. Null when none."
+
+  bruteuser:
+    description: "Brute-force a single user's password from a wordlist via Kerberos pre-authentication. Tests every password in the list against one specific account. WARNING from kerbrute: 'only run this if there\\'s no lockout policy!' — each failed attempt counts toward that account's lockout threshold. Internally: writes passwords to temp file, runs `kerbrute bruteuser --dc <dc> -d <domain> -v [--safe] <file> <username>`, parses `[+] VALID LOGIN:` lines."
+    when_to_use: "(1) When you have a known high-value username (e.g., 'administrator', 'svc-sql') and want to try a wordlist against it. (2) When lockout policy is confirmed as disabled or very lenient (e.g., 100+ attempts). (3) After userenum found valid users and password spray failed — escalate to targeted brute-force. (4) DANGEROUS: use --safe and --delay to minimize lockout risk. Prefer passwordspray (one password, many users) when lockout policy is in effect."
+    required_ports: [88]
+    params:
+      dc:
+        type: string
+        required: true
+        description: "Domain controller IP address (port 88)."
+      domain:
+        type: string
+        required: true
+        description: "Full AD domain name."
+      username:
+        type: string
+        required: true
+        description: "Single username to brute-force (without @domain). Example: 'administrator', 'svc-sql'."
+      passwords:
+        type: string
+        required: true
+        description: "Newline-separated list of passwords to try against the user. Common wordlists: rockyou top-1000, common enterprise passwords. Example: 'Password1\\nWelcome1\\nAdmin123\\nChangeme1'."
+      threads:
+        type: integer
+        default: 10
+        description: "Concurrent threads. Reduce to 1 with delay for safety."
+      delay:
+        type: integer
+        description: "Delay in ms between attempts. Highly recommended for bruteuser to avoid lockout."
+      safe:
+        type: boolean
+        default: false
+        description: "Abort if account becomes locked. STRONGLY recommended for bruteuser."
+      timeout:
+        type: integer
+        default: 120
+        description: "Maximum execution time in seconds."
+    returns:
+      valid_logins:
+        type: array
+        description: "Successful login if found. Entry: {username: '<target>', password: '<found_pass>'}. Empty if no password worked."
+      valid_count:
+        type: integer
+        description: "1 if password found, 0 if not"
+      failed_count:
+        type: integer
+        description: "Number of failed password attempts"
+      locked_users:
+        type: array
+        description: "Contains the target username if it became locked during brute-force"
+      total_tested:
+        type: integer
+        description: "Total passwords tested"
+      target_user:
+        type: string
+        description: "The username that was brute-forced"
+      errors:
+        type: array
+        description: "Network/KDC errors. Null when none."

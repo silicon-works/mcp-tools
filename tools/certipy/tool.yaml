@@ -1,0 +1,516 @@
+name: certipy
+version: "5.0.4"
+description: "Active Directory Certificate Services (AD CS) enumeration and exploitation via Certipy v5.0.4 (ly4k/Certipy, pip certipy-ad). Certipy has 11 subcommands total, but this MCP server exposes 6 methods: find, request, authenticate, shadow, forge, template. The ca, account, cert, parse, and relay subcommands exist in certipy but are not yet wrapped as MCP methods. Discovers Certificate Authorities and certificate templates, identifies ESC1 through ESC16 vulnerability classifications, requests certificates with attacker-controlled Subject Alternative Names (ESC1), performs enrollment agent abuse (ESC3), exploits template write access (ESC4), forges Golden Certificates from compromised CA keys (ESC5), authenticates via PKINIT to obtain TGTs and NT hashes, and manipulates Shadow Credentials (msDS-KeyCredentialLink) for account takeover. Outputs PFX certificates, ccache/kirbi Kerberos tickets, and JSON enumeration reports to /session/certipy/. Authentication supports password, NTLM hash (pass-the-hash), Kerberos ccache, and AES keys. Username format is user@domain (NOT domain/user). All output files use unique prefixes to avoid certipy's interactive overwrite prompt. For NTLM relay to AD CS endpoints (ESC8/ESC11), use impacket.ntlmrelayx instead — certipy's relay subcommand is not exposed as an MCP method because it requires long-running listener mode with external coercion."
+image: "ghcr.io/silicon-works/mcp-tools-certipy:latest"
+image_size_mb: 721
+timeout_seconds: 600
+
+capabilities:
+  - adcs_enumeration
+  - certificate_request
+  - pkinit_authentication
+  - shadow_credentials
+  - golden_certificate
+  - template_manipulation
+  - esc1_exploitation
+  - esc3_exploitation
+  - esc4_exploitation
+  - esc5_exploitation
+
+routing:
+  use_for:
+    - "enumerate AD Certificate Services to find vulnerable certificate templates (ESC1-ESC16)"
+    - "request a certificate with an attacker-controlled UPN to impersonate domain admin (ESC1)"
+    - "authenticate to Active Directory using a PFX certificate via PKINIT to get a TGT and NT hash"
+    - "exploit Shadow Credentials by adding a key credential to a target account's msDS-KeyCredentialLink"
+    - "forge a Golden Certificate using a compromised CA private key for persistent domain access (ESC5)"
+    - "save and modify certificate template configurations to make them vulnerable (ESC4 exploitation)"
+    - "use enrollment agent certificates to request certs on behalf of other users (ESC3)"
+    - "identify which certificate templates allow enrollee-supplied SANs for user impersonation"
+    - "perform PKINIT authentication with a PFX to obtain Kerberos ccache and NT hash for pass-the-hash"
+    - "check if AD CS Web Enrollment or RPC enrollment interfaces are exposed for relay attacks"
+    - "exploit ESC7 by adding CA officer, enabling SubCA template, and approving pending requests"
+    - "convert a certificate-based authentication into an NT hash for use with other AD tools"
+    - "enumerate Certificate Authorities and their security settings in an Active Directory forest"
+    - "create a backup of certificate template configuration before modifying it for exploitation"
+  never_use_for:
+    - "NTLM relay to AD CS HTTP/RPC endpoints (use impacket.ntlmrelayx — certipy relay requires interactive long-running listener with external coercion trigger)"
+    - "Kerberoasting or AS-REP roasting (use impacket — certipy handles certificates, not service ticket attacks)"
+    - "LDAP enumeration without ADCS (use bloodhound or netexec — certipy only queries ADCS objects)"
+    - "password spraying or brute-force (use kerbrute — certipy requires valid credentials)"
+    - "cracking NT hashes obtained from PKINIT auth (use john or hashcat — certipy extracts hashes, cracking tools crack them)"
+    - "BloodHound data collection (use bloodhound — certipy v5 removed BloodHound zip output)"
+    - "coercing authentication for relay attacks (use PetitPotam/PrinterBug/Coercer — certipy is the relay receiver, not the coercion trigger)"
+    - "CA management, account creation, cert conversion, or certificate parsing (not yet implemented as MCP methods — use certipy directly via bash)"
+  triggers:
+    - "certipy"
+    - "ADCS"
+    - "AD CS"
+    - "certificate services"
+    - "ESC1"
+    - "ESC4"
+    - "ESC7"
+    - "ESC8"
+    - "shadow credentials"
+    - "golden certificate"
+    - "PKINIT"
+    - "certificate template"
+    - "PFX"
+    - "enrollment agent"
+
+phases:
+  - enumeration
+  - exploitation
+
+requirements:
+  network: true
+  privileged: false
+
+resources:
+  memory_mb: 512
+  cpu: 0.5
+
+see_also:
+  - tool: impacket
+    reason: "Use ntlmrelayx for ESC8/ESC11 relay attacks, secretsdump with obtained NT hashes, or getTGT with obtained ccache files"
+  - tool: bloodhound
+    reason: "Collect AD relationship data to identify which users can enroll in vulnerable templates (enrollment permissions)"
+  - tool: netexec
+    reason: "Validate NT hashes obtained from PKINIT authentication across SMB, WinRM, LDAP, MSSQL"
+  - tool: john
+    reason: "Crack NT hashes if obtained via PKINIT authentication (hashcat mode 1000)"
+  - tool: kerbrute
+    reason: "Enumerate valid AD usernames before attempting certipy operations that require credentials"
+  - tool: responder
+    reason: "Capture NTLMv2 hashes via poisoning, then crack to obtain credentials for certipy authentication"
+  - tool: hashcat
+    reason: "Certipy authenticate extracts NT hashes (hashcat mode 1000). Use hashcat for cracking NTLM hashes, especially with mask or hybrid attacks."
+
+methods:
+  find:
+    description: "Enumerate AD Certificate Services — discovers all Certificate Authorities, certificate templates, and their security configurations. Identifies ESC1 through ESC16 vulnerabilities by analyzing template permissions (enrollment rights, write access), EKU settings (Any Purpose, Certificate Request Agent), SAN configuration (enrollee-supplied subject), CA flags (EDITF_ATTRIBUTESUBJECTALTNAME2, IF_ENFORCEENCRYPTICERTREQUEST), and issuance policies. Runs `certipy find -username <user@domain> -dc-ip <ip> -json -text` with unique output prefix. Produces two output files: JSON (machine-parseable with CA and template details) and TXT (human-readable summary). JSON structure: `{\"Certificate Authorities\": {\"0\": {\"CA Name\": ..., \"Vulnerabilities\": {\"ESC8\": ...}}}, \"Certificate Templates\": {\"0\": {\"Template Name\": ..., \"Vulnerabilities\": {\"ESC1\": ...}}}}`. Use -vulnerable flag to filter to only vulnerable templates. Use -dc-only for stealth (LDAP queries to DC only, no host enumeration). The -sid flag improves vulnerability assessment accuracy by checking enrollment permissions against a specific user SID."
+    when_to_use: "(1) First step in any ADCS attack — run find to discover CAs, templates, and ESC vulnerabilities before attempting exploitation. (2) After obtaining valid AD credentials (password, hash, or Kerberos ticket) — enumerate ADCS to check for certificate-based privilege escalation paths. (3) When bloodhound shows ADCS objects but you need detailed template vulnerability analysis (ESC classifications). (4) Before requesting certificates — identify which templates are vulnerable and which CA to target. (5) With -vulnerable flag to quickly filter for exploitable templates in large environments. (6) With -dc-only for stealthier enumeration that avoids touching non-DC hosts. (7) After exploiting other ESC vulnerabilities — re-run find to check if template modifications (ESC4) or CA changes (ESC7) were successful."
+    required_ports: [389]
+    params:
+      username:
+        type: string
+        required: true
+        description: "Username in user@domain format (e.g., 'web@fries.htb'). The @domain suffix is required for certipy's LDAP operations."
+      password:
+        type: string
+        description: "Password for authentication."
+      hashes:
+        type: string
+        description: "NTLM hash for pass-the-hash (e.g., 'aad3b435b51404ee:31d6cfe0d16ae931b73c59d7e0c089c0')."
+      kerberos:
+        type: boolean
+        default: false
+        description: "Use Kerberos authentication from ccache (KRB5CCNAME env). Requires valid TGT."
+      aes_key:
+        type: string
+        description: "AES key for Kerberos auth (128 or 256 bit hex)."
+      dc_ip:
+        type: string
+        required: true
+        description: "Domain Controller IP. Used for LDAP connection and as DNS nameserver."
+      ns:
+        type: string
+        description: "DNS nameserver IP override. Defaults to dc_ip."
+      dns_tcp:
+        type: boolean
+        default: true
+        description: "Use TCP for DNS queries. Default true for Docker reliability."
+      vulnerable:
+        type: boolean
+        default: false
+        description: "Only show vulnerable templates and CAs. Filters to ESC1-ESC16 findings."
+      enabled:
+        type: boolean
+        default: false
+        description: "Only show enabled templates. Reduces noise."
+      dc_only:
+        type: boolean
+        default: false
+        description: "DC-only collection — LDAP queries only, no host contact. Stealthier."
+      stdout:
+        type: boolean
+        default: false
+        description: "Print text summary to console instead of file."
+      user_sid:
+        type: string
+        description: "User SID for accurate vulnerability assessment. Certipy checks enrollment permissions against this SID."
+      timeout:
+        type: integer
+        default: 300
+        description: "Maximum execution time in seconds."
+    returns:
+      certificate_authorities:
+        type: array
+        description: "Array of CA objects. Each has: name, dns_name, certificate_subject, web_enrollment (Enabled/Disabled), user_specified_san, vulnerabilities (array of ESC IDs like 'ESC6', 'ESC8')."
+      certificate_templates:
+        type: array
+        description: "Array of all template objects. Each has: name, display_name, enabled, client_authentication, enrollee_supplies_subject, requires_manager_approval, authorized_signatures_required, enrollment_permissions, vulnerabilities."
+      vulnerable_templates:
+        type: array
+        description: "Subset of certificate_templates that have at least one ESC vulnerability. Each template includes vulnerabilities array with ESC classifications."
+      vulnerable_count:
+        type: integer
+        description: "Number of vulnerable templates found. Zero means no ADCS misconfigurations detected."
+      ca_count:
+        type: integer
+        description: "Total number of Certificate Authorities discovered."
+      template_count:
+        type: integer
+        description: "Total number of certificate templates discovered."
+      output_files:
+        type: array
+        description: "Paths to output files under /session/certipy/ (JSON and TXT)."
+      json_file:
+        type: string
+        description: "Path to the JSON output file for programmatic analysis."
+      text_file:
+        type: string
+        description: "Path to the human-readable text summary."
+
+  request:
+    description: "Request a certificate from a Certificate Authority — the core exploitation method for ESC1, ESC2, ESC3, ESC6, ESC7, ESC9, ESC10, ESC15, ESC16. Runs `certipy req -username <user@domain> -dc-ip <ip> -ca <ca_name> -template <template>` with optional SAN injection flags. For ESC1: use -upn to specify the target UPN (e.g., administrator@corp.local) to impersonate any user. For ESC3: use -on-behalf-of with an enrollment agent PFX. For ESC7: use -retrieve to fetch approved pending requests. For ESC15 (EKUwu): use -application-policies with OIDs to override template EKU. Output is a PFX file containing the certificate and private key, saved to /session/certipy/ with a unique prefix. If the request requires manager approval (ESC7 workflow), returns a request_id instead of a PFX — the CA management subcommand ('certipy ca') is not wrapped as an MCP method, so approve pending requests via bash, then use request -retrieve to fetch the certificate."
+    when_to_use: "(1) After find identifies an ESC1-vulnerable template — request a certificate with -upn set to administrator@domain to impersonate domain admin. (2) For ESC3 enrollment agent abuse — first request an enrollment agent certificate, then use -pfx and -on-behalf-of to request on behalf of another user. (3) For ESC7 CA manager abuse — request with SubCA template (will fail with pending), note the request_id, then approve via ca method, then retrieve with -retrieve. (4) For ESC15 (EKUwu) — use -application-policies to inject Client Authentication OID into the CSR, overriding template EKU on v1 templates. (5) After successful request, pass the PFX to authenticate method for PKINIT auth. (6) With -web flag when only Web Enrollment is available. (7) With -sid flag when StrongCertificateBindingEnforcement=2 requires SID in the certificate."
+    required_ports: [389]
+    params:
+      username:
+        type: string
+        required: true
+        description: "Username in user@domain format."
+      password:
+        type: string
+        description: "Password for authentication."
+      hashes:
+        type: string
+        description: "NTLM hash for pass-the-hash."
+      kerberos:
+        type: boolean
+        default: false
+        description: "Use Kerberos auth from ccache."
+      aes_key:
+        type: string
+        description: "AES key for Kerberos."
+      dc_ip:
+        type: string
+        required: true
+        description: "Domain Controller IP."
+      ns:
+        type: string
+        description: "DNS nameserver override."
+      dns_tcp:
+        type: boolean
+        default: true
+        description: "TCP DNS queries."
+      ca:
+        type: string
+        required: true
+        description: "Certificate Authority name (e.g., 'CORP-CA'). Get from find method's certificate_authorities[].name."
+      template:
+        type: string
+        default: "User"
+        description: "Certificate template name (case-sensitive). Get from find method's vulnerable_templates[].name. Common: 'User', 'Machine', 'WebServer', 'SubCA'."
+      upn:
+        type: string
+        description: "User Principal Name for SAN injection (ESC1). Set to target user (e.g., 'administrator@corp.local') to impersonate them."
+      dns:
+        type: string
+        description: "DNS hostname for SAN. For machine account impersonation (e.g., 'dc01.corp.local')."
+      sid:
+        type: string
+        description: "Object SID for SAN. Needed when StrongCertificateBindingEnforcement=2."
+      target:
+        type: string
+        description: "CA server hostname or IP. Auto-resolved from LDAP if omitted."
+      on_behalf_of:
+        type: string
+        description: "Request on behalf of user (ESC3). Format: 'DOMAIN\\user'. Requires enrollment agent PFX via pfx_path."
+      pfx_path:
+        type: string
+        description: "PFX file for enrollment agent (ESC3) or renewal. Path under /session/."
+      retrieve:
+        type: integer
+        description: "Retrieve pending certificate by request ID (ESC7 workflow)."
+      key_size:
+        type: integer
+        default: 2048
+        description: "RSA key size in bits."
+      web:
+        type: boolean
+        default: false
+        description: "Use Web Enrollment (HTTP) instead of RPC."
+      application_policies:
+        type: string
+        description: "Application policy OIDs for ESC15 exploitation. Comma-separated."
+      timeout:
+        type: integer
+        default: 300
+        description: "Maximum execution time in seconds."
+    returns:
+      pfx_path:
+        type: string
+        description: "Path to the output PFX file under /session/certipy/. Contains certificate + private key. Pass to authenticate method for PKINIT. Null if request is pending approval."
+      request_id:
+        type: integer
+        description: "Request ID for pending requests (ESC7 workflow). The ca subcommand is not wrapped as an MCP method — approve via bash ('certipy ca -issue-request <id>'), then use request -retrieve to fetch."
+      ca:
+        type: string
+        description: "CA name used."
+      template:
+        type: string
+        description: "Template name used."
+      upn:
+        type: string
+        description: "UPN injected into SAN, if specified."
+      output_files:
+        type: array
+        description: "All output file paths."
+
+  authenticate:
+    description: "Authenticate using a PFX certificate via Kerberos PKINIT — obtains a Ticket Granting Ticket (TGT) and extracts the NT hash via User-to-User (U2U) authentication. Runs `certipy auth -pfx <file> -dc-ip <ip>`. The NT hash is extracted from the PAC in the TGT and can be used for pass-the-hash with impacket, netexec, or other tools. The TGT is saved as a ccache file (default) or kirbi file (-kirbi flag). The ccache file can be used with KRB5CCNAME env for Kerberos-based tools. This method does NOT require additional credentials — the PFX certificate is the authentication material."
+    when_to_use: "(1) After requesting a certificate via the request method — authenticate with the PFX to get a TGT and NT hash. (2) After forging a Golden Certificate — authenticate to prove the forged cert works and extract the target's NT hash. (3) After shadow credentials auto mode produces a PFX — authenticate to verify the shadow credential attack succeeded. (4) The NT hash output is the primary value — use it with impacket secretsdump, netexec, or pass-the-hash attacks. (5) The ccache output enables Kerberos-only authentication with tools that support KRB5CCNAME. (6) Use -kirbi flag when the output will be used with Windows tools (Rubeus, Mimikatz)."
+    required_ports: [88]
+    params:
+      pfx_path:
+        type: string
+        required: true
+        description: "Path to PFX certificate file (e.g., '/session/certipy/administrator.pfx'). Obtained from request, forge, or shadow methods."
+      pfx_password:
+        type: string
+        description: "PFX file password. Usually empty for certipy-generated files."
+      dc_ip:
+        type: string
+        required: true
+        description: "Domain Controller IP for PKINIT authentication."
+      domain:
+        type: string
+        description: "Domain name override. Usually auto-extracted from certificate."
+      kirbi:
+        type: boolean
+        default: false
+        description: "Save TGT as .kirbi (Windows format) instead of .ccache (Linux format)."
+      no_hash:
+        type: boolean
+        default: false
+        description: "Skip NT hash extraction via U2U. Only obtain TGT."
+      ldap_shell:
+        type: boolean
+        default: false
+        description: "Start LDAP shell after auth. NOT recommended for MCP (interactive)."
+      timeout:
+        type: integer
+        default: 120
+        description: "Maximum execution time in seconds."
+    returns:
+      nt_hash:
+        type: string
+        description: "NT hash in LM:NT format (e.g., 'aad3b435b51404ee:31d6cfe0d16ae931b73c59d7e0c089c0'). Use with impacket -hashes, netexec -H, or hashcat mode 1000."
+      ccache_path:
+        type: string
+        description: "Path to Kerberos ccache file. Set KRB5CCNAME to this path for Kerberos auth with other tools."
+      kirbi_path:
+        type: string
+        description: "Path to Kirbi ticket file (if -kirbi flag used)."
+      username:
+        type: string
+        description: "Authenticated username extracted from certificate."
+      domain:
+        type: string
+        description: "Domain name."
+      output_files:
+        type: array
+        description: "All output file paths."
+
+  shadow:
+    description: "Shadow Credentials attack — adds a key credential to a target account's msDS-KeyCredentialLink attribute, authenticates with the resulting certificate, and extracts the NT hash. Runs `certipy shadow <action> -username <user@domain> -dc-ip <ip> -account <target>`. The 'auto' action performs the full attack chain: (1) adds key credential, (2) authenticates via PKINIT, (3) extracts NT hash, (4) removes the key credential. The attacker must have write access to the target's msDS-KeyCredentialLink attribute (check with bloodhound: GenericAll, GenericWrite, WriteProperty on msDS-KeyCredentialLink). Actions: 'auto' (full chain), 'list' (enumerate existing), 'add' (add only), 'remove' (remove by device ID), 'clear' (remove all), 'info' (details of specific key)."
+    when_to_use: "(1) When bloodhound shows GenericAll/GenericWrite/WriteProperty over a target account — use shadow auto to get the target's NT hash without knowing their password. (2) For lateral movement — compromise a user with write access to a higher-privilege account's msDS-KeyCredentialLink. (3) Use 'auto' for the full attack (add → auth → hash → cleanup). (4) Use 'list' to check existing key credentials before attacking (avoid disrupting legitimate key credentials). (5) Use 'add' + separate 'authenticate' for more control over each step. (6) Use 'clear' with caution — removes ALL key credentials, may break Windows Hello for Business. (7) Requires the domain to have a CA for PKINIT — if no CA exists, shadow credentials won't work."
+    required_ports: [389, 88]
+    params:
+      username:
+        type: string
+        required: true
+        description: "Attacker username in user@domain format. Must have write access to target's msDS-KeyCredentialLink."
+      password:
+        type: string
+        description: "Attacker password."
+      hashes:
+        type: string
+        description: "NTLM hash for pass-the-hash."
+      kerberos:
+        type: boolean
+        default: false
+        description: "Kerberos auth from ccache."
+      aes_key:
+        type: string
+        description: "AES key for Kerberos."
+      dc_ip:
+        type: string
+        required: true
+        description: "Domain Controller IP."
+      ns:
+        type: string
+        description: "DNS nameserver override."
+      dns_tcp:
+        type: boolean
+        default: true
+        description: "TCP DNS queries."
+      account:
+        type: string
+        required: true
+        description: "Target account SAM name (e.g., 'administrator', 'DC01$'). Must have write access via GenericAll/GenericWrite/WriteProperty."
+      action:
+        type: enum
+        values: ["auto", "list", "add", "remove", "clear", "info"]
+        default: "auto"
+        description: "'auto' = full chain (add→auth→hash→remove). 'list' = show key credentials. 'add' = add only. 'remove' = remove by device_id. 'clear' = remove all. 'info' = show details."
+      device_id:
+        type: string
+        description: "Device ID UUID for 'remove'/'info' actions. Get from 'list' action."
+      timeout:
+        type: integer
+        default: 300
+        description: "Maximum execution time in seconds."
+    returns:
+      nt_hash:
+        type: string
+        description: "Target account's NT hash (from auto action). Use for pass-the-hash."
+      pfx_path:
+        type: string
+        description: "PFX file path (from auto/add actions). Can be used with authenticate method separately."
+      device_id:
+        type: string
+        description: "Device ID of the added key credential (from add action). Use with remove action for cleanup."
+      key_credentials:
+        type: array
+        description: "List of existing key credentials (from list action). Each has device_id and owner."
+      output_files:
+        type: array
+        description: "All output file paths."
+
+  forge:
+    description: "Forge certificates using a compromised CA private key — creates Golden Certificates for persistent domain access (ESC5). Runs `certipy forge -ca-pfx <ca_file> -upn <target@domain>`. Given the CA's certificate and private key (obtained from a compromised CA server via certipy's ca subcommand or other means, or from ESC5 exploitation), forges arbitrary certificates that the CA's chain will trust. Note: the ca subcommand is not wrapped as an MCP method — extract the CA private key via bash if needed. Forged certificates can impersonate any user or computer in the domain. Use with authenticate method to obtain TGTs and NT hashes. This is the AD CS equivalent of a Golden Ticket — persists until the CA certificate expires or is revoked. Output is a PFX file saved to /session/certipy/."
+    when_to_use: "(1) After compromising a CA server and extracting its certificate + private key — forge certificates for any domain user/computer. (2) For persistent access — Golden Certificates survive password resets (unlike Golden Tickets which need krbtgt hash). (3) After ESC5 exploitation where CA object ACLs allow extracting the CA private key. (4) Combine with -crl for a more realistic certificate that includes a CRL distribution point. (5) Use -sid when StrongCertificateBindingEnforcement=2 requires SID in the certificate. (6) After forging, use authenticate method to obtain TGT + NT hash from the forged certificate."
+    required_ports: []
+    params:
+      ca_pfx:
+        type: string
+        required: true
+        description: "Path to CA certificate + private key PFX file (e.g., '/session/certipy/CORP-CA.pfx'). Obtained from a compromised CA server (via certipy ca subcommand in bash) or ESC5 exploitation."
+      ca_password:
+        type: string
+        description: "Password for the CA PFX file."
+      upn:
+        type: string
+        description: "UPN for forged cert (e.g., 'administrator@corp.local'). Primary way to impersonate users."
+      dns:
+        type: string
+        description: "DNS hostname for machine impersonation (e.g., 'dc01.corp.local')."
+      sid:
+        type: string
+        description: "Object SID for certificate. Required for StrongCertificateBindingEnforcement=2."
+      subject:
+        type: string
+        description: "Certificate subject DN."
+      crl:
+        type: string
+        description: "CRL distribution point URL (e.g., 'ldap:///'). Makes certificate look legitimate."
+      serial:
+        type: string
+        description: "Custom serial number."
+      key_size:
+        type: integer
+        default: 2048
+        description: "RSA key size."
+      validity_period:
+        type: integer
+        default: 365
+        description: "Certificate validity in days."
+      timeout:
+        type: integer
+        default: 120
+        description: "Maximum execution time in seconds."
+    returns:
+      pfx_path:
+        type: string
+        description: "Path to forged PFX file. Pass to authenticate method for PKINIT."
+      upn:
+        type: string
+        description: "UPN embedded in the forged certificate."
+      dns:
+        type: string
+        description: "DNS hostname embedded."
+      validity_days:
+        type: integer
+        description: "Validity period in days."
+      output_files:
+        type: array
+        description: "All output file paths."
+
+  template:
+    description: "View or modify Active Directory certificate template configurations. Runs `certipy template -username <user@domain> -dc-ip <ip> -template <name>` with action-specific flags. Actions: 'read' displays current template properties (default). 'save_config' saves the template's current configuration to a JSON file for backup before exploitation. 'write_default' overwrites the template with an ESC1-vulnerable default configuration (enables enrollee-supplied subject, client authentication EKU, low-privilege enrollment — used for ESC4 exploitation). 'write_config' restores a template from a previously saved JSON file. The -force flag is automatically added for write operations to skip certipy's confirmation prompt. IMPORTANT: Always save_config before write_default so the template can be restored after exploitation to avoid detection."
+    when_to_use: "(1) ESC4 exploitation — when bloodhound/find shows write access to a template: save_config (backup) → write_default (make vulnerable) → request cert via request method → write_config (restore). (2) Before any template modification — save_config to create a backup JSON for later restoration. (3) To inspect template properties — use read action to see enrollment permissions, EKU settings, SAN configuration. (4) After exploitation — write_config with the saved JSON to restore original template settings and reduce detection footprint. (5) The read action is useful for verifying that write_default or write_config changes were applied correctly."
+    required_ports: [389]
+    params:
+      username:
+        type: string
+        required: true
+        description: "Username in user@domain format. Must have write access to template for modification actions."
+      password:
+        type: string
+        description: "Password."
+      hashes:
+        type: string
+        description: "NTLM hash for pass-the-hash."
+      kerberos:
+        type: boolean
+        default: false
+        description: "Kerberos auth."
+      aes_key:
+        type: string
+        description: "AES key."
+      dc_ip:
+        type: string
+        required: true
+        description: "Domain Controller IP."
+      ns:
+        type: string
+        description: "DNS nameserver override."
+      dns_tcp:
+        type: boolean
+        default: true
+        description: "TCP DNS queries."
+      template:
+        type: string
+        required: true
+        description: "Template name (case-sensitive). Get from find method."
+      action:
+        type: enum
+        values: ["read", "save_config", "write_default", "write_config"]
+        default: "read"
+        description: "'read' = display properties. 'save_config' = save to JSON. 'write_default' = overwrite with ESC1-vulnerable config (ESC4). 'write_config' = restore from JSON."
+      config_path:
+        type: string
+        description: "JSON config file path for write_config action. Must be under /session/."
+      timeout:
+        type: integer
+        default: 300
+        description: "Maximum execution time."
+    returns:
+      template:
+        type: string
+        description: "Template name operated on."
+      action:
+        type: string
+        description: "Action performed."
+      config:
+        type: object
+        description: "Template configuration (from save_config action). JSON object with all template properties."
+      config_path:
+        type: string
+        description: "Path to saved configuration JSON file."
+      output_files:
+        type: array
+        description: "All output file paths."
