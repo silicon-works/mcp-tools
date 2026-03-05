@@ -14,6 +14,7 @@ RUN apt-get update && \
         impacket-scripts \
         krb5-user \
         libkrb5-dev \
+        libfaketime \
         python3 \
         python3-pip \
         python3-venv && \

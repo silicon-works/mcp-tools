@@ -21,6 +21,7 @@ RUN apt-get update && \
         libffi-dev \
         libkrb5-dev \
         krb5-user \
+        libfaketime \
         iproute2 && \
     rm -rf /var/lib/apt/lists/* && \
     apt-get clean
