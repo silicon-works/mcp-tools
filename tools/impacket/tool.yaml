@@ -1,6 +1,6 @@
 name: impacket
 version: "0.12"
-description: "Windows/Active Directory exploitation toolkit (Impacket 0.12). 13 methods in 4 categories: remote execution (psexec, wmiexec, smbexec, dcomexec, atexec — 5 execution methods with different stealth/reliability tradeoffs), credential dumping (secretsdump — SAM, LSA, NTDS.dit via DRSUAPI or VSS), Kerberos attacks (kerberoast, asreproast, get_tgt), SMB operations (smb_shares, smb_get, smb_put), AD enumeration (get_ad_users, lookupsid). All methods support password, NTLM hash (pass-the-hash), Kerberos, and AES key authentication."
+description: "Windows/Active Directory exploitation toolkit (Impacket 0.12). 17 methods in 5 categories: remote execution (psexec, wmiexec, smbexec, dcomexec, atexec — 5 execution methods with different stealth/reliability tradeoffs), credential dumping (secretsdump — SAM, LSA, NTDS.dit via DRSUAPI or VSS), Kerberos attacks (kerberoast, asreproast, get_tgt, get_st), delegation abuse (addcomputer, find_delegation), SMB operations (smb_shares, smb_get, smb_put), AD enumeration (get_ad_users, lookupsid). All methods support password, NTLM hash (pass-the-hash), Kerberos, and AES key authentication."
 image: "ghcr.io/silicon-works/mcp-tools-impacket:latest"
 image_size_mb: 900
 timeout_seconds: 300
@@ -44,6 +44,12 @@ routing:
     - "Kerberos TGT request"
     - "Windows lateral movement"
     - "psexec wmiexec smbexec"
+    - "constrained delegation abuse"
+    - "S4U2Self S4U2Proxy service ticket"
+    - "RBCD resource-based constrained delegation"
+    - "create machine account for delegation attack"
+    - "enumerate delegation settings across domain"
+    - "getST impersonation via delegation"
   never_use_for:
     - "Linux-only targets"
     - "port scanning"
@@ -70,6 +76,14 @@ routing:
     - "GetADUsers"
     - "lookupsid"
     - "getTGT"
+    - "getST"
+    - "addcomputer"
+    - "findDelegation"
+    - "constrained delegation"
+    - "unconstrained delegation"
+    - "RBCD"
+    - "S4U"
+    - "machine account"
   prefer_over: []
 
 see_also:
@@ -891,3 +905,179 @@ methods:
       hint:
         type: string
         description: "Usage hint for the ccache file"
+
+  get_st:
+    required_ports: [88]
+    description: "Request a Kerberos service ticket (TGS) via S4U2Self/S4U2Proxy for constrained delegation abuse. Saves ccache to /session/ for persistence."
+    when_to_use: "After discovering constrained delegation (via find_delegation) or RBCD setup — request a service ticket impersonating a privileged user. Workflow: find_delegation → identify constrained delegation → get_st with -impersonate Administrator -spn cifs/target. Also used after RBCD: addcomputer → set msDS-AllowedToActOnBehalfOfOtherIdentity → get_st."
+    params:
+      target:
+        type: string
+        required: true
+        description: "Target domain or DC IP"
+      username:
+        type: string
+        description: "Username of the account with delegation rights"
+      password:
+        type: string
+        description: "Password for authentication"
+      domain:
+        type: string
+        description: "Active Directory domain name"
+      hashes:
+        type: string
+        description: "NTLM hash in LM:NT format"
+      kerberos:
+        type: boolean
+        default: false
+        description: "Use Kerberos authentication"
+      dc_ip:
+        type: string
+        description: "Domain Controller IP"
+      aes_key:
+        type: string
+        description: "AES key for Kerberos authentication"
+      port:
+        type: integer
+        description: "Target port"
+      spn:
+        type: string
+        required: true
+        description: "Target SPN (e.g., 'cifs/dc.corp.local', 'http/web.corp.local')"
+      impersonate:
+        type: string
+        required: true
+        description: "User to impersonate (e.g., 'Administrator')"
+      additional_ticket:
+        type: string
+        description: "Path to additional ticket for S4U2Proxy (from RBCD setup)"
+      force_forwardable:
+        type: boolean
+        default: false
+        description: "Force the service ticket to be forwardable"
+      altservice:
+        type: string
+        description: "Alternative service name for the ticket"
+      timeout:
+        type: integer
+        default: 60
+        description: "Timeout in seconds"
+    returns:
+      ccache_file:
+        type: string
+        description: "Path to saved ccache file (in /session/ for persistence)"
+      ccache_exists:
+        type: boolean
+        description: "Whether ccache file was saved successfully"
+      hint:
+        type: string
+        description: "Usage hint for the ccache file"
+
+  addcomputer:
+    required_ports: [445]
+    description: "Create a machine account in Active Directory for RBCD and other delegation attacks"
+    when_to_use: "When setting up RBCD (resource-based constrained delegation) — create a machine account you control, then set msDS-AllowedToActOnBehalfOfOtherIdentity on the target to allow your machine to delegate. Requires MachineAccountQuota > 0 (default: 10). Workflow: addcomputer → rbcd.py (set delegation) → get_st -impersonate Administrator."
+    params:
+      target:
+        type: string
+        required: true
+        description: "Target domain or DC IP"
+      username:
+        type: string
+        description: "Domain username"
+      password:
+        type: string
+        description: "Domain password"
+      domain:
+        type: string
+        description: "Active Directory domain name"
+      hashes:
+        type: string
+        description: "NTLM hash in LM:NT format"
+      kerberos:
+        type: boolean
+        default: false
+        description: "Use Kerberos authentication"
+      dc_ip:
+        type: string
+        description: "Domain Controller IP"
+      aes_key:
+        type: string
+        description: "AES key for Kerberos authentication"
+      port:
+        type: integer
+        description: "Target port"
+      computer_name:
+        type: string
+        description: "Name for new machine account (default: random). Do NOT include trailing '$'."
+      computer_pass:
+        type: string
+        description: "Password for new machine account (default: random)"
+      method:
+        type: enum
+        values: [SAMR, LDAPS]
+        default: SAMR
+        description: "Creation method: SAMR (SMB) or LDAPS (LDAP over TLS)"
+      base_dn:
+        type: string
+        description: "Base DN for LDAPS method (auto-derived from domain if omitted)"
+      timeout:
+        type: integer
+        default: 60
+        description: "Timeout in seconds"
+    returns:
+      computer_name:
+        type: string
+        description: "Name of the created machine account"
+      computer_pass:
+        type: string
+        description: "Password of the created machine account"
+      method:
+        type: string
+        description: "Creation method used"
+
+  find_delegation:
+    required_ports: [389]
+    description: "Enumerate delegation settings (unconstrained, constrained, RBCD) across all domain accounts"
+    when_to_use: "During enumeration to discover delegation misconfigurations. Finds accounts with unconstrained delegation (full impersonation), constrained delegation (limited to specific SPNs), and RBCD. Results feed directly into get_st for exploitation."
+    params:
+      target:
+        type: string
+        required: true
+        description: "Target domain or DC IP"
+      username:
+        type: string
+        description: "Domain username"
+      password:
+        type: string
+        description: "Domain password"
+      domain:
+        type: string
+        description: "Active Directory domain name"
+      hashes:
+        type: string
+        description: "NTLM hash in LM:NT format"
+      kerberos:
+        type: boolean
+        default: false
+        description: "Use Kerberos authentication"
+      dc_ip:
+        type: string
+        description: "Domain Controller IP"
+      aes_key:
+        type: string
+        description: "AES key for Kerberos authentication"
+      port:
+        type: integer
+        description: "Target port"
+      timeout:
+        type: integer
+        default: 120
+        description: "Timeout in seconds"
+    returns:
+      delegations:
+        type: array
+        description: "Delegation entries with account_name, account_type, delegation_type, delegation_rights_to"
+      delegation_count:
+        type: integer
+        description: "Number of delegation entries found"

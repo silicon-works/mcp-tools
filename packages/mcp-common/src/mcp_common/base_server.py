@@ -208,6 +208,11 @@ class BaseMCPServer(ABC):
             return result
 
         except asyncio.TimeoutError:
+            try:
+                proc.kill()
+                await proc.wait()
+            except ProcessLookupError:
+                pass
             raise ToolError(
                 message=f"Command timed out after {timeout} seconds",
                 details=" ".join(cmd),

