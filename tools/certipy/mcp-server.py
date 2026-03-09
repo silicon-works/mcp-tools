@@ -497,7 +497,11 @@ class CertipyServer(BaseMCPServer):
 
             # Certipy v5 JSON structure: {"Certificate Authorities": {...}, "Certificate Templates": {...}}
             cas = data.get("Certificate Authorities", {})
+            if not isinstance(cas, dict):
+                cas = {}
             templates = data.get("Certificate Templates", {})
+            if not isinstance(templates, dict):
+                templates = {}
 
             for ca_id, ca_data in cas.items():
                 ca_info = {
@@ -657,6 +661,7 @@ class CertipyServer(BaseMCPServer):
         if user_sid:
             cmd.extend(["-sid", user_sid])
 
+        combined = ""
         try:
             result = await self.run_command(cmd, timeout=timeout)
             combined = result.stdout + result.stderr
@@ -690,7 +695,7 @@ class CertipyServer(BaseMCPServer):
                 error=certipy_error if not is_success else None,
             )
         except Exception as e:
-            return ToolResult(success=False, error=str(e))
+            return ToolResult(success=False, error=str(e), raw_output=sanitize_output(combined))
 
     async def request(
         self,
@@ -763,6 +768,7 @@ class CertipyServer(BaseMCPServer):
         if application_policies:
             cmd.extend(["-application-policies", application_policies])
 
+        combined = ""
         try:
             result = await self.run_command(cmd, timeout=timeout)
             combined = result.stdout + result.stderr
@@ -794,7 +800,7 @@ class CertipyServer(BaseMCPServer):
                 if not pfx_files and request_id is None else None,
             )
         except Exception as e:
-            return ToolResult(success=False, error=str(e))
+            return ToolResult(success=False, error=str(e), raw_output=sanitize_output(combined))
 
     async def authenticate(
         self,
@@ -830,6 +836,7 @@ class CertipyServer(BaseMCPServer):
         if ldap_shell:
             cmd.append("-ldap-shell")
 
+        combined = ""
         try:
             result = await self.run_command(cmd, timeout=timeout)
             combined = result.stdout + result.stderr
@@ -867,7 +874,7 @@ class CertipyServer(BaseMCPServer):
                 ),
             )
         except Exception as e:
-            return ToolResult(success=False, error=str(e))
+            return ToolResult(success=False, error=str(e), raw_output=sanitize_output(combined))
 
     async def shadow(
         self,
@@ -917,6 +924,7 @@ class CertipyServer(BaseMCPServer):
         if device_id:
             cmd.extend(["-device-id", device_id])
 
+        combined = ""
         try:
             result = await self.run_command(cmd, timeout=timeout)
             combined = result.stdout + result.stderr
@@ -949,7 +957,7 @@ class CertipyServer(BaseMCPServer):
                 error=certipy_error if not is_success else None,
             )
         except Exception as e:
-            return ToolResult(success=False, error=str(e))
+            return ToolResult(success=False, error=str(e), raw_output=sanitize_output(combined))
 
     async def forge(
         self,
@@ -1008,6 +1016,7 @@ class CertipyServer(BaseMCPServer):
         if validity_period != 365:
             cmd.extend(["-validity-period", str(validity_period)])
 
+        combined = ""
         try:
             result = await self.run_command(cmd, timeout=timeout)
             combined = result.stdout + result.stderr
@@ -1031,7 +1040,7 @@ class CertipyServer(BaseMCPServer):
                 if not pfx_files else None,
             )
         except Exception as e:
-            return ToolResult(success=False, error=str(e))
+            return ToolResult(success=False, error=str(e), raw_output=sanitize_output(combined))
 
     async def template(
         self,
@@ -1084,6 +1093,7 @@ class CertipyServer(BaseMCPServer):
             cmd.extend(["-write-configuration", config_path])
             cmd.append("-force")  # Skip confirmation prompt
 
+        combined = ""
         try:
             result = await self.run_command(cmd, timeout=timeout)
             combined = result.stdout + result.stderr
@@ -1131,7 +1141,7 @@ class CertipyServer(BaseMCPServer):
                 error=certipy_error if not is_success else None,
             )
         except Exception as e:
-            return ToolResult(success=False, error=str(e))
+            return ToolResult(success=False, error=str(e), raw_output=sanitize_output(combined))
 
 
     async def ca(
@@ -1183,6 +1193,7 @@ class CertipyServer(BaseMCPServer):
             cmd.extend(["-deny-request", str(deny_request)])
             action_desc = f"deny request {deny_request}"
 
+        combined = ""
         try:
             result = await self.run_command(cmd, timeout=timeout)
             combined = result.stdout + result.stderr
@@ -1215,7 +1226,7 @@ class CertipyServer(BaseMCPServer):
                 error=certipy_error if not is_success else None,
             )
         except Exception as e:
-            return ToolResult(success=False, error=str(e))
+            return ToolResult(success=False, error=str(e), raw_output=sanitize_output(combined))
 
 
 if __name__ == "__main__":
