@@ -77,6 +77,13 @@ class CertipyServer(BaseMCPServer):
             handler=self.template,
         )
 
+        self.register_method(
+            name="ca",
+            description="Manage Certificate Authority: enable/disable templates, approve/deny certificate requests (ESC7)",
+            params=self._ca_params(),
+            handler=self.ca,
+        )
+
     # ── Parameter Definitions ──────────────────────────────────
 
     def _auth_params(self) -> Dict[str, Dict[str, Any]]:
@@ -370,6 +377,34 @@ class CertipyServer(BaseMCPServer):
                 "description": "Maximum execution time in seconds.",
             },
         }
+
+    def _ca_params(self) -> Dict[str, Dict[str, Any]]:
+        """Parameters for the ca method."""
+        params = self._auth_params()
+        params.update({
+            "ca_name": {
+                "type": "string",
+                "required": True,
+                "description": "Certificate Authority name (e.g., 'pirate-DC01-CA'). Get from 'find' method output.",
+            },
+            "enable_template": {
+                "type": "string",
+                "description": "Template name to enable on the CA.",
+            },
+            "disable_template": {
+                "type": "string",
+                "description": "Template name to disable on the CA.",
+            },
+            "issue_request": {
+                "type": "integer",
+                "description": "Request ID to approve/issue (for pending certificate requests).",
+            },
+            "deny_request": {
+                "type": "integer",
+                "description": "Request ID to deny.",
+            },
+        })
+        return params
 
     def _template_params(self) -> Dict[str, Dict[str, Any]]:
         """Parameters for the template method."""
@@ -1092,6 +1127,90 @@ class CertipyServer(BaseMCPServer):
             return ToolResult(
                 success=is_success,
                 data=data,
+                raw_output=sanitize_output(combined),
+                error=certipy_error if not is_success else None,
+            )
+        except Exception as e:
+            return ToolResult(success=False, error=str(e))
+
+
+    async def ca(
+        self,
+        username: str,
+        dc_ip: str,
+        ca_name: str,
+        enable_template: Optional[str] = None,
+        disable_template: Optional[str] = None,
+        issue_request: Optional[int] = None,
+        deny_request: Optional[int] = None,
+        password: Optional[str] = None,
+        hashes: Optional[str] = None,
+        kerberos: bool = False,
+        aes_key: Optional[str] = None,
+        ns: Optional[str] = None,
+        dns_tcp: bool = True,
+        timeout: int = 300,
+    ) -> ToolResult:
+        """Manage Certificate Authority: enable/disable templates, approve/deny requests (ESC7)."""
+        if not password and not hashes and not kerberos and not aes_key:
+            return ToolResult(
+                success=False,
+                error="No credentials provided. Supply password, hashes, aes_key, or kerberos=true.",
+            )
+
+        self._ensure_work_dir()
+
+        cmd = [CERTIPY_BIN, "ca"]
+        cmd.extend(self._build_auth_args(
+            username=username, dc_ip=dc_ip, password=password,
+            hashes=hashes, kerberos=kerberos, aes_key=aes_key,
+            ns=ns, dns_tcp=dns_tcp,
+        ))
+
+        cmd.extend(["-ca", ca_name])
+
+        action_desc = "unknown"
+        if enable_template:
+            cmd.extend(["-enable-template", enable_template])
+            action_desc = f"enable template '{enable_template}'"
+        elif disable_template:
+            cmd.extend(["-disable-template", disable_template])
+            action_desc = f"disable template '{disable_template}'"
+        elif issue_request is not None:
+            cmd.extend(["-issue-request", str(issue_request)])
+            action_desc = f"issue request {issue_request}"
+        elif deny_request is not None:
+            cmd.extend(["-deny-request", str(deny_request)])
+            action_desc = f"deny request {deny_request}"
+
+        try:
+            result = await self.run_command(cmd, timeout=timeout)
+            combined = result.stdout + result.stderr
+
+            certipy_error = self._detect_certipy_error(combined)
+
+            # Check for success indicators in output
+            success_indicators = [
+                "Successfully enabled",
+                "Successfully disabled",
+                "Successfully issued",
+                "Successfully denied",
+                "approved",
+            ]
+            has_success = any(ind.lower() in combined.lower() for ind in success_indicators)
+            is_success = (certipy_error is None and result.returncode == 0) or has_success
+
+            return ToolResult(
+                success=is_success,
+                data={
+                    "method": "ca",
+                    "ca_name": ca_name,
+                    "action": action_desc,
+                    "enable_template": enable_template,
+                    "disable_template": disable_template,
+                    "issue_request": issue_request,
+                    "deny_request": deny_request,
+                },
                 raw_output=sanitize_output(combined),
                 error=certipy_error if not is_success else None,
             )

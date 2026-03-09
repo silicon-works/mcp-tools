@@ -36,6 +36,17 @@ RUN pip install --no-cache-dir /app/packages/mcp-common
 COPY tools/impacket/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
+# Bundle impacket example scripts missing from Kali package
+COPY tools/impacket/scripts/rbcd.py tools/impacket/scripts/changepasswd.py /opt/impacket-scripts/
+RUN chmod +x /opt/impacket-scripts/*.py
+
+# Install krbrelayx tools (addspn.py) — standalone scripts that use system impacket
+RUN apt-get update && apt-get install -y --no-install-recommends git && \
+    git clone --depth 1 https://github.com/dirkjanm/krbrelayx.git /opt/krbrelayx && \
+    chmod +x /opt/krbrelayx/*.py && \
+    apt-get purge -y git && apt-get autoremove -y && \
+    rm -rf /var/lib/apt/lists/*
+
 # Copy MCP server code
 COPY tools/impacket/mcp-server.py .
 

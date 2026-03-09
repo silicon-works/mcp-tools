@@ -1,0 +1,163 @@
+name: impacket-relay
+version: "1.0"
+description: "NTLM relay attacks via impacket ntlmrelayx. Listens for incoming NTLM authentication and relays it to a target service (LDAP, LDAPS, MSSQL, HTTP, SMB). Used for RBCD writes via relay, AD CS relay (ESC8), credential relay, and privilege escalation. Long-running service with start/stop/status process management."
+image: "ghcr.io/silicon-works/mcp-tools-impacket-relay:latest"
+image_size_mb: 900
+timeout_seconds: 600
+service: true
+service_name: "impacket-relay"
+
+capabilities:
+  - ntlm_relay
+  - rbcd_write
+  - ad_compromise
+  - credential_relay
+
+routing:
+  use_for:
+    - "NTLM relay attacks"
+    - "relay NTLM authentication to LDAP or LDAPS"
+    - "RBCD via relay — relay coerced auth to write msDS-AllowedToActOnBehalfOfOtherIdentity"
+    - "ntlmrelayx start listener for coerced authentication"
+    - "relay coerced authentication from PetitPotam or WebDAV to target service"
+    - "ESC8 AD CS relay — relay NTLM auth to certificate enrollment endpoint"
+    - "cross-protocol relay from SMB/HTTP to LDAP"
+  never_use_for:
+    - "one-shot impacket commands like secretsdump, psexec, kerberoast (use impacket tool instead)"
+    - "triggering authentication coercion (use PetitPotam, PrinterBug, or WebDAV coercion tools)"
+    - "direct RBCD write without relay (use impacket.rbcd method instead)"
+    - "password attacks or brute-forcing (use hydra)"
+  triggers:
+    - "ntlm relay"
+    - "ntlmrelayx"
+    - "relay to ldap"
+    - "relay to ldaps"
+    - "relay coerced"
+    - "ntlm relay rbcd"
+    - "relay delegate"
+
+phases:
+  - exploitation
+
+requirements:
+  network: true
+  privileged: true
+
+resources:
+  memory_mb: 512
+  cpu: 0.5
+
+see_also:
+  - tool: impacket
+    reason: "Use impacket.addcomputer to create machine account before relay, impacket.get_st after RBCD write, impacket.rbcd for direct RBCD without relay"
+  - tool: certipy
+    reason: "For ADCS-specific attacks (ESC1-7) use certipy directly. impacket-relay handles ESC8 relay to HTTP enrollment."
+
+methods:
+  start:
+    required_ports: [80, 445]
+    description: "Start ntlmrelayx NTLM relay listener. Spawns ntlmrelayx as a background process, listening for incoming NTLM authentication and relaying it to the specified target. Returns a relay_id for status checking and stopping."
+    when_to_use: "When you need to relay coerced NTLM authentication to a target. Workflow: (1) start relay listener targeting LDAP/LDAPS/SMB, (2) coerce target via PetitPotam/PrinterBug/WebDAV, (3) check status for relay success, (4) stop relay. Use --delegate-access for automatic RBCD write after successful relay."
+    params:
+      target:
+        type: string
+        required: true
+        description: "Relay target URL (e.g., 'ldaps://DC01.pirate.htb', 'smb://10.10.10.1', 'http://ca.corp.local/certsrv/certfnsh.asp')"
+      listen_port:
+        type: integer
+        default: 80
+        description: "Port to listen on for incoming NTLM auth (HTTP=80, SMB=445)"
+      smb2support:
+        type: boolean
+        default: true
+        description: "Enable SMB2 support for incoming connections"
+      delegate_access:
+        type: boolean
+        default: false
+        description: "Write RBCD delegation after successful relay (--delegate-access). Creates a machine account and sets msDS-AllowedToActOnBehalfOfOtherIdentity."
+      escalate_user:
+        type: string
+        description: "Account to escalate privileges for (--escalate-user)"
+      remove_mic:
+        type: boolean
+        default: false
+        description: "Remove MIC for cross-protocol relay (--remove-mic)"
+      additional_args:
+        type: string
+        description: "Additional ntlmrelayx arguments as a single string"
+      timeout:
+        type: integer
+        default: 300
+        description: "Max time to keep relay running (seconds)"
+    returns:
+      relay_id:
+        type: string
+        description: "Relay process ID for use with status and stop methods"
+      pid:
+        type: integer
+        description: "Process ID of ntlmrelayx"
+      status:
+        type: string
+        description: "Process status (running, exited)"
+      target:
+        type: string
+        description: "Relay target URL"
+      listen_port:
+        type: integer
+        description: "Port listening for incoming NTLM auth"
+
+  status:
+    description: "Check status of a running relay and retrieve captured output. Returns connection attempts, relay success indicators, and any errors."
+    when_to_use: "After starting a relay, poll this to check if coercion has triggered and relay succeeded. Look for relay_succeeded=true and delegation_written=true (if --delegate-access was used)."
+    params:
+      relay_id:
+        type: string
+        required: true
+        description: "Relay ID from start method"
+    returns:
+      relay_id:
+        type: string
+        description: "Relay process ID"
+      status:
+        type: string
+        description: "Process status (running, completed, exited)"
+      relay_succeeded:
+        type: boolean
+        description: "Whether NTLM relay was successful"
+      delegation_written:
+        type: boolean
+        description: "Whether RBCD delegation was written (if --delegate-access)"
+      connections:
+        type: array
+        description: "List of connection attempts received"
+      errors:
+        type: array
+        description: "Any errors encountered"
+
+  stop:
+    description: "Stop a running relay and return final results including all captured output."
+    when_to_use: "After relay succeeds or to clean up. Always stop relays when done to free the listening port."
+    params:
+      relay_id:
+        type: string
+        required: true
+        description: "Relay ID to stop"
+    returns:
+      relay_id:
+        type: string
+        description: "Relay process ID"
+      status:
+        type: string
+        description: "Always 'stopped'"
+      relay_succeeded:
+        type: boolean
+        description: "Whether NTLM relay was successful"
+      delegation_written:
+        type: boolean
+        description: "Whether RBCD delegation was written"
+      connections:
+        type: array
+        description: "All connection attempts received"
+      errors:
+        type: array
+        description: "All errors encountered"

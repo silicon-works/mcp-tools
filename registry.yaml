@@ -1,5 +1,5 @@
 version: '2.0'
-updated_at: '2026-03-06T12:34:12Z'
+updated_at: '2026-03-09T20:18:37Z'
 tools:
   amass:
     name: amass
@@ -463,17 +463,18 @@ tools:
     name: certipy
     version: 5.0.4
     description: 'Active Directory Certificate Services (AD CS) enumeration and exploitation via Certipy v5.0.4 (ly4k/Certipy,
-      pip certipy-ad). Certipy has 11 subcommands total, but this MCP server exposes 6 methods: find, request, authenticate,
-      shadow, forge, template. The ca, account, cert, parse, and relay subcommands exist in certipy but are not yet wrapped
+      pip certipy-ad). Certipy has 11 subcommands total, and this MCP server exposes 7 methods: find, request, authenticate,
+      shadow, forge, template, ca. The account, cert, parse, and relay subcommands exist in certipy but are not yet wrapped
       as MCP methods. Discovers Certificate Authorities and certificate templates, identifies ESC1 through ESC16 vulnerability
       classifications, requests certificates with attacker-controlled Subject Alternative Names (ESC1), performs enrollment
-      agent abuse (ESC3), exploits template write access (ESC4), forges Golden Certificates from compromised CA keys (ESC5),
-      authenticates via PKINIT to obtain TGTs and NT hashes, and manipulates Shadow Credentials (msDS-KeyCredentialLink) for
-      account takeover. Outputs PFX certificates, ccache/kirbi Kerberos tickets, and JSON enumeration reports to /session/certipy/.
-      Authentication supports password, NTLM hash (pass-the-hash), Kerberos ccache, and AES keys. Username format is user@domain
-      (NOT domain/user). All output files use unique prefixes to avoid certipy''s interactive overwrite prompt. For NTLM relay
-      to AD CS endpoints (ESC8/ESC11), use impacket.ntlmrelayx instead — certipy''s relay subcommand is not exposed as an
-      MCP method because it requires long-running listener mode with external coercion.'
+      agent abuse (ESC3), exploits template write access (ESC4), manages Certificate Authority operations for ESC7 (enable/disable
+      templates, approve/deny requests), forges Golden Certificates from compromised CA keys (ESC5), authenticates via PKINIT
+      to obtain TGTs and NT hashes, and manipulates Shadow Credentials (msDS-KeyCredentialLink) for account takeover. Outputs
+      PFX certificates, ccache/kirbi Kerberos tickets, and JSON enumeration reports to /session/certipy/. Authentication supports
+      password, NTLM hash (pass-the-hash), Kerberos ccache, and AES keys. Username format is user@domain (NOT domain/user).
+      All output files use unique prefixes to avoid certipy''s interactive overwrite prompt. For NTLM relay to AD CS endpoints
+      (ESC8/ESC11), use impacket-relay instead — certipy''s relay subcommand is not exposed as an MCP method because it requires
+      long-running listener mode with external coercion.'
     image: ghcr.io/silicon-works/mcp-tools-certipy:latest
     image_size_mb: 721
     timeout_seconds: 600
@@ -484,10 +485,12 @@ tools:
     - shadow_credentials
     - golden_certificate
     - template_manipulation
+    - ca_management
     - esc1_exploitation
     - esc3_exploitation
     - esc4_exploitation
     - esc5_exploitation
+    - esc7_exploitation
     routing:
       use_for:
       - enumerate AD Certificate Services to find vulnerable certificate templates (ESC1-ESC16)
@@ -515,8 +518,8 @@ tools:
       - BloodHound data collection (use bloodhound — certipy v5 removed BloodHound zip output)
       - coercing authentication for relay attacks (use PetitPotam/PrinterBug/Coercer — certipy is the relay receiver, not
         the coercion trigger)
-      - CA management, account creation, cert conversion, or certificate parsing (not yet implemented as MCP methods — use
-        certipy directly via bash)
+      - account creation, cert conversion, or certificate parsing (not yet implemented as MCP methods — use certipy directly
+        via bash)
       triggers:
       - certipy
       - ADCS
@@ -670,11 +673,10 @@ tools:
           ESC6, ESC7, ESC9, ESC10, ESC15, ESC16. Runs `certipy req -username <user@domain> -dc-ip <ip> -ca <ca_name> -template
           <template>` with optional SAN injection flags. For ESC1: use -upn to specify the target UPN (e.g., administrator@corp.local)
           to impersonate any user. For ESC3: use -on-behalf-of with an enrollment agent PFX. For ESC7: use -retrieve to fetch
-          approved pending requests. For ESC15 (EKUwu): use -application-policies with OIDs to override template EKU. Output
-          is a PFX file containing the certificate and private key, saved to /session/certipy/ with a unique prefix. If the
-          request requires manager approval (ESC7 workflow), returns a request_id instead of a PFX — the CA management subcommand
-          (''certipy ca'') is not wrapped as an MCP method, so approve pending requests via bash, then use request -retrieve
-          to fetch the certificate.'
+          approved pending requests (approve via the ''ca'' method with issue_request). For ESC15 (EKUwu): use -application-policies
+          with OIDs to override template EKU. Output is a PFX file containing the certificate and private key, saved to /session/certipy/
+          with a unique prefix. If the request requires manager approval (ESC7 workflow), returns a request_id instead of
+          a PFX — use the ''ca'' method with issue_request to approve, then use request -retrieve to fetch the certificate.'
         when_to_use: (1) After find identifies an ESC1-vulnerable template — request a certificate with -upn set to administrator@domain
           to impersonate domain admin. (2) For ESC3 enrollment agent abuse — first request an enrollment agent certificate,
           then use -pfx and -on-behalf-of to request on behalf of another user. (3) For ESC7 CA manager abuse — request with
@@ -767,8 +769,8 @@ tools:
               authenticate method for PKINIT. Null if request is pending approval.
           request_id:
             type: integer
-            description: Request ID for pending requests (ESC7 workflow). The ca subcommand is not wrapped as an MCP method
-              — approve via bash ('certipy ca -issue-request <id>'), then use request -retrieve to fetch.
+            description: Request ID for pending requests (ESC7 workflow). Use the 'ca' method with issue_request to approve,
+              then use request -retrieve to fetch the issued certificate.
           ca:
             type: string
             description: CA name used.
@@ -1087,6 +1089,86 @@ tools:
           output_files:
             type: array
             description: All output file paths.
+      ca:
+        description: 'Manage Certificate Authority operations — enable/disable certificate templates, approve/deny pending
+          certificate requests. Core method for ESC7 exploitation when you have ManageCA rights on a CA. Runs `certipy ca
+          -username <user@domain> -dc-ip <ip> -ca <ca_name>` with action flags. Use in the ESC7 workflow: find (identify ManageCA)
+          → ca (enable SubCA template) → request (request SubCA cert, gets pending) → ca (issue/approve the request) → request
+          -retrieve (fetch issued cert) → authenticate (get TGT + NT hash).'
+        when_to_use: 'ESC7 exploitation: when you have ManageCA rights on a CA, use this to enable the SubCA template, then
+          request a certificate, then approve your own request. Workflow: find → ca (enable SubCA) → request (SubCA cert,
+          gets request_id) → ca (issue-request with request_id) → request (retrieve with request_id) → authenticate. Also
+          useful to disable templates after exploitation for cleanup.'
+        required_ports:
+        - 389
+        params:
+          username:
+            type: string
+            required: true
+            description: Username in user@domain format.
+          password:
+            type: string
+            description: Password for authentication.
+          hashes:
+            type: string
+            description: NTLM hash for pass-the-hash.
+          kerberos:
+            type: boolean
+            default: false
+            description: Use Kerberos auth from ccache.
+          aes_key:
+            type: string
+            description: AES key for Kerberos.
+          dc_ip:
+            type: string
+            required: true
+            description: Domain Controller IP.
+          ns:
+            type: string
+            description: DNS nameserver override.
+          dns_tcp:
+            type: boolean
+            default: true
+            description: TCP DNS queries.
+          ca_name:
+            type: string
+            required: true
+            description: Certificate Authority name (e.g., 'pirate-DC01-CA'). Get from find method's certificate_authorities[].name.
+          enable_template:
+            type: string
+            description: Template name to enable on the CA (e.g., 'SubCA' for ESC7).
+          disable_template:
+            type: string
+            description: Template name to disable on the CA.
+          issue_request:
+            type: integer
+            description: Request ID to approve/issue. Get from request method's request_id output.
+          deny_request:
+            type: integer
+            description: Request ID to deny.
+          timeout:
+            type: integer
+            default: 300
+            description: Maximum execution time in seconds.
+        returns:
+          ca_name:
+            type: string
+            description: CA name operated on.
+          action:
+            type: string
+            description: Action performed (enable template, disable template, issue request, deny request).
+          enable_template:
+            type: string
+            description: Template that was enabled (if applicable).
+          disable_template:
+            type: string
+            description: Template that was disabled (if applicable).
+          issue_request:
+            type: integer
+            description: Request ID that was approved (if applicable).
+          deny_request:
+            type: integer
+            description: Request ID that was denied (if applicable).
   chisel:
     name: chisel
     version: 1.11.4
@@ -5443,11 +5525,12 @@ tools:
   impacket:
     name: impacket
     version: '0.12'
-    description: 'Windows/Active Directory exploitation toolkit (Impacket 0.12). 17 methods in 5 categories: remote execution
+    description: 'Windows/Active Directory exploitation toolkit (Impacket 0.12). 20 methods in 6 categories: remote execution
       (psexec, wmiexec, smbexec, dcomexec, atexec — 5 execution methods with different stealth/reliability tradeoffs), credential
       dumping (secretsdump — SAM, LSA, NTDS.dit via DRSUAPI or VSS), Kerberos attacks (kerberoast, asreproast, get_tgt, get_st),
-      delegation abuse (addcomputer, find_delegation), SMB operations (smb_shares, smb_get, smb_put), AD enumeration (get_ad_users,
-      lookupsid). All methods support password, NTLM hash (pass-the-hash), Kerberos, and AES key authentication.'
+      delegation abuse (addcomputer, find_delegation, rbcd), RBCD & account modification (rbcd, changepasswd, addspn), SMB
+      operations (smb_shares, smb_get, smb_put), AD enumeration (get_ad_users, lookupsid). All methods support password, NTLM
+      hash (pass-the-hash), Kerberos, and AES key authentication.'
     image: ghcr.io/silicon-works/mcp-tools-impacket:latest
     image_size_mb: 900
     timeout_seconds: 300
@@ -5458,6 +5541,9 @@ tools:
     - kerberos_attacks
     - smb_operations
     - ad_enumeration
+    - rbcd_delegation
+    - password_reset
+    - spn_manipulation
     phases:
     - enumeration
     - exploitation
@@ -5526,6 +5612,12 @@ tools:
       - RBCD
       - S4U
       - machine account
+      - rbcd.py
+      - changepasswd
+      - ForceChangePassword
+      - addspn
+      - SPN injection
+      - password reset
       prefer_over: []
     see_also:
     - tool: netexec
@@ -6546,6 +6638,393 @@ tools:
           delegation_count:
             type: integer
             description: Number of delegation entries found
+      rbcd:
+        required_ports:
+        - 389
+        description: Read, write, or clear Resource-Based Constrained Delegation (RBCD) on a computer account's msDS-AllowedToActOnBehalfOfOtherIdentity
+          attribute
+        when_to_use: 'After creating a machine account with addcomputer, use rbcd to set msDS-AllowedToActOnBehalfOfOtherIdentity
+          on the target computer. Workflow: addcomputer → rbcd (write) → get_st (impersonate). Also use to read or clear existing
+          RBCD settings during enumeration.'
+        params:
+          target:
+            type: string
+            required: true
+            description: Target IP address or hostname
+          username:
+            type: string
+            description: Username for authentication
+          password:
+            type: string
+            description: Password for authentication
+          domain:
+            type: string
+            description: Active Directory domain name
+          hashes:
+            type: string
+            description: NTLM hash in LM:NT format for pass-the-hash
+          kerberos:
+            type: boolean
+            default: false
+            description: Use Kerberos authentication
+          dc_ip:
+            type: string
+            description: Domain Controller IP
+          aes_key:
+            type: string
+            description: AES key for Kerberos authentication
+          port:
+            type: integer
+            description: Target port
+          delegate_from:
+            type: string
+            description: Machine account allowed to delegate (e.g., 'FAKEMACHINE$')
+          delegate_to:
+            type: string
+            required: true
+            description: Target computer to set RBCD on (e.g., 'WEB01$')
+          action:
+            type: enum
+            values:
+            - read
+            - write
+            - remove
+            - flush
+            default: read
+            description: 'Action: write (add delegation), read (list current), remove (remove specific), flush (clear all)'
+          use_ldaps:
+            type: boolean
+            default: false
+            description: Use LDAPS instead of LDAP
+          timeout:
+            type: integer
+            default: 60
+            description: Timeout in seconds
+        returns:
+          target:
+            type: string
+            description: Target hostname/IP
+          delegate_from:
+            type: string
+            description: Machine account set for delegation
+          delegate_to:
+            type: string
+            description: Computer with RBCD configured
+          action:
+            type: string
+            description: Action performed
+      changepasswd:
+        required_ports:
+        - 445
+        description: Change or force-reset a domain user's password via SMB-SAMR, RPC-SAMR, Kerberos kpasswd, or LDAP
+        when_to_use: 'When you have ForceChangePassword ACL over a target user. Common in ACL abuse chains: compromise user
+          A who has ForceChangePassword on user B → reset B''s password → use B''s new credentials. Use -reset flag with -altuser
+          for privilege-based resets.'
+        params:
+          target:
+            type: string
+            required: true
+            description: Target IP address or hostname
+          username:
+            type: string
+            description: Username of user whose password is being changed
+          password:
+            type: string
+            description: Current password of the target user (omit for force-reset)
+          domain:
+            type: string
+            description: Active Directory domain name
+          hashes:
+            type: string
+            description: NTLM hash of the target user in LM:NT format
+          kerberos:
+            type: boolean
+            default: false
+            description: Use Kerberos authentication
+          dc_ip:
+            type: string
+            description: Domain Controller IP
+          aes_key:
+            type: string
+            description: AES key for Kerberos authentication
+          port:
+            type: integer
+            description: Target port
+          new_password:
+            type: string
+            required: true
+            description: New password to set
+          altuser:
+            type: string
+            description: 'Privileged user performing the reset (for ForceChangePassword ACL abuse). Format: domain/user'
+          altpass:
+            type: string
+            description: Password of the privileged user
+          althash:
+            type: string
+            description: NT hash of the privileged user
+          reset:
+            type: boolean
+            default: false
+            description: Force-reset password with privileges (bypasses some password policies)
+          protocol:
+            type: enum
+            values:
+            - smb-samr
+            - rpc-samr
+            - kpasswd
+            - ldap
+            default: smb-samr
+            description: Protocol for password change/reset
+          timeout:
+            type: integer
+            default: 60
+            description: Timeout in seconds
+        returns:
+          target:
+            type: string
+            description: Target hostname/IP
+          protocol:
+            type: string
+            description: Protocol used
+          reset:
+            type: boolean
+            description: Whether force-reset was used
+      addspn:
+        required_ports:
+        - 389
+        description: Add or remove a Service Principal Name (SPN) on an Active Directory account via LDAP
+        when_to_use: When you have WriteProperty on a computer or user account and need to add an SPN for Kerberos delegation
+          abuse (SPN jacking). Common in constrained delegation attacks where you control an account with delegation rights
+          and need to modify the target's SPNs.
+        params:
+          target:
+            type: string
+            required: true
+            description: Target DC IP address or hostname
+          username:
+            type: string
+            description: Username for LDAP authentication
+          password:
+            type: string
+            description: Password for authentication
+          domain:
+            type: string
+            description: Active Directory domain name
+          hashes:
+            type: string
+            description: NTLM hash in LM:NT format for pass-the-hash
+          kerberos:
+            type: boolean
+            default: false
+            description: Use Kerberos authentication
+          dc_ip:
+            type: string
+            description: Domain Controller IP
+          aes_key:
+            type: string
+            description: AES key for Kerberos authentication
+          port:
+            type: integer
+            description: Target port
+          target_account:
+            type: string
+            required: true
+            description: Account to modify SPNs on (e.g., 'DC01$', 'svc_sql')
+          spn:
+            type: string
+            required: true
+            description: SPN to add/remove (e.g., 'cifs/DC01.pirate.htb', 'http/web01.corp.local')
+          action:
+            type: enum
+            values:
+            - add
+            - remove
+            default: add
+            description: Whether to add or remove the SPN
+          timeout:
+            type: integer
+            default: 60
+            description: Timeout in seconds
+        returns:
+          target:
+            type: string
+            description: Target DC hostname/IP
+          target_account:
+            type: string
+            description: Account modified
+          spn:
+            type: string
+            description: SPN added/removed
+          action:
+            type: string
+            description: Action performed (add/remove)
+  impacket-relay:
+    name: impacket-relay
+    version: '1.0'
+    description: NTLM relay attacks via impacket ntlmrelayx. Listens for incoming NTLM authentication and relays it to a target
+      service (LDAP, LDAPS, MSSQL, HTTP, SMB). Used for RBCD writes via relay, AD CS relay (ESC8), credential relay, and privilege
+      escalation. Long-running service with start/stop/status process management.
+    image: ghcr.io/silicon-works/mcp-tools-impacket-relay:latest
+    image_size_mb: 900
+    timeout_seconds: 600
+    service: true
+    service_name: impacket-relay
+    capabilities:
+    - ntlm_relay
+    - rbcd_write
+    - ad_compromise
+    - credential_relay
+    routing:
+      use_for:
+      - NTLM relay attacks
+      - relay NTLM authentication to LDAP or LDAPS
+      - RBCD via relay — relay coerced auth to write msDS-AllowedToActOnBehalfOfOtherIdentity
+      - ntlmrelayx start listener for coerced authentication
+      - relay coerced authentication from PetitPotam or WebDAV to target service
+      - ESC8 AD CS relay — relay NTLM auth to certificate enrollment endpoint
+      - cross-protocol relay from SMB/HTTP to LDAP
+      never_use_for:
+      - one-shot impacket commands like secretsdump, psexec, kerberoast (use impacket tool instead)
+      - triggering authentication coercion (use PetitPotam, PrinterBug, or WebDAV coercion tools)
+      - direct RBCD write without relay (use impacket.rbcd method instead)
+      - password attacks or brute-forcing (use hydra)
+      triggers:
+      - ntlm relay
+      - ntlmrelayx
+      - relay to ldap
+      - relay to ldaps
+      - relay coerced
+      - ntlm relay rbcd
+      - relay delegate
+    phases:
+    - exploitation
+    requirements:
+      network: true
+      privileged: true
+    resources:
+      memory_mb: 512
+      cpu: 0.5
+    see_also:
+    - tool: impacket
+      reason: Use impacket.addcomputer to create machine account before relay, impacket.get_st after RBCD write, impacket.rbcd
+        for direct RBCD without relay
+    - tool: certipy
+      reason: For ADCS-specific attacks (ESC1-7) use certipy directly. impacket-relay handles ESC8 relay to HTTP enrollment.
+    methods:
+      start:
+        required_ports:
+        - 80
+        - 445
+        description: Start ntlmrelayx NTLM relay listener. Spawns ntlmrelayx as a background process, listening for incoming
+          NTLM authentication and relaying it to the specified target. Returns a relay_id for status checking and stopping.
+        when_to_use: 'When you need to relay coerced NTLM authentication to a target. Workflow: (1) start relay listener targeting
+          LDAP/LDAPS/SMB, (2) coerce target via PetitPotam/PrinterBug/WebDAV, (3) check status for relay success, (4) stop
+          relay. Use --delegate-access for automatic RBCD write after successful relay.'
+        params:
+          target:
+            type: string
+            required: true
+            description: Relay target URL (e.g., 'ldaps://DC01.pirate.htb', 'smb://10.10.10.1', 'http://ca.corp.local/certsrv/certfnsh.asp')
+          listen_port:
+            type: integer
+            default: 80
+            description: Port to listen on for incoming NTLM auth (HTTP=80, SMB=445)
+          smb2support:
+            type: boolean
+            default: true
+            description: Enable SMB2 support for incoming connections
+          delegate_access:
+            type: boolean
+            default: false
+            description: Write RBCD delegation after successful relay (--delegate-access). Creates a machine account and sets
+              msDS-AllowedToActOnBehalfOfOtherIdentity.
+          escalate_user:
+            type: string
+            description: Account to escalate privileges for (--escalate-user)
+          remove_mic:
+            type: boolean
+            default: false
+            description: Remove MIC for cross-protocol relay (--remove-mic)
+          additional_args:
+            type: string
+            description: Additional ntlmrelayx arguments as a single string
+          timeout:
+            type: integer
+            default: 300
+            description: Max time to keep relay running (seconds)
+        returns:
+          relay_id:
+            type: string
+            description: Relay process ID for use with status and stop methods
+          pid:
+            type: integer
+            description: Process ID of ntlmrelayx
+          status:
+            type: string
+            description: Process status (running, exited)
+          target:
+            type: string
+            description: Relay target URL
+          listen_port:
+            type: integer
+            description: Port listening for incoming NTLM auth
+      status:
+        description: Check status of a running relay and retrieve captured output. Returns connection attempts, relay success
+          indicators, and any errors.
+        when_to_use: After starting a relay, poll this to check if coercion has triggered and relay succeeded. Look for relay_succeeded=true
+          and delegation_written=true (if --delegate-access was used).
+        params:
+          relay_id:
+            type: string
+            required: true
+            description: Relay ID from start method
+        returns:
+          relay_id:
+            type: string
+            description: Relay process ID
+          status:
+            type: string
+            description: Process status (running, completed, exited)
+          relay_succeeded:
+            type: boolean
+            description: Whether NTLM relay was successful
+          delegation_written:
+            type: boolean
+            description: Whether RBCD delegation was written (if --delegate-access)
+          connections:
+            type: array
+            description: List of connection attempts received
+          errors:
+            type: array
+            description: Any errors encountered
+      stop:
+        description: Stop a running relay and return final results including all captured output.
+        when_to_use: After relay succeeds or to clean up. Always stop relays when done to free the listening port.
+        params:
+          relay_id:
+            type: string
+            required: true
+            description: Relay ID to stop
+        returns:
+          relay_id:
+            type: string
+            description: Relay process ID
+          status:
+            type: string
+            description: Always 'stopped'
+          relay_succeeded:
+            type: boolean
+            description: Whether NTLM relay was successful
+          delegation_written:
+            type: boolean
+            description: Whether RBCD delegation was written
+          connections:
+            type: array
+            description: All connection attempts received
+          errors:
+            type: array
+            description: All errors encountered
   john:
     name: john
     version: 1.9.0-jumbo-1

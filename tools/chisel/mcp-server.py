@@ -236,6 +236,16 @@ class ChiselServer(BaseMCPServer):
             s.bind(("", 0))
             return s.getsockname()[1]
 
+    def _is_port_available(self, port: int) -> bool:
+        """Check if a port is available for binding."""
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                s.bind(("127.0.0.1", port))
+                return True
+        except OSError:
+            return False
+
     async def _start_process(
         self,
         cmd: List[str],
@@ -413,6 +423,11 @@ class ChiselServer(BaseMCPServer):
         verbose: bool = False,
     ) -> ToolResult:
         """Create a reverse tunnel via chisel client."""
+        # Check if remote port is available, find free one if not
+        if not self._is_port_available(remote_port):
+            self.logger.warning(f"Port {remote_port} unavailable, finding free port")
+            remote_port = self._find_free_port()
+
         # Build reverse remote spec: R:remote_port:local_host:local_port
         remote_spec = f"R:{remote_port}:{local_host}:{local_port}"
 
@@ -451,6 +466,11 @@ class ChiselServer(BaseMCPServer):
         verbose: bool = False,
     ) -> ToolResult:
         """Create a SOCKS5 proxy through a chisel server."""
+        # Check if requested port is available, find free one if not
+        if not self._is_port_available(socks_port):
+            self.logger.warning(f"Port {socks_port} unavailable, finding free port")
+            socks_port = self._find_free_port()
+
         # Build socks remote spec: socks_port:socks
         remote_spec = f"{socks_port}:socks"
 
@@ -487,7 +507,16 @@ class ChiselServer(BaseMCPServer):
             if proc and proc.returncode is None:
                 entry = {k: v for k, v in info.items() if k != "process"}
                 entry["id"] = proc_id
-                entry["status"] = "running"
+                # Health check: verify port is actually bound for tunnel processes
+                if info.get("type") in ("socks", "reverse"):
+                    port = info.get("socks_port") or info.get("remote_port")
+                    if port and self._is_port_available(port):
+                        entry["status"] = "degraded"
+                        entry["warning"] = f"Port {port} not bound — tunnel may be broken"
+                    else:
+                        entry["status"] = "running"
+                else:
+                    entry["status"] = "running"
                 active.append(entry)
             else:
                 dead.append(proc_id)
@@ -529,6 +558,14 @@ class ChiselServer(BaseMCPServer):
         except asyncio.TimeoutError:
             proc.kill()
             await proc.wait()
+
+        # Wait briefly for port release from TIME_WAIT
+        port = info.get("port") or info.get("socks_port") or info.get("remote_port")
+        if port:
+            for _ in range(5):
+                if self._is_port_available(port):
+                    break
+                await asyncio.sleep(1)
 
         proc_type = info.get("type", "unknown")
         del self.processes[id]

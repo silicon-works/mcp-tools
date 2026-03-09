@@ -1,6 +1,6 @@
 name: impacket
 version: "0.12"
-description: "Windows/Active Directory exploitation toolkit (Impacket 0.12). 17 methods in 5 categories: remote execution (psexec, wmiexec, smbexec, dcomexec, atexec — 5 execution methods with different stealth/reliability tradeoffs), credential dumping (secretsdump — SAM, LSA, NTDS.dit via DRSUAPI or VSS), Kerberos attacks (kerberoast, asreproast, get_tgt, get_st), delegation abuse (addcomputer, find_delegation), SMB operations (smb_shares, smb_get, smb_put), AD enumeration (get_ad_users, lookupsid). All methods support password, NTLM hash (pass-the-hash), Kerberos, and AES key authentication."
+description: "Windows/Active Directory exploitation toolkit (Impacket 0.12). 20 methods in 6 categories: remote execution (psexec, wmiexec, smbexec, dcomexec, atexec — 5 execution methods with different stealth/reliability tradeoffs), credential dumping (secretsdump — SAM, LSA, NTDS.dit via DRSUAPI or VSS), Kerberos attacks (kerberoast, asreproast, get_tgt, get_st), delegation abuse (addcomputer, find_delegation, rbcd), RBCD & account modification (rbcd, changepasswd, addspn), SMB operations (smb_shares, smb_get, smb_put), AD enumeration (get_ad_users, lookupsid). All methods support password, NTLM hash (pass-the-hash), Kerberos, and AES key authentication."
 image: "ghcr.io/silicon-works/mcp-tools-impacket:latest"
 image_size_mb: 900
 timeout_seconds: 300
@@ -12,6 +12,9 @@ capabilities:
   - kerberos_attacks
   - smb_operations
   - ad_enumeration
+  - rbcd_delegation
+  - password_reset
+  - spn_manipulation
 
 phases:
   - enumeration
@@ -84,6 +87,12 @@ routing:
     - "RBCD"
     - "S4U"
     - "machine account"
+    - "rbcd.py"
+    - "changepasswd"
+    - "ForceChangePassword"
+    - "addspn"
+    - "SPN injection"
+    - "password reset"
   prefer_over: []
 
 see_also:
@@ -1081,3 +1090,207 @@ methods:
       delegation_count:
         type: integer
         description: "Number of delegation entries found"
+
+  rbcd:
+    required_ports: [389]
+    description: "Read, write, or clear Resource-Based Constrained Delegation (RBCD) on a computer account's msDS-AllowedToActOnBehalfOfOtherIdentity attribute"
+    when_to_use: "After creating a machine account with addcomputer, use rbcd to set msDS-AllowedToActOnBehalfOfOtherIdentity on the target computer. Workflow: addcomputer → rbcd (write) → get_st (impersonate). Also use to read or clear existing RBCD settings during enumeration."
+    params:
+      target:
+        type: string
+        required: true
+        description: "Target IP address or hostname"
+      username:
+        type: string
+        description: "Username for authentication"
+      password:
+        type: string
+        description: "Password for authentication"
+      domain:
+        type: string
+        description: "Active Directory domain name"
+      hashes:
+        type: string
+        description: "NTLM hash in LM:NT format for pass-the-hash"
+      kerberos:
+        type: boolean
+        default: false
+        description: "Use Kerberos authentication"
+      dc_ip:
+        type: string
+        description: "Domain Controller IP"
+      aes_key:
+        type: string
+        description: "AES key for Kerberos authentication"
+      port:
+        type: integer
+        description: "Target port"
+      delegate_from:
+        type: string
+        description: "Machine account allowed to delegate (e.g., 'FAKEMACHINE$')"
+      delegate_to:
+        type: string
+        required: true
+        description: "Target computer to set RBCD on (e.g., 'WEB01$')"
+      action:
+        type: enum
+        values: [read, write, remove, flush]
+        default: read
+        description: "Action: write (add delegation), read (list current), remove (remove specific), flush (clear all)"
+      use_ldaps:
+        type: boolean
+        default: false
+        description: "Use LDAPS instead of LDAP"
+      timeout:
+        type: integer
+        default: 60
+        description: "Timeout in seconds"
+    returns:
+      target:
+        type: string
+        description: "Target hostname/IP"
+      delegate_from:
+        type: string
+        description: "Machine account set for delegation"
+      delegate_to:
+        type: string
+        description: "Computer with RBCD configured"
+      action:
+        type: string
+        description: "Action performed"
+
+  changepasswd:
+    required_ports: [445]
+    description: "Change or force-reset a domain user's password via SMB-SAMR, RPC-SAMR, Kerberos kpasswd, or LDAP"
+    when_to_use: "When you have ForceChangePassword ACL over a target user. Common in ACL abuse chains: compromise user A who has ForceChangePassword on user B → reset B's password → use B's new credentials. Use -reset flag with -altuser for privilege-based resets."
+    params:
+      target:
+        type: string
+        required: true
+        description: "Target IP address or hostname"
+      username:
+        type: string
+        description: "Username of user whose password is being changed"
+      password:
+        type: string
+        description: "Current password of the target user (omit for force-reset)"
+      domain:
+        type: string
+        description: "Active Directory domain name"
+      hashes:
+        type: string
+        description: "NTLM hash of the target user in LM:NT format"
+      kerberos:
+        type: boolean
+        default: false
+        description: "Use Kerberos authentication"
+      dc_ip:
+        type: string
+        description: "Domain Controller IP"
+      aes_key:
+        type: string
+        description: "AES key for Kerberos authentication"
+      port:
+        type: integer
+        description: "Target port"
+      new_password:
+        type: string
+        required: true
+        description: "New password to set"
+      altuser:
+        type: string
+        description: "Privileged user performing the reset (for ForceChangePassword ACL abuse). Format: domain/user"
+      altpass:
+        type: string
+        description: "Password of the privileged user"
+      althash:
+        type: string
+        description: "NT hash of the privileged user"
+      reset:
+        type: boolean
+        default: false
+        description: "Force-reset password with privileges (bypasses some password policies)"
+      protocol:
+        type: enum
+        values: [smb-samr, rpc-samr, kpasswd, ldap]
+        default: smb-samr
+        description: "Protocol for password change/reset"
+      timeout:
+        type: integer
+        default: 60
+        description: "Timeout in seconds"
+    returns:
+      target:
+        type: string
+        description: "Target hostname/IP"
+      protocol:
+        type: string
+        description: "Protocol used"
+      reset:
+        type: boolean
+        description: "Whether force-reset was used"
+
+  addspn:
+    required_ports: [389]
+    description: "Add or remove a Service Principal Name (SPN) on an Active Directory account via LDAP"
+    when_to_use: "When you have WriteProperty on a computer or user account and need to add an SPN for Kerberos delegation abuse (SPN jacking). Common in constrained delegation attacks where you control an account with delegation rights and need to modify the target's SPNs."
+    params:
+      target:
+        type: string
+        required: true
+        description: "Target DC IP address or hostname"
+      username:
+        type: string
+        description: "Username for LDAP authentication"
+      password:
+        type: string
+        description: "Password for authentication"
+      domain:
+        type: string
+        description: "Active Directory domain name"
+      hashes:
+        type: string
+        description: "NTLM hash in LM:NT format for pass-the-hash"
+      kerberos:
+        type: boolean
+        default: false
+        description: "Use Kerberos authentication"
+      dc_ip:
+        type: string
+        description: "Domain Controller IP"
+      aes_key:
+        type: string
+        description: "AES key for Kerberos authentication"
+      port:
+        type: integer
+        description: "Target port"
+      target_account:
+        type: string
+        required: true
+        description: "Account to modify SPNs on (e.g., 'DC01$', 'svc_sql')"
+      spn:
+        type: string
+        required: true
+        description: "SPN to add/remove (e.g., 'cifs/DC01.pirate.htb', 'http/web01.corp.local')"
+      action:
+        type: enum
+        values: [add, remove]
+        default: add
+        description: "Whether to add or remove the SPN"
+      timeout:
+        type: integer
+        default: 60
+        description: "Timeout in seconds"
+    returns:
+      target:
+        type: string
+        description: "Target DC hostname/IP"
+      target_account:
+        type: string
+        description: "Account modified"
+      spn:
+        type: string
+        description: "SPN added/removed"
+      action:
+        type: string
+        description: "Action performed (add/remove)"

@@ -471,6 +471,114 @@ class ImpacketServer(BaseMCPServer):
             handler=self.find_delegation,
         )
 
+        # ── RBCD & Account Modification ─────────────────────────────
+
+        self.register_method(
+            name="rbcd",
+            description="Read, write, or clear Resource-Based Constrained Delegation on a computer account",
+            params={
+                **self._auth_params(),
+                "delegate_from": {
+                    "type": "string",
+                    "description": "Machine account allowed to delegate (e.g., 'FAKEMACHINE$')",
+                },
+                "delegate_to": {
+                    "type": "string",
+                    "required": True,
+                    "description": "Target computer to set RBCD on (e.g., 'WEB01$')",
+                },
+                "action": {
+                    "type": "enum",
+                    "values": ["read", "write", "remove", "flush"],
+                    "default": "read",
+                    "description": "Action: write (add delegation), read (list current), remove (remove specific), flush (clear all)",
+                },
+                "use_ldaps": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": "Use LDAPS instead of LDAP",
+                },
+                "timeout": {
+                    "type": "integer",
+                    "default": 60,
+                    "description": "Timeout in seconds",
+                },
+            },
+            handler=self.rbcd,
+        )
+
+        self.register_method(
+            name="changepasswd",
+            description="Change or force-reset a domain user's password",
+            params={
+                **self._auth_params(),
+                "new_password": {
+                    "type": "string",
+                    "required": True,
+                    "description": "New password to set",
+                },
+                "altuser": {
+                    "type": "string",
+                    "description": "Privileged user performing the reset (for ForceChangePassword ACL abuse). Format: domain/user",
+                },
+                "altpass": {
+                    "type": "string",
+                    "description": "Password of the privileged user",
+                },
+                "althash": {
+                    "type": "string",
+                    "description": "NT hash of the privileged user (LMHASH:NTHASH or NTHASH)",
+                },
+                "reset": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": "Force-reset password with privileges (bypasses some password policies). Use when you have ForceChangePassword ACL.",
+                },
+                "protocol": {
+                    "type": "enum",
+                    "values": ["smb-samr", "rpc-samr", "kpasswd", "ldap"],
+                    "default": "smb-samr",
+                    "description": "Protocol for password change/reset",
+                },
+                "timeout": {
+                    "type": "integer",
+                    "default": 60,
+                    "description": "Timeout in seconds",
+                },
+            },
+            handler=self.changepasswd,
+        )
+
+        self.register_method(
+            name="addspn",
+            description="Add or remove a Service Principal Name on an AD account",
+            params={
+                **self._auth_params(),
+                "target_account": {
+                    "type": "string",
+                    "required": True,
+                    "description": "Account to modify SPNs on (e.g., 'DC01$')",
+                },
+                "spn": {
+                    "type": "string",
+                    "required": True,
+                    "description": "SPN to add/remove (e.g., 'cifs/DC01.pirate.htb')",
+                },
+                "action": {
+                    "type": "enum",
+                    "values": ["add", "remove"],
+                    "default": "add",
+                    "description": "Whether to add or remove the SPN",
+                },
+                "timeout": {
+                    "type": "integer",
+                    "default": 60,
+                    "description": "Timeout in seconds",
+                },
+            },
+            handler=self.addspn,
+        )
+
     # ── Helpers ──────────────────────────────────────────────────────────
 
     def _auth_params(self, extra_params: Optional[Dict] = None) -> Dict[str, Dict[str, Any]]:
@@ -1905,6 +2013,203 @@ class ImpacketServer(BaseMCPServer):
                     "target": target,
                     "delegations": delegations,
                     "delegation_count": len(delegations),
+                },
+                raw_output=sanitize_output(combined),
+            )
+        except ToolError as e:
+            return ToolResult(success=False, data={"target": target}, error=str(e))
+
+
+    async def rbcd(
+        self,
+        target: str,
+        delegate_to: str,
+        delegate_from: Optional[str] = None,
+        action: str = "read",
+        use_ldaps: bool = False,
+        username: Optional[str] = None,
+        password: Optional[str] = None,
+        domain: Optional[str] = None,
+        hashes: Optional[str] = None,
+        kerberos: bool = False,
+        dc_ip: Optional[str] = None,
+        aes_key: Optional[str] = None,
+        port: Optional[int] = None,
+        timeout: int = 60,
+    ) -> ToolResult:
+        """Read, write, or clear Resource-Based Constrained Delegation."""
+        self.logger.info(f"RBCD {action} on {delegate_to}")
+
+        identity_str, extra_args = self._build_domain_auth_args(
+            target, username, password, domain, hashes, kerberos, dc_ip, aes_key, port,
+        )
+
+        cmd = ["python3", "/opt/impacket-scripts/rbcd.py"]
+        cmd.extend(extra_args)
+
+        cmd.extend(["-delegate-to", delegate_to])
+        cmd.extend(["-action", action])
+
+        if delegate_from and action in ("write", "remove"):
+            cmd.extend(["-delegate-from", delegate_from])
+        if use_ldaps:
+            cmd.append("-use-ldaps")
+
+        cmd.append(identity_str)
+
+        try:
+            result = await self.run_command(cmd, timeout=timeout)
+            combined = result.stdout + result.stderr
+            success = (
+                result.returncode == 0
+                or "written successfully" in combined.lower()
+                or "attribute" in combined.lower()
+                or "accounts allowed" in combined.lower()
+            )
+
+            return ToolResult(
+                success=success,
+                data={
+                    "target": target,
+                    "delegate_from": delegate_from,
+                    "delegate_to": delegate_to,
+                    "action": action,
+                },
+                raw_output=sanitize_output(combined),
+            )
+        except ToolError as e:
+            return ToolResult(success=False, data={"target": target}, error=str(e))
+
+    async def changepasswd(
+        self,
+        target: str,
+        new_password: str,
+        altuser: Optional[str] = None,
+        altpass: Optional[str] = None,
+        althash: Optional[str] = None,
+        reset: bool = False,
+        protocol: str = "smb-samr",
+        username: Optional[str] = None,
+        password: Optional[str] = None,
+        domain: Optional[str] = None,
+        hashes: Optional[str] = None,
+        kerberos: bool = False,
+        dc_ip: Optional[str] = None,
+        aes_key: Optional[str] = None,
+        port: Optional[int] = None,
+        timeout: int = 60,
+    ) -> ToolResult:
+        """Change or force-reset a domain user's password."""
+        self.logger.info(f"Password change on {target} via {protocol}")
+
+        # changepasswd.py uses target-based auth: [[domain/]username[:password]@]<hostname>
+        target_str, extra_args = self._build_auth_args(
+            target, username, password, domain, hashes, kerberos, dc_ip, aes_key, port,
+        )
+
+        cmd = ["python3", "/opt/impacket-scripts/changepasswd.py"]
+        cmd.extend(extra_args)
+        cmd.extend(["-newpass", new_password])
+        cmd.extend(["-protocol", protocol])
+
+        if reset:
+            cmd.append("-reset")
+        if altuser:
+            cmd.extend(["-altuser", altuser])
+        if altpass:
+            cmd.extend(["-altpass", altpass])
+        if althash:
+            cmd.extend(["-althash", althash])
+
+        cmd.append(target_str)
+
+        try:
+            result = await self.run_command(cmd, timeout=timeout)
+            combined = result.stdout + result.stderr
+            success = (
+                result.returncode == 0
+                or "changed successfully" in combined.lower()
+                or "password was changed" in combined.lower()
+                or "password was reset" in combined.lower()
+            )
+
+            return ToolResult(
+                success=success,
+                data={
+                    "target": target,
+                    "protocol": protocol,
+                    "reset": reset,
+                },
+                raw_output=sanitize_output(combined),
+            )
+        except ToolError as e:
+            return ToolResult(success=False, data={"target": target}, error=str(e))
+
+    async def addspn(
+        self,
+        target: str,
+        target_account: str,
+        spn: str,
+        action: str = "add",
+        username: Optional[str] = None,
+        password: Optional[str] = None,
+        domain: Optional[str] = None,
+        hashes: Optional[str] = None,
+        kerberos: bool = False,
+        dc_ip: Optional[str] = None,
+        aes_key: Optional[str] = None,
+        port: Optional[int] = None,
+        timeout: int = 60,
+    ) -> ToolResult:
+        """Add or remove a Service Principal Name on an AD account."""
+        self.logger.info(f"SPN {action}: {spn} on {target_account}")
+
+        # addspn.py (krbrelayx) uses: addspn.py -u user -p pass -t target -s spn [-r] dc_host
+        cmd = ["python3", "/opt/krbrelayx/addspn.py"]
+
+        if username:
+            if domain:
+                cmd.extend(["-u", f"{domain}\\{username}"])
+            else:
+                cmd.extend(["-u", username])
+        if password:
+            cmd.extend(["-p", password])
+        elif hashes:
+            # addspn.py accepts LM:NTLM hash via -p flag
+            cmd.extend(["-p", hashes])
+        cmd.extend(["-t", target_account])
+        cmd.extend(["-s", spn])
+
+        if action == "remove":
+            cmd.append("-r")
+        if kerberos:
+            cmd.append("-k")
+        if aes_key:
+            cmd.extend(["-aesKey", aes_key])
+        if dc_ip:
+            cmd.extend(["-dc-ip", dc_ip])
+
+        # Positional host arg: the LDAP server to connect to
+        host = dc_ip or target
+        cmd.append(host)
+
+        try:
+            result = await self.run_command(cmd, timeout=timeout)
+            combined = result.stdout + result.stderr
+            success = (
+                result.returncode == 0
+                or "added" in combined.lower()
+                or "removed" in combined.lower()
+                or "found" in combined.lower()
+            )
+
+            return ToolResult(
+                success=success,
+                data={
+                    "target": target,
+                    "target_account": target_account,
+                    "spn": spn,
+                    "action": action,
                 },
                 raw_output=sanitize_output(combined),
             )

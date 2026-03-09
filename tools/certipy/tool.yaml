@@ -1,6 +1,6 @@
 name: certipy
 version: "5.0.4"
-description: "Active Directory Certificate Services (AD CS) enumeration and exploitation via Certipy v5.0.4 (ly4k/Certipy, pip certipy-ad). Certipy has 11 subcommands total, but this MCP server exposes 6 methods: find, request, authenticate, shadow, forge, template. The ca, account, cert, parse, and relay subcommands exist in certipy but are not yet wrapped as MCP methods. Discovers Certificate Authorities and certificate templates, identifies ESC1 through ESC16 vulnerability classifications, requests certificates with attacker-controlled Subject Alternative Names (ESC1), performs enrollment agent abuse (ESC3), exploits template write access (ESC4), forges Golden Certificates from compromised CA keys (ESC5), authenticates via PKINIT to obtain TGTs and NT hashes, and manipulates Shadow Credentials (msDS-KeyCredentialLink) for account takeover. Outputs PFX certificates, ccache/kirbi Kerberos tickets, and JSON enumeration reports to /session/certipy/. Authentication supports password, NTLM hash (pass-the-hash), Kerberos ccache, and AES keys. Username format is user@domain (NOT domain/user). All output files use unique prefixes to avoid certipy's interactive overwrite prompt. For NTLM relay to AD CS endpoints (ESC8/ESC11), use impacket.ntlmrelayx instead — certipy's relay subcommand is not exposed as an MCP method because it requires long-running listener mode with external coercion."
+description: "Active Directory Certificate Services (AD CS) enumeration and exploitation via Certipy v5.0.4 (ly4k/Certipy, pip certipy-ad). Certipy has 11 subcommands total, and this MCP server exposes 7 methods: find, request, authenticate, shadow, forge, template, ca. The account, cert, parse, and relay subcommands exist in certipy but are not yet wrapped as MCP methods. Discovers Certificate Authorities and certificate templates, identifies ESC1 through ESC16 vulnerability classifications, requests certificates with attacker-controlled Subject Alternative Names (ESC1), performs enrollment agent abuse (ESC3), exploits template write access (ESC4), manages Certificate Authority operations for ESC7 (enable/disable templates, approve/deny requests), forges Golden Certificates from compromised CA keys (ESC5), authenticates via PKINIT to obtain TGTs and NT hashes, and manipulates Shadow Credentials (msDS-KeyCredentialLink) for account takeover. Outputs PFX certificates, ccache/kirbi Kerberos tickets, and JSON enumeration reports to /session/certipy/. Authentication supports password, NTLM hash (pass-the-hash), Kerberos ccache, and AES keys. Username format is user@domain (NOT domain/user). All output files use unique prefixes to avoid certipy's interactive overwrite prompt. For NTLM relay to AD CS endpoints (ESC8/ESC11), use impacket-relay instead — certipy's relay subcommand is not exposed as an MCP method because it requires long-running listener mode with external coercion."
 image: "ghcr.io/silicon-works/mcp-tools-certipy:latest"
 image_size_mb: 721
 timeout_seconds: 600
@@ -12,10 +12,12 @@ capabilities:
   - shadow_credentials
   - golden_certificate
   - template_manipulation
+  - ca_management
   - esc1_exploitation
   - esc3_exploitation
   - esc4_exploitation
   - esc5_exploitation
+  - esc7_exploitation
 
 routing:
   use_for:
@@ -41,7 +43,7 @@ routing:
     - "cracking NT hashes obtained from PKINIT auth (use john or hashcat — certipy extracts hashes, cracking tools crack them)"
     - "BloodHound data collection (use bloodhound — certipy v5 removed BloodHound zip output)"
     - "coercing authentication for relay attacks (use PetitPotam/PrinterBug/Coercer — certipy is the relay receiver, not the coercion trigger)"
-    - "CA management, account creation, cert conversion, or certificate parsing (not yet implemented as MCP methods — use certipy directly via bash)"
+    - "account creation, cert conversion, or certificate parsing (not yet implemented as MCP methods — use certipy directly via bash)"
   triggers:
     - "certipy"
     - "ADCS"
@@ -173,7 +175,7 @@ methods:
         description: "Path to the human-readable text summary."
 
   request:
-    description: "Request a certificate from a Certificate Authority — the core exploitation method for ESC1, ESC2, ESC3, ESC6, ESC7, ESC9, ESC10, ESC15, ESC16. Runs `certipy req -username <user@domain> -dc-ip <ip> -ca <ca_name> -template <template>` with optional SAN injection flags. For ESC1: use -upn to specify the target UPN (e.g., administrator@corp.local) to impersonate any user. For ESC3: use -on-behalf-of with an enrollment agent PFX. For ESC7: use -retrieve to fetch approved pending requests. For ESC15 (EKUwu): use -application-policies with OIDs to override template EKU. Output is a PFX file containing the certificate and private key, saved to /session/certipy/ with a unique prefix. If the request requires manager approval (ESC7 workflow), returns a request_id instead of a PFX — the CA management subcommand ('certipy ca') is not wrapped as an MCP method, so approve pending requests via bash, then use request -retrieve to fetch the certificate."
+    description: "Request a certificate from a Certificate Authority — the core exploitation method for ESC1, ESC2, ESC3, ESC6, ESC7, ESC9, ESC10, ESC15, ESC16. Runs `certipy req -username <user@domain> -dc-ip <ip> -ca <ca_name> -template <template>` with optional SAN injection flags. For ESC1: use -upn to specify the target UPN (e.g., administrator@corp.local) to impersonate any user. For ESC3: use -on-behalf-of with an enrollment agent PFX. For ESC7: use -retrieve to fetch approved pending requests (approve via the 'ca' method with issue_request). For ESC15 (EKUwu): use -application-policies with OIDs to override template EKU. Output is a PFX file containing the certificate and private key, saved to /session/certipy/ with a unique prefix. If the request requires manager approval (ESC7 workflow), returns a request_id instead of a PFX — use the 'ca' method with issue_request to approve, then use request -retrieve to fetch the certificate."
     when_to_use: "(1) After find identifies an ESC1-vulnerable template — request a certificate with -upn set to administrator@domain to impersonate domain admin. (2) For ESC3 enrollment agent abuse — first request an enrollment agent certificate, then use -pfx and -on-behalf-of to request on behalf of another user. (3) For ESC7 CA manager abuse — request with SubCA template (will fail with pending), note the request_id, then approve via ca method, then retrieve with -retrieve. (4) For ESC15 (EKUwu) — use -application-policies to inject Client Authentication OID into the CSR, overriding template EKU on v1 templates. (5) After successful request, pass the PFX to authenticate method for PKINIT auth. (6) With -web flag when only Web Enrollment is available. (7) With -sid flag when StrongCertificateBindingEnforcement=2 requires SID in the certificate."
     required_ports: [389]
     params:
@@ -255,7 +257,7 @@ methods:
         description: "Path to the output PFX file under /session/certipy/. Contains certificate + private key. Pass to authenticate method for PKINIT. Null if request is pending approval."
       request_id:
         type: integer
-        description: "Request ID for pending requests (ESC7 workflow). The ca subcommand is not wrapped as an MCP method — approve via bash ('certipy ca -issue-request <id>'), then use request -retrieve to fetch."
+        description: "Request ID for pending requests (ESC7 workflow). Use the 'ca' method with issue_request to approve, then use request -retrieve to fetch the issued certificate."
       ca:
         type: string
         description: "CA name used."
@@ -514,3 +516,76 @@ methods:
       output_files:
         type: array
         description: "All output file paths."
+
+  ca:
+    description: "Manage Certificate Authority operations — enable/disable certificate templates, approve/deny pending certificate requests. Core method for ESC7 exploitation when you have ManageCA rights on a CA. Runs `certipy ca -username <user@domain> -dc-ip <ip> -ca <ca_name>` with action flags. Use in the ESC7 workflow: find (identify ManageCA) → ca (enable SubCA template) → request (request SubCA cert, gets pending) → ca (issue/approve the request) → request -retrieve (fetch issued cert) → authenticate (get TGT + NT hash)."
+    when_to_use: "ESC7 exploitation: when you have ManageCA rights on a CA, use this to enable the SubCA template, then request a certificate, then approve your own request. Workflow: find → ca (enable SubCA) → request (SubCA cert, gets request_id) → ca (issue-request with request_id) → request (retrieve with request_id) → authenticate. Also useful to disable templates after exploitation for cleanup."
+    required_ports: [389]
+    params:
+      username:
+        type: string
+        required: true
+        description: "Username in user@domain format."
+      password:
+        type: string
+        description: "Password for authentication."
+      hashes:
+        type: string
+        description: "NTLM hash for pass-the-hash."
+      kerberos:
+        type: boolean
+        default: false
+        description: "Use Kerberos auth from ccache."
+      aes_key:
+        type: string
+        description: "AES key for Kerberos."
+      dc_ip:
+        type: string
+        required: true
+        description: "Domain Controller IP."
+      ns:
+        type: string
+        description: "DNS nameserver override."
+      dns_tcp:
+        type: boolean
+        default: true
+        description: "TCP DNS queries."
+      ca_name:
+        type: string
+        required: true
+        description: "Certificate Authority name (e.g., 'pirate-DC01-CA'). Get from find method's certificate_authorities[].name."
+      enable_template:
+        type: string
+        description: "Template name to enable on the CA (e.g., 'SubCA' for ESC7)."
+      disable_template:
+        type: string
+        description: "Template name to disable on the CA."
+      issue_request:
+        type: integer
+        description: "Request ID to approve/issue. Get from request method's request_id output."
+      deny_request:
+        type: integer
+        description: "Request ID to deny."
+      timeout:
+        type: integer
+        default: 300
+        description: "Maximum execution time in seconds."
+    returns:
+      ca_name:
+        type: string
+        description: "CA name operated on."
+      action:
+        type: string
+        description: "Action performed (enable template, disable template, issue request, deny request)."
+      enable_template:
+        type: string
+        description: "Template that was enabled (if applicable)."
+      disable_template:
+        type: string
+        description: "Template that was disabled (if applicable)."
+      issue_request:
+        type: integer
+        description: "Request ID that was approved (if applicable)."
+      deny_request:
+        type: integer
+        description: "Request ID that was denied (if applicable)."
