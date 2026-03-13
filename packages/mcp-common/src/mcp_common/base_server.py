@@ -220,6 +220,14 @@ class BaseMCPServer(ABC):
                 message=f"Command timed out after {timeout} seconds",
                 details=" ".join(cmd),
             )
+        except asyncio.CancelledError:
+            self.logger.info("Request cancelled, killing subprocess")
+            try:
+                proc.kill()
+                await proc.wait()
+            except ProcessLookupError:
+                pass
+            raise
 
     async def send_progress(self, message: str, progress: float = 0.0, total: float | None = None) -> None:
         """Send an MCP progress notification if a progress token exists on the current request.
@@ -328,6 +336,14 @@ class BaseMCPServer(ABC):
                 message=f"Command timed out after {timeout} seconds",
                 details=" ".join(cmd),
             )
+        except asyncio.CancelledError:
+            self.logger.info("Request cancelled, killing subprocess")
+            try:
+                proc.kill()
+                await proc.wait()
+            except ProcessLookupError:
+                pass
+            raise
 
         result = subprocess.CompletedProcess(
             args=cmd,
