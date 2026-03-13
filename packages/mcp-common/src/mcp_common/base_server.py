@@ -9,11 +9,13 @@ import json
 import logging
 import subprocess
 import sys
+import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional
 
 from mcp.server import Server
+from mcp.server.lowlevel.server import request_ctx
 from mcp.server.stdio import stdio_server
 from mcp.types import (
     TextContent,
@@ -218,6 +220,129 @@ class BaseMCPServer(ABC):
                 message=f"Command timed out after {timeout} seconds",
                 details=" ".join(cmd),
             )
+
+    async def send_progress(self, message: str, progress: float = 0.0, total: float | None = None) -> None:
+        """Send an MCP progress notification if a progress token exists on the current request.
+
+        Safe to call unconditionally — silently no-ops when there is no active
+        request context or no progress token was provided by the client.
+        """
+        try:
+            ctx = request_ctx.get()
+        except LookupError:
+            return
+        if ctx.meta is None or ctx.meta.progressToken is None:
+            return
+        try:
+            await ctx.session.send_progress_notification(
+                progress_token=ctx.meta.progressToken,
+                progress=progress,
+                total=total,
+                message=message,
+            )
+        except Exception:
+            self.logger.debug("Failed to send progress notification", exc_info=True)
+
+    async def run_command_with_progress(
+        self,
+        cmd: List[str],
+        timeout: int = 300,
+        check: bool = False,
+        progress_filter: Callable[[str], str | None] | None = None,
+        heartbeat_interval: float = 30.0,
+    ) -> subprocess.CompletedProcess:
+        """Run a command while streaming progress notifications from its output.
+
+        Like ``run_command`` but reads stdout/stderr line-by-line and sends MCP
+        progress notifications for lines matched by *progress_filter*, plus a
+        generic heartbeat every *heartbeat_interval* seconds of silence.
+
+        Args:
+            cmd: Command and arguments as list.
+            timeout: Overall wall-clock timeout in seconds.
+            check: Raise ``ToolError`` on non-zero exit code.
+            progress_filter: ``(line) -> message | None``.  Return a short
+                string to emit as a progress notification, or ``None`` to skip.
+            heartbeat_interval: Seconds between automatic "Still running…"
+                heartbeat notifications when no filter match occurs.
+
+        Returns:
+            ``subprocess.CompletedProcess`` with full accumulated stdout/stderr
+            (same interface as ``run_command``).
+        """
+        self.logger.info(f"Running (with progress): {' '.join(cmd)}")
+
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdin=asyncio.subprocess.DEVNULL,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+
+        stdout_buf: list[str] = []
+        stderr_buf: list[str] = []
+        last_progress_time = time.monotonic()
+        progress_count = 0
+
+        async def _read_stream(stream: asyncio.StreamReader, buf: list[str]) -> None:
+            nonlocal last_progress_time, progress_count
+            while True:
+                line_bytes = await stream.readline()
+                if not line_bytes:
+                    break
+                line = line_bytes.decode("utf-8", errors="replace")
+                buf.append(line)
+
+                # Try caller-supplied filter
+                msg: str | None = None
+                if progress_filter is not None:
+                    msg = progress_filter(line)
+
+                # Heartbeat if no filter match and enough time has elapsed
+                if msg is None:
+                    now = time.monotonic()
+                    if now - last_progress_time >= heartbeat_interval:
+                        msg = "Still running\u2026"
+
+                if msg is not None:
+                    progress_count += 1
+                    last_progress_time = time.monotonic()
+                    await self.send_progress(msg, progress=float(progress_count))
+
+        try:
+            await asyncio.wait_for(
+                asyncio.gather(
+                    _read_stream(proc.stdout, stdout_buf),
+                    _read_stream(proc.stderr, stderr_buf),
+                ),
+                timeout=timeout,
+            )
+            await proc.wait()
+        except asyncio.TimeoutError:
+            try:
+                proc.kill()
+                await proc.wait()
+            except ProcessLookupError:
+                pass
+            raise ToolError(
+                message=f"Command timed out after {timeout} seconds",
+                details=" ".join(cmd),
+            )
+
+        result = subprocess.CompletedProcess(
+            args=cmd,
+            returncode=proc.returncode or 0,
+            stdout="".join(stdout_buf),
+            stderr="".join(stderr_buf),
+        )
+
+        if check and result.returncode != 0:
+            raise ToolError(
+                message=f"Command failed with exit code {result.returncode}",
+                details=result.stderr,
+            )
+
+        return result
 
     async def _handle_tool_call(self, name: str, arguments: Dict[str, Any]) -> CallToolResult:
         """Handle an incoming tool call."""
