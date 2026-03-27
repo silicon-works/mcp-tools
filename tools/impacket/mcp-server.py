@@ -8,12 +8,17 @@ for remote execution, credential dumping, Kerberos attacks, and SMB operations.
 
 import asyncio
 import base64
+import glob
 import os
 import re
+import shutil
 import tempfile
 from typing import Any, Dict, List, Optional
 
 from mcp_common import BaseMCPServer, ToolResult, ToolError, sanitize_output
+
+CRED_DIR = "/session/credentials"
+CONFIG_DIR = "/session/config"
 
 
 class ImpacketServer(BaseMCPServer):
@@ -25,6 +30,14 @@ class ImpacketServer(BaseMCPServer):
             description="Windows/AD exploitation toolkit (psexec, secretsdump, kerberoast, SMB)",
             version="1.0.0",
         )
+
+        # Stateful credential tracking
+        self._tickets: Dict[str, str] = {}  # principal -> ccache path in /session/credentials/
+        self._active_principal: Optional[str] = None  # default identity for subsequent calls
+        self._krb5_configured: bool = False  # whether krb5.conf has been written
+
+        # Restore state from /session/ on startup
+        self._restore_state()
 
         # ── Remote Execution ─────────────────────────────────────────────
 
@@ -416,6 +429,21 @@ class ImpacketServer(BaseMCPServer):
                     "type": "string",
                     "description": "Alternative service name for the ticket (e.g., 'cifs/dc.corp.local' to get CIFS access via HTTP delegation)",
                 },
+                "u2u": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": "Use User-to-User (U2U) Kerberos extension. Required for RBCD against accounts without SPNs.",
+                },
+                "self_only": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": "Only perform S4U2Self, skip S4U2Proxy. Gets a ticket for the impersonated user to the requesting account.",
+                },
+                "dmsa": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": "Use Delegated Managed Service Accounts (DMSA) for ticket request.",
+                },
                 "timeout": {
                     "type": "integer",
                     "default": 60,
@@ -579,6 +607,73 @@ class ImpacketServer(BaseMCPServer):
             handler=self.addspn,
         )
 
+    # ── State Management ──────────────────────────────────────────────
+
+    def _restore_state(self):
+        """Restore credential state from /session/credentials/ on container start."""
+        if not os.path.isdir(CRED_DIR):
+            return
+        for ccache in glob.glob(os.path.join(CRED_DIR, "*.ccache")):
+            principal = os.path.splitext(os.path.basename(ccache))[0]
+            self._tickets[principal] = ccache
+            self._active_principal = principal  # last one wins as default
+        if os.path.exists(os.path.join(CONFIG_DIR, "krb5.conf")):
+            if not os.path.exists("/etc/krb5.conf"):
+                shutil.copy(os.path.join(CONFIG_DIR, "krb5.conf"), "/etc/krb5.conf")
+            self._krb5_configured = True
+        if self._tickets:
+            self.logger.info(f"Restored {len(self._tickets)} tickets from {CRED_DIR}")
+
+    def _save_ticket(self, principal: str, ccache_path: str):
+        """Save a ticket to /session/credentials/ and track in memory."""
+        os.makedirs(CRED_DIR, exist_ok=True)
+        # Sanitize principal for filename
+        safe_name = principal.replace("/", "_").replace("@", "_").replace("\\", "_")
+        dest = os.path.join(CRED_DIR, f"{safe_name}.ccache")
+        shutil.copy2(ccache_path, dest)
+        self._tickets[principal] = dest
+        self._active_principal = principal
+        self.logger.info(f"Saved ticket for {principal} -> {dest}")
+
+    def _get_auth_env(self, principal: str = None) -> Dict[str, str]:
+        """Get env dict with KRB5CCNAME for the given (or active) principal."""
+        p = principal or self._active_principal
+        if p:
+            ccache = self._tickets.get(p)
+            if ccache and os.path.exists(ccache):
+                return {"KRB5CCNAME": ccache}
+        return {}
+
+    def _ensure_krb5_conf(self, domain: str, dc_ip: str):
+        """Auto-generate /etc/krb5.conf on first Kerberos call."""
+        if self._krb5_configured:
+            return
+        realm = domain.upper()
+        conf = f"""[libdefaults]
+    default_realm = {realm}
+    dns_lookup_realm = false
+    dns_lookup_kdc = false
+    forwardable = true
+
+[realms]
+    {realm} = {{
+        kdc = {dc_ip}
+        admin_server = {dc_ip}
+    }}
+
+[domain_realm]
+    .{domain.lower()} = {realm}
+    {domain.lower()} = {realm}
+"""
+        with open("/etc/krb5.conf", "w") as f:
+            f.write(conf)
+        # Also save to /session/config/ for other tool containers
+        os.makedirs(CONFIG_DIR, exist_ok=True)
+        with open(os.path.join(CONFIG_DIR, "krb5.conf"), "w") as f:
+            f.write(conf)
+        self._krb5_configured = True
+        self.logger.info(f"Generated krb5.conf for realm {realm} (KDC: {dc_ip})")
+
     # ── Helpers ──────────────────────────────────────────────────────────
 
     def _auth_params(self, extra_params: Optional[Dict] = None) -> Dict[str, Dict[str, Any]]:
@@ -649,6 +744,10 @@ class ImpacketServer(BaseMCPServer):
             (target_str, extra_args) where target_str is '[domain/]user[:pass]@target'
             and extra_args is a list of additional CLI flags.
         """
+        # Auto-generate krb5.conf if using Kerberos
+        if kerberos and domain:
+            self._ensure_krb5_conf(domain, dc_ip or target)
+
         # Build target string: [domain/]user[:password]@target
         parts = []
         if domain:
@@ -666,6 +765,8 @@ class ImpacketServer(BaseMCPServer):
             extra_args.extend(["-hashes", hashes])
         if kerberos:
             extra_args.append("-k")
+            if not password and not hashes and not aes_key:
+                extra_args.append("-no-pass")
         if dc_ip:
             extra_args.extend(["-dc-ip", dc_ip])
         if aes_key:
@@ -701,6 +802,10 @@ class ImpacketServer(BaseMCPServer):
             (identity_str, extra_args) where identity_str is 'domain/user[:pass]'
             and extra_args includes -dc-ip.
         """
+        # Auto-generate krb5.conf if using Kerberos
+        if kerberos and domain:
+            self._ensure_krb5_conf(domain, dc_ip or target)
+
         # Build identity string: domain/user[:password] (no @target)
         parts = []
         if domain:
@@ -717,6 +822,8 @@ class ImpacketServer(BaseMCPServer):
             extra_args.extend(["-hashes", hashes])
         if kerberos:
             extra_args.append("-k")
+            if not password and not hashes and not aes_key:
+                extra_args.append("-no-pass")
         # Use explicit dc_ip if set, otherwise use target as DC IP
         effective_dc_ip = dc_ip or target
         if effective_dc_ip:
@@ -1019,7 +1126,8 @@ class ImpacketServer(BaseMCPServer):
             cmd.append(command)
 
         try:
-            result = await self.run_command(cmd, timeout=timeout)
+            auth_env = self._get_auth_env() if kerberos else {}
+            result = await self.run_command(cmd, timeout=timeout, env=auth_env)
             parsed = self._parse_exec_output(result.stdout, result.stderr)
 
             success = result.returncode == 0 or bool(parsed["output"].strip())
@@ -1070,7 +1178,8 @@ class ImpacketServer(BaseMCPServer):
             cmd.append(command)
 
         try:
-            result = await self.run_command(cmd, timeout=timeout)
+            auth_env = self._get_auth_env() if kerberos else {}
+            result = await self.run_command(cmd, timeout=timeout, env=auth_env)
             parsed = self._parse_exec_output(result.stdout, result.stderr)
 
             success = result.returncode == 0 or bool(parsed["output"].strip())
@@ -1120,9 +1229,12 @@ class ImpacketServer(BaseMCPServer):
         cmd.append(target_str)
 
         # smbexec is interactive (no command positional arg). Pipe command to stdin.
+        auth_env = self._get_auth_env() if kerberos else {}
+        merged_env = {**os.environ, **auth_env} if auth_env else None
         try:
             proc = await asyncio.create_subprocess_exec(
                 *cmd,
+                env=merged_env,
                 stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
@@ -1194,7 +1306,8 @@ class ImpacketServer(BaseMCPServer):
             cmd.append(command)
 
         try:
-            result = await self.run_command(cmd, timeout=timeout)
+            auth_env = self._get_auth_env() if kerberos else {}
+            result = await self.run_command(cmd, timeout=timeout, env=auth_env)
             parsed = self._parse_exec_output(result.stdout, result.stderr)
 
             success = result.returncode == 0 or bool(parsed["output"].strip())
@@ -1242,7 +1355,8 @@ class ImpacketServer(BaseMCPServer):
         cmd.append(command)
 
         try:
-            result = await self.run_command(cmd, timeout=timeout)
+            auth_env = self._get_auth_env() if kerberos else {}
+            result = await self.run_command(cmd, timeout=timeout, env=auth_env)
             parsed = self._parse_exec_output(result.stdout, result.stderr)
 
             success = result.returncode == 0 or bool(parsed["output"].strip())
@@ -1308,7 +1422,8 @@ class ImpacketServer(BaseMCPServer):
         cmd.append(target_str)
 
         try:
-            result = await self.run_command(cmd, timeout=timeout)
+            auth_env = self._get_auth_env() if kerberos else {}
+            result = await self.run_command(cmd, timeout=timeout, env=auth_env)
             parsed = self._parse_secretsdump_output(result.stdout, result.stderr, output_prefix)
 
             success = result.returncode == 0 or parsed["total_hashes"] > 0
@@ -1371,7 +1486,8 @@ class ImpacketServer(BaseMCPServer):
         cmd.append(identity_str)
 
         try:
-            result = await self.run_command(cmd, timeout=timeout)
+            auth_env = self._get_auth_env() if kerberos else {}
+            result = await self.run_command(cmd, timeout=timeout, env=auth_env)
             parsed = self._parse_kerberoast_output(result.stdout, result.stderr)
 
             success = result.returncode == 0 or parsed["hash_count"] > 0
@@ -1423,7 +1539,8 @@ class ImpacketServer(BaseMCPServer):
         cmd.append(identity_str)
 
         try:
-            result = await self.run_command(cmd, timeout=timeout)
+            auth_env = self._get_auth_env() if kerberos else {}
+            result = await self.run_command(cmd, timeout=timeout, env=auth_env)
             parsed = self._parse_asreproast_output(result.stdout, result.stderr)
 
             success = result.returncode == 0 or parsed["hash_count"] > 0
@@ -1466,9 +1583,12 @@ class ImpacketServer(BaseMCPServer):
         cmd.extend(extra_args)
         cmd.append(target_str)
 
+        auth_env = self._get_auth_env() if kerberos else {}
+        merged_env = {**os.environ, **auth_env} if auth_env else None
         try:
             proc = await asyncio.create_subprocess_exec(
                 *cmd,
+                env=merged_env,
                 stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
@@ -1535,9 +1655,12 @@ class ImpacketServer(BaseMCPServer):
         # Normalize path separators for smbclient
         smb_path = remote_path.replace("/", "\\")
 
+        auth_env = self._get_auth_env() if kerberos else {}
+        merged_env = {**os.environ, **auth_env} if auth_env else None
         try:
             proc = await asyncio.create_subprocess_exec(
                 *cmd,
+                env=merged_env,
                 stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
@@ -1627,9 +1750,12 @@ class ImpacketServer(BaseMCPServer):
 
         smb_path = remote_path.replace("/", "\\")
 
+        auth_env = self._get_auth_env() if kerberos else {}
+        merged_env = {**os.environ, **auth_env} if auth_env else None
         try:
             proc = await asyncio.create_subprocess_exec(
                 *cmd,
+                env=merged_env,
                 stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
@@ -1700,7 +1826,8 @@ class ImpacketServer(BaseMCPServer):
         cmd.append(identity_str)
 
         try:
-            result = await self.run_command(cmd, timeout=timeout)
+            auth_env = self._get_auth_env() if kerberos else {}
+            result = await self.run_command(cmd, timeout=timeout, env=auth_env)
             users = self._parse_ad_users(result.stdout, result.stderr)
 
             return ToolResult(
@@ -1742,7 +1869,8 @@ class ImpacketServer(BaseMCPServer):
         cmd.append(str(max_rid))  # maxRid is a positional argument
 
         try:
-            result = await self.run_command(cmd, timeout=timeout)
+            auth_env = self._get_auth_env() if kerberos else {}
+            result = await self.run_command(cmd, timeout=timeout, env=auth_env)
             parsed = self._parse_lookupsid_output(result.stdout, result.stderr)
 
             return ToolResult(
@@ -1774,6 +1902,11 @@ class ImpacketServer(BaseMCPServer):
         """Request a Kerberos TGT and save ccache file."""
         self.logger.info(f"Requesting TGT for {username}@{domain or target}")
 
+        # Auto-generate krb5.conf on first Kerberos operation
+        effective_dc = dc_ip or target
+        if domain and effective_dc:
+            self._ensure_krb5_conf(domain, effective_dc)
+
         identity_str, extra_args = self._build_domain_auth_args(
             target, username, password, domain, hashes, kerberos, dc_ip, aes_key, port,
         )
@@ -1783,7 +1916,8 @@ class ImpacketServer(BaseMCPServer):
         cmd.append(identity_str)
 
         try:
-            result = await self.run_command(cmd, timeout=timeout)
+            auth_env = self._get_auth_env() if kerberos else {}
+            result = await self.run_command(cmd, timeout=timeout, env=auth_env)
             combined = result.stdout + result.stderr
 
             # Find the generated ccache file
@@ -1792,8 +1926,13 @@ class ImpacketServer(BaseMCPServer):
             if ccache_match:
                 ccache_path = ccache_match.group(1)
 
-            # Read ccache info
-            ccache_exists = ccache_path and os.path.exists(ccache_path)
+            # Save ticket to /session/credentials/ for persistence
+            principal = username or "unknown"
+            if ccache_path and os.path.exists(ccache_path):
+                self._save_ticket(principal, ccache_path)
+
+            saved_path = self._tickets.get(principal)
+            ccache_exists = bool(saved_path) or (ccache_path and os.path.exists(ccache_path))
 
             return ToolResult(
                 success=result.returncode == 0 or ccache_exists,
@@ -1801,9 +1940,9 @@ class ImpacketServer(BaseMCPServer):
                     "target": target,
                     "username": username,
                     "domain": domain,
-                    "ccache_file": ccache_path,
+                    "principal": username,
+                    "ccache_file": saved_path or ccache_path,
                     "ccache_exists": ccache_exists,
-                    "hint": f"Set KRB5CCNAME={ccache_path} to use this ticket" if ccache_path else None,
                 },
                 raw_output=sanitize_output(combined),
             )
@@ -1826,10 +1965,18 @@ class ImpacketServer(BaseMCPServer):
         additional_ticket: Optional[str] = None,
         force_forwardable: bool = False,
         altservice: Optional[str] = None,
+        u2u: bool = False,
+        self_only: bool = False,
+        dmsa: bool = False,
         timeout: int = 60,
     ) -> ToolResult:
         """Request a service ticket via S4U2Self/S4U2Proxy for constrained delegation."""
         self.logger.info(f"Requesting ST for {impersonate} -> {spn}")
+
+        # Auto-generate krb5.conf on first Kerberos operation
+        effective_dc = dc_ip or target
+        if domain and effective_dc:
+            self._ensure_krb5_conf(domain, effective_dc)
 
         identity_str, extra_args = self._build_domain_auth_args(
             target, username, password, domain, hashes, kerberos, dc_ip, aes_key, port,
@@ -1846,11 +1993,18 @@ class ImpacketServer(BaseMCPServer):
             cmd.append("-force-forwardable")
         if altservice:
             cmd.extend(["-altservice", altservice])
+        if u2u:
+            cmd.append("-u2u")
+        if self_only:
+            cmd.append("-self")
+        if dmsa:
+            cmd.append("-dmsa")
 
         cmd.append(identity_str)
 
         try:
-            result = await self.run_command(cmd, timeout=timeout)
+            auth_env = self._get_auth_env() if kerberos else {}
+            result = await self.run_command(cmd, timeout=timeout, env=auth_env)
             combined = result.stdout + result.stderr
 
             # Find the generated ccache file
@@ -1859,16 +2013,13 @@ class ImpacketServer(BaseMCPServer):
             if ccache_match:
                 ccache_path = ccache_match.group(1)
 
-            # Copy ccache to /session/ for persistence across calls
-            session_ccache = None
+            # Save ticket to /session/credentials/ with descriptive principal
             if ccache_path and os.path.exists(ccache_path):
-                session_dir = "/session"
-                if os.path.isdir(session_dir):
-                    session_ccache = os.path.join(session_dir, os.path.basename(ccache_path))
-                    import shutil
-                    shutil.copy2(ccache_path, session_ccache)
+                ticket_principal = f"{impersonate}@{spn}"
+                self._save_ticket(ticket_principal, ccache_path)
 
             ccache_exists = ccache_path is not None and os.path.exists(ccache_path)
+            saved_path = self._tickets.get(f"{impersonate}@{spn}", ccache_path)
 
             return ToolResult(
                 success=result.returncode == 0 or ccache_exists,
@@ -1876,9 +2027,8 @@ class ImpacketServer(BaseMCPServer):
                     "target": target,
                     "spn": spn,
                     "impersonate": impersonate,
-                    "ccache_file": session_ccache or ccache_path,
+                    "ccache_file": saved_path,
                     "ccache_exists": ccache_exists,
-                    "hint": f"Set KRB5CCNAME={session_ccache or ccache_path} to use this ticket" if ccache_path else None,
                 },
                 raw_output=sanitize_output(combined),
             )
@@ -1923,7 +2073,8 @@ class ImpacketServer(BaseMCPServer):
         cmd.append(identity_str)
 
         try:
-            result = await self.run_command(cmd, timeout=timeout)
+            auth_env = self._get_auth_env() if kerberos else {}
+            result = await self.run_command(cmd, timeout=timeout, env=auth_env)
             combined = result.stdout + result.stderr
 
             # Parse computer name and password from output
@@ -1976,7 +2127,8 @@ class ImpacketServer(BaseMCPServer):
         cmd.append(identity_str)
 
         try:
-            result = await self.run_command(cmd, timeout=timeout)
+            auth_env = self._get_auth_env() if kerberos else {}
+            result = await self.run_command(cmd, timeout=timeout, env=auth_env)
             combined = result.stdout + result.stderr
 
             # Parse tabular output into structured data
@@ -2058,7 +2210,8 @@ class ImpacketServer(BaseMCPServer):
         cmd.append(identity_str)
 
         try:
-            result = await self.run_command(cmd, timeout=timeout)
+            auth_env = self._get_auth_env() if kerberos else {}
+            result = await self.run_command(cmd, timeout=timeout, env=auth_env)
             combined = result.stdout + result.stderr
             success = (
                 result.returncode == 0
@@ -2124,7 +2277,8 @@ class ImpacketServer(BaseMCPServer):
         cmd.append(target_str)
 
         try:
-            result = await self.run_command(cmd, timeout=timeout)
+            auth_env = self._get_auth_env() if kerberos else {}
+            result = await self.run_command(cmd, timeout=timeout, env=auth_env)
             combined = result.stdout + result.stderr
             success = (
                 result.returncode == 0
@@ -2194,7 +2348,8 @@ class ImpacketServer(BaseMCPServer):
         cmd.append(host)
 
         try:
-            result = await self.run_command(cmd, timeout=timeout)
+            auth_env = self._get_auth_env() if kerberos else {}
+            result = await self.run_command(cmd, timeout=timeout, env=auth_env)
             combined = result.stdout + result.stderr
             success = (
                 result.returncode == 0

@@ -1,5 +1,5 @@
 version: '2.0'
-updated_at: '2026-03-13T19:22:44Z'
+updated_at: '2026-03-27T22:33:33Z'
 tools:
   amass:
     name: amass
@@ -139,6 +139,7 @@ tools:
     image: ghcr.io/silicon-works/mcp-tools-bloodhound:latest
     image_size_mb: 258
     timeout_seconds: 300
+    idle_timeout: 1800
     capabilities:
     - ad_enumeration
     - attack_path_analysis
@@ -327,6 +328,9 @@ tools:
             default: 300
             description: Maximum execution time in seconds. 300s handles most single-domain collections. Increase for large
               domains (10K+ computers) or when using slow collection methods like LoggedOn.
+          ccache_path:
+            type: string
+            description: Path to Kerberos ccache file (e.g., /session/credentials/auditor.ccache)
         returns:
           files:
             type: array
@@ -439,6 +443,9 @@ tools:
             type: integer
             default: 300
             description: Maximum execution time in seconds.
+          ccache_path:
+            type: string
+            description: Path to Kerberos ccache file (e.g., /session/credentials/auditor.ccache)
         returns:
           files:
             type: array
@@ -459,6 +466,966 @@ tools:
           collection:
             type: string
             description: Always 'DCOnly' for this method
+  bloodyad:
+    name: bloodyad
+    version: 2.1.7
+    description: 'Active Directory privilege escalation via LDAP using bloodyAD. 20 methods covering ACL abuse (GenericAll,
+      WriteDacl), RBCD delegation, shadow credentials, password resets, group manipulation, DCSync rights, UAC flag modification,
+      and AD object enumeration/search. Supports both NTLM and Kerberos authentication with ccache files.
+
+      '
+    image: ghcr.io/silicon-works/mcp-tools-bloodyad:latest
+    image_size_mb: 650
+    timeout_seconds: 120
+    idle_timeout: 1800
+    capabilities:
+    - ad_acl_abuse
+    - rbcd_delegation
+    - shadow_credentials
+    - password_reset
+    - group_manipulation
+    - dcsync_rights
+    - uac_modification
+    - ad_enumeration
+    - ldap_search
+    phases:
+    - exploitation
+    - post-exploitation
+    requirements:
+      network: true
+      privileged: false
+    resources:
+      memory_mb: 256
+      cpu: 0.25
+    routing:
+      use_for:
+      - Change or reset an AD user's password via LDAP (ForceChangePassword abuse)
+      - Grant GenericAll or WriteDacl permissions on AD objects
+      - Set up Resource-Based Constrained Delegation (RBCD)
+      - Add shadow credentials (msDS-KeyCredentialLink) to a target
+      - Add or remove users from AD groups
+      - Create machine accounts for delegation attacks
+      - Grant DCSync rights to a principal
+      - Modify UAC flags (DONT_REQ_PREAUTH, TRUSTED_TO_AUTH_FOR_DELEGATION)
+      - Read AD object attributes via LDAP
+      - Search AD with LDAP filters
+      - Find writable AD objects
+      - Set ownership of AD objects (WriteOwner abuse)
+      never_use_for:
+      - Network scanning or port discovery (use nmap)
+      - Kerberos ticket requests (use impacket get_tgt/get_st)
+      - Certificate attacks (use certipy)
+      - Remote command execution (use evil-winrm, impacket psexec/wmiexec)
+      - SMB file operations (use impacket smb_get/smb_put)
+      triggers:
+      - bloodyAD
+      - bloodyad
+      - ForceChangePassword
+      - GenericAll
+      - WriteDacl
+      - WriteOwner
+      - RBCD
+      - shadow credentials
+      - msDS-KeyCredentialLink
+      - group membership
+      - DCSync rights
+      - UAC flags
+      - DONT_REQ_PREAUTH
+      - TRUSTED_TO_AUTH_FOR_DELEGATION
+      - AD ACL abuse
+      - LDAP privesc
+      prefer_over:
+      - impacket
+    see_also:
+    - tool: impacket
+      reason: Use impacket for Kerberos ticket operations (getTGT, getST) that feed into bloodyAD Kerberos auth
+    - tool: certipy
+      reason: Use certipy for certificate-based attacks (ADCS). bloodyAD handles shadow credentials via LDAP
+    - tool: bloodhound
+      reason: Use BloodHound to discover ACL paths, then bloodyAD to exploit them
+    methods:
+      set_password:
+        description: Force-change a user's password via LDAP (ForceChangePassword or GenericAll required)
+        when_to_use: When you have ForceChangePassword, GenericAll, or AllExtendedRights on a target user
+        required_ports:
+        - 389
+        - 636
+        params:
+          host:
+            type: string
+            required: true
+            description: DC hostname or IP
+          domain:
+            type: string
+            required: true
+            description: AD domain name
+          username:
+            type: string
+            description: Auth username
+          password:
+            type: string
+            description: Auth password or hash
+          kerberos:
+            type: boolean
+            default: false
+            description: Use Kerberos auth
+          ccache_path:
+            type: string
+            description: Path to ccache file
+          target:
+            type: string
+            required: true
+            description: Target user sAMAccountName
+          new_password:
+            type: string
+            required: true
+            description: New password
+      set_owner:
+        description: Change ownership of an AD object (WriteOwner required)
+        when_to_use: When you have WriteOwner permission and need to take ownership before modifying DACLs
+        required_ports:
+        - 389
+        - 636
+        params:
+          host:
+            type: string
+            required: true
+            description: DC hostname or IP
+          domain:
+            type: string
+            required: true
+            description: AD domain name
+          username:
+            type: string
+            description: Auth username
+          password:
+            type: string
+            description: Auth password or hash
+          kerberos:
+            type: boolean
+            default: false
+            description: Use Kerberos auth
+          ccache_path:
+            type: string
+            description: Path to ccache file
+          target:
+            type: string
+            required: true
+            description: Target object
+          owner:
+            type: string
+            required: true
+            description: New owner
+      set_object:
+        description: Add/replace/delete attributes on AD objects
+        when_to_use: For direct LDAP attribute manipulation — modifying SPNs, descriptions, or custom attributes
+        required_ports:
+        - 389
+        - 636
+        params:
+          host:
+            type: string
+            required: true
+            description: DC hostname or IP
+          domain:
+            type: string
+            required: true
+            description: AD domain name
+          username:
+            type: string
+            description: Auth username
+          password:
+            type: string
+            description: Auth password or hash
+          kerberos:
+            type: boolean
+            default: false
+            description: Use Kerberos auth
+          ccache_path:
+            type: string
+            description: Path to ccache file
+          target:
+            type: string
+            required: true
+            description: Target object
+          attribute:
+            type: string
+            required: true
+            description: Attribute name
+          values:
+            type: array
+            description: Values to set (omit to delete)
+      add_genericall:
+        description: Grant full control (GenericAll) to a principal on a target (WriteDacl required)
+        when_to_use: When you have WriteDacl on an object and need to grant yourself full control
+        required_ports:
+        - 389
+        - 636
+        params:
+          host:
+            type: string
+            required: true
+            description: DC hostname or IP
+          domain:
+            type: string
+            required: true
+            description: AD domain name
+          username:
+            type: string
+            description: Auth username
+          password:
+            type: string
+            description: Auth password or hash
+          kerberos:
+            type: boolean
+            default: false
+            description: Use Kerberos auth
+          ccache_path:
+            type: string
+            description: Path to ccache file
+          target:
+            type: string
+            required: true
+            description: Target object
+          trustee:
+            type: string
+            required: true
+            description: Principal to grant access to
+      add_rbcd:
+        description: Configure RBCD on target to allow impersonation via a controlled service account
+        when_to_use: When you control a machine account and have Write on target's msDS-AllowedToActOnBehalfOfOtherIdentity
+        required_ports:
+        - 389
+        - 636
+        params:
+          host:
+            type: string
+            required: true
+            description: DC hostname or IP
+          domain:
+            type: string
+            required: true
+            description: AD domain name
+          username:
+            type: string
+            description: Auth username
+          password:
+            type: string
+            description: Auth password or hash
+          kerberos:
+            type: boolean
+            default: false
+            description: Use Kerberos auth
+          ccache_path:
+            type: string
+            description: Path to ccache file
+          target:
+            type: string
+            required: true
+            description: Target machine
+          service:
+            type: string
+            required: true
+            description: Attacker service account
+      add_shadow_credentials:
+        description: Add Key Credentials for shadow credentials attack
+        when_to_use: When you have Write on msDS-KeyCredentialLink — alternative to password reset
+        required_ports:
+        - 389
+        - 636
+        params:
+          host:
+            type: string
+            required: true
+            description: DC hostname or IP
+          domain:
+            type: string
+            required: true
+            description: AD domain name
+          username:
+            type: string
+            description: Auth username
+          password:
+            type: string
+            description: Auth password or hash
+          kerberos:
+            type: boolean
+            default: false
+            description: Use Kerberos auth
+          ccache_path:
+            type: string
+            description: Path to ccache file
+          target:
+            type: string
+            required: true
+            description: Target account
+          cert_path:
+            type: string
+            description: Output path for certificate
+      add_group_member:
+        description: Add a principal to an AD group
+        when_to_use: When you have Write access on a group and need to add a user/computer
+        required_ports:
+        - 389
+        - 636
+        params:
+          host:
+            type: string
+            required: true
+            description: DC hostname or IP
+          domain:
+            type: string
+            required: true
+            description: AD domain name
+          username:
+            type: string
+            description: Auth username
+          password:
+            type: string
+            description: Auth password or hash
+          kerberos:
+            type: boolean
+            default: false
+            description: Use Kerberos auth
+          ccache_path:
+            type: string
+            description: Path to ccache file
+          group:
+            type: string
+            required: true
+            description: Target group
+          member:
+            type: string
+            required: true
+            description: Member to add
+      add_computer:
+        description: Create a machine account in AD
+        when_to_use: When you need a machine account for RBCD attacks (default MAQ allows 10)
+        required_ports:
+        - 389
+        - 636
+        params:
+          host:
+            type: string
+            required: true
+            description: DC hostname or IP
+          domain:
+            type: string
+            required: true
+            description: AD domain name
+          username:
+            type: string
+            description: Auth username
+          password:
+            type: string
+            description: Auth password or hash
+          kerberos:
+            type: boolean
+            default: false
+            description: Use Kerberos auth
+          ccache_path:
+            type: string
+            description: Path to ccache file
+          hostname:
+            type: string
+            required: true
+            description: Computer name (no trailing $)
+          computer_pass:
+            type: string
+            required: true
+            description: Password for machine account
+      add_dcsync:
+        description: Grant DCSync (Replicating Directory Changes) rights to a principal
+        when_to_use: When you have WriteDacl on the domain object and want to enable DCSync
+        required_ports:
+        - 389
+        - 636
+        params:
+          host:
+            type: string
+            required: true
+            description: DC hostname or IP
+          domain:
+            type: string
+            required: true
+            description: AD domain name
+          username:
+            type: string
+            description: Auth username
+          password:
+            type: string
+            description: Auth password or hash
+          kerberos:
+            type: boolean
+            default: false
+            description: Use Kerberos auth
+          ccache_path:
+            type: string
+            description: Path to ccache file
+          trustee:
+            type: string
+            required: true
+            description: Principal to grant DCSync to
+      add_uac:
+        description: Add UAC flags to user/computer objects
+        when_to_use: To set DONT_REQ_PREAUTH for AS-REP roasting, or TRUSTED_TO_AUTH_FOR_DELEGATION
+        required_ports:
+        - 389
+        - 636
+        params:
+          host:
+            type: string
+            required: true
+            description: DC hostname or IP
+          domain:
+            type: string
+            required: true
+            description: AD domain name
+          username:
+            type: string
+            description: Auth username
+          password:
+            type: string
+            description: Auth password or hash
+          kerberos:
+            type: boolean
+            default: false
+            description: Use Kerberos auth
+          ccache_path:
+            type: string
+            description: Path to ccache file
+          target:
+            type: string
+            required: true
+            description: Target object
+          flags:
+            type: array
+            required: true
+            description: UAC flags to add
+      add_dns_record:
+        description: Add a DNS record to the AD-integrated DNS zone
+        when_to_use: To add DNS records for phishing, MITM attacks, or pointing a hostname to an attacker-controlled IP
+        required_ports:
+        - 389
+        - 636
+        params:
+          host:
+            type: string
+            required: true
+            description: DC hostname or IP
+          domain:
+            type: string
+            required: true
+            description: AD domain name
+          username:
+            type: string
+            description: Auth username
+          password:
+            type: string
+            description: Auth password or hash
+          kerberos:
+            type: boolean
+            default: false
+            description: Use Kerberos auth
+          ccache_path:
+            type: string
+            description: Path to ccache file
+          name:
+            type: string
+            required: true
+            description: DNS record name
+          data:
+            type: string
+            required: true
+            description: DNS record data (e.g., IP address)
+          dnstype:
+            type: string
+            default: A
+            description: DNS record type (A, AAAA, CNAME, TXT)
+          zone:
+            type: string
+            description: 'DNS zone (default: domain zone)'
+          ttl:
+            type: integer
+            description: TTL in seconds
+      add_user:
+        description: Create a new user account in the domain
+        when_to_use: When you have CreateChild rights on an OU and need a new domain user for persistence or further attacks
+        required_ports:
+        - 389
+        - 636
+        params:
+          host:
+            type: string
+            required: true
+            description: DC hostname or IP
+          domain:
+            type: string
+            required: true
+            description: AD domain name
+          username:
+            type: string
+            description: Auth username
+          password:
+            type: string
+            description: Auth password or hash
+          kerberos:
+            type: boolean
+            default: false
+            description: Use Kerberos auth
+          ccache_path:
+            type: string
+            description: Path to ccache file
+          sam_account_name:
+            type: string
+            required: true
+            description: sAMAccountName for the new user
+          new_password:
+            type: string
+            required: true
+            description: Password for the new user
+          ou:
+            type: string
+            description: Organizational Unit DN
+      get_object:
+        description: Read LDAP attributes of an AD object
+        when_to_use: To inspect object properties, check ACLs, or verify attack results
+        required_ports:
+        - 389
+        - 636
+        params:
+          host:
+            type: string
+            required: true
+            description: DC hostname or IP
+          domain:
+            type: string
+            required: true
+            description: AD domain name
+          username:
+            type: string
+            description: Auth username
+          password:
+            type: string
+            description: Auth password or hash
+          kerberos:
+            type: boolean
+            default: false
+            description: Use Kerberos auth
+          ccache_path:
+            type: string
+            description: Path to ccache file
+          target:
+            type: string
+            required: true
+            description: Target object
+          attr:
+            type: string
+            description: Comma-separated attributes
+      get_children:
+        description: List child objects of an AD container/OU
+        when_to_use: To enumerate objects within an OU or container
+        required_ports:
+        - 389
+        - 636
+        params:
+          host:
+            type: string
+            required: true
+            description: DC hostname or IP
+          domain:
+            type: string
+            required: true
+            description: AD domain name
+          username:
+            type: string
+            description: Auth username
+          password:
+            type: string
+            description: Auth password or hash
+          kerberos:
+            type: boolean
+            default: false
+            description: Use Kerberos auth
+          ccache_path:
+            type: string
+            description: Path to ccache file
+          target:
+            type: string
+            description: 'Parent object (default: domain)'
+          otype:
+            type: string
+            description: Object class filter
+      get_search:
+        description: Search AD with LDAP filter
+        when_to_use: For targeted LDAP queries — finding LAPS passwords, specific object classes, etc.
+        required_ports:
+        - 389
+        - 636
+        params:
+          host:
+            type: string
+            required: true
+            description: DC hostname or IP
+          domain:
+            type: string
+            required: true
+            description: AD domain name
+          username:
+            type: string
+            description: Auth username
+          password:
+            type: string
+            description: Auth password or hash
+          kerberos:
+            type: boolean
+            default: false
+            description: Use Kerberos auth
+          ccache_path:
+            type: string
+            description: Path to ccache file
+          filter:
+            type: string
+            required: true
+            description: LDAP filter
+          attr:
+            type: string
+            description: Comma-separated attributes
+      get_writable:
+        description: Find AD objects writable by the current user
+        when_to_use: To discover privilege escalation paths via writable objects
+        required_ports:
+        - 389
+        - 636
+        params:
+          host:
+            type: string
+            required: true
+            description: DC hostname or IP
+          domain:
+            type: string
+            required: true
+            description: AD domain name
+          username:
+            type: string
+            description: Auth username
+          password:
+            type: string
+            description: Auth password or hash
+          kerberos:
+            type: boolean
+            default: false
+            description: Use Kerberos auth
+          ccache_path:
+            type: string
+            description: Path to ccache file
+          otype:
+            type: string
+            default: ALL
+            description: Object type filter
+          right:
+            type: string
+            default: ALL
+            description: Right type filter
+      get_membership:
+        description: List all groups a target belongs to (recursive)
+        when_to_use: To understand group memberships for privilege analysis
+        required_ports:
+        - 389
+        - 636
+        params:
+          host:
+            type: string
+            required: true
+            description: DC hostname or IP
+          domain:
+            type: string
+            required: true
+            description: AD domain name
+          username:
+            type: string
+            description: Auth username
+          password:
+            type: string
+            description: Auth password or hash
+          kerberos:
+            type: boolean
+            default: false
+            description: Use Kerberos auth
+          ccache_path:
+            type: string
+            description: Path to ccache file
+          target:
+            type: string
+            required: true
+            description: Target object
+      get_dnsdump:
+        description: Dump all DNS records from the AD-integrated DNS zone
+        when_to_use: To enumerate DNS records for target discovery, finding hidden hosts, or identifying DNS-based misconfigurations
+        required_ports:
+        - 389
+        - 636
+        params:
+          host:
+            type: string
+            required: true
+            description: DC hostname or IP
+          domain:
+            type: string
+            required: true
+            description: AD domain name
+          username:
+            type: string
+            description: Auth username
+          password:
+            type: string
+            description: Auth password or hash
+          kerberos:
+            type: boolean
+            default: false
+            description: Use Kerberos auth
+          ccache_path:
+            type: string
+            description: Path to ccache file
+      get_trusts:
+        description: Enumerate all Active Directory trust relationships
+        when_to_use: To discover inter-domain and inter-forest trust relationships for lateral movement paths
+        required_ports:
+        - 389
+        - 636
+        params:
+          host:
+            type: string
+            required: true
+            description: DC hostname or IP
+          domain:
+            type: string
+            required: true
+            description: AD domain name
+          username:
+            type: string
+            description: Auth username
+          password:
+            type: string
+            description: Auth password or hash
+          kerberos:
+            type: boolean
+            default: false
+            description: Use Kerberos auth
+          ccache_path:
+            type: string
+            description: Path to ccache file
+      remove_genericall:
+        description: Remove GenericAll ACE from a target (cleanup)
+        when_to_use: Post-exploitation cleanup — remove the ACE you added
+        required_ports:
+        - 389
+        - 636
+        params:
+          host:
+            type: string
+            required: true
+            description: DC hostname or IP
+          domain:
+            type: string
+            required: true
+            description: AD domain name
+          username:
+            type: string
+            description: Auth username
+          password:
+            type: string
+            description: Auth password or hash
+          kerberos:
+            type: boolean
+            default: false
+            description: Use Kerberos auth
+          ccache_path:
+            type: string
+            description: Path to ccache file
+          target:
+            type: string
+            required: true
+            description: Target object
+          trustee:
+            type: string
+            required: true
+            description: Trustee to remove
+      remove_rbcd:
+        description: Remove RBCD delegation (cleanup)
+        when_to_use: Post-exploitation cleanup — remove the RBCD entry you added
+        required_ports:
+        - 389
+        - 636
+        params:
+          host:
+            type: string
+            required: true
+            description: DC hostname or IP
+          domain:
+            type: string
+            required: true
+            description: AD domain name
+          username:
+            type: string
+            description: Auth username
+          password:
+            type: string
+            description: Auth password or hash
+          kerberos:
+            type: boolean
+            default: false
+            description: Use Kerberos auth
+          ccache_path:
+            type: string
+            description: Path to ccache file
+          target:
+            type: string
+            required: true
+            description: Target machine
+          service:
+            type: string
+            required: true
+            description: Service account to remove
+      remove_group_member:
+        description: Remove a member from a group (cleanup)
+        when_to_use: Post-exploitation cleanup — remove the user you added
+        required_ports:
+        - 389
+        - 636
+        params:
+          host:
+            type: string
+            required: true
+            description: DC hostname or IP
+          domain:
+            type: string
+            required: true
+            description: AD domain name
+          username:
+            type: string
+            description: Auth username
+          password:
+            type: string
+            description: Auth password or hash
+          kerberos:
+            type: boolean
+            default: false
+            description: Use Kerberos auth
+          ccache_path:
+            type: string
+            description: Path to ccache file
+          group:
+            type: string
+            required: true
+            description: Target group
+          member:
+            type: string
+            required: true
+            description: Member to remove
+      remove_shadow_credentials:
+        description: Remove shadow credentials (Key Credentials) from a target (cleanup)
+        when_to_use: Post-exploitation cleanup — remove the shadow credentials you added
+        required_ports:
+        - 389
+        - 636
+        params:
+          host:
+            type: string
+            required: true
+            description: DC hostname or IP
+          domain:
+            type: string
+            required: true
+            description: AD domain name
+          username:
+            type: string
+            description: Auth username
+          password:
+            type: string
+            description: Auth password or hash
+          kerberos:
+            type: boolean
+            default: false
+            description: Use Kerberos auth
+          ccache_path:
+            type: string
+            description: Path to ccache file
+          target:
+            type: string
+            required: true
+            description: Target account
+          key:
+            type: string
+            description: Specific key identifier to remove
+      remove_dcsync:
+        description: Remove DCSync rights from a principal (cleanup)
+        when_to_use: Post-exploitation cleanup — remove the DCSync rights you granted
+        required_ports:
+        - 389
+        - 636
+        params:
+          host:
+            type: string
+            required: true
+            description: DC hostname or IP
+          domain:
+            type: string
+            required: true
+            description: AD domain name
+          username:
+            type: string
+            description: Auth username
+          password:
+            type: string
+            description: Auth password or hash
+          kerberos:
+            type: boolean
+            default: false
+            description: Use Kerberos auth
+          ccache_path:
+            type: string
+            description: Path to ccache file
+          trustee:
+            type: string
+            required: true
+            description: Principal to remove DCSync from
+      remove_uac:
+        description: Remove UAC flags from a user/computer object (cleanup)
+        when_to_use: Post-exploitation cleanup — remove the UAC flags you added
+        required_ports:
+        - 389
+        - 636
+        params:
+          host:
+            type: string
+            required: true
+            description: DC hostname or IP
+          domain:
+            type: string
+            required: true
+            description: AD domain name
+          username:
+            type: string
+            description: Auth username
+          password:
+            type: string
+            description: Auth password or hash
+          kerberos:
+            type: boolean
+            default: false
+            description: Use Kerberos auth
+          ccache_path:
+            type: string
+            description: Path to ccache file
+          target:
+            type: string
+            required: true
+            description: Target object
+          flags:
+            type: array
+            required: true
+            description: UAC flags to remove
   certipy:
     name: certipy
     version: 5.0.4
@@ -478,6 +1445,7 @@ tools:
     image: ghcr.io/silicon-works/mcp-tools-certipy:latest
     image_size_mb: 721
     timeout_seconds: 600
+    idle_timeout: 1800
     capabilities:
     - adcs_enumeration
     - certificate_request
@@ -758,6 +1726,10 @@ tools:
           application_policies:
             type: string
             description: Application policy OIDs for ESC15 exploitation. Comma-separated.
+          dcom:
+            type: boolean
+            default: false
+            description: Use DCOM transport for certificate request. Workaround for RPC_E_CALL_COMPLETE errors.
           timeout:
             type: integer
             default: 300
@@ -2524,6 +3496,7 @@ tools:
     image: ghcr.io/silicon-works/mcp-tools-evil-winrm:latest
     image_size_mb: 300
     timeout_seconds: 300
+    idle_timeout: 1800
     capabilities:
     - winrm_shell
     - file_transfer
@@ -2627,6 +3600,16 @@ tools:
             type: integer
             description: 'Custom WinRM port. Default: 5985 (HTTP) or 5986 (HTTPS when ssl=true). Override for non-standard
               WinRM configurations.'
+          auth:
+            type: enum
+            values:
+            - ntlm
+            - kerberos
+            default: ntlm
+            description: Auth method. Use 'kerberos' when NTLM is disabled on the target.
+          ccache_path:
+            type: string
+            description: Path to Kerberos ccache file (e.g., /session/credentials/auditor.ccache)
         returns:
           output:
             type: string
@@ -2679,6 +3662,16 @@ tools:
           port:
             type: integer
             description: 'Custom WinRM port (default: 5985 HTTP, 5986 HTTPS).'
+          auth:
+            type: enum
+            values:
+            - ntlm
+            - kerberos
+            default: ntlm
+            description: Auth method. Use 'kerberos' when NTLM is disabled on the target.
+          ccache_path:
+            type: string
+            description: Path to Kerberos ccache file (e.g., /session/credentials/auditor.ccache)
         returns:
           success:
             type: boolean
@@ -2726,6 +3719,16 @@ tools:
           port:
             type: integer
             description: 'Custom WinRM port (default: 5985 HTTP, 5986 HTTPS).'
+          auth:
+            type: enum
+            values:
+            - ntlm
+            - kerberos
+            default: ntlm
+            description: Auth method. Use 'kerberos' when NTLM is disabled on the target.
+          ccache_path:
+            type: string
+            description: Path to Kerberos ccache file (e.g., /session/credentials/auditor.ccache)
         returns:
           content:
             type: string
@@ -5534,6 +6537,7 @@ tools:
     image: ghcr.io/silicon-works/mcp-tools-impacket:latest
     image_size_mb: 900
     timeout_seconds: 300
+    idle_timeout: 1800
     capabilities:
     - remote_execution
     - credential_dumping
@@ -6509,6 +7513,19 @@ tools:
           altservice:
             type: string
             description: Alternative service name for the ticket
+          u2u:
+            type: boolean
+            default: false
+            description: Use User-to-User (U2U) Kerberos extension. Required for RBCD against accounts without SPNs.
+          self_only:
+            type: boolean
+            default: false
+            description: Only perform S4U2Self, skip S4U2Proxy. Gets a ticket for the impersonated user to the requesting
+              account.
+          dmsa:
+            type: boolean
+            default: false
+            description: Use Delegated Managed Service Accounts (DMSA) for ticket request.
           timeout:
             type: integer
             default: 60
@@ -6516,11 +7533,8 @@ tools:
         returns:
           ccache_file:
             type: string
-            description: Path to saved ccache file (in /session/ for persistence)
+            description: Path to saved ccache file (in /session/credentials/ for persistence)
           ccache_exists:
-            type: boolean
-            description: Whether ccache file was saved successfully
-          hint:
             type: string
             description: Usage hint for the ccache file
       addcomputer:
@@ -9347,6 +10361,7 @@ tools:
     image: ghcr.io/silicon-works/mcp-tools-netexec:latest
     image_size_mb: 800
     timeout_seconds: 300
+    idle_timeout: 1800
     capabilities:
     - credential_validation
     - authenticated_execution
@@ -9540,6 +10555,16 @@ tools:
             type: string
             description: 'Module options (-o KEY=VALUE). Example for spider_plus: ''MAX_FILE_SIZE=50000 OUTPUT_FOLDER=/session/artifacts''.
               Multiple options space-separated.'
+          kerberos:
+            type: boolean
+            default: false
+            description: Use Kerberos authentication via ccache file
+          aes_key:
+            type: string
+            description: AES key for Kerberos authentication (128 or 256 bit hex)
+          ccache_path:
+            type: string
+            description: Path to Kerberos ccache file (e.g., /session/credentials/auditor.ccache)
       winrm:
         required_ports:
         - 5985
@@ -9595,6 +10620,16 @@ tools:
             type: boolean
             description: Dump DPAPI/Credential Manager secrets via WinRM (--dpapi). Reveals saved Windows credentials, browser
               passwords, Wi-Fi keys.
+          kerberos:
+            type: boolean
+            default: false
+            description: Use Kerberos authentication via ccache file
+          aes_key:
+            type: string
+            description: AES key for Kerberos authentication (128 or 256 bit hex)
+          ccache_path:
+            type: string
+            description: Path to Kerberos ccache file (e.g., /session/credentials/auditor.ccache)
       ldap:
         required_ports:
         - 389
@@ -9683,6 +10718,16 @@ tools:
             type: array
             description: 'Custom LDAP query (--query FILTER ATTRIBUTES). Array of [filter, attributes]. Example: [''(servicePrincipalName=*)'',
               ''sAMAccountName servicePrincipalName'']. Use --base-dn to change search root.'
+          kerberos:
+            type: boolean
+            default: false
+            description: Use Kerberos authentication via ccache file
+          aes_key:
+            type: string
+            description: AES key for Kerberos authentication (128 or 256 bit hex)
+          ccache_path:
+            type: string
+            description: Path to Kerberos ccache file (e.g., /session/credentials/auditor.ccache)
       mssql:
         required_ports:
         - 1433
@@ -9746,6 +10791,16 @@ tools:
             type: integer
             description: 'RID brute force user discovery via MSSQL (--rid-brute MAX_RID). Default max: 4000. Works when LDAP
               is blocked.'
+          kerberos:
+            type: boolean
+            default: false
+            description: Use Kerberos authentication via ccache file
+          aes_key:
+            type: string
+            description: AES key for Kerberos authentication (128 or 256 bit hex)
+          ccache_path:
+            type: string
+            description: Path to Kerberos ccache file (e.g., /session/credentials/auditor.ccache)
       ssh:
         required_ports:
         - 22
@@ -9890,6 +10945,16 @@ tools:
             description: 'Execution method (--exec-method). Options: ''wmiexec'' (default, Win32_Process + StdRegProv registry
               output, stable on multiple hosts) or ''wmiexec-event'' (T1546.003 WMI event subscriptions, stealthier but less
               stable, recommend single host only).'
+          kerberos:
+            type: boolean
+            default: false
+            description: Use Kerberos authentication via ccache file
+          aes_key:
+            type: string
+            description: AES key for Kerberos authentication (128 or 256 bit hex)
+          ccache_path:
+            type: string
+            description: Path to Kerberos ccache file (e.g., /session/credentials/auditor.ccache)
   nikto:
     name: nikto
     version: '2.5'

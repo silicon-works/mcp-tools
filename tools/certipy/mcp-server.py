@@ -12,6 +12,7 @@ import glob
 import json
 import os
 import re
+import shutil
 import uuid
 from typing import Any, Dict, List, Optional
 
@@ -27,6 +28,10 @@ OUTPUT_DIR = "/session"
 WORK_DIR = "/session/certipy"
 
 
+CRED_DIR = "/session/credentials"
+CONFIG_DIR = "/session/config"
+
+
 class CertipyServer(BaseMCPServer):
     def __init__(self):
         super().__init__(
@@ -34,6 +39,15 @@ class CertipyServer(BaseMCPServer):
             description="AD Certificate Services enumeration and exploitation",
             version="1.0.0",
         )
+
+        # Stateful credential tracking
+        self._tickets: Dict[str, str] = {}  # identity -> ccache path
+        self._certificates: Dict[str, str] = {}  # identity -> pfx path
+        self._active_principal: Optional[str] = None
+        self._krb5_configured: bool = False
+
+        # Restore state from /session/ on startup
+        self._restore_state()
 
         self.register_method(
             name="find",
@@ -83,6 +97,80 @@ class CertipyServer(BaseMCPServer):
             params=self._ca_params(),
             handler=self.ca,
         )
+
+    # ── State Management ─────────────────────────────────────────
+
+    def _restore_state(self):
+        """Restore credential state from /session/ on container start."""
+        if os.path.isdir(CRED_DIR):
+            for ccache in glob.glob(os.path.join(CRED_DIR, "*.ccache")):
+                principal = os.path.splitext(os.path.basename(ccache))[0]
+                self._tickets[principal] = ccache
+                self._active_principal = principal
+        # Also restore certificates from working directory
+        for pfx in glob.glob(os.path.join(WORK_DIR, "*.pfx")):
+            identity = os.path.splitext(os.path.basename(pfx))[0]
+            self._certificates[identity] = pfx
+        if os.path.exists(os.path.join(CONFIG_DIR, "krb5.conf")):
+            if not os.path.exists("/etc/krb5.conf"):
+                shutil.copy(os.path.join(CONFIG_DIR, "krb5.conf"), "/etc/krb5.conf")
+            self._krb5_configured = True
+        if self._tickets:
+            self.logger.info(f"Restored {len(self._tickets)} tickets from {CRED_DIR}")
+
+    def _save_ticket(self, principal: str, ccache_path: str):
+        """Save a ticket to /session/credentials/ and track in memory."""
+        os.makedirs(CRED_DIR, exist_ok=True)
+        safe_name = principal.replace("/", "_").replace("@", "_").replace("\\", "_")
+        dest = os.path.join(CRED_DIR, f"{safe_name}.ccache")
+        shutil.copy2(ccache_path, dest)
+        self._tickets[principal] = dest
+        self._active_principal = principal
+        self.logger.info(f"Saved ticket for {principal} -> {dest}")
+
+    def _get_auth_env(self, principal: str = None) -> Dict[str, str]:
+        """Get env dict with KRB5CCNAME for the given (or active) principal."""
+        p = principal or self._active_principal
+        if p:
+            ccache = self._tickets.get(p)
+            if ccache and os.path.exists(ccache):
+                return {"KRB5CCNAME": ccache}
+        return {}
+
+    def _ensure_krb5_conf(self, dc_ip: str, username: str = None):
+        """Auto-generate /etc/krb5.conf from username@domain format."""
+        if self._krb5_configured:
+            return
+        # Extract domain from user@domain format
+        domain = None
+        if username and "@" in username:
+            domain = username.split("@", 1)[1]
+        if not domain:
+            return
+        realm = domain.upper()
+        conf = f"""[libdefaults]
+    default_realm = {realm}
+    dns_lookup_realm = false
+    dns_lookup_kdc = false
+    forwardable = true
+
+[realms]
+    {realm} = {{
+        kdc = {dc_ip}
+        admin_server = {dc_ip}
+    }}
+
+[domain_realm]
+    .{domain.lower()} = {realm}
+    {domain.lower()} = {realm}
+"""
+        with open("/etc/krb5.conf", "w") as f:
+            f.write(conf)
+        os.makedirs(CONFIG_DIR, exist_ok=True)
+        with open(os.path.join(CONFIG_DIR, "krb5.conf"), "w") as f:
+            f.write(conf)
+        self._krb5_configured = True
+        self.logger.info(f"Generated krb5.conf for realm {realm} (KDC: {dc_ip})")
 
     # ── Parameter Definitions ──────────────────────────────────
 
@@ -145,6 +233,10 @@ class CertipyServer(BaseMCPServer):
         target: Optional[str] = None,
     ) -> List[str]:
         """Build common certipy auth CLI arguments."""
+        # Auto-generate krb5.conf if using Kerberos
+        if kerberos:
+            self._ensure_krb5_conf(dc_ip, username)
+
         args = ["-username", username, "-dc-ip", dc_ip]
 
         if password:
@@ -256,6 +348,11 @@ class CertipyServer(BaseMCPServer):
             "application_policies": {
                 "type": "string",
                 "description": "Application policy OIDs to include in CSR (ESC15/EKUwu). Comma-separated OIDs.",
+            },
+            "dcom": {
+                "type": "boolean",
+                "default": False,
+                "description": "Use DCOM transport for certificate request. Workaround for RPC_E_CALL_COMPLETE errors.",
             },
         })
         return params
@@ -661,9 +758,10 @@ class CertipyServer(BaseMCPServer):
         if user_sid:
             cmd.extend(["-sid", user_sid])
 
+        auth_env = self._get_auth_env() if kerberos else {}
         combined = ""
         try:
-            result = await self.run_command(cmd, timeout=timeout)
+            result = await self.run_command(cmd, timeout=timeout, env=auth_env)
             combined = result.stdout + result.stderr
 
             new_files = self._find_new_files(before)
@@ -719,6 +817,7 @@ class CertipyServer(BaseMCPServer):
         key_size: int = 2048,
         web: bool = False,
         application_policies: Optional[str] = None,
+        dcom: bool = False,
         timeout: int = 300,
     ) -> ToolResult:
         """Request a certificate from a CA."""
@@ -767,10 +866,13 @@ class CertipyServer(BaseMCPServer):
             cmd.append("-web")
         if application_policies:
             cmd.extend(["-application-policies", application_policies])
+        if dcom:
+            cmd.append("-dcom")
 
+        auth_env = self._get_auth_env() if kerberos else {}
         combined = ""
         try:
-            result = await self.run_command(cmd, timeout=timeout)
+            result = await self.run_command(cmd, timeout=timeout, env=auth_env)
             combined = result.stdout + result.stderr
 
             new_files = self._find_new_files(before)
@@ -849,6 +951,9 @@ class CertipyServer(BaseMCPServer):
             kirbi_files = [f for f in new_files if f.endswith(".kirbi")]
             if ccache_files:
                 parsed["ccache_path"] = ccache_files[0]
+                # Save ccache to /session/credentials/ for cross-tool usage
+                identity = parsed.get("username") or os.path.splitext(os.path.basename(ccache_files[0]))[0]
+                self._save_ticket(identity, ccache_files[0])
             if kirbi_files:
                 parsed["kirbi_path"] = kirbi_files[0]
 
@@ -924,9 +1029,10 @@ class CertipyServer(BaseMCPServer):
         if device_id:
             cmd.extend(["-device-id", device_id])
 
+        auth_env = self._get_auth_env() if kerberos else {}
         combined = ""
         try:
-            result = await self.run_command(cmd, timeout=timeout)
+            result = await self.run_command(cmd, timeout=timeout, env=auth_env)
             combined = result.stdout + result.stderr
 
             new_files = self._find_new_files(before)
@@ -936,6 +1042,12 @@ class CertipyServer(BaseMCPServer):
             pfx_files = [f for f in new_files if f.endswith(".pfx")]
             if pfx_files:
                 parsed["pfx_path"] = pfx_files[0]
+                self._certificates[account] = pfx_files[0]
+
+            # Save ccache if shadow auto produced one
+            ccache_files = [f for f in new_files if f.endswith(".ccache")]
+            if ccache_files:
+                self._save_ticket(account, ccache_files[0])
 
             # Detect certipy errors
             certipy_error = self._detect_certipy_error(combined)
@@ -1093,9 +1205,10 @@ class CertipyServer(BaseMCPServer):
             cmd.extend(["-write-configuration", config_path])
             cmd.append("-force")  # Skip confirmation prompt
 
+        auth_env = self._get_auth_env() if kerberos else {}
         combined = ""
         try:
-            result = await self.run_command(cmd, timeout=timeout)
+            result = await self.run_command(cmd, timeout=timeout, env=auth_env)
             combined = result.stdout + result.stderr
 
             new_files = self._find_new_files(before)
@@ -1193,9 +1306,10 @@ class CertipyServer(BaseMCPServer):
             cmd.extend(["-deny-request", str(deny_request)])
             action_desc = f"deny request {deny_request}"
 
+        auth_env = self._get_auth_env() if kerberos else {}
         combined = ""
         try:
-            result = await self.run_command(cmd, timeout=timeout)
+            result = await self.run_command(cmd, timeout=timeout, env=auth_env)
             combined = result.stdout + result.stderr
 
             certipy_error = self._detect_certipy_error(combined)

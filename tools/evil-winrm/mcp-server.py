@@ -9,13 +9,36 @@ for non-admin WinRM users.
 """
 
 import os
+import shutil
 from typing import Optional
 
 from mcp_common import BaseMCPServer, ToolResult, ToolError
 
+CONFIG_DIR = "/session/config"
+
 
 class EvilWinRMServer(BaseMCPServer):
     """MCP server for WinRM operations using pypsrp."""
+
+    _AUTH_PARAMS = {
+        "target": {"type": "string", "required": True, "description": "Target IP or hostname"},
+        "username": {"type": "string", "required": True, "description": "Username (for kerberos use user@REALM format)"},
+        "password": {"type": "string", "description": "Password"},
+        "hash": {"type": "string", "description": "NTLM hash for pass-the-hash (bare NT hash or LM:NT format)"},
+        "domain": {"type": "string", "description": "Active Directory domain"},
+        "auth": {
+            "type": "enum",
+            "values": ["ntlm", "kerberos"],
+            "default": "ntlm",
+            "description": "Auth method. Use 'kerberos' when NTLM is disabled on the target.",
+        },
+        "ccache_path": {
+            "type": "string",
+            "description": "Path to Kerberos ccache file (e.g., /session/credentials/auditor.ccache). Required when auth=kerberos.",
+        },
+        "ssl": {"type": "boolean", "description": "Use SSL (port 5986)"},
+        "port": {"type": "integer", "description": "Custom port (default: 5985 or 5986 for SSL)"},
+    }
 
     def __init__(self):
         super().__init__(
@@ -28,19 +51,13 @@ class EvilWinRMServer(BaseMCPServer):
             name="exec",
             description="Execute command via WinRM (PowerShell or CMD)",
             params={
-                "target": {"type": "string", "required": True, "description": "Target IP or hostname"},
-                "username": {"type": "string", "required": True, "description": "Username"},
-                "password": {"type": "string", "description": "Password"},
-                "hash": {"type": "string", "description": "NTLM hash for pass-the-hash (bare NT hash or LM:NT format)"},
-                "domain": {"type": "string", "description": "Active Directory domain"},
+                **self._AUTH_PARAMS,
                 "command": {"type": "string", "required": True, "description": "Command to execute"},
                 "shell": {
                     "type": "enum",
                     "values": ["powershell", "cmd"],
                     "description": "Shell to use: 'powershell' (default, native PSRP) or 'cmd' (WinRS CMD shell)",
                 },
-                "ssl": {"type": "boolean", "description": "Use SSL (port 5986)"},
-                "port": {"type": "integer", "description": "Custom port (default: 5985 or 5986 for SSL)"},
             },
             handler=self.exec_cmd,
         )
@@ -49,15 +66,9 @@ class EvilWinRMServer(BaseMCPServer):
             name="upload",
             description="Upload file to target via WinRM",
             params={
-                "target": {"type": "string", "required": True, "description": "Target IP or hostname"},
-                "username": {"type": "string", "required": True, "description": "Username"},
-                "password": {"type": "string", "description": "Password"},
-                "hash": {"type": "string", "description": "NTLM hash for pass-the-hash (bare NT hash or LM:NT format)"},
-                "domain": {"type": "string", "description": "Active Directory domain"},
+                **self._AUTH_PARAMS,
                 "local_path": {"type": "string", "required": True, "description": "Local file path to upload"},
                 "remote_path": {"type": "string", "required": True, "description": "Remote destination path"},
-                "ssl": {"type": "boolean", "description": "Use SSL (port 5986)"},
-                "port": {"type": "integer", "description": "Custom port (default: 5985 or 5986 for SSL)"},
             },
             handler=self.upload,
         )
@@ -66,67 +77,81 @@ class EvilWinRMServer(BaseMCPServer):
             name="download",
             description="Download file from target via WinRM",
             params={
-                "target": {"type": "string", "required": True, "description": "Target IP or hostname"},
-                "username": {"type": "string", "required": True, "description": "Username"},
-                "password": {"type": "string", "description": "Password"},
-                "hash": {"type": "string", "description": "NTLM hash for pass-the-hash (bare NT hash or LM:NT format)"},
-                "domain": {"type": "string", "description": "Active Directory domain"},
+                **self._AUTH_PARAMS,
                 "remote_path": {"type": "string", "required": True, "description": "Remote file path to download"},
                 "local_path": {"type": "string", "description": "Local destination (default: /session/artifacts/)"},
-                "ssl": {"type": "boolean", "description": "Use SSL (port 5986)"},
-                "port": {"type": "integer", "description": "Custom port (default: 5985 or 5986 for SSL)"},
             },
             handler=self.download,
         )
 
     def _get_client(self, target: str, username: str, password: Optional[str] = None,
                     hash: Optional[str] = None, domain: Optional[str] = None,
-                    ssl: bool = False, port: Optional[int] = None):
+                    ssl: bool = False, port: Optional[int] = None,
+                    auth: str = "ntlm", ccache_path: Optional[str] = None):
         """Create a pypsrp Client.
 
-        Authentication priority: hash (pass-the-hash) > password.
-        When hash is provided, it is formatted as LM:NT for pyspnego
-        auto-detection of NTLM hash auth.
+        Authentication modes:
+          - ntlm: hash (pass-the-hash) > password
+          - kerberos: uses ccache file via KRB5CCNAME env var
         """
         from pypsrp.client import Client
 
         actual_port = port or (5986 if ssl else 5985)
 
-        # Determine auth credential: hash takes priority over password
-        if hash:
-            # pypsrp/pyspnego auto-detects LM:NT format for pass-the-hash
-            if ":" not in hash:
-                # Bare NT hash — prepend empty LM hash
-                auth_pass = f"00000000000000000000000000000000:{hash}"
-            else:
-                auth_pass = hash
-        else:
-            auth_pass = password or ""
+        if auth == "kerberos":
+            # Set KRB5CCNAME if ccache provided
+            if ccache_path:
+                os.environ["KRB5CCNAME"] = ccache_path
+            # Ensure krb5.conf exists (may have been generated by impacket)
+            shared_krb5 = os.path.join(CONFIG_DIR, "krb5.conf")
+            if os.path.exists(shared_krb5) and not os.path.exists("/etc/krb5.conf"):
+                shutil.copy(shared_krb5, "/etc/krb5.conf")
 
-        client = Client(
-            target,
-            username=username,
-            password=auth_pass,
-            port=actual_port,
-            ssl=ssl,
-            auth="ntlm",
-            cert_validation=False,
-            connection_timeout=30,
-        )
+            client = Client(
+                target,
+                username=username,
+                password=password or "",
+                port=actual_port,
+                ssl=ssl,
+                auth="kerberos",
+                cert_validation=False,
+                connection_timeout=30,
+            )
+        else:
+            # NTLM auth: hash takes priority over password
+            if hash:
+                if ":" not in hash:
+                    auth_pass = f"00000000000000000000000000000000:{hash}"
+                else:
+                    auth_pass = hash
+            else:
+                auth_pass = password or ""
+
+            client = Client(
+                target,
+                username=username,
+                password=auth_pass,
+                port=actual_port,
+                ssl=ssl,
+                auth="ntlm",
+                cert_validation=False,
+                connection_timeout=30,
+            )
         return client
 
     async def exec_cmd(self, target: str, username: str, command: str,
                        password: Optional[str] = None, hash: Optional[str] = None,
                        domain: Optional[str] = None, shell: str = "powershell",
-                       ssl: bool = False, port: Optional[int] = None) -> ToolResult:
+                       ssl: bool = False, port: Optional[int] = None,
+                       auth: str = "ntlm", ccache_path: Optional[str] = None) -> ToolResult:
         """Execute a command via WinRM using PowerShell (PSRP) or CMD (WinRS)."""
         shell_label = "CMD" if shell == "cmd" else "PowerShell"
-        # Prepend domain to username for NTLM auth
-        auth_user = f"{domain}\\{username}" if domain else username
-        self.logger.info(f"WinRM exec ({shell_label}): {target} as {auth_user}")
+        # Prepend domain to username for NTLM auth (skip for kerberos — use user@REALM)
+        auth_user = f"{domain}\\{username}" if domain and auth != "kerberos" else username
+        self.logger.info(f"WinRM exec ({shell_label}): {target} as {auth_user} [auth={auth}]")
 
         try:
-            client = self._get_client(target, auth_user, password, hash, None, ssl, port)
+            client = self._get_client(target, auth_user, password, hash, None, ssl, port, auth, ccache_path)
 
             if shell == "cmd":
                 stdout, stderr, rc = client.execute_cmd(command)
@@ -157,16 +182,17 @@ class EvilWinRMServer(BaseMCPServer):
     async def upload(self, target: str, username: str, local_path: str, remote_path: str,
                      password: Optional[str] = None, hash: Optional[str] = None,
                      domain: Optional[str] = None,
-                     ssl: bool = False, port: Optional[int] = None) -> ToolResult:
+                     ssl: bool = False, port: Optional[int] = None,
+                     auth: str = "ntlm", ccache_path: Optional[str] = None) -> ToolResult:
         """Upload a file to the target via WinRM using native PSRP copy."""
-        auth_user = f"{domain}\\{username}" if domain else username
+        auth_user = f"{domain}\\{username}" if domain and auth != "kerberos" else username
         self.logger.info(f"WinRM upload: {local_path} -> {remote_path} on {target}")
 
         if not os.path.isfile(local_path):
             return ToolResult(success=False, error=f"Local file not found: {local_path}", data={})
 
         try:
-            client = self._get_client(target, auth_user, password, hash, None, ssl, port)
+            client = self._get_client(target, auth_user, password, hash, None, ssl, port, auth, ccache_path)
 
             file_size = os.path.getsize(local_path)
             client.copy(local_path, remote_path)
@@ -186,13 +212,14 @@ class EvilWinRMServer(BaseMCPServer):
     async def download(self, target: str, username: str, remote_path: str,
                        password: Optional[str] = None, hash: Optional[str] = None,
                        domain: Optional[str] = None, local_path: Optional[str] = None,
-                       ssl: bool = False, port: Optional[int] = None) -> ToolResult:
+                       ssl: bool = False, port: Optional[int] = None,
+                       auth: str = "ntlm", ccache_path: Optional[str] = None) -> ToolResult:
         """Download a file from the target via WinRM using native PSRP fetch."""
-        auth_user = f"{domain}\\{username}" if domain else username
+        auth_user = f"{domain}\\{username}" if domain and auth != "kerberos" else username
         self.logger.info(f"WinRM download: {remote_path} from {target}")
 
         try:
-            client = self._get_client(target, auth_user, password, hash, None, ssl, port)
+            client = self._get_client(target, auth_user, password, hash, None, ssl, port, auth, ccache_path)
 
             # Determine local save path
             if not local_path:

@@ -6,10 +6,14 @@ Multi-protocol credential validation and authenticated command execution.
 Wraps NetExec (CrackMapExec successor) for SMB, WinRM, SSH, LDAP, MSSQL, RDP, WMI.
 """
 
+import os
 import re
+import shutil
 from typing import Any, Dict, List, Optional
 
 from mcp_common import BaseMCPServer, ToolResult, ToolError, sanitize_output
+
+CONFIG_DIR = "/session/config"
 
 
 class NetExecServer(BaseMCPServer):
@@ -60,6 +64,19 @@ class NetExecServer(BaseMCPServer):
                 "port": {
                     "type": "integer",
                     "description": "SMB port (default 445)",
+                },
+                "kerberos": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": "Use Kerberos authentication via ccache file",
+                },
+                "aes_key": {
+                    "type": "string",
+                    "description": "AES key for Kerberos authentication (128 or 256 bit hex)",
+                },
+                "ccache_path": {
+                    "type": "string",
+                    "description": "Path to Kerberos ccache file (e.g., /session/credentials/auditor.ccache)",
                 },
                 "command": {
                     "type": "string",
@@ -163,6 +180,19 @@ class NetExecServer(BaseMCPServer):
                     "type": "string",
                     "description": "WinRM port(s), e.g. '5985' or '5985 5986'",
                 },
+                "kerberos": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": "Use Kerberos authentication via ccache file",
+                },
+                "aes_key": {
+                    "type": "string",
+                    "description": "AES key for Kerberos authentication",
+                },
+                "ccache_path": {
+                    "type": "string",
+                    "description": "Path to Kerberos ccache file",
+                },
                 "command": {
                     "type": "string",
                     "description": "CMD command to execute via WinRM -x",
@@ -216,6 +246,19 @@ class NetExecServer(BaseMCPServer):
                 "port": {
                     "type": "integer",
                     "description": "LDAP port (default 389, or 636 for LDAPS)",
+                },
+                "kerberos": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": "Use Kerberos authentication via ccache file",
+                },
+                "aes_key": {
+                    "type": "string",
+                    "description": "AES key for Kerberos authentication",
+                },
+                "ccache_path": {
+                    "type": "string",
+                    "description": "Path to Kerberos ccache file",
                 },
                 "users": {
                     "type": "boolean",
@@ -306,6 +349,19 @@ class NetExecServer(BaseMCPServer):
                 "port": {
                     "type": "integer",
                     "description": "MSSQL port (default 1433)",
+                },
+                "kerberos": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": "Use Kerberos authentication via ccache file",
+                },
+                "aes_key": {
+                    "type": "string",
+                    "description": "AES key for Kerberos authentication",
+                },
+                "ccache_path": {
+                    "type": "string",
+                    "description": "Path to Kerberos ccache file",
                 },
                 "command": {
                     "type": "string",
@@ -465,6 +521,19 @@ class NetExecServer(BaseMCPServer):
                     "type": "boolean",
                     "description": "Use local authentication instead of domain",
                 },
+                "kerberos": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": "Use Kerberos authentication via ccache file",
+                },
+                "aes_key": {
+                    "type": "string",
+                    "description": "AES key for Kerberos authentication",
+                },
+                "ccache_path": {
+                    "type": "string",
+                    "description": "Path to Kerberos ccache file",
+                },
                 "command": {
                     "type": "string",
                     "description": "CMD command to execute via -x",
@@ -485,6 +554,18 @@ class NetExecServer(BaseMCPServer):
             handler=self.wmi,
         )
 
+    def _get_auth_env(self, kerberos: bool = False, ccache_path: Optional[str] = None) -> Dict[str, str]:
+        """Get env dict with KRB5CCNAME when using Kerberos auth."""
+        if not kerberos:
+            return {}
+        # Ensure krb5.conf exists (may have been generated by impacket)
+        shared_krb5 = os.path.join(CONFIG_DIR, "krb5.conf")
+        if os.path.exists(shared_krb5) and not os.path.exists("/etc/krb5.conf"):
+            shutil.copy(shared_krb5, "/etc/krb5.conf")
+        if ccache_path and os.path.exists(ccache_path):
+            return {"KRB5CCNAME": ccache_path}
+        return {}
+
     def _build_base_cmd(
         self,
         protocol: str,
@@ -495,17 +576,25 @@ class NetExecServer(BaseMCPServer):
         domain: Optional[str] = None,
         local_auth: bool = False,
         port: Optional[Any] = None,
+        kerberos: bool = False,
+        aes_key: Optional[str] = None,
     ) -> List[str]:
         """Build the base netexec command with authentication arguments."""
         cmd = ["netexec", protocol, target, "-u", username]
 
-        if hash:
+        if kerberos:
+            cmd.append("-k")
+            cmd.append("--use-kcache")
+        elif hash:
             cmd.extend(["-H", hash])
         elif password is not None:
             cmd.extend(["-p", password])
         else:
             # Empty password - netexec requires -p even if blank
             cmd.extend(["-p", ""])
+
+        if aes_key:
+            cmd.extend(["--aesKey", aes_key])
 
         # --local-auth and -d are mutually exclusive in netexec
         if local_auth:
@@ -550,6 +639,9 @@ class NetExecServer(BaseMCPServer):
         domain: Optional[str] = None,
         local_auth: bool = False,
         port: Optional[int] = None,
+        kerberos: bool = False,
+        aes_key: Optional[str] = None,
+        ccache_path: Optional[str] = None,
         command: Optional[str] = None,
         ps_command: Optional[str] = None,
         exec_method: Optional[str] = None,
@@ -572,7 +664,7 @@ class NetExecServer(BaseMCPServer):
 
         cmd = self._build_base_cmd(
             "smb", target, username, password, hash, domain,
-            local_auth=local_auth, port=port,
+            local_auth=local_auth, port=port, kerberos=kerberos, aes_key=aes_key,
         )
 
         if command:
@@ -611,7 +703,8 @@ class NetExecServer(BaseMCPServer):
         if module_options:
             cmd.extend(["-o", module_options])
 
-        result = await self.run_command(cmd, timeout=300)
+        auth_env = self._get_auth_env(kerberos, ccache_path)
+        result = await self.run_command(cmd, timeout=300, env=auth_env)
         parsed = self._parse_output(result.stdout, result.stderr)
         raw = sanitize_output(result.stdout + result.stderr)
 
@@ -631,6 +724,9 @@ class NetExecServer(BaseMCPServer):
         domain: Optional[str] = None,
         local_auth: bool = False,
         port: Optional[str] = None,
+        kerberos: bool = False,
+        aes_key: Optional[str] = None,
+        ccache_path: Optional[str] = None,
         command: Optional[str] = None,
         ps_command: Optional[str] = None,
         sam: bool = False,
@@ -642,7 +738,7 @@ class NetExecServer(BaseMCPServer):
 
         cmd = self._build_base_cmd(
             "winrm", target, username, password, hash, domain,
-            local_auth=local_auth, port=port,
+            local_auth=local_auth, port=port, kerberos=kerberos, aes_key=aes_key,
         )
 
         if command:
@@ -656,7 +752,8 @@ class NetExecServer(BaseMCPServer):
         if dpapi:
             cmd.append("--dpapi")
 
-        result = await self.run_command(cmd, timeout=300)
+        auth_env = self._get_auth_env(kerberos, ccache_path)
+        result = await self.run_command(cmd, timeout=300, env=auth_env)
         parsed = self._parse_output(result.stdout, result.stderr)
         raw = sanitize_output(result.stdout + result.stderr)
 
@@ -675,6 +772,9 @@ class NetExecServer(BaseMCPServer):
         hash: Optional[str] = None,
         domain: Optional[str] = None,
         port: Optional[int] = None,
+        kerberos: bool = False,
+        aes_key: Optional[str] = None,
+        ccache_path: Optional[str] = None,
         users: bool = False,
         groups: bool = False,
         kerberoasting: Optional[str] = None,
@@ -694,7 +794,7 @@ class NetExecServer(BaseMCPServer):
 
         cmd = self._build_base_cmd(
             "ldap", target, username, password, hash, domain,
-            port=port,
+            port=port, kerberos=kerberos, aes_key=aes_key,
         )
 
         if users:
@@ -726,7 +826,8 @@ class NetExecServer(BaseMCPServer):
 
         # BloodHound and kerberoasting can take a while
         timeout = 300 if (bloodhound or kerberoasting or asreproast) else 120
-        result = await self.run_command(cmd, timeout=timeout)
+        auth_env = self._get_auth_env(kerberos, ccache_path)
+        result = await self.run_command(cmd, timeout=timeout, env=auth_env)
         parsed = self._parse_output(result.stdout, result.stderr)
         raw = sanitize_output(result.stdout + result.stderr)
 
@@ -746,6 +847,9 @@ class NetExecServer(BaseMCPServer):
         domain: Optional[str] = None,
         local_auth: bool = False,
         port: Optional[int] = None,
+        kerberos: bool = False,
+        aes_key: Optional[str] = None,
+        ccache_path: Optional[str] = None,
         command: Optional[str] = None,
         ps_command: Optional[str] = None,
         query: Optional[str] = None,
@@ -759,7 +863,7 @@ class NetExecServer(BaseMCPServer):
 
         cmd = self._build_base_cmd(
             "mssql", target, username, password, hash, domain,
-            local_auth=local_auth, port=port,
+            local_auth=local_auth, port=port, kerberos=kerberos, aes_key=aes_key,
         )
 
         if command:
@@ -777,7 +881,8 @@ class NetExecServer(BaseMCPServer):
         if rid_brute is not None:
             cmd.extend(["--rid-brute", str(rid_brute)])
 
-        result = await self.run_command(cmd, timeout=120)
+        auth_env = self._get_auth_env(kerberos, ccache_path)
+        result = await self.run_command(cmd, timeout=120, env=auth_env)
         parsed = self._parse_output(result.stdout, result.stderr)
         raw = sanitize_output(result.stdout + result.stderr)
 
@@ -882,6 +987,9 @@ class NetExecServer(BaseMCPServer):
         hash: Optional[str] = None,
         domain: Optional[str] = None,
         local_auth: bool = False,
+        kerberos: bool = False,
+        aes_key: Optional[str] = None,
+        ccache_path: Optional[str] = None,
         command: Optional[str] = None,
         ps_command: Optional[str] = None,
         wmi_query: Optional[str] = None,
@@ -892,7 +1000,7 @@ class NetExecServer(BaseMCPServer):
 
         cmd = self._build_base_cmd(
             "wmi", target, username, password, hash, domain,
-            local_auth=local_auth,
+            local_auth=local_auth, kerberos=kerberos, aes_key=aes_key,
         )
 
         if command:
@@ -904,7 +1012,8 @@ class NetExecServer(BaseMCPServer):
         if exec_method:
             cmd.extend(["--exec-method", exec_method])
 
-        result = await self.run_command(cmd, timeout=120)
+        auth_env = self._get_auth_env(kerberos, ccache_path)
+        result = await self.run_command(cmd, timeout=120, env=auth_env)
         parsed = self._parse_output(result.stdout, result.stderr)
         raw = sanitize_output(result.stdout + result.stderr)
 

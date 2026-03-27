@@ -12,11 +12,14 @@ import glob
 import json
 import os
 import re
+import shutil
 import zipfile
 from typing import Any, Dict, Optional
 
 from mcp_common.base_server import BaseMCPServer, ToolResult
 from mcp_common.output_parsers import sanitize_output
+
+CONFIG_DIR = "/session/config"
 
 # Output directory inside the container (session mount)
 OUTPUT_DIR = "/session"
@@ -81,6 +84,10 @@ class BloodhoundServer(BaseMCPServer):
                 "values": ["auto", "ntlm", "kerberos"],
                 "default": "auto",
                 "description": "Force authentication method. 'auto' tries Kerberos then NTLM.",
+            },
+            "ccache_path": {
+                "type": "string",
+                "description": "Path to Kerberos ccache file (e.g., /session/credentials/auditor.ccache)",
             },
         }
 
@@ -291,6 +298,7 @@ class BloodhoundServer(BaseMCPServer):
         kerberos: bool = False,
         aes_key: Optional[str] = None,
         auth_method: str = "auto",
+        ccache_path: Optional[str] = None,
         dc_host: Optional[str] = None,
         gc_host: Optional[str] = None,
         use_ldaps: bool = False,
@@ -324,8 +332,17 @@ class BloodhoundServer(BaseMCPServer):
             computerfile=computerfile,
         )
 
+        # Kerberos env injection
+        auth_env = {}
+        if kerberos or auth_method == "kerberos":
+            shared_krb5 = os.path.join(CONFIG_DIR, "krb5.conf")
+            if os.path.exists(shared_krb5) and not os.path.exists("/etc/krb5.conf"):
+                shutil.copy(shared_krb5, "/etc/krb5.conf")
+            if ccache_path and os.path.exists(ccache_path):
+                auth_env["KRB5CCNAME"] = ccache_path
+
         try:
-            result = await self.run_command(cmd, timeout=timeout)
+            result = await self.run_command(cmd, timeout=timeout, env=auth_env)
             combined = result.stdout + result.stderr
 
             files = self._find_output_files()
@@ -365,6 +382,7 @@ class BloodhoundServer(BaseMCPServer):
         kerberos: bool = False,
         aes_key: Optional[str] = None,
         auth_method: str = "auto",
+        ccache_path: Optional[str] = None,
         dc_host: Optional[str] = None,
         gc_host: Optional[str] = None,
         use_ldaps: bool = False,
@@ -398,8 +416,17 @@ class BloodhoundServer(BaseMCPServer):
             computerfile=computerfile,
         )
 
+        # Kerberos env injection
+        auth_env = {}
+        if kerberos or auth_method == "kerberos":
+            shared_krb5 = os.path.join(CONFIG_DIR, "krb5.conf")
+            if os.path.exists(shared_krb5) and not os.path.exists("/etc/krb5.conf"):
+                shutil.copy(shared_krb5, "/etc/krb5.conf")
+            if ccache_path and os.path.exists(ccache_path):
+                auth_env["KRB5CCNAME"] = ccache_path
+
         try:
-            result = await self.run_command(cmd, timeout=timeout)
+            result = await self.run_command(cmd, timeout=timeout, env=auth_env)
             combined = result.stdout + result.stderr
 
             files = self._find_output_files()

@@ -7,6 +7,7 @@ Provides a foundation for building MCP servers that wrap security tools.
 import asyncio
 import json
 import logging
+import os
 import subprocess
 import sys
 import time
@@ -168,6 +169,7 @@ class BaseMCPServer(ABC):
         cmd: List[str],
         timeout: int = 300,
         check: bool = False,
+        env: Optional[Dict[str, str]] = None,
     ) -> subprocess.CompletedProcess:
         """
         Run a shell command asynchronously.
@@ -176,15 +178,19 @@ class BaseMCPServer(ABC):
             cmd: Command and arguments as list
             timeout: Timeout in seconds
             check: Raise exception on non-zero exit
+            env: Optional env vars to merge with os.environ for the subprocess
 
         Returns:
             CompletedProcess with stdout and stderr
         """
         self.logger.info(f"Running command: {' '.join(cmd)}")
 
+        merged_env = {**os.environ, **env} if env else None
+
         try:
             proc = await asyncio.create_subprocess_exec(
                 *cmd,
+                env=merged_env,
                 stdin=asyncio.subprocess.DEVNULL,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
@@ -258,6 +264,7 @@ class BaseMCPServer(ABC):
         check: bool = False,
         progress_filter: Callable[[str], str | None] | None = None,
         heartbeat_interval: float = 30.0,
+        env: Optional[Dict[str, str]] = None,
     ) -> subprocess.CompletedProcess:
         """Run a command while streaming progress notifications from its output.
 
@@ -273,6 +280,7 @@ class BaseMCPServer(ABC):
                 string to emit as a progress notification, or ``None`` to skip.
             heartbeat_interval: Seconds between automatic "Still running…"
                 heartbeat notifications when no filter match occurs.
+            env: Optional env vars to merge with os.environ for the subprocess.
 
         Returns:
             ``subprocess.CompletedProcess`` with full accumulated stdout/stderr
@@ -280,8 +288,11 @@ class BaseMCPServer(ABC):
         """
         self.logger.info(f"Running (with progress): {' '.join(cmd)}")
 
+        merged_env = {**os.environ, **env} if env else None
+
         proc = await asyncio.create_subprocess_exec(
             *cmd,
+            env=merged_env,
             stdin=asyncio.subprocess.DEVNULL,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
