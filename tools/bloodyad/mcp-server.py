@@ -612,11 +612,11 @@ class BloodyADServer(BaseMCPServer):
         if password and not kerberos:
             cmd.extend(["-p", password])
         if kerberos:
-            ccache = ccache_path or self._active_ccache
-            if ccache and os.path.exists(ccache):
-                cmd.extend(["-k", f"ccache={ccache}"])
-            else:
-                cmd.append("-k")
+            # Use bare -k flag only. ccache is passed via KRB5CCNAME env
+            # (through _get_auth_env). Cannot use -k ccache=<path> inline
+            # because argparse nargs='*' on -k greedily consumes the
+            # subcommand (get/set/add/remove) as kerberos arguments.
+            cmd.append("-k")
             if password:
                 cmd.extend(["-p", password])
         if dc_ip:
