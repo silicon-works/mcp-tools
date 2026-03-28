@@ -128,8 +128,11 @@ class CertipyServer(BaseMCPServer):
         self._active_principal = principal
         self.logger.info(f"Saved ticket for {principal} -> {dest}")
 
-    def _get_auth_env(self, principal: str = None) -> Dict[str, str]:
+    def _get_auth_env(self, principal: str = None, ccache_path: str = None) -> Dict[str, str]:
         """Get env dict with KRB5CCNAME for the given (or active) principal."""
+        # Direct ccache_path takes priority
+        if ccache_path and os.path.exists(ccache_path):
+            return {"KRB5CCNAME": ccache_path}
         p = principal or self._active_principal
         if p:
             ccache = self._tickets.get(p)
@@ -199,6 +202,10 @@ class CertipyServer(BaseMCPServer):
                 "type": "string",
                 "description": "AES key for Kerberos auth (128 or 256 bit hex string).",
             },
+            "ccache_path": {
+                "type": "string",
+                "description": "Path to Kerberos ccache file (e.g., /session/credentials/auditor.ccache). Used when kerberos=true.",
+            },
             "dc_ip": {
                 "type": "string",
                 "required": True,
@@ -259,6 +266,10 @@ class CertipyServer(BaseMCPServer):
 
         if target:
             args.extend(["-target", target])
+        elif kerberos:
+            # Certipy Kerberos auth requires -target for server discovery.
+            # Auto-add dc_ip as target when using Kerberos without explicit target.
+            args.extend(["-target", dc_ip])
 
         return args
 
@@ -716,6 +727,7 @@ class CertipyServer(BaseMCPServer):
         hashes: Optional[str] = None,
         kerberos: bool = False,
         aes_key: Optional[str] = None,
+        ccache_path: Optional[str] = None,
         ns: Optional[str] = None,
         dns_tcp: bool = True,
         vulnerable: bool = False,
@@ -758,7 +770,7 @@ class CertipyServer(BaseMCPServer):
         if user_sid:
             cmd.extend(["-sid", user_sid])
 
-        auth_env = self._get_auth_env() if kerberos else {}
+        auth_env = self._get_auth_env(ccache_path=ccache_path) if kerberos else {}
         combined = ""
         try:
             result = await self.run_command(cmd, timeout=timeout, env=auth_env)
@@ -805,6 +817,7 @@ class CertipyServer(BaseMCPServer):
         hashes: Optional[str] = None,
         kerberos: bool = False,
         aes_key: Optional[str] = None,
+        ccache_path: Optional[str] = None,
         ns: Optional[str] = None,
         dns_tcp: bool = True,
         upn: Optional[str] = None,
@@ -869,7 +882,7 @@ class CertipyServer(BaseMCPServer):
         if dcom:
             cmd.append("-dcom")
 
-        auth_env = self._get_auth_env() if kerberos else {}
+        auth_env = self._get_auth_env(ccache_path=ccache_path) if kerberos else {}
         combined = ""
         try:
             result = await self.run_command(cmd, timeout=timeout, env=auth_env)
@@ -991,6 +1004,7 @@ class CertipyServer(BaseMCPServer):
         hashes: Optional[str] = None,
         kerberos: bool = False,
         aes_key: Optional[str] = None,
+        ccache_path: Optional[str] = None,
         ns: Optional[str] = None,
         dns_tcp: bool = True,
         device_id: Optional[str] = None,
@@ -1029,7 +1043,7 @@ class CertipyServer(BaseMCPServer):
         if device_id:
             cmd.extend(["-device-id", device_id])
 
-        auth_env = self._get_auth_env() if kerberos else {}
+        auth_env = self._get_auth_env(ccache_path=ccache_path) if kerberos else {}
         combined = ""
         try:
             result = await self.run_command(cmd, timeout=timeout, env=auth_env)
@@ -1164,6 +1178,7 @@ class CertipyServer(BaseMCPServer):
         hashes: Optional[str] = None,
         kerberos: bool = False,
         aes_key: Optional[str] = None,
+        ccache_path: Optional[str] = None,
         ns: Optional[str] = None,
         dns_tcp: bool = True,
         config_path: Optional[str] = None,
@@ -1205,7 +1220,7 @@ class CertipyServer(BaseMCPServer):
             cmd.extend(["-write-configuration", config_path])
             cmd.append("-force")  # Skip confirmation prompt
 
-        auth_env = self._get_auth_env() if kerberos else {}
+        auth_env = self._get_auth_env(ccache_path=ccache_path) if kerberos else {}
         combined = ""
         try:
             result = await self.run_command(cmd, timeout=timeout, env=auth_env)
@@ -1270,6 +1285,7 @@ class CertipyServer(BaseMCPServer):
         hashes: Optional[str] = None,
         kerberos: bool = False,
         aes_key: Optional[str] = None,
+        ccache_path: Optional[str] = None,
         ns: Optional[str] = None,
         dns_tcp: bool = True,
         timeout: int = 300,
@@ -1306,7 +1322,7 @@ class CertipyServer(BaseMCPServer):
             cmd.extend(["-deny-request", str(deny_request)])
             action_desc = f"deny request {deny_request}"
 
-        auth_env = self._get_auth_env() if kerberos else {}
+        auth_env = self._get_auth_env(ccache_path=ccache_path) if kerberos else {}
         combined = ""
         try:
             result = await self.run_command(cmd, timeout=timeout, env=auth_env)
