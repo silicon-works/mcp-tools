@@ -196,7 +196,7 @@ class CertipyServer(BaseMCPServer):
             "kerberos": {
                 "type": "boolean",
                 "default": False,
-                "description": "Use Kerberos authentication from ccache file (set KRB5CCNAME env).",
+                "description": "Use Kerberos authentication from ccache file. When using Kerberos, also pass target with the DC FQDN (e.g., DC01.corp.local) for SPN resolution.",
             },
             "aes_key": {
                 "type": "string",
@@ -219,6 +219,10 @@ class CertipyServer(BaseMCPServer):
                 "type": "boolean",
                 "default": True,
                 "description": "Use TCP for DNS queries. Enabled by default for Docker reliability.",
+            },
+            "target": {
+                "type": "string",
+                "description": "Target server hostname or IP. Required for Kerberos auth — use the DC FQDN (e.g., DC01.corp.local), not IP.",
             },
             "timeout": {
                 "type": "integer",
@@ -266,10 +270,9 @@ class CertipyServer(BaseMCPServer):
 
         if target:
             args.extend(["-target", target])
-        elif kerberos:
-            # Certipy Kerberos auth requires -target for server discovery.
-            # Auto-add dc_ip as target when using Kerberos without explicit target.
-            args.extend(["-target", dc_ip])
+            if kerberos:
+                # Kerberos also needs -dc-host for SPN resolution
+                args.extend(["-dc-host", target])
 
         return args
 
@@ -730,6 +733,7 @@ class CertipyServer(BaseMCPServer):
         ccache_path: Optional[str] = None,
         ns: Optional[str] = None,
         dns_tcp: bool = True,
+        target: Optional[str] = None,
         vulnerable: bool = False,
         enabled: bool = False,
         dc_only: bool = False,
@@ -752,7 +756,7 @@ class CertipyServer(BaseMCPServer):
         cmd.extend(self._build_auth_args(
             username=username, dc_ip=dc_ip, password=password,
             hashes=hashes, kerberos=kerberos, aes_key=aes_key,
-            ns=ns, dns_tcp=dns_tcp,
+            ns=ns, dns_tcp=dns_tcp, target=target,
         ))
 
         # Output options
@@ -1007,6 +1011,7 @@ class CertipyServer(BaseMCPServer):
         ccache_path: Optional[str] = None,
         ns: Optional[str] = None,
         dns_tcp: bool = True,
+        target: Optional[str] = None,
         device_id: Optional[str] = None,
         timeout: int = 300,
     ) -> ToolResult:
@@ -1029,7 +1034,7 @@ class CertipyServer(BaseMCPServer):
         cmd.extend(self._build_auth_args(
             username=username, dc_ip=dc_ip, password=password,
             hashes=hashes, kerberos=kerberos, aes_key=aes_key,
-            ns=ns, dns_tcp=dns_tcp,
+            ns=ns, dns_tcp=dns_tcp, target=target,
         ))
 
         cmd.extend(["-account", account])
@@ -1181,6 +1186,7 @@ class CertipyServer(BaseMCPServer):
         ccache_path: Optional[str] = None,
         ns: Optional[str] = None,
         dns_tcp: bool = True,
+        target: Optional[str] = None,
         config_path: Optional[str] = None,
         timeout: int = 300,
     ) -> ToolResult:
@@ -1205,7 +1211,7 @@ class CertipyServer(BaseMCPServer):
         cmd.extend(self._build_auth_args(
             username=username, dc_ip=dc_ip, password=password,
             hashes=hashes, kerberos=kerberos, aes_key=aes_key,
-            ns=ns, dns_tcp=dns_tcp,
+            ns=ns, dns_tcp=dns_tcp, target=target,
         ))
 
         cmd.extend(["-template", template])
@@ -1288,6 +1294,7 @@ class CertipyServer(BaseMCPServer):
         ccache_path: Optional[str] = None,
         ns: Optional[str] = None,
         dns_tcp: bool = True,
+        target: Optional[str] = None,
         timeout: int = 300,
     ) -> ToolResult:
         """Manage Certificate Authority: enable/disable templates, approve/deny requests (ESC7)."""
@@ -1303,7 +1310,7 @@ class CertipyServer(BaseMCPServer):
         cmd.extend(self._build_auth_args(
             username=username, dc_ip=dc_ip, password=password,
             hashes=hashes, kerberos=kerberos, aes_key=aes_key,
-            ns=ns, dns_tcp=dns_tcp,
+            ns=ns, dns_tcp=dns_tcp, target=target,
         ))
 
         cmd.extend(["-ca", ca_name])
