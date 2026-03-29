@@ -14,9 +14,11 @@ import os
 import re
 import shutil
 import uuid
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Set
 
-from mcp_common.base_server import BaseMCPServer, ToolResult
+import yaml
+
+from mcp_common.base_server import BaseMCPServer, ToolResult, ToolError
 from mcp_common.output_parsers import sanitize_output
 
 # Certipy binary (pip install certipy-ad)
@@ -30,6 +32,11 @@ WORK_DIR = "/session/certipy"
 
 CRED_DIR = "/session/credentials"
 CONFIG_DIR = "/session/config"
+RECIPE_DIR = "/session/tool_recipes/certipy"
+
+# Auth params handled by _build_auth_args, not recipe flag mapping
+CERTIPY_AUTH_PARAM_NAMES = {"username", "password", "hashes", "kerberos", "aes_key",
+                            "ccache_path", "dc_ip", "ns", "dns_tcp", "target"}
 
 
 class CertipyServer(BaseMCPServer):
@@ -45,6 +52,10 @@ class CertipyServer(BaseMCPServer):
         self._certificates: Dict[str, str] = {}  # identity -> pfx path
         self._active_principal: Optional[str] = None
         self._krb5_configured: bool = False
+
+        # Recipe tracking
+        self._recipe_methods: Set[str] = set()
+        self._recipe_file_mtimes: Dict[str, float] = {}
 
         # Restore state from /session/ on startup
         self._restore_state()
@@ -97,6 +108,149 @@ class CertipyServer(BaseMCPServer):
             params=self._ca_params(),
             handler=self.ca,
         )
+
+        # Load dynamic recipes from session
+        self._load_recipes()
+
+    # ── Dynamic Recipe System ────────────────────────────────────
+
+    def _load_recipes(self):
+        """Load recipe YAML files from /session/tool_recipes/certipy/."""
+        if not os.path.isdir(RECIPE_DIR):
+            return
+        for path in sorted(glob.glob(os.path.join(RECIPE_DIR, "*.yaml"))) + \
+                     sorted(glob.glob(os.path.join(RECIPE_DIR, "*.yml"))):
+            try:
+                mtime = os.path.getmtime(path)
+                if self._recipe_file_mtimes.get(path) == mtime:
+                    continue
+                with open(path) as f:
+                    recipe = yaml.safe_load(f)
+                if not recipe or not recipe.get("name"):
+                    continue
+                name = recipe["name"]
+                if name in self.methods and name not in self._recipe_methods:
+                    self.logger.warning(f"Recipe '{name}' conflicts with built-in method, skipping")
+                    continue
+                self._register_recipe(name, recipe)
+                self._recipe_file_mtimes[path] = mtime
+                self.logger.info(f"Loaded recipe: {name}")
+            except Exception as e:
+                self.logger.warning(f"Recipe load failed {path}: {e}")
+
+    def _maybe_reload_recipes(self):
+        """Check for new or modified recipe files."""
+        if not os.path.isdir(RECIPE_DIR):
+            return
+        current_files = set(
+            glob.glob(os.path.join(RECIPE_DIR, "*.yaml")) +
+            glob.glob(os.path.join(RECIPE_DIR, "*.yml"))
+        )
+        needs_reload = current_files != set(self._recipe_file_mtimes.keys())
+        if not needs_reload:
+            for path in current_files:
+                try:
+                    if os.path.getmtime(path) != self._recipe_file_mtimes.get(path):
+                        needs_reload = True
+                        break
+                except OSError:
+                    needs_reload = True
+                    break
+        if needs_reload:
+            for path in set(self._recipe_file_mtimes.keys()) - current_files:
+                del self._recipe_file_mtimes[path]
+            self._load_recipes()
+
+    def _register_recipe(self, name: str, recipe: Dict[str, Any]):
+        """Register a dynamic recipe method with inherited auth params."""
+        recipe_params = recipe.get("params", {})
+        auth_style = recipe.get("auth", "target")
+
+        extra = {
+            "timeout": {"type": "integer", "default": 60, "description": "Timeout in seconds"},
+            **{k: {"type": v.get("type", "string"),
+                    "required": v.get("required", False),
+                    "description": v.get("description", "")}
+               for k, v in recipe_params.items() if k not in CERTIPY_AUTH_PARAM_NAMES}
+        }
+
+        if auth_style != "none":
+            params = self._auth_params()
+            params.update(extra)
+        else:
+            params = extra
+
+        def make_handler(r):
+            async def handler(**kw):
+                return await self._run_recipe(r, **kw)
+            return handler
+
+        self.register_method(
+            name=name,
+            description=recipe.get("description", f"Dynamic method: {name}"),
+            params=params,
+            handler=make_handler(recipe),
+        )
+        self._recipe_methods.add(name)
+
+    async def _run_recipe(self, recipe: Dict[str, Any], **kwargs) -> ToolResult:
+        """Execute a dynamic recipe method using certipy auth builder."""
+        timeout = kwargs.pop("timeout", 60)
+        auth_style = recipe.get("auth", "target")
+
+        # Extract certipy auth kwargs
+        auth_kw = {k: kwargs.pop(k, None) for k in list(CERTIPY_AUTH_PARAM_NAMES) if k in kwargs}
+
+        # Build command
+        binary = recipe.get("binary", f"certipy {recipe['name']}")
+        cmd = binary.split() if " " in binary else [binary]
+
+        # Build auth args if recipe uses certipy auth
+        if auth_style != "none":
+            filtered = {k: v for k, v in auth_kw.items() if v is not None
+                        and k in ("username", "dc_ip", "password", "hashes",
+                                  "kerberos", "aes_key", "ns", "dns_tcp", "target")}
+            if "username" in filtered and "dc_ip" in filtered:
+                auth_args = self._build_auth_args(**filtered)
+                cmd.extend(auth_args)
+
+        # Translate recipe params to CLI flags
+        recipe_params = recipe.get("params", {})
+        for param_name, value in kwargs.items():
+            if value is None:
+                continue
+            param_def = recipe_params.get(param_name, {})
+            flag = param_def.get("flag", f"-{param_name.replace('_', '-')}")
+            if not flag:
+                cmd.append(str(value))
+            elif param_def.get("type") == "boolean":
+                if value:
+                    cmd.append(flag)
+            else:
+                cmd.extend([flag, str(value)])
+
+        # Build env for Kerberos
+        env = {}
+        ccache_path = auth_kw.get("ccache_path")
+        kerberos = auth_kw.get("kerberos", False)
+        if kerberos:
+            env = self._get_auth_env(ccache_path=ccache_path)
+
+        try:
+            result = await self.run_command(cmd, timeout=timeout, env=env)
+            combined = result.stdout + result.stderr
+            return ToolResult(
+                success=result.returncode == 0,
+                data={"command": " ".join(cmd), "method": recipe["name"]},
+                raw_output=sanitize_output(combined),
+            )
+        except ToolError as e:
+            return ToolResult(success=False, data={"method": recipe["name"]}, error=str(e))
+
+    async def _handle_tool_call(self, name, arguments):
+        """Override to check for new recipes before handling calls."""
+        self._maybe_reload_recipes()
+        return await super()._handle_tool_call(name, arguments)
 
     # ── State Management ─────────────────────────────────────────
 

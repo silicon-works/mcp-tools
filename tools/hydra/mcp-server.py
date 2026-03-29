@@ -571,7 +571,7 @@ class HydraServer(BaseMCPServer):
             # SSH format: [22][ssh] host: 10.10.10.1   login: admin   password: admin123
             # HTTP form format: [80][http-post-form] host: httpbin.org   misc: /path:...   login: admin   password: admin123
             cred_match = re.search(
-                r"\[(\d+)\]\[([\w-]+)\]\s+host:\s+(\S+).*?\s+login:\s+(\S+)\s+password:\s+(\S+)",
+                r"\[(\d+)\]\[([\w-]+)\]\s+host:\s+(\S+).*?\s+login:\s+(\S+)\s+password:\s+(.+)",
                 line
             )
             if cred_match:
@@ -580,7 +580,22 @@ class HydraServer(BaseMCPServer):
                     "service": cred_match.group(2),
                     "host": cred_match.group(3),
                     "username": cred_match.group(4),
-                    "password": cred_match.group(5),
+                    "password": cred_match.group(5).strip(),
+                })
+                continue
+
+            # Password-only services (VNC, Redis, SNMP, etc.) — no login field
+            pwd_only_match = re.search(
+                r"\[(\d+)\]\[([\w-]+)\]\s+host:\s+(\S+).*?\s+password:\s+(.+)",
+                line
+            )
+            if pwd_only_match and "login:" not in line:
+                credentials.append({
+                    "port": int(pwd_only_match.group(1)),
+                    "service": pwd_only_match.group(2),
+                    "host": pwd_only_match.group(3),
+                    "username": "",
+                    "password": pwd_only_match.group(4).strip(),
                 })
                 continue
 
@@ -675,8 +690,8 @@ class HydraServer(BaseMCPServer):
         # Build command
         args = ["hydra", "-t", str(threads)]
 
-        # Add verbose flag if requested (always use -V for progress tracking)
-        args.append("-V")
+        # Use -v (lowercase) for minimal progress info instead of -V (very verbose)
+        args.append("-v")
 
         # Wait time between connections
         if wait_time is not None:

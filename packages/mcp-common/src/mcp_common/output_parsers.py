@@ -177,6 +177,18 @@ def parse_nmap_xml(xml_output: str) -> Dict[str, Any]:
 
             host_data["ports"].append(port_data)
 
+        # Parse host-level NSE scripts (smb-os-discovery, smb2-security-mode, clock-skew, etc.)
+        host_scripts = []
+        hostscript_elem = host.find("hostscript")
+        if hostscript_elem is not None:
+            for script in hostscript_elem.findall("script"):
+                host_scripts.append({
+                    "id": script.get("id", ""),
+                    "output": script.get("output", ""),
+                })
+        if host_scripts:
+            host_data["host_scripts"] = host_scripts
+
         # OS detection
         for osmatch in host.findall(".//osmatch"):
             host_data["os_matches"].append({

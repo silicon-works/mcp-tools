@@ -573,7 +573,10 @@ class SqlmapServer(BaseMCPServer):
         }
 
         for line in output.split("\n"):
-            if "is vulnerable" in line.lower() or ("parameter" in line.lower() and "injectable" in line.lower() and "not appear" not in line.lower()):
+            if ("is vulnerable" in line.lower()
+                    or ("parameter" in line.lower() and "injectable" in line.lower()
+                        and "not appear" not in line.lower())
+                    or "identified the following injection point" in line.lower()):
                 result["vulnerable"] = True
 
             param_match = re.search(r"Parameter: (\S+)", line)
