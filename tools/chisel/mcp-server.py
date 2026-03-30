@@ -267,9 +267,7 @@ class ChiselServer(BaseMCPServer):
             await asyncio.sleep(startup_wait)
 
             if proc.returncode is not None:
-                stdout_data = await proc.stdout.read()
-                stderr_data = await proc.stderr.read()
-                combined = stdout_data.decode() + stderr_data.decode()
+                combined = await self._read_remaining(proc)
                 return ToolResult(
                     success=False,
                     error=f"Process exited immediately (code {proc.returncode}): {combined[:500]}",

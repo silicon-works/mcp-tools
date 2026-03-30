@@ -235,6 +235,23 @@ class BaseMCPServer(ABC):
                 pass
             raise
 
+    async def _read_remaining(self, proc, timeout: float = 3.0) -> str:
+        """Drain stdout+stderr from a terminated process with a timeout.
+
+        Use after proc.terminate()/kill() + wait() to safely collect any
+        remaining output without risking an indefinite hang on broken pipes.
+        """
+        output = ""
+        for stream in [proc.stdout, proc.stderr]:
+            if stream is None:
+                continue
+            try:
+                data = await asyncio.wait_for(stream.read(), timeout=timeout)
+                output += data.decode("utf-8", errors="replace")
+            except (asyncio.TimeoutError, Exception):
+                pass
+        return output
+
     async def send_progress(self, message: str, progress: float = 0.0, total: float | None = None) -> None:
         """Send an MCP progress notification if a progress token exists on the current request.
 

@@ -292,9 +292,7 @@ class ImpacketRelayServer(BaseMCPServer):
             await asyncio.sleep(3)
 
             if proc.returncode is not None:
-                stdout_data = await proc.stdout.read()
-                stderr_data = await proc.stderr.read()
-                combined = stdout_data.decode(errors="replace") + stderr_data.decode(errors="replace")
+                combined = await self._read_remaining(proc)
                 return ToolResult(
                     success=False,
                     error=f"ntlmrelayx exited immediately (code {proc.returncode}): {combined[:500]}",
@@ -351,13 +349,8 @@ class ImpacketRelayServer(BaseMCPServer):
 
         # Check if process is still running
         if proc.returncode is not None:
-            # Process ended — read remaining output
-            try:
-                remaining_stdout = await proc.stdout.read()
-                remaining_stderr = await proc.stderr.read()
-                info["output_buffer"] += remaining_stdout.decode(errors="replace") + remaining_stderr.decode(errors="replace")
-            except Exception:
-                pass
+            # Process ended — drain remaining output safely
+            info["output_buffer"] += await self._read_remaining(proc)
 
             parsed = self._parse_relay_output(info["output_buffer"])
             status = "completed" if parsed["relay_succeeded"] else "exited"
@@ -413,13 +406,8 @@ class ImpacketRelayServer(BaseMCPServer):
                 proc.kill()
                 await proc.wait()
 
-        # Read all remaining output
-        try:
-            remaining_stdout = await proc.stdout.read()
-            remaining_stderr = await proc.stderr.read()
-            info["output_buffer"] += remaining_stdout.decode(errors="replace") + remaining_stderr.decode(errors="replace")
-        except Exception:
-            pass
+        # Drain remaining output safely (with timeout to avoid hanging on broken pipes)
+        info["output_buffer"] += await self._read_remaining(proc)
 
         parsed = self._parse_relay_output(info["output_buffer"])
         final_output = info["output_buffer"]
