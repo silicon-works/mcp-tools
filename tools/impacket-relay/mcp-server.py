@@ -404,7 +404,10 @@ class ImpacketRelayServer(BaseMCPServer):
                 await asyncio.wait_for(proc.wait(), timeout=5)
             except asyncio.TimeoutError:
                 proc.kill()
-                await proc.wait()
+                try:
+                    await asyncio.wait_for(proc.wait(), timeout=3)
+                except asyncio.TimeoutError:
+                    pass  # Process stuck — move on
 
         # Drain remaining output safely (with timeout to avoid hanging on broken pipes)
         info["output_buffer"] += await self._read_remaining(proc)

@@ -555,7 +555,10 @@ class ChiselServer(BaseMCPServer):
             await asyncio.wait_for(proc.wait(), timeout=5)
         except asyncio.TimeoutError:
             proc.kill()
-            await proc.wait()
+            try:
+                await asyncio.wait_for(proc.wait(), timeout=3)
+            except asyncio.TimeoutError:
+                pass  # Process stuck — move on
 
         # Wait briefly for port release from TIME_WAIT
         port = info.get("port") or info.get("socks_port") or info.get("remote_port")
