@@ -138,7 +138,7 @@ class CloudfoxServer(BaseMCPServer):
         cmd.append("-y")
 
         try:
-            result = await self.run_command(cmd, timeout=timeout)
+            result = await self.run_command(cmd, timeout=timeout, env=env)
             stdout = result.stdout.strip() if result.stdout else ""
             stderr = result.stderr.strip() if result.stderr else ""
             combined = f"{stdout}\n{stderr}".strip()
