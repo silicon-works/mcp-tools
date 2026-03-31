@@ -214,7 +214,8 @@ class PacuServer(BaseMCPServer):
             # Check for errors
             has_error = False
             error_msg = None
-            if "error" in combined.lower() and "credential" in combined.lower():
+            combined_lower = combined.lower()
+            if "error" in combined_lower and "credential" in combined_lower:
                 has_error = True
                 error_msg = "AWS credential error — check access key and secret key"
             elif "InvalidClientTokenId" in combined or "SignatureDoesNotMatch" in combined:
@@ -223,6 +224,15 @@ class PacuServer(BaseMCPServer):
             elif "AccessDenied" in combined or "UnauthorizedAccess" in combined:
                 has_error = True
                 error_msg = "Access denied — insufficient permissions for this module"
+            elif "Traceback" in combined and "EOFError" in combined:
+                has_error = True
+                error_msg = "Pacu module requires interactive input — not supported in MCP mode"
+            elif "Module not found" in combined or "not a valid module" in combined_lower:
+                has_error = True
+                error_msg = f"Unknown Pacu module: {module}"
+            elif rc != 0 and "Traceback" in combined:
+                has_error = True
+                error_msg = "Pacu module crashed — check raw output"
 
             return ToolResult(
                 success=not has_error,
@@ -256,8 +266,18 @@ class PacuServer(BaseMCPServer):
 
             combined = f"{stdout}\n{stderr}".strip()
 
-            # Check for privesc paths
-            privesc_found = "privilege escalation" in combined.lower() or "privesc" in combined.lower()
+            # Check for crashes first
+            if "Traceback" in combined and "EOFError" in combined:
+                return ToolResult(
+                    success=False,
+                    data={"module": "iam__privesc_scan"},
+                    error="Pacu privesc_scan requires iam__enum_permissions to run first — module prompted for input",
+                    raw_output=sanitize_output(combined, max_length=10000),
+                )
+
+            # Check for privesc paths — only count if the module actually completed
+            # "Confirmed possible escalation methods" is the real indicator
+            privesc_found = "confirmed possible" in combined.lower() or "potential privilege escalation" in combined.lower()
 
             return ToolResult(
                 success=True,
