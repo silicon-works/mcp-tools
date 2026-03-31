@@ -189,6 +189,8 @@ class PygpoabuseServer(BaseMCPServer):
             failure_indicators = [
                 "unable to connect", "does not exist", "access denied",
                 "error", "failed", "domain should be specified",
+                "doesn't seem to have the necessary rights",
+                "permission denied", "not authorized",
             ]
             has_failure = any(ind in combined.lower() for ind in failure_indicators)
             has_success = "task was created" in combined.lower() or "success" in combined.lower()
