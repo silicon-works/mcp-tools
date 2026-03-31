@@ -1,0 +1,189 @@
+name: smtp
+version: "1.0"
+description: "SMTP testing via swaks (Swiss Army Knife for SMTP) and user enumeration via smtp-user-enum. 3 methods: send (craft and send emails with full header/body control, spoofing, auth, TLS), enum_users (enumerate valid users via VRFY/EXPN/RCPT TO methods), relay_test (check if server is an open relay). Swaks supports all SMTP auth mechanisms, STARTTLS, custom EHLO, and arbitrary headers. For password brute-force use hydra. For email harvesting use theharvester."
+image: "ghcr.io/silicon-works/mcp-tools-smtp:latest"
+image_size_mb: 200
+timeout_seconds: 120
+
+capabilities:
+  - smtp_testing
+  - user_enumeration
+  - relay_testing
+  - email_sending
+
+phases:
+  - enumeration
+  - exploitation
+
+requirements:
+  network: true
+  privileged: false
+
+resources:
+  memory_mb: 128
+  cpu: 0.25
+
+routing:
+  use_for:
+    - "enumerate valid SMTP users via VRFY, EXPN, or RCPT TO"
+    - "test if SMTP server is an open relay"
+    - "send crafted emails for phishing pretexts or to trigger server-side processing"
+    - "test SMTP authentication with discovered credentials"
+    - "send spoofed emails when SPF/DKIM is not configured"
+    - "trigger email-based alerts or workflows on target systems"
+  never_use_for:
+    - "SMTP password brute-force (use hydra)"
+    - "email address harvesting (use theharvester)"
+    - "port scanning to find SMTP services (use nmap)"
+  triggers:
+    - SMTP
+    - swaks
+    - email enumeration
+    - VRFY
+    - EXPN
+    - RCPT TO
+    - open relay
+    - smtp-user-enum
+    - port 25
+    - send email
+    - mail server
+  prefer_over: []
+
+see_also:
+  - tool: nmap
+    reason: Use nmap to discover SMTP on port 25/465/587 before using smtp tool.
+  - tool: hydra
+    reason: Use hydra for SMTP password brute-force attacks. Use smtp for user enumeration and relay testing.
+  - tool: theharvester
+    reason: Use theharvester for email address harvesting. Use smtp for testing the mail server directly.
+
+methods:
+  send:
+    description: "Send a crafted email via SMTP using swaks. Supports full header/body control, sender spoofing, STARTTLS, SMTP authentication, and custom EHLO hostname. Returns the full SMTP transaction showing all server responses."
+    when_to_use: "When you need to send an email through a target SMTP server — for phishing pretexts, triggering server-side email processing (e.g., password resets, alert systems), or testing email delivery with spoofed senders. Also useful to confirm SMTP connectivity and check what the server banner reveals."
+    params:
+      server:
+        type: string
+        required: true
+        description: "SMTP server hostname or IP address."
+      to:
+        type: string
+        required: true
+        description: "Recipient email address."
+      from_addr:
+        type: string
+        default: "test@test.com"
+        description: "Sender email address. Can be spoofed if server allows (no SPF/DKIM check)."
+      subject:
+        type: string
+        description: "Email subject line."
+      body:
+        type: string
+        description: "Email body text."
+      headers:
+        type: array
+        description: "Additional headers as list of 'Header: value' strings."
+      port:
+        type: integer
+        default: 25
+        description: "SMTP port (25=SMTP, 465=SMTPS, 587=submission)."
+      tls:
+        type: boolean
+        default: false
+        description: "Use STARTTLS encryption."
+      auth_user:
+        type: string
+        description: "SMTP authentication username."
+      auth_password:
+        type: string
+        description: "SMTP authentication password."
+      ehlo:
+        type: string
+        description: "Custom EHLO/HELO hostname to send."
+      timeout:
+        type: integer
+        default: 30
+        description: "Connection timeout in seconds."
+    returns:
+      mail_from_accepted:
+        type: boolean
+        description: "Whether MAIL FROM was accepted by the server."
+      rcpt_to_accepted:
+        type: boolean
+        description: "Whether RCPT TO was accepted by the server."
+      message_queued:
+        type: boolean
+        description: "Whether the message was successfully queued for delivery."
+      smtp_codes:
+        type: array
+        description: "SMTP response codes and messages from the server."
+
+  enum_users:
+    description: "Enumerate valid SMTP users via VRFY, EXPN, or RCPT TO methods using smtp-user-enum. Tests a list of usernames against the SMTP server and reports which ones exist."
+    when_to_use: "After nmap discovers SMTP on port 25 — enumerate valid system users. VRFY is the most direct method but often disabled. RCPT TO works when VRFY is blocked (append @domain). EXPN expands mailing lists. Valid usernames feed into hydra for password brute-force or SSH/FTP login attempts."
+    params:
+      server:
+        type: string
+        required: true
+        description: "SMTP server hostname or IP address."
+      usernames:
+        type: array
+        required: true
+        description: "List of usernames to test (e.g., ['root', 'admin', 'michael', 'www-data', 'mail', 'postmaster'])."
+      method:
+        type: string
+        default: "VRFY"
+        description: "Enumeration method: VRFY (verify user), EXPN (expand list), RCPT (test via RCPT TO)."
+      domain:
+        type: string
+        description: "Domain to append for RCPT method (e.g., 'trick.htb' makes user become user@trick.htb)."
+      port:
+        type: integer
+        default: 25
+        description: "SMTP port."
+      timeout:
+        type: integer
+        default: 10
+        description: "Timeout per user check in seconds."
+    returns:
+      valid_users:
+        type: array
+        description: "List of usernames confirmed to exist on the server."
+      valid_count:
+        type: integer
+        description: "Number of valid users found."
+      tested_count:
+        type: integer
+        description: "Total number of usernames tested."
+
+  relay_test:
+    description: "Test if an SMTP server is an open relay by attempting to send to an external domain. An open relay allows unauthenticated sending to any destination, which is a serious misconfiguration."
+    when_to_use: "After discovering SMTP — check if the server will relay emails to external domains without authentication. Open relays can be abused for phishing or spam and are a finding in security assessments."
+    params:
+      server:
+        type: string
+        required: true
+        description: "SMTP server hostname or IP address."
+      from_addr:
+        type: string
+        default: "test@test.com"
+        description: "Sender address to use in the relay test."
+      to_addr:
+        type: string
+        default: "relay-test@example.com"
+        description: "External recipient to test relaying to."
+      port:
+        type: integer
+        default: 25
+        description: "SMTP port."
+      timeout:
+        type: integer
+        default: 30
+        description: "Connection timeout in seconds."
+    returns:
+      is_open_relay:
+        type: boolean
+        description: "Whether the server accepted the relay attempt (true = open relay = vulnerability)."
+      rcpt_accepted:
+        type: boolean
+        description: "Whether RCPT TO for the external address was accepted."

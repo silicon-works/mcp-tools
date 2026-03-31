@@ -1,5 +1,5 @@
 version: '2.0'
-updated_at: '2026-03-29T00:16:34Z'
+updated_at: '2026-03-31T15:07:03Z'
 tools:
   amass:
     name: amass
@@ -123,6 +123,90 @@ tools:
           total_found:
             type: integer
             description: Total unique subdomains discovered.
+  aws:
+    name: aws
+    version: '1.3'
+    description: Interactive AWS API client via awslabs aws-api-mcp-server (forked for offensive use). Translates AWS CLI
+      command strings into boto3 API calls. Supports ALL AWS services — IAM, S3, Lambda, DynamoDB, SQS, STS, EC2, Secrets
+      Manager, CloudTrail, and 200+ more. Batch mode (20 commands per call), all-region scanning, automatic pagination. User-Agent
+      fingerprint stripped for OPSEC. Credentials via env vars. For IAM privilege escalation use pacu. For attack path analysis
+      use cloudfox. For cloud security auditing use prowler.
+    image: ghcr.io/silicon-works/mcp-tools-aws:latest
+    image_size_mb: 400
+    timeout_seconds: 600
+    capabilities:
+    - aws_api_access
+    - iam_enumeration
+    - s3_operations
+    - lambda_operations
+    - cloud_exploitation
+    phases:
+    - reconnaissance
+    - enumeration
+    - exploitation
+    - post-exploitation
+    requirements:
+      network: true
+      privileged: false
+    resources:
+      memory_mb: 512
+      cpu: 0.5
+    routing:
+      use_for:
+      - execute any AWS CLI command against an AWS account
+      - enumerate IAM users, roles, policies, and permissions
+      - list and access S3 buckets and objects
+      - inspect and invoke Lambda functions
+      - scan DynamoDB tables and query data
+      - check STS identity (who am I?) with stolen credentials
+      - access Secrets Manager and Parameter Store
+      - enumerate EC2 instances, security groups, and user data
+      - interact with SQS queues
+      - disable CloudTrail logging (if authorized)
+      never_use_for:
+      - cloud security auditing/compliance (use prowler)
+      - IAM privilege escalation analysis (use pacu — it has 21+ privesc modules)
+      - attack path analysis (use cloudfox — it does cross-service correlation)
+      - S3 bucket brute-force discovery (use s3scanner)
+      - secret scanning in S3 contents (use trufflehog)
+      triggers:
+      - aws
+      - AWS CLI
+      - iam
+      - s3
+      - lambda
+      - dynamodb
+      - sqs
+      - sts
+      - ec2
+      - secrets manager
+      - cloudtrail
+      - AWS API
+      - cloud
+      prefer_over:
+      - prowler
+    see_also:
+    - tool: pacu
+      reason: aws gives raw API access. pacu encodes exploitation knowledge — 21+ IAM privesc paths, persistence modules,
+        evasion techniques. Use aws for manual enumeration, pacu for automated exploitation.
+    - tool: cloudfox
+      reason: aws makes individual API calls. cloudfox does cross-service attack path analysis (trust chains, role assumptions,
+        env var secrets). Use cloudfox for situational awareness.
+    - tool: prowler
+      reason: Both interact with AWS APIs but prowler is read-only compliance auditing. aws allows read AND write operations
+        for exploitation.
+    - tool: s3scanner
+      reason: Use s3scanner to discover unknown S3 buckets by name. Use aws to interact with known/discovered buckets.
+    - tool: trufflehog
+      reason: Use trufflehog to scan S3 bucket contents for secrets. Use aws for general S3 operations.
+    methods:
+      execute_aws_command:
+        description: Execute any AWS CLI command via boto3. Accepts the full AWS CLI command string (e.g., 'aws sts get-caller-identity',
+          'aws s3 ls'). Supports batch mode with up to 20 commands per call.
+        when_to_use: For any AWS API interaction — IAM enumeration, S3 access, Lambda inspection, DynamoDB queries, SQS interaction,
+          and 200+ other AWS services. This is the swiss army knife for AWS pentesting.
+        params: {}
+        returns: {}
   bloodhound:
     name: bloodhound
     version: 1.9.0
@@ -2477,6 +2561,106 @@ tools:
           status:
             type: string
             description: Always 'closed'.
+  cloudfox:
+    name: cloudfox
+    version: '1.0'
+    description: 'AWS attack path enumeration via Bishop Fox CloudFox. 2 methods: run (execute any of 30+ CloudFox AWS modules
+      for cross-service attack path analysis — principals, permissions, role-trusts, env-vars, endpoints, instances, workloads,
+      secrets, etc.), list_commands (show available modules). Read-only enumeration that cross-references data across services
+      to find exploitable paths. For raw AWS API access use aws. For exploitation use pacu.'
+    image: ghcr.io/silicon-works/mcp-tools-cloudfox:latest
+    image_size_mb: 350
+    timeout_seconds: 600
+    capabilities:
+    - aws_attack_path_analysis
+    - iam_enumeration
+    - cross_service_correlation
+    - trust_analysis
+    phases:
+    - reconnaissance
+    - enumeration
+    requirements:
+      network: true
+      privileged: false
+    resources:
+      memory_mb: 512
+      cpu: 1.0
+    routing:
+      use_for:
+      - enumerate IAM principals, permissions, and role trust relationships
+      - find AWS attack paths (workloads with admin or path to admin)
+      - discover secrets in environment variables across Lambda, ECS, CodeBuild
+      - enumerate API endpoints, instances, databases, and network exposure
+      - analyze cross-account trust relationships and resource sharing
+      - find outbound assumed roles for lateral movement
+      never_use_for:
+      - executing AWS API commands (use aws)
+      - exploiting AWS misconfigurations (use pacu)
+      - S3 bucket brute-force (use s3scanner)
+      - secret scanning in files (use trufflehog)
+      triggers:
+      - cloudfox
+      - AWS attack path
+      - cloud attack surface
+      - IAM analysis
+      - role trust
+      - AWS enumeration
+      - cloud enumeration
+      prefer_over: []
+    see_also:
+    - tool: aws
+      reason: cloudfox does read-only cross-service analysis. aws provides interactive API access for exploitation.
+    - tool: pacu
+      reason: cloudfox identifies attack paths. pacu exploits them (privesc, persistence, evasion).
+    - tool: prowler
+      reason: Both do AWS analysis but prowler checks compliance. CloudFox finds offensive attack paths.
+    methods:
+      run:
+        description: Run a CloudFox AWS module. 30+ modules available for cross-service attack path analysis.
+        when_to_use: After obtaining AWS credentials — use CloudFox for situational awareness. Start with 'inventory' for
+          account overview, then 'principals' + 'permissions' for IAM analysis, 'role-trusts' for trust relationships, 'env-vars'
+          for leaked secrets, 'workloads' for admin paths.
+        params:
+          command:
+            type: string
+            required: true
+            description: CloudFox module name (e.g., 'principals', 'permissions', 'role-trusts', 'env-vars', 'workloads').
+          access_key_id:
+            type: string
+            description: AWS access key ID.
+          secret_access_key:
+            type: string
+            description: AWS secret access key.
+          session_token:
+            type: string
+            description: AWS session token.
+          region:
+            type: string
+            default: us-east-1
+            description: AWS region.
+          output:
+            type: string
+            default: wide
+            description: 'Output format: brief or wide.'
+          timeout:
+            type: integer
+            default: 300
+            description: Timeout in seconds.
+        returns:
+          command:
+            type: string
+            description: Module that was executed.
+      list_commands:
+        description: List all available CloudFox AWS modules with descriptions.
+        when_to_use: Reference — see which modules are available.
+        params: {}
+        returns:
+          commands:
+            type: array
+            description: Available modules with descriptions.
+          command_count:
+            type: integer
+            description: Total modules.
   curl:
     name: curl
     version: '8.18'
@@ -3168,6 +3352,374 @@ tools:
           metasploit_search:
             type: string
             description: Ready-to-use Metasploit search command (e.g., 'search cve:CVE-2021-44228'). Use with metasploit tool.
+  dns:
+    name: dns
+    version: '9.18'
+    description: 'DNS enumeration via dig (dnsutils 9.18) — zone transfers, reverse lookups, and record queries. 3 methods:
+      lookup (forward/reverse DNS query for specific record types with optional DNS server targeting), zone_transfer (attempt
+      AXFR to retrieve all records for a domain — extracts hostnames and record counts), enum (enumerate all common record
+      types A/AAAA/CNAME/MX/NS/SOA/TXT/SRV for a domain in one call). Supports TCP mode, custom DNS servers, and short-form
+      output. For subdomain brute-force discovery use amass. For port scanning discovered hosts use nmap.'
+    image: ghcr.io/silicon-works/mcp-tools-dns:latest
+    image_size_mb: 200
+    timeout_seconds: 120
+    capabilities:
+    - dns_enumeration
+    - zone_transfer
+    - reverse_lookup
+    - record_query
+    phases:
+    - reconnaissance
+    requirements:
+      network: true
+      privileged: false
+    resources:
+      memory_mb: 128
+      cpu: 0.25
+    routing:
+      use_for:
+      - DNS zone transfer (AXFR) to discover all subdomains and records for a domain
+      - reverse DNS lookup to identify hostnames from IP addresses
+      - query specific DNS record types (A, AAAA, MX, TXT, SRV, NS, SOA, PTR, CNAME)
+      - enumerate all DNS record types for a target domain in one call
+      - query a specific DNS server (e.g., target's internal DNS) for internal hostnames
+      - check SOA record to identify authoritative nameservers
+      never_use_for:
+      - subdomain brute-force discovery (use amass for passive OSINT, ffuf for DNS brute-force)
+      - port scanning discovered hosts (use nmap)
+      - web content discovery (use ffuf)
+      - DNS-based vulnerability scanning (use nuclei with dns templates)
+      triggers:
+      - dig
+      - zone transfer
+      - AXFR
+      - reverse DNS
+      - DNS lookup
+      - DNS records
+      - DNS query
+      - MX record
+      - TXT record
+      - SOA record
+      - NS record
+      - SRV record
+      - PTR record
+      - nameserver
+      prefer_over: []
+    see_also:
+    - tool: amass
+      reason: Use amass for OSINT-based subdomain discovery (passive sources, no target contact). Use dns for interactive
+        queries, zone transfers, and specific record lookups against known DNS servers.
+    - tool: nmap
+      reason: After DNS enumeration discovers hostnames, use nmap to port scan those hosts. Nmap has basic DNS NSE scripts
+        but dns (dig) provides much more control for zone transfers and record queries.
+    - tool: ffuf
+      reason: Use ffuf for DNS subdomain brute-force when amass passive enumeration and dns zone transfer both fail to find
+        subdomains.
+    methods:
+      lookup:
+        description: Perform a DNS lookup for a specific record type. Supports forward lookups (domain → IP), reverse lookups
+          (IP → hostname via -x), and queries against custom DNS servers. Returns parsed answer records with TTL, class, type,
+          and value.
+        when_to_use: First DNS interaction after identifying a target domain or IP. Try reverse lookup on target IP to discover
+          hostnames. Query the target's DNS server directly for internal records that public DNS won't have. Check MX records
+          to find mail servers, TXT records for SPF/DKIM, NS records for nameservers, SOA for the authoritative DNS server
+          (needed for zone_transfer).
+        params:
+          target:
+            type: string
+            required: true
+            description: Domain name (e.g., 'target.htb') or IP address (for reverse lookups).
+          record_type:
+            type: string
+            default: A
+            description: 'DNS record type: A, AAAA, MX, TXT, NS, SOA, SRV, PTR, CNAME, ANY, DNSKEY, DS, HINFO, NAPTR, TLSA.'
+          server:
+            type: string
+            description: DNS server to query (e.g., '10.10.10.5'). Omit to use system default. Use target's DNS server for
+              internal records.
+          reverse:
+            type: boolean
+            default: false
+            description: Perform reverse DNS lookup (-x flag). Target should be an IP address.
+          short:
+            type: boolean
+            default: false
+            description: Return short-form answer only (+short). Cleaner output for scripting.
+          tcp:
+            type: boolean
+            default: false
+            description: Use TCP instead of UDP (+tcp). Required for large responses or when UDP is filtered.
+          timeout:
+            type: integer
+            default: 10
+            description: Query timeout in seconds.
+        returns:
+          target:
+            type: string
+            description: The queried target.
+          record_type:
+            type: string
+            description: The record type queried.
+          records:
+            type: array
+            description: 'Parsed DNS records, each with: name, ttl, class, type, value.'
+          count:
+            type: integer
+            description: Number of records returned.
+      zone_transfer:
+        description: Attempt a DNS zone transfer (AXFR) to retrieve all DNS records for a domain. Zone transfers are often
+          misconfigured on internal DNS servers and leak the entire zone — all subdomains, mail servers, service records,
+          and internal hostnames. Returns parsed records and extracted unique hostnames.
+        when_to_use: After identifying the authoritative DNS server for a domain (via SOA record or nmap). Zone transfers
+          are a quick win — if allowed, they reveal the entire DNS zone without brute-forcing. Always try AXFR before resorting
+          to subdomain brute-force. Common in HTB/CTF where DNS misconfiguration is a deliberate vulnerability.
+        params:
+          domain:
+            type: string
+            required: true
+            description: Domain to attempt zone transfer on (e.g., 'target.htb', 'hackfail.htb').
+          server:
+            type: string
+            required: true
+            description: DNS server to query — must be the authoritative nameserver for the domain.
+          timeout:
+            type: integer
+            default: 30
+            description: Query timeout in seconds. Zone transfers can be slow for large zones.
+        returns:
+          domain:
+            type: string
+            description: The domain queried.
+          transfer_allowed:
+            type: boolean
+            description: Whether the zone transfer was permitted by the server.
+          records:
+            type: array
+            description: 'All DNS records from the zone, each with: name, ttl, class, type, value.'
+          record_count:
+            type: integer
+            description: Total number of records in the zone.
+          hostnames:
+            type: array
+            description: Unique hostnames (A/AAAA/CNAME records) extracted from the zone — the subdomains you discovered.
+          hostname_count:
+            type: integer
+            description: Number of unique hostnames discovered.
+      enum:
+        description: Enumerate all common DNS record types (A, AAAA, CNAME, MX, NS, SOA, TXT, SRV, PTR) for a domain in one
+          call. Returns results grouped by record type with short-form values. Quick way to get a complete DNS picture of
+          a domain.
+        when_to_use: Early reconnaissance to get a full DNS overview of a target domain. Discovers mail servers (MX), nameservers
+          (NS), SPF/DKIM records (TXT), service locations (SRV), and IPv6 addresses (AAAA) in a single call. Use before zone_transfer
+          to understand the DNS landscape.
+        params:
+          domain:
+            type: string
+            required: true
+            description: Domain to enumerate (e.g., 'target.htb').
+          server:
+            type: string
+            description: DNS server to query. Omit to use system default.
+          timeout:
+            type: integer
+            default: 10
+            description: Timeout per query in seconds.
+        returns:
+          domain:
+            type: string
+            description: The enumerated domain.
+          records:
+            type: object
+            description: 'Records grouped by type, e.g., {''A'': [''10.10.10.1''], ''MX'': [''mail.target.htb''], ''TXT'':
+              [''v=spf1 ...'']}.'
+          record_types_found:
+            type: array
+            description: List of record types that returned results (e.g., ['A', 'MX', 'NS', 'SOA', 'TXT']).
+          total_records:
+            type: integer
+            description: Total number of records across all types.
+  elasticsearch:
+    name: elasticsearch
+    version: '1.0'
+    description: 'Elasticsearch enumeration and data extraction via REST API. 6 methods: cluster_info (version, health, nodes,
+      plugins), enum_indices (list all indices with doc counts and sizes), get_mappings (field schema for an index), search
+      (full Query DSL with pagination), dump (bulk extraction via scroll API — no 10K document limit), enum_snapshots (list
+      snapshot repos and backups). Connects to unauthenticated or Basic auth instances. For MongoDB use mongodb. For MySQL
+      use mysql.'
+    image: ghcr.io/silicon-works/mcp-tools-elasticsearch:latest
+    image_size_mb: 250
+    timeout_seconds: 600
+    capabilities:
+    - elasticsearch_enumeration
+    - data_extraction
+    - scroll_api
+    - cluster_reconnaissance
+    phases:
+    - enumeration
+    - post-exploitation
+    requirements:
+      network: true
+      privileged: false
+    resources:
+      memory_mb: 256
+      cpu: 0.5
+    routing:
+      use_for:
+      - enumerate Elasticsearch cluster info, indices, and mappings
+      - search Elasticsearch indices for credentials, PII, API keys, or sensitive data
+      - bulk dump data from Elasticsearch indices using scroll API
+      - enumerate Elasticsearch snapshot repositories for backup data
+      - probe unauthenticated Elasticsearch instances on port 9200
+      never_use_for:
+      - MongoDB databases (use mongodb)
+      - MySQL databases (use mysql)
+      - MSSQL databases (use mssql)
+      - port scanning to find Elasticsearch (use nmap)
+      triggers:
+      - elasticsearch
+      - elastic
+      - kibana
+      - port 9200
+      - ELK
+      - logstash
+      - elastic search
+      - ES cluster
+      prefer_over: []
+    see_also:
+    - tool: nmap
+      reason: Use nmap to discover Elasticsearch on port 9200/9300 before using elasticsearch tool.
+    - tool: curl
+      reason: Use curl for quick one-off ES API calls. Use elasticsearch for structured enumeration and bulk extraction with
+        scroll API.
+    - tool: mongodb
+      reason: Different NoSQL database. Use mongodb for MongoDB, elasticsearch for Elasticsearch.
+    methods:
+      cluster_info:
+        description: Get Elasticsearch cluster health, version, node info, and installed plugins. First step after discovering
+          ES.
+        when_to_use: After nmap discovers port 9200 — check if Elasticsearch is unauthenticated, identify version (for CVE
+          research), enumerate nodes and plugins.
+        params:
+          host:
+            type: string
+            required: true
+            description: Elasticsearch URL (e.g., 'http://10.10.10.5:9200').
+        returns:
+          cluster_name:
+            type: string
+            description: Cluster name.
+          version:
+            type: string
+            description: Elasticsearch version.
+          status:
+            type: string
+            description: Cluster health (green/yellow/red).
+          nodes:
+            type: array
+            description: Node information.
+      enum_indices:
+        description: List all indices with document count, size, and health status.
+        when_to_use: After confirming ES access — discover what data is stored. Look for indices named 'users', 'accounts',
+          'logs', 'emails', 'secrets', etc.
+        params:
+          host:
+            type: string
+            required: true
+            description: Elasticsearch URL.
+        returns:
+          indices:
+            type: array
+            description: Index details (name, status, health, doc count, size).
+          index_names:
+            type: array
+            description: Just the index names.
+      get_mappings:
+        description: Get field mappings for a specific index. Shows the schema — what fields exist and their types.
+        when_to_use: Before searching an index — understand its structure to craft targeted queries.
+        params:
+          host:
+            type: string
+            required: true
+            description: Elasticsearch URL.
+          index:
+            type: string
+            required: true
+            description: Index name.
+        returns:
+          mappings:
+            type: object
+            description: Index field mappings.
+      search:
+        description: Search an index using Elasticsearch Query DSL. Supports match_all, match, term, range, bool, and all
+          other Query DSL constructs.
+        when_to_use: Targeted data extraction — search for passwords, credentials, API keys, PII. Use match_all for overview,
+          match for keyword search, bool for complex queries.
+        params:
+          host:
+            type: string
+            required: true
+            description: Elasticsearch URL.
+          index:
+            type: string
+            default: _all
+            description: 'Index to search (default: all).'
+          query:
+            type: object
+            description: 'Query DSL (default: match_all). Example: {''match'': {''field'': ''password''}}.'
+          size:
+            type: integer
+            default: 20
+            description: Results per page.
+          from_offset:
+            type: integer
+            default: 0
+            description: Pagination offset.
+        returns:
+          documents:
+            type: array
+            description: Matching documents.
+          total:
+            type: integer
+            description: Total matching documents.
+      dump:
+        description: Bulk dump all documents from an index using the scroll API. Bypasses the default 10,000 document limit.
+        when_to_use: When you need ALL data from an index — full user databases, credential stores, log archives. Use max_docs
+          to limit output size.
+        params:
+          host:
+            type: string
+            required: true
+            description: Elasticsearch URL.
+          index:
+            type: string
+            required: true
+            description: Index to dump.
+          max_docs:
+            type: integer
+            default: 1000
+            description: Maximum documents to retrieve.
+        returns:
+          documents:
+            type: array
+            description: All dumped documents.
+          document_count:
+            type: integer
+            description: Number of documents retrieved.
+      enum_snapshots:
+        description: List snapshot repositories and their snapshots. Snapshots may contain older data or data from other indices.
+        when_to_use: Check for backup data that might contain credentials or historical records not in current indices.
+        params:
+          host:
+            type: string
+            required: true
+            description: Elasticsearch URL.
+        returns:
+          repositories:
+            type: array
+            description: Snapshot repository names.
+          snapshots:
+            type: object
+            description: Snapshots per repository.
   embedding:
     name: embedding
     version: '1.0'
@@ -5156,6 +5708,155 @@ tools:
           programs:
             type: array
             description: List of open program names with current indicator
+  git-dumper:
+    name: git-dumper
+    version: '1.0'
+    description: 'Extract git repositories from exposed .git directories on web servers via git-dumper. 2 methods: dump (download
+      .git objects/packs/refs and reconstruct full repository with commit history), analyze (show git log with diffs, list
+      branches, search history for secrets/credentials, find interesting config files). Reconstructed repos often contain
+      hardcoded credentials, API keys, and application source code not visible on the live site. For web directory fuzzing
+      to find .git use ffuf. For web content inspection use curl.'
+    image: ghcr.io/silicon-works/mcp-tools-git-dumper:latest
+    image_size_mb: 250
+    timeout_seconds: 300
+    capabilities:
+    - git_extraction
+    - source_code_recovery
+    - credential_discovery
+    - commit_history_analysis
+    phases:
+    - enumeration
+    requirements:
+      network: true
+      privileged: false
+    resources:
+      memory_mb: 256
+      cpu: 0.5
+    routing:
+      use_for:
+      - extract source code from exposed .git directory on a web server
+      - reconstruct git repository with full commit history from a web-accessible .git
+      - find credentials, API keys, and secrets in git commit history
+      - recover application source code for vulnerability analysis
+      - analyze git log and diffs for information leakage
+      never_use_for:
+      - directory brute-forcing to find .git (use ffuf with common.txt wordlist)
+      - cloning git repos you have credentials for (use git clone via bash)
+      - web content inspection (use curl)
+      - source code static analysis (use the recovered files directly)
+      triggers:
+      - .git
+      - git directory
+      - git-dumper
+      - exposed git
+      - git repository
+      - source code recovery
+      - git dump
+      prefer_over: []
+    see_also:
+    - tool: ffuf
+      reason: Use ffuf to discover if .git is exposed (fuzz with common.txt, look for 200/301 on /.git/HEAD). Then use git-dumper
+        to extract the repo.
+    - tool: curl
+      reason: Use curl to quickly check if /.git/HEAD is accessible before running git-dumper. A response containing 'ref:'
+        confirms an exposed .git.
+    - tool: trufflehog
+      reason: After dumping with git-dumper, use trufflehog scan_git on the recovered repo for automated secret detection
+        (800+ credential types).
+    methods:
+      dump:
+        description: Dump an exposed .git directory from a URL and reconstruct the full git repository. Downloads objects,
+          packs, refs, and other .git internals, then runs git checkout to recover working tree files. Returns the repo path,
+          file list, branch names, and commit count.
+        when_to_use: After discovering an exposed .git directory (typically found via ffuf directory fuzzing or by checking
+          /.git/HEAD manually with curl). Common finding on PHP, Python, and Node.js web applications where the deployment
+          process left the .git directory accessible. The recovered source code often contains hardcoded credentials, API
+          keys, database connection strings, and application logic that reveals vulnerabilities.
+        params:
+          url:
+            type: string
+            required: true
+            description: Base URL of the website (e.g., 'http://10.10.10.5/' or 'http://target.htb/.git/'). The /.git/ suffix
+              is handled automatically.
+          jobs:
+            type: integer
+            default: 10
+            description: Number of simultaneous download requests. Higher = faster but noisier.
+          retry:
+            type: integer
+            default: 3
+            description: Number of retry attempts per failed request.
+          timeout:
+            type: integer
+            default: 30
+            description: Timeout per request in seconds.
+          user_agent:
+            type: string
+            description: Custom User-Agent header to avoid detection.
+          headers:
+            type: array
+            description: Additional HTTP headers as 'NAME=VALUE' strings (e.g., 'Cookie=session=abc123').
+          proxy:
+            type: string
+            description: HTTP proxy (e.g., 'http://127.0.0.1:8080' for Burp Suite).
+        returns:
+          repo_path:
+            type: string
+            description: Path to the reconstructed repository (use this in analyze method).
+          files:
+            type: array
+            description: List of recovered files (up to 100).
+          file_count:
+            type: integer
+            description: Total number of files recovered.
+          branches:
+            type: array
+            description: Git branches found.
+          commit_count:
+            type: integer
+            description: Number of commits in history.
+      analyze:
+        description: Analyze a previously dumped git repository. Shows commit log with diffs, searches history for leaked
+          secrets (passwords, API keys, tokens, private keys), and lists interesting configuration files.
+        when_to_use: After dump succeeds — analyze the recovered repo for secrets and vulnerabilities. The commit history
+          often reveals credentials that were committed then 'removed' (but remain in git history). Also reveals how the application
+          works, which endpoints exist, and where to look for vulnerabilities.
+        params:
+          repo_path:
+            type: string
+            required: true
+            description: Path to the dumped repository (from dump method's repo_path return value).
+          log_count:
+            type: integer
+            default: 20
+            description: Number of recent commits to show in the log.
+          show_diff:
+            type: boolean
+            default: true
+            description: Include diffs in commit log (shows exactly what changed — essential for finding removed secrets).
+          grep_secrets:
+            type: boolean
+            default: true
+            description: Search commit history and files for potential secrets (passwords, keys, tokens, connection strings).
+        returns:
+          log:
+            type: string
+            description: Git log output (with diffs if show_diff=true).
+          commits:
+            type: array
+            description: Parsed commits (hash, author, email, message, date) — only when show_diff=false.
+          secrets_in_history:
+            type: string
+            description: Commits that added/removed password-related content.
+          secrets_in_files:
+            type: array
+            description: Lines in current files matching secret patterns.
+          secrets_count:
+            type: integer
+            description: Number of potential secrets found in files.
+          interesting_files:
+            type: array
+            description: Files with interesting names (.env, config, credentials, .key, .pem, etc.).
   hash-lookup:
     name: hash-lookup
     version: '1.0'
@@ -6565,6 +7266,145 @@ tools:
           method:
             type: string
             description: Method used (dictionary or bruteforce)
+  ilspy:
+    name: ilspy
+    version: '9.1'
+    description: '.NET assembly decompilation to readable C# source code via ILSpy CLI (ilspycmd 9.1). 4 methods: decompile
+      (entire assembly to C# — single file or project with one file per type), decompile_type (specific class/struct by fully
+      qualified name), list_types (list all classes, interfaces, structs, delegates, enums), list_resources (list embedded
+      resources). Produces clean C# source code far superior to Ghidra''s .NET output. For native binary analysis use ghidra.
+      For .NET deserialization payloads use ysoserial.'
+    image: ghcr.io/silicon-works/mcp-tools-ilspy:latest
+    image_size_mb: 500
+    timeout_seconds: 120
+    capabilities:
+    - dotnet_decompilation
+    - source_code_recovery
+    - type_enumeration
+    - resource_extraction
+    phases:
+    - enumeration
+    - post-exploitation
+    requirements:
+      network: false
+      privileged: false
+    resources:
+      memory_mb: 512
+      cpu: 0.5
+    routing:
+      use_for:
+      - decompile .NET DLL or EXE to readable C# source code
+      - analyze .NET assemblies extracted from MSSQL, Windows services, or compromised hosts
+      - find hardcoded credentials, encryption keys, or logic flaws in .NET binaries
+      - list classes and methods in a .NET binary before targeted decompilation
+      - understand custom .NET services, protocols, or authentication logic
+      never_use_for:
+      - native binary analysis (x86/ARM — use ghidra)
+      - generating .NET deserialization payloads (use ysoserial)
+      - Java decompilation (use exploit-runner with jadx/procyon)
+      triggers:
+      - decompile .NET
+      - ilspy
+      - dnSpy
+      - .NET decompile
+      - DLL decompile
+      - C# decompile
+      - assembly decompile
+      - .NET binary
+      - .NET reverse engineering
+      prefer_over:
+      - ghidra
+    see_also:
+    - tool: ghidra
+      reason: Use ghidra for native binary analysis (ELF, PE x86/ARM). Use ilspy for .NET assemblies — it produces clean C#
+        source code.
+    - tool: ysoserial
+      reason: After decompiling with ilspy to understand which formatter/gadget the target uses, use ysoserial to generate
+        the deserialization payload.
+    - tool: mssql
+      reason: Use mssql extract_assembly to retrieve .NET DLLs from MSSQL CLR assemblies, then decompile with ilspy.
+    methods:
+      decompile:
+        description: Decompile an entire .NET assembly (DLL or EXE) to C# source code. Can output as a single concatenated
+          file (default) or as a project with one source file per type.
+        when_to_use: 'When you have a .NET binary and need to understand its logic — find hardcoded credentials, understand
+          authentication mechanisms, discover protocol details, or identify vulnerabilities. Common sources: MSSQL CLR assemblies
+          (via mssql extract_assembly), Windows services found during post-exploitation, custom .NET applications.'
+        params:
+          assembly_path:
+            type: string
+            required: true
+            description: Path to the .NET DLL or EXE file (e.g., '/session/ClientsBackup.dll').
+          as_project:
+            type: boolean
+            default: false
+            description: Decompile as project (one file per type with .csproj). More organized but larger output.
+        returns:
+          source:
+            type: string
+            description: Decompiled C# source code (when as_project=false).
+          output_dir:
+            type: string
+            description: Output directory path (when as_project=true).
+          class_count:
+            type: integer
+            description: Number of classes found.
+          method_count:
+            type: integer
+            description: Number of methods found.
+      decompile_type:
+        description: Decompile a specific type (class/struct/enum) from a .NET assembly. Faster and less output than full
+          decompilation.
+        when_to_use: When you know which class to examine (from list_types or error messages). Faster than decompiling the
+          entire assembly.
+        params:
+          assembly_path:
+            type: string
+            required: true
+            description: Path to the .NET DLL or EXE file.
+          type_name:
+            type: string
+            required: true
+            description: Fully qualified type name (e.g., 'BackupService.BackupClients', 'WindowsService.TcpServer').
+        returns:
+          source:
+            type: string
+            description: Decompiled C# source code for the specified type.
+      list_types:
+        description: List all types in a .NET assembly — classes, interfaces, structs, delegates, and enums.
+        when_to_use: First step when analyzing an unknown .NET binary — survey what's inside before decompiling. Identifies
+          the interesting classes to focus on.
+        params:
+          assembly_path:
+            type: string
+            required: true
+            description: Path to the .NET DLL or EXE file.
+          entity_type:
+            type: string
+            default: all
+            description: 'Filter by entity type: all, class, interface, struct, delegate, enum.'
+        returns:
+          types:
+            type: array
+            description: Fully qualified type names.
+          type_count:
+            type: integer
+            description: Number of types found.
+      list_resources:
+        description: List embedded resources in a .NET assembly (icons, config files, embedded data).
+        when_to_use: Check for embedded configuration files, certificates, or data that might contain credentials or secrets.
+        params:
+          assembly_path:
+            type: string
+            required: true
+            description: Path to the .NET DLL or EXE file.
+        returns:
+          resources:
+            type: array
+            description: List of embedded resource names.
+          resource_count:
+            type: integer
+            description: Number of resources found.
   impacket:
     name: impacket
     version: '0.12'
@@ -9768,6 +10608,257 @@ tools:
           max_bson_object_size:
             type: integer
             description: Maximum BSON document size in bytes (default 16MB)
+  mssql:
+    name: mssql
+    version: '1.0'
+    description: 'Microsoft SQL Server exploitation via impacket TDS client. 7 methods: query (execute arbitrary SQL), enum
+      (enumerate databases, tables, users, linked servers, assemblies, impersonation targets), xp_cmdshell (enable and execute
+      OS commands), xp_dirtree (read filesystem or trigger NTLM authentication for relay), linked_query (execute queries through
+      linked servers via OPENQUERY), extract_assembly (retrieve CLR assembly DLLs), escalate (attempt privilege escalation
+      via impersonation or trustworthy DB). Supports SQL and Windows authentication plus pass-the-hash. Stateless — connection
+      params provided with every call. For MySQL use mysql. For credential relay use impacket-relay.'
+    image: ghcr.io/silicon-works/mcp-tools-mssql:latest
+    image_size_mb: 350
+    timeout_seconds: 300
+    capabilities:
+    - mssql_query
+    - command_execution
+    - linked_server_traversal
+    - assembly_extraction
+    - privilege_escalation
+    phases:
+    - enumeration
+    - exploitation
+    - post-exploitation
+    requirements:
+      network: true
+      privileged: false
+    resources:
+      memory_mb: 256
+      cpu: 0.5
+    routing:
+      use_for:
+      - connect to and query Microsoft SQL Server
+      - execute OS commands via xp_cmdshell on MSSQL
+      - enumerate MSSQL databases, tables, users, linked servers, and CLR assemblies
+      - traverse linked MSSQL servers via OPENQUERY
+      - trigger NTLM authentication via xp_dirtree to UNC paths (for relay attacks)
+      - extract .NET DLLs from MSSQL CLR assemblies for decompilation
+      - attempt MSSQL privilege escalation via impersonation or trustworthy databases
+      never_use_for:
+      - MySQL databases (use mysql)
+      - MongoDB databases (use mongodb)
+      - SQL injection testing (use sqlmap)
+      - NTLM relay attacks (use impacket-relay — mssql only triggers the auth)
+      triggers:
+      - MSSQL
+      - SQL Server
+      - Microsoft SQL
+      - xp_cmdshell
+      - linked server
+      - OPENQUERY
+      - CLR assembly
+      - port 1433
+      - xp_dirtree
+      - sa password
+      prefer_over: []
+    see_also:
+    - tool: mysql
+      reason: Use mysql for MySQL databases. Use mssql for Microsoft SQL Server. Different protocols and exploitation techniques.
+    - tool: ilspy
+      reason: After extracting CLR assemblies with mssql extract_assembly, decompile the DLLs with ilspy to find hardcoded
+        credentials.
+    - tool: responder
+      reason: Use mssql xp_dirtree to trigger NTLM authentication to your IP, and responder to capture the Net-NTLMv2 hash.
+    - tool: impacket-relay
+      reason: Use mssql xp_dirtree to trigger NTLM auth, and impacket-relay to relay it for lateral movement.
+    methods:
+      query:
+        description: Execute an arbitrary SQL query against MSSQL Server. Returns parsed tabular results.
+        when_to_use: 'General SQL interaction — enumerate data, check permissions, read tables. First try: ''SELECT @@version'',
+          ''SELECT DB_NAME()'', ''SELECT SYSTEM_USER'', ''SELECT IS_SRVROLEMEMBER(''''sysadmin'''')''.'
+        params:
+          host:
+            type: string
+            required: true
+            description: MSSQL server hostname or IP.
+          username:
+            type: string
+            required: true
+            description: SQL or Windows username.
+          password:
+            type: string
+            description: Password.
+          sql:
+            type: string
+            required: true
+            description: SQL query to execute.
+          port:
+            type: integer
+            default: 1433
+            description: MSSQL port.
+          windows_auth:
+            type: boolean
+            default: false
+            description: Use Windows authentication.
+        returns:
+          rows:
+            type: array
+            description: Query results as list of row dicts.
+          row_count:
+            type: integer
+            description: Number of rows returned.
+      enum:
+        description: Enumerate MSSQL server — databases, tables, users, linked servers, CLR assemblies, impersonation targets.
+        when_to_use: After gaining MSSQL access — discover the attack surface. Check linked_servers for lateral movement,
+          assemblies for .NET DLLs with credentials, impersonation for privilege escalation.
+        params:
+          host:
+            type: string
+            required: true
+            description: MSSQL server hostname or IP.
+          username:
+            type: string
+            required: true
+            description: SQL or Windows username.
+          password:
+            type: string
+            description: Password.
+          target:
+            type: string
+            default: all
+            description: 'What to enumerate: databases, tables, users, linked_servers, assemblies, impersonation, all.'
+        returns:
+          results:
+            type: object
+            description: Enumeration results grouped by category.
+      xp_cmdshell:
+        description: Execute OS commands via MSSQL xp_cmdshell. Automatically enables xp_cmdshell if disabled (requires sysadmin).
+        when_to_use: 'When you have sysadmin access to MSSQL and need RCE. Enables xp_cmdshell via sp_configure, then executes
+          the command. Common first commands: ''whoami'', ''hostname'', ''ipconfig''.'
+        params:
+          host:
+            type: string
+            required: true
+            description: MSSQL server hostname or IP.
+          username:
+            type: string
+            required: true
+            description: Username (must be sysadmin).
+          password:
+            type: string
+            description: Password.
+          command:
+            type: string
+            required: true
+            description: OS command to execute.
+        returns:
+          output:
+            type: string
+            description: Command execution output.
+      xp_dirtree:
+        description: Use xp_dirtree to list directory contents or trigger NTLM authentication. When given a UNC path (\\attacker_ip\share),
+          the MSSQL service account authenticates to the attacker, leaking its Net-NTLMv2 hash.
+        when_to_use: 'Two uses: (1) File enumeration — list files on the MSSQL server filesystem. (2) NTLM relay — provide
+          a UNC path pointing to your responder/ntlmrelayx to capture the service account hash.'
+        params:
+          host:
+            type: string
+            required: true
+            description: MSSQL server hostname or IP.
+          username:
+            type: string
+            required: true
+            description: Username.
+          password:
+            type: string
+            description: Password.
+          path:
+            type: string
+            required: true
+            description: Path to list (C:\Users) or UNC path for NTLM capture (\\attacker_ip\share).
+        returns:
+          entries:
+            type: array
+            description: Directory entries.
+          is_unc:
+            type: boolean
+            description: Whether a UNC path was used (NTLM trigger).
+      linked_query:
+        description: Execute a SQL query through a linked MSSQL server via OPENQUERY. Used for lateral movement between linked
+          SQL instances.
+        when_to_use: After enum discovers linked servers — query data on the linked instance or attempt to escalate via double-hop
+          (linked server that links back with higher privileges).
+        params:
+          host:
+            type: string
+            required: true
+            description: MSSQL server to connect to.
+          username:
+            type: string
+            required: true
+            description: Username.
+          password:
+            type: string
+            description: Password.
+          linked_server:
+            type: string
+            required: true
+            description: Linked server name.
+          sql:
+            type: string
+            required: true
+            description: SQL query for the linked server.
+        returns:
+          rows:
+            type: array
+            description: Query results from the linked server.
+      extract_assembly:
+        description: Extract CLR assembly DLLs stored in MSSQL sys.assembly_files. These DLLs often contain hardcoded credentials
+          or business logic.
+        when_to_use: After enum discovers assemblies — extract the DLL content, decode from hex, then decompile with ilspy
+          to find credentials.
+        params:
+          host:
+            type: string
+            required: true
+            description: MSSQL server.
+          username:
+            type: string
+            required: true
+            description: Username.
+          password:
+            type: string
+            description: Password.
+          assembly_name:
+            type: string
+            description: Assembly name to extract. Omit to list all assemblies.
+        returns:
+          results:
+            type: array
+            description: Assembly data (name + hex content if specific assembly requested).
+      escalate:
+        description: Attempt MSSQL privilege escalation via impersonation (EXECUTE AS LOGIN), trustworthy database abuse,
+          or linked server double-hop.
+        when_to_use: 'When current user is not sysadmin but needs to escalate. impersonate: check and use IMPERSONATE permission.
+          trustworthy: abuse databases with TRUSTWORTHY ON. linked_hop: find linked server double-hops with higher privileges.'
+        params:
+          host:
+            type: string
+            required: true
+            description: MSSQL server.
+          username:
+            type: string
+            required: true
+            description: Username.
+          password:
+            type: string
+            description: Password.
+          technique:
+            type: string
+            default: impersonate
+            description: 'Technique: impersonate, trustworthy, linked_hop.'
+        returns: {}
   mysql:
     name: mysql
     version: '8.0'
@@ -12280,6 +13371,129 @@ tools:
           payloads:
             type: object
             description: Available payloads organized by file type and category
+  pacu:
+    name: pacu
+    version: '1.7'
+    description: 'AWS exploitation framework via Rhino Security Labs Pacu v1.7. 4 methods: list_modules (list 50+ attack modules),
+      run_module (execute any Pacu module with AWS credentials), privesc_scan (scan for 21+ IAM privilege escalation paths),
+      whoami (identify current AWS identity and permissions). Modules cover IAM privesc, Lambda exploitation, EC2 instance
+      compromise, S3 exfiltration, CloudTrail evasion, persistence, and lateral movement. For raw AWS API access use aws.
+      For attack path analysis use cloudfox.'
+    image: ghcr.io/silicon-works/mcp-tools-pacu:latest
+    image_size_mb: 600
+    timeout_seconds: 600
+    capabilities:
+    - aws_exploitation
+    - iam_privilege_escalation
+    - aws_persistence
+    - aws_enumeration
+    phases:
+    - enumeration
+    - exploitation
+    - post-exploitation
+    requirements:
+      network: true
+      privileged: false
+    resources:
+      memory_mb: 512
+      cpu: 1.0
+    routing:
+      use_for:
+      - scan for IAM privilege escalation paths in AWS
+      - enumerate IAM users, roles, policies, and permissions comprehensively
+      - exploit AWS misconfigurations (Lambda backdoors, EC2 instance compromise)
+      - establish persistence in AWS (IAM backdoor, cross-account roles)
+      - evade CloudTrail and GuardDuty detection
+      never_use_for:
+      - raw AWS CLI commands (use aws — pacu is for exploitation modules)
+      - AWS compliance auditing (use prowler)
+      - S3 bucket brute-force (use s3scanner)
+      triggers:
+      - pacu
+      - IAM privesc
+      - AWS privilege escalation
+      - AWS exploitation
+      - AWS persistence
+      - AWS enumeration
+      - cloud exploitation
+      prefer_over: []
+    see_also:
+    - tool: aws
+      reason: aws gives raw API access for manual commands. pacu provides pre-built exploitation modules with embedded knowledge
+        of 21+ privesc techniques.
+    - tool: cloudfox
+      reason: cloudfox does cross-service attack path analysis (read-only). pacu actively exploits the discovered paths.
+    - tool: prowler
+      reason: prowler finds misconfigurations (defensive). pacu exploits them (offensive).
+    methods:
+      list_modules:
+        description: List all available Pacu exploitation modules (50+).
+        when_to_use: Reference — discover which modules are available for enumeration, exploitation, persistence, and evasion.
+        params: {}
+        returns:
+          modules:
+            type: array
+            description: Available module names.
+          module_count:
+            type: integer
+            description: Total modules.
+      run_module:
+        description: Execute a specific Pacu module with AWS credentials.
+        when_to_use: After identifying a module to run from list_modules. Provide AWS credentials and the module name.
+        params:
+          access_key_id:
+            type: string
+            required: true
+            description: AWS access key ID.
+          secret_access_key:
+            type: string
+            required: true
+            description: AWS secret access key.
+          module:
+            type: string
+            required: true
+            description: Module name (e.g., 'iam__enum_permissions', 'lambda__enum', 's3__enum').
+          module_args:
+            type: string
+            description: Module-specific arguments.
+          timeout:
+            type: integer
+            default: 300
+            description: Execution timeout in seconds.
+        returns: {}
+      privesc_scan:
+        description: Scan for IAM privilege escalation paths using Pacu's iam__privesc_scan module. Checks 21+ privesc techniques.
+        when_to_use: After obtaining AWS credentials — check if the compromised identity can escalate to higher privileges.
+        params:
+          access_key_id:
+            type: string
+            required: true
+            description: AWS access key ID.
+          secret_access_key:
+            type: string
+            required: true
+            description: AWS secret access key.
+          timeout:
+            type: integer
+            default: 300
+            description: Scan timeout.
+        returns:
+          privesc_found:
+            type: boolean
+            description: Whether privilege escalation paths were found.
+      whoami:
+        description: Identify the current AWS identity and enumerate basic permissions.
+        when_to_use: First step after obtaining AWS credentials — understand who you are and what you can do.
+        params:
+          access_key_id:
+            type: string
+            required: true
+            description: AWS access key ID.
+          secret_access_key:
+            type: string
+            required: true
+            description: AWS secret access key.
+        returns: {}
   payload:
     name: payload
     version: '1.0'
@@ -12494,6 +13708,131 @@ tools:
           decoded:
             type: string
             description: Decoded payload
+  phpggc:
+    name: phpggc
+    version: '1.0'
+    description: 'PHP Generic Gadget Chains — generates serialized PHP payloads for deserialization attacks via phpggc. 3
+      methods: list_gadgets (list all chains filterable by framework — Symfony, Laravel, Monolog, Doctrine, Drupal, WordPress,
+      Magento, Guzzle, etc.), get_info (detailed info on a specific chain), generate (create serialized payload with encoding
+      options: base64, URL-encode, JSON, PHAR wrapper, fast-destruct). For .NET deserialization use ysoserial. For exploit
+      execution use exploit-runner.'
+    image: ghcr.io/silicon-works/mcp-tools-phpggc:latest
+    image_size_mb: 300
+    timeout_seconds: 60
+    capabilities:
+    - php_deserialization
+    - gadget_chain_generation
+    - phar_creation
+    phases:
+    - exploitation
+    requirements:
+      network: false
+      privileged: false
+    resources:
+      memory_mb: 128
+      cpu: 0.25
+    routing:
+      use_for:
+      - generate PHP deserialization payloads for unserialize() vulnerabilities
+      - create gadget chains for Symfony, Laravel, Monolog, Doctrine, Drupal, WordPress, Guzzle
+      - exploit PHP deserialization via phar:// wrapper (PHAR polyglot payloads)
+      - list available gadget chains for a specific PHP framework
+      - generate serialized PHP objects with various encodings (base64, URL-encode)
+      never_use_for:
+      - .NET deserialization (use ysoserial)
+      - Java deserialization (use exploit-runner with ysoserial-java)
+      - running exploits (use exploit-runner — phpggc only generates the payload)
+      - web scanning or vulnerability detection (use nuclei, sqlmap, ssti)
+      triggers:
+      - phpggc
+      - PHP deserialization
+      - unserialize
+      - gadget chain
+      - PHP gadget
+      - phar deserialization
+      - Monolog RCE
+      - Symfony RCE
+      - Laravel RCE
+      prefer_over: []
+    see_also:
+    - tool: ysoserial
+      reason: phpggc is for PHP deserialization. ysoserial is for .NET deserialization. Different language ecosystems.
+    - tool: exploit-runner
+      reason: phpggc generates the serialized payload. Use exploit-runner or curl to deliver it to the target.
+    - tool: ssti
+      reason: Both exploit PHP applications but different vulnerability classes — SSTI injects template code, phpggc exploits
+        insecure deserialization.
+    methods:
+      list_gadgets:
+        description: List all available PHP gadget chains, optionally filtered by framework name. Returns chain name, affected
+          versions, type (RCE/file write/file delete/etc.), and trigger vector (__destruct/__wakeup/__toString).
+        when_to_use: First step after confirming PHP deserialization — check which gadget chains are available for the target
+          framework. Filter by framework name (e.g., 'symfony', 'laravel', 'monolog') to see only relevant chains.
+        params:
+          filter:
+            type: string
+            description: Filter by framework name (e.g., 'symfony', 'laravel', 'monolog', 'drupal', 'wordpress', 'guzzle').
+        returns:
+          chains:
+            type: array
+            description: 'Available chains, each with: name, version, type, vector.'
+          chain_count:
+            type: integer
+            description: Total number of matching chains.
+          frameworks:
+            type: array
+            description: Unique framework names found.
+      get_info:
+        description: Get detailed information about a specific gadget chain — required arguments, affected versions, and usage
+          notes.
+        when_to_use: Before generating a payload — understand what arguments the chain needs and which versions it supports.
+        params:
+          chain:
+            type: string
+            required: true
+            description: Gadget chain name (e.g., 'Monolog/RCE1', 'Symfony/RCE4', 'Laravel/RCE1').
+        returns:
+          info:
+            type: string
+            description: Detailed chain information (arguments, versions, notes).
+      generate:
+        description: Generate a serialized PHP payload for a specific gadget chain. The payload can be delivered via any mechanism
+          that triggers unserialize() — cookie values, POST parameters, file uploads, session data, or phar:// wrapper.
+        when_to_use: After identifying the target framework and selecting a chain from list_gadgets. For RCE chains, arguments
+          are typically [function, command] (e.g., ['system', 'id']). For file write chains, arguments are [remote_path, local_path].
+          Use base64 encoding for safe transport in URLs/cookies.
+        params:
+          chain:
+            type: string
+            required: true
+            description: Gadget chain name (e.g., 'Monolog/RCE1').
+          arguments:
+            type: array
+            required: true
+            description: Chain arguments (e.g., ['system', 'id'] for RCE, ['/var/www/shell.php', '/tmp/shell.php'] for file
+              write).
+          encoding:
+            type: string
+            default: none
+            description: 'Output encoding: none (raw serialized), base64, url, soft-url, json.'
+          fast_destruct:
+            type: boolean
+            default: false
+            description: Fast-destruct technique — triggers immediately after unserialize() instead of at script end.
+          ascii_strings:
+            type: boolean
+            default: false
+            description: Replace non-ASCII bytes with hex (experimental, avoids null bytes).
+          phar:
+            type: string
+            description: Generate PHAR file (tar/zip/phar format) for phar:// wrapper attacks.
+        returns:
+          payload:
+            type: string
+            description: The serialized PHP payload (ready to deliver).
+          payload_length:
+            type: integer
+            description: Payload length in characters.
   playwright-mcp:
     name: playwright-mcp
     version: latest
@@ -13165,6 +14504,128 @@ tools:
           summary:
             type: object
             description: Status and severity breakdown for the service.
+  pygpoabuse:
+    name: pygpoabuse
+    version: '1.0'
+    description: 'Active Directory GPO exploitation via pyGPOAbuse — create immediate scheduled tasks as SYSTEM, add local
+      administrators, or inject startup scripts through Group Policy Objects. 2 methods: scheduled_task (create GPO-based
+      immediate scheduled task executing as SYSTEM on all domain computers), cleanup (remove task and roll back GPO version).
+      Supports password auth, pass-the-hash, and Kerberos. For finding GPO write access use bloodhound. For other AD attacks
+      use impacket.'
+    image: ghcr.io/silicon-works/mcp-tools-pygpoabuse:latest
+    image_size_mb: 300
+    timeout_seconds: 120
+    capabilities:
+    - gpo_exploitation
+    - scheduled_task_injection
+    - privilege_escalation
+    phases:
+    - exploitation
+    requirements:
+      network: true
+      privileged: false
+    resources:
+      memory_mb: 256
+      cpu: 0.5
+    routing:
+      use_for:
+      - exploit GPO write access to create scheduled tasks running as SYSTEM
+      - escalate privileges via Group Policy Object modification in Active Directory
+      - add users to local administrators group via GPO
+      - inject startup scripts via GPO for persistence
+      - clean up GPO modifications after exploitation
+      never_use_for:
+      - finding who has GPO write access (use bloodhound to identify GPO owners)
+      - Kerberoasting or AS-REP roasting (use impacket)
+      - credential dumping (use impacket secretsdump)
+      - general AD enumeration (use bloodhound or netexec)
+      triggers:
+      - GPO abuse
+      - Group Policy
+      - pyGPOAbuse
+      - scheduled task GPO
+      - GPO privilege escalation
+      - GenericAll GPO
+      - GenericWrite GPO
+      prefer_over: []
+    see_also:
+    - tool: bloodhound
+      reason: Use bloodhound to identify which users have write access to GPOs (GenericAll, GenericWrite). Then use pygpoabuse
+        to exploit that access.
+    - tool: impacket
+      reason: Use impacket for other AD attacks (secretsdump, kerberoast, psexec). pygpoabuse specifically exploits GPO write
+        access.
+    - tool: netexec
+      reason: Use netexec to validate credentials and enumerate SMB/LDAP before GPO exploitation.
+    methods:
+      scheduled_task:
+        description: Create an immediate scheduled task via GPO that executes a command as SYSTEM on domain computers. The
+          task runs within minutes when Group Policy refreshes (or force with gpupdate /force on target).
+        when_to_use: When bloodhound shows the compromised user has write access (GenericAll, GenericWrite, WriteDACL) to
+          a GPO linked to Domain Controllers or target OUs. Creates a scheduled task that runs the specified command as SYSTEM
+          — use for adding local admins, executing reverse shells, or running post-exploitation commands.
+        params:
+          target:
+            type: string
+            required: true
+            description: domain/username[:password] format (e.g., 'TEIGNTON/jay.teignton:D0ntL0seSk3l3tonK3y!').
+          gpo_id:
+            type: string
+            description: GPO GUID to target (from bloodhound or GPMC).
+          gpo_name:
+            type: string
+            description: GPO display name (resolved via LDAP). Provide either gpo_id or gpo_name.
+          command:
+            type: string
+            required: true
+            description: Command to execute as SYSTEM.
+          dc_ip:
+            type: string
+            description: Domain controller IP.
+          taskname:
+            type: string
+            description: 'Custom task name (default: TASK_<random>).'
+          powershell:
+            type: boolean
+            default: false
+            description: Use PowerShell for execution.
+          force:
+            type: boolean
+            default: false
+            description: Force add even if task already exists.
+        returns:
+          gpo:
+            type: string
+            description: GPO that was modified.
+          command:
+            type: string
+            description: Command that will execute as SYSTEM.
+      cleanup:
+        description: Remove a previously created scheduled task and roll back the GPO version to cover tracks.
+        when_to_use: After exploitation is complete — remove the malicious GPO entry and restore the original GPO version
+          number.
+        params:
+          target:
+            type: string
+            required: true
+            description: domain/username[:password] format.
+          gpo_id:
+            type: string
+            description: GPO GUID.
+          gpo_name:
+            type: string
+            description: GPO display name.
+          taskname:
+            type: string
+            required: true
+            description: Name of the task to remove.
+          dc_ip:
+            type: string
+            description: Domain controller IP.
+        returns:
+          cleaned_up:
+            type: boolean
+            description: Whether cleanup succeeded.
   responder:
     name: responder
     version: 3.2.2.0
@@ -13438,6 +14899,117 @@ tools:
           copied_files:
             type: array
             description: Paths of hash files copied to /session/responder/.
+  s3scanner:
+    name: s3scanner
+    version: '3.0'
+    description: 'S3 bucket discovery and misconfiguration testing via S3Scanner 3.0. 2 methods: scan (test a list of bucket
+      names for existence and public access — brute-force discovery via name mutations), test (test a single known bucket
+      for misconfigurations — anonymous list/read/write permissions and object enumeration). Supports AWS, GCP, DigitalOcean,
+      Dreamhost, Linode. For scanning bucket CONTENTS for secrets use trufflehog. For AWS API interaction use aws.'
+    image: ghcr.io/silicon-works/mcp-tools-s3scanner:latest
+    image_size_mb: 250
+    timeout_seconds: 300
+    capabilities:
+    - s3_discovery
+    - bucket_testing
+    - misconfiguration_detection
+    phases:
+    - reconnaissance
+    requirements:
+      network: true
+      privileged: false
+    resources:
+      memory_mb: 256
+      cpu: 0.5
+    routing:
+      use_for:
+      - discover S3 buckets by brute-forcing bucket names with mutations
+      - test known S3 buckets for anonymous read/write/list permissions
+      - enumerate objects in misconfigured S3 buckets
+      - check for public S3 bucket access on AWS, GCP, DigitalOcean
+      never_use_for:
+      - scanning bucket contents for secrets (use trufflehog scan_s3)
+      - interacting with AWS APIs (use aws)
+      - port scanning (use nmap)
+      triggers:
+      - s3scanner
+      - S3 bucket
+      - bucket discovery
+      - public bucket
+      - S3 misconfiguration
+      - bucket brute force
+      - open bucket
+      prefer_over: []
+    see_also:
+    - tool: trufflehog
+      reason: s3scanner discovers and tests bucket permissions. trufflehog scan_s3 scans bucket CONTENTS for leaked secrets.
+        Use s3scanner first to find accessible buckets, then trufflehog to scan their contents.
+    - tool: aws
+      reason: Use aws for authenticated S3 operations (listing your own buckets, reading/writing objects with credentials).
+        Use s3scanner for unauthenticated discovery of OTHER buckets.
+    methods:
+      scan:
+        description: Test a list of bucket names for existence and misconfigurations. Used for bucket name brute-forcing —
+          provide a list of name guesses (company-backup, company-dev, company-prod, etc.).
+        when_to_use: External recon — guess target's bucket names using company name, project names, and common suffixes (backup,
+          dev, prod, staging, assets, uploads, logs). Also useful for testing a wordlist of bucket names.
+        params:
+          buckets:
+            type: array
+            required: true
+            description: List of bucket names to test.
+          provider:
+            type: string
+            default: aws
+            description: 'Cloud provider: aws, gcp, digitalocean, dreamhost, linode.'
+          enumerate:
+            type: boolean
+            default: false
+            description: Enumerate bucket objects (slow for large buckets).
+          threads:
+            type: integer
+            default: 4
+            description: Concurrent threads.
+        returns:
+          buckets_tested:
+            type: integer
+            description: Number of buckets tested.
+          results:
+            type: array
+            description: Per-bucket results.
+          existing_count:
+            type: integer
+            description: Buckets that exist.
+          public_count:
+            type: integer
+            description: Buckets with public access.
+      test:
+        description: Test a single known bucket for misconfigurations — anonymous list, read, write permissions.
+        when_to_use: When you know a specific bucket name (from OSINT, source code, or config files) and want to check its
+          permissions.
+        params:
+          bucket:
+            type: string
+            required: true
+            description: Bucket name to test.
+          provider:
+            type: string
+            default: aws
+            description: Cloud provider.
+          enumerate:
+            type: boolean
+            default: true
+            description: Enumerate bucket objects.
+        returns:
+          exists:
+            type: boolean
+            description: Whether the bucket exists.
+          info:
+            type: object
+            description: Bucket permissions and details.
+          object_count:
+            type: integer
+            description: Number of objects found (if enumerated).
   scapy:
     name: scapy
     version: '2.5'
@@ -14147,6 +15719,405 @@ tools:
           success:
             type: boolean
             description: Whether the shell was upgraded to PTY.
+  smtp:
+    name: smtp
+    version: '1.0'
+    description: 'SMTP testing via swaks (Swiss Army Knife for SMTP) and user enumeration via smtp-user-enum. 3 methods: send
+      (craft and send emails with full header/body control, spoofing, auth, TLS), enum_users (enumerate valid users via VRFY/EXPN/RCPT
+      TO methods), relay_test (check if server is an open relay). Swaks supports all SMTP auth mechanisms, STARTTLS, custom
+      EHLO, and arbitrary headers. For password brute-force use hydra. For email harvesting use theharvester.'
+    image: ghcr.io/silicon-works/mcp-tools-smtp:latest
+    image_size_mb: 200
+    timeout_seconds: 120
+    capabilities:
+    - smtp_testing
+    - user_enumeration
+    - relay_testing
+    - email_sending
+    phases:
+    - enumeration
+    - exploitation
+    requirements:
+      network: true
+      privileged: false
+    resources:
+      memory_mb: 128
+      cpu: 0.25
+    routing:
+      use_for:
+      - enumerate valid SMTP users via VRFY, EXPN, or RCPT TO
+      - test if SMTP server is an open relay
+      - send crafted emails for phishing pretexts or to trigger server-side processing
+      - test SMTP authentication with discovered credentials
+      - send spoofed emails when SPF/DKIM is not configured
+      - trigger email-based alerts or workflows on target systems
+      never_use_for:
+      - SMTP password brute-force (use hydra)
+      - email address harvesting (use theharvester)
+      - port scanning to find SMTP services (use nmap)
+      triggers:
+      - SMTP
+      - swaks
+      - email enumeration
+      - VRFY
+      - EXPN
+      - RCPT TO
+      - open relay
+      - smtp-user-enum
+      - port 25
+      - send email
+      - mail server
+      prefer_over: []
+    see_also:
+    - tool: nmap
+      reason: Use nmap to discover SMTP on port 25/465/587 before using smtp tool.
+    - tool: hydra
+      reason: Use hydra for SMTP password brute-force attacks. Use smtp for user enumeration and relay testing.
+    - tool: theharvester
+      reason: Use theharvester for email address harvesting. Use smtp for testing the mail server directly.
+    methods:
+      send:
+        description: Send a crafted email via SMTP using swaks. Supports full header/body control, sender spoofing, STARTTLS,
+          SMTP authentication, and custom EHLO hostname. Returns the full SMTP transaction showing all server responses.
+        when_to_use: When you need to send an email through a target SMTP server — for phishing pretexts, triggering server-side
+          email processing (e.g., password resets, alert systems), or testing email delivery with spoofed senders. Also useful
+          to confirm SMTP connectivity and check what the server banner reveals.
+        params:
+          server:
+            type: string
+            required: true
+            description: SMTP server hostname or IP address.
+          to:
+            type: string
+            required: true
+            description: Recipient email address.
+          from_addr:
+            type: string
+            default: test@test.com
+            description: Sender email address. Can be spoofed if server allows (no SPF/DKIM check).
+          subject:
+            type: string
+            description: Email subject line.
+          body:
+            type: string
+            description: Email body text.
+          headers:
+            type: array
+            description: 'Additional headers as list of ''Header: value'' strings.'
+          port:
+            type: integer
+            default: 25
+            description: SMTP port (25=SMTP, 465=SMTPS, 587=submission).
+          tls:
+            type: boolean
+            default: false
+            description: Use STARTTLS encryption.
+          auth_user:
+            type: string
+            description: SMTP authentication username.
+          auth_password:
+            type: string
+            description: SMTP authentication password.
+          ehlo:
+            type: string
+            description: Custom EHLO/HELO hostname to send.
+          timeout:
+            type: integer
+            default: 30
+            description: Connection timeout in seconds.
+        returns:
+          mail_from_accepted:
+            type: boolean
+            description: Whether MAIL FROM was accepted by the server.
+          rcpt_to_accepted:
+            type: boolean
+            description: Whether RCPT TO was accepted by the server.
+          message_queued:
+            type: boolean
+            description: Whether the message was successfully queued for delivery.
+          smtp_codes:
+            type: array
+            description: SMTP response codes and messages from the server.
+      enum_users:
+        description: Enumerate valid SMTP users via VRFY, EXPN, or RCPT TO methods using smtp-user-enum. Tests a list of usernames
+          against the SMTP server and reports which ones exist.
+        when_to_use: After nmap discovers SMTP on port 25 — enumerate valid system users. VRFY is the most direct method but
+          often disabled. RCPT TO works when VRFY is blocked (append @domain). EXPN expands mailing lists. Valid usernames
+          feed into hydra for password brute-force or SSH/FTP login attempts.
+        params:
+          server:
+            type: string
+            required: true
+            description: SMTP server hostname or IP address.
+          usernames:
+            type: array
+            required: true
+            description: List of usernames to test (e.g., ['root', 'admin', 'michael', 'www-data', 'mail', 'postmaster']).
+          method:
+            type: string
+            default: VRFY
+            description: 'Enumeration method: VRFY (verify user), EXPN (expand list), RCPT (test via RCPT TO).'
+          domain:
+            type: string
+            description: Domain to append for RCPT method (e.g., 'trick.htb' makes user become user@trick.htb).
+          port:
+            type: integer
+            default: 25
+            description: SMTP port.
+          timeout:
+            type: integer
+            default: 10
+            description: Timeout per user check in seconds.
+        returns:
+          valid_users:
+            type: array
+            description: List of usernames confirmed to exist on the server.
+          valid_count:
+            type: integer
+            description: Number of valid users found.
+          tested_count:
+            type: integer
+            description: Total number of usernames tested.
+      relay_test:
+        description: Test if an SMTP server is an open relay by attempting to send to an external domain. An open relay allows
+          unauthenticated sending to any destination, which is a serious misconfiguration.
+        when_to_use: After discovering SMTP — check if the server will relay emails to external domains without authentication.
+          Open relays can be abused for phishing or spam and are a finding in security assessments.
+        params:
+          server:
+            type: string
+            required: true
+            description: SMTP server hostname or IP address.
+          from_addr:
+            type: string
+            default: test@test.com
+            description: Sender address to use in the relay test.
+          to_addr:
+            type: string
+            default: relay-test@example.com
+            description: External recipient to test relaying to.
+          port:
+            type: integer
+            default: 25
+            description: SMTP port.
+          timeout:
+            type: integer
+            default: 30
+            description: Connection timeout in seconds.
+        returns:
+          is_open_relay:
+            type: boolean
+            description: Whether the server accepted the relay attempt (true = open relay = vulnerability).
+          rcpt_accepted:
+            type: boolean
+            description: Whether RCPT TO for the external address was accepted.
+  snmp:
+    name: snmp
+    version: '5.9'
+    description: 'SNMP enumeration via net-snmp 5.9 (snmpwalk, snmpbulkwalk, snmpget) and community string brute-force via
+      onesixtyone 0.3.3. 4 methods: walk (enumerate OID subtree with v1/v2c/v3 support and named OID shortcuts for system/processes/interfaces/software),
+      get (query specific OID), bulk_walk (high-performance v2c walk for large trees), brute_community (brute-force community
+      strings with onesixtyone). Supports SNMPv3 authentication and encryption. MIB translation enabled. For port scanning
+      to find SNMP use nmap UDP scan. For password brute-force use hydra.'
+    image: ghcr.io/silicon-works/mcp-tools-snmp:latest
+    image_size_mb: 250
+    timeout_seconds: 300
+    capabilities:
+    - snmp_enumeration
+    - community_bruteforce
+    - oid_walking
+    - system_info_extraction
+    phases:
+    - enumeration
+    requirements:
+      network: true
+      privileged: false
+    resources:
+      memory_mb: 256
+      cpu: 0.5
+    routing:
+      use_for:
+      - SNMP enumeration with community strings (v1/v2c/v3)
+      - walk OID trees to discover system info, running processes, interfaces, installed software
+      - brute-force SNMP community strings when port 161/UDP is open
+      - extract credentials from running process command lines via HOST-RESOURCES-MIB
+      - enumerate network interfaces and IP addresses via SNMP
+      - discover installed software versions for vulnerability research
+      - query specific SNMP OIDs for targeted information extraction
+      never_use_for:
+      - port scanning (use nmap with -sU for UDP to find SNMP on port 161 first)
+      - password brute-force for non-SNMP services (use hydra)
+      - SNMP trap handling or monitoring
+      triggers:
+      - snmp
+      - snmpwalk
+      - snmpbulkwalk
+      - community string
+      - OID
+      - SNMP enumeration
+      - port 161
+      - onesixtyone
+      - MIB
+      prefer_over: []
+    see_also:
+    - tool: nmap
+      reason: Use nmap UDP scan (-sU --top-ports 200) to discover SNMP on port 161 before using snmp tool.
+    - tool: hydra
+      reason: Use hydra for credential brute-force on other protocols. Use snmp brute_community specifically for SNMP community
+        strings.
+    methods:
+      walk:
+        description: Perform an SNMP walk to enumerate an OID subtree. Supports v1/v2c/v3, named OID shortcuts (system, processes,
+          interfaces, installed_software, storage, users), and full tree walks. Returns parsed OID/type/value triples.
+        when_to_use: After discovering SNMP on port 161 — first try with 'public' community string. Walk 'system' for OS info
+          and hostname, 'processes' for running processes (often leaks credentials in command-line arguments), 'interfaces'
+          for network config, 'installed_software' for version enumeration. Try discovered community strings from brute_community.
+        params:
+          target:
+            type: string
+            required: true
+            description: Target hostname or IP address.
+          community:
+            type: string
+            default: public
+            description: SNMP community string. Try 'public' first, then results from brute_community.
+          version:
+            type: string
+            default: 2c
+            description: 'SNMP version: 1, 2c, or 3.'
+          oid:
+            type: string
+            description: OID subtree to walk (e.g., '1.3.6.1.2.1.25.4' for processes). Omit for full walk.
+          oid_name:
+            type: string
+            description: 'Named OID shortcut: system, interfaces, ip_addresses, routes, processes, installed_software, storage,
+              users.'
+          port:
+            type: integer
+            default: 161
+            description: SNMP port.
+          timeout:
+            type: integer
+            default: 30
+            description: Timeout per request in seconds.
+        returns:
+          entries:
+            type: array
+            description: 'Parsed SNMP entries, each with: oid, type, value.'
+          entry_count:
+            type: integer
+            description: Number of entries returned.
+      get:
+        description: Get a specific SNMP OID value. Returns the type and value for a single OID.
+        when_to_use: 'When you know the exact OID to query — for targeted information extraction. Common OIDs: 1.3.6.1.2.1.1.1.0
+          (sysDescr), 1.3.6.1.2.1.1.5.0 (sysName), 1.3.6.1.2.1.1.3.0 (sysUpTime).'
+        params:
+          target:
+            type: string
+            required: true
+            description: Target hostname or IP address.
+          oid:
+            type: string
+            required: true
+            description: OID to query (e.g., '1.3.6.1.2.1.1.1.0' for sysDescr).
+          community:
+            type: string
+            default: public
+            description: SNMP community string.
+          version:
+            type: string
+            default: 2c
+            description: SNMP version.
+          port:
+            type: integer
+            default: 161
+            description: SNMP port.
+          timeout:
+            type: integer
+            default: 10
+            description: Timeout in seconds.
+        returns:
+          oid:
+            type: string
+            description: The queried OID.
+          type:
+            type: string
+            description: SNMP data type (STRING, INTEGER, Counter32, etc.).
+          value:
+            type: string
+            description: The OID value.
+      bulk_walk:
+        description: High-performance SNMP bulk walk using GETBULK requests (v2c/v3 only). Faster than walk for large OID
+          trees.
+        when_to_use: When walk is too slow for large SNMP trees — bulk_walk retrieves multiple OIDs per request. Use for full
+          tree enumeration or large subtrees like installed_software. Only works with SNMPv2c or v3.
+        params:
+          target:
+            type: string
+            required: true
+            description: Target hostname or IP address.
+          community:
+            type: string
+            default: public
+            description: SNMP community string.
+          oid:
+            type: string
+            description: OID subtree to walk. Omit for full walk.
+          oid_name:
+            type: string
+            description: Named OID shortcut.
+          port:
+            type: integer
+            default: 161
+            description: SNMP port.
+          timeout:
+            type: integer
+            default: 30
+            description: Timeout in seconds.
+          max_repetitions:
+            type: integer
+            default: 25
+            description: Max OIDs per GETBULK request (higher = faster, more memory).
+        returns:
+          entries:
+            type: array
+            description: 'Parsed SNMP entries, each with: oid, type, value.'
+          entry_count:
+            type: integer
+            description: Number of entries returned.
+      brute_community:
+        description: Brute-force SNMP community strings using onesixtyone. Sends SNMP requests with different community strings
+          and reports which ones get a valid response. Fast — tests hundreds of strings in seconds.
+        when_to_use: When nmap discovers SNMP on port 161/UDP but the community string is unknown. Always try this before
+          giving up on SNMP — many devices use non-default strings like 'internal', 'private', 'monitor', or company-specific
+          strings. Results feed directly into walk/get/bulk_walk.
+        params:
+          target:
+            type: string
+            required: true
+            description: Target hostname or IP address.
+          wordlist:
+            type: array
+            description: Custom community strings to try. If omitted, uses built-in list (public, private, community, manager,
+              admin, internal, etc.).
+          port:
+            type: integer
+            default: 161
+            description: SNMP port.
+          wait:
+            type: integer
+            default: 10
+            description: Milliseconds between packets (lower = faster but may miss responses).
+        returns:
+          found:
+            type: array
+            description: 'Valid community strings found, each with: host, community, sysDescr.'
+          found_count:
+            type: integer
+            description: Number of valid community strings discovered.
+          communities:
+            type: array
+            description: Just the community string names (for easy use in walk/get calls).
   sqlite:
     name: sqlite
     version: '1.0'
@@ -15669,6 +17640,338 @@ tools:
           check_command:
             type: string
             description: Command to verify process status (only if return_check_command=true).
+  ssrfmap:
+    name: ssrfmap
+    version: '1.0'
+    description: 'SSRF exploitation framework via SSRFmap — 3 methods: scan (test parameter for SSRF using 12 modules: readfiles,
+      portscan, networkscan, redis, mysql, fastcgi, memcache, smtp, tomcat, axfr, github, custom), exploit_metadata (extract
+      cloud instance metadata from AWS/GCE/Azure/DigitalOcean/Alibaba via SSRF to 169.254.169.254), generate_gopher (create
+      gopher:// protocol payloads for attacking Redis, MySQL, FastCGI, Memcached, SMTP, PostgreSQL, Zabbix through SSRF).
+      Supports WAF bypass levels 1-5. For basic HTTP requests use curl. For web vulnerability scanning use nuclei.'
+    image: ghcr.io/silicon-works/mcp-tools-ssrfmap:latest
+    image_size_mb: 300
+    timeout_seconds: 300
+    capabilities:
+    - ssrf_exploitation
+    - cloud_metadata_extraction
+    - gopher_payload_generation
+    - backend_service_rce
+    phases:
+    - exploitation
+    requirements:
+      network: true
+      privileged: false
+    resources:
+      memory_mb: 256
+      cpu: 0.5
+    routing:
+      use_for:
+      - exploit SSRF vulnerability to read internal files or access internal services
+      - extract AWS/GCE/Azure cloud instance metadata credentials via SSRF
+      - attack backend services (Redis, MySQL, FastCGI, Memcached) through SSRF
+      - generate gopher:// protocol payloads for SSRF exploitation
+      - port scan internal network through SSRF
+      - bypass WAF protections on SSRF endpoints with multiple encoding levels
+      never_use_for:
+      - basic HTTP requests (use curl)
+      - web vulnerability scanning (use nuclei)
+      - 'direct service exploitation without SSRF (use dedicated tools: redis via netcat, mysql via mysql tool)'
+      triggers:
+      - SSRF
+      - server-side request forgery
+      - ssrfmap
+      - cloud metadata
+      - 169.254.169.254
+      - instance metadata
+      - gopher payload
+      - internal service access
+      prefer_over: []
+    see_also:
+    - tool: curl
+      reason: Use curl for manual SSRF testing with specific URLs. Use ssrfmap for automated exploitation with modules and
+        WAF bypass.
+    - tool: nuclei
+      reason: Use nuclei for SSRF detection (has SSRF templates). Use ssrfmap for exploitation after confirming SSRF.
+    - tool: aws
+      reason: After extracting AWS credentials via ssrfmap exploit_metadata, use aws tool to enumerate and exploit the AWS
+        account.
+    methods:
+      scan:
+        description: 'Test a parameter for SSRF vulnerability using SSRFmap modules. Supports 12 modules: readfiles (read
+          local files), portscan (scan internal ports), networkscan (scan internal network), redis/mysql/fastcgi/memcache/smtp
+          (exploit backend services), tomcat (Tomcat manager), axfr (DNS zone transfer), github (GitHub Enterprise RCE).'
+        when_to_use: When a web parameter accepts URLs or file paths and might be used for server-side requests. Start with
+          readfiles module to confirm SSRF, then escalate to service-specific modules.
+        params:
+          url:
+            type: string
+            required: true
+            description: Target URL with the vulnerable parameter.
+          param:
+            type: string
+            required: true
+            description: Name of the SSRF-vulnerable parameter.
+          module:
+            type: string
+            default: readfiles
+            description: SSRFmap module to use.
+          level:
+            type: integer
+            default: 1
+            description: WAF bypass level (1-5).
+          lhost:
+            type: string
+            description: Attacker IP for reverse connections.
+          lport:
+            type: integer
+            description: Attacker port for reverse connections.
+          timeout:
+            type: integer
+            default: 60
+            description: Timeout in seconds.
+        returns: {}
+      exploit_metadata:
+        description: Extract cloud instance metadata via SSRF. Targets the cloud metadata endpoints (169.254.169.254 for AWS/Azure/DO,
+          metadata.google.internal for GCE) to steal IAM credentials, instance identity, and user data.
+        when_to_use: When SSRF is confirmed and target is a cloud instance (AWS EC2, GCE, Azure VM). AWS metadata is the most
+          valuable — steals temporary IAM credentials for account takeover.
+        params:
+          url:
+            type: string
+            required: true
+            description: Target URL with SSRF-vulnerable parameter.
+          param:
+            type: string
+            required: true
+            description: Vulnerable parameter name.
+          cloud:
+            type: string
+            default: aws
+            description: 'Cloud provider: aws, gce, azure, digitalocean, alibaba.'
+          level:
+            type: integer
+            default: 1
+            description: WAF bypass level (1-5).
+          timeout:
+            type: integer
+            default: 30
+            description: Timeout in seconds.
+        returns:
+          metadata_found:
+            type: boolean
+            description: Whether cloud metadata was successfully extracted.
+          credentials:
+            type: object
+            description: Extracted AWS credentials (AccessKeyId, SecretAccessKey, Token) if found.
+      generate_gopher:
+        description: Generate a gopher:// protocol payload for attacking backend services through SSRF. Gopher allows sending
+          raw TCP data, enabling exploitation of services that don't speak HTTP.
+        when_to_use: When SSRF supports the gopher:// protocol (many URL parsers do). Generate payloads for Redis RCE (webshell
+          via CONFIG SET), MySQL queries, FastCGI RCE, Memcached injection, SMTP relay.
+        params:
+          service:
+            type: string
+            required: true
+            description: 'Target backend service: redis, mysql, fastcgi, memcached, smtp, postgres, zabbix.'
+          command:
+            type: string
+            required: true
+            description: Command or query to execute on the backend service.
+          target_host:
+            type: string
+            default: 127.0.0.1
+            description: Backend service host.
+          target_port:
+            type: integer
+            description: Backend service port (auto-detected from service type if omitted).
+        returns:
+          payload:
+            type: string
+            description: The gopher:// URL payload to inject into the SSRF parameter.
+          usage:
+            type: string
+            description: Instructions on how to use the generated payload.
+  ssti:
+    name: ssti
+    version: '1.0'
+    description: 'Server-Side Template Injection detection and exploitation via SSTImap. 3 methods: detect (test URL/parameter
+      for SSTI across 15+ template engines with 4 detection techniques — Rendered, Error-based, Boolean-blind, Time-blind),
+      exploit (execute OS commands via confirmed SSTI), list_engines (show all supported engines by language). Supports Jinja2,
+      Twig, Mako, Smarty, Freemarker, Velocity, Pug/Jade, Tornado, Django, ERB, Slim, Nunjucks, Pebble, EJS, Handlebars, and
+      more. For file inclusion use lfi-rfi. For SQL injection use sqlmap.'
+    image: ghcr.io/silicon-works/mcp-tools-ssti:latest
+    image_size_mb: 300
+    timeout_seconds: 300
+    capabilities:
+    - ssti_detection
+    - ssti_exploitation
+    - template_engine_identification
+    - remote_code_execution
+    phases:
+    - exploitation
+    requirements:
+      network: true
+      privileged: false
+    resources:
+      memory_mb: 256
+      cpu: 0.5
+    routing:
+      use_for:
+      - detect Server-Side Template Injection in web application parameters
+      - identify which template engine is vulnerable (Jinja2, Twig, Mako, Freemarker, etc.)
+      - exploit SSTI for remote code execution (OS commands, reverse shell)
+      - test parameters where user input is reflected in rendered pages
+      - bypass template sandbox restrictions with multiple escaping levels
+      never_use_for:
+      - Local/Remote File Inclusion (use lfi-rfi)
+      - SQL injection (use sqlmap)
+      - XSS detection (use nuclei or zap)
+      - web directory fuzzing (use ffuf)
+      triggers:
+      - SSTI
+      - template injection
+      - server-side template injection
+      - Jinja2
+      - Twig
+      - Mako
+      - Freemarker
+      - render_template
+      - template engine
+      - '{{7*7}}'
+      prefer_over: []
+    see_also:
+    - tool: lfi-rfi
+      reason: SSTI is template injection (code execution in template engine). LFI/RFI is file inclusion (reading/including
+        files). Different vulnerability classes — use lfi-rfi for path traversal and file reads.
+    - tool: sqlmap
+      reason: Both test for injection but in different contexts. sqlmap tests SQL injection in database queries. ssti tests
+        template injection in page rendering.
+    - tool: curl
+      reason: Use curl to manually send SSTI payloads (e.g., {{7*7}}) for quick checks. Use ssti (SSTImap) for automated detection
+        across all engines with sandbox escape.
+    methods:
+      detect:
+        description: Test a URL/parameter for Server-Side Template Injection. Tries multiple template engine payloads and
+          4 detection techniques (Rendered, Error-based, Boolean-blind, Time-blind). Identifies the vulnerable engine and
+          available capabilities (OS shell, code eval, template shell).
+        when_to_use: When user input is reflected in rendered web pages — potential template injection. Mark the injection
+          point with * in the URL or POST data. SSTImap tests across 15+ engines automatically. Try increasing the level (1-5)
+          if initial detection fails — higher levels attempt more complex escaping to bypass WAFs and filters.
+        params:
+          url:
+            type: string
+            required: true
+            description: Target URL with * marking injection point (e.g., 'http://target/page?name=*'). If no * present, tests
+              all parameters.
+          method:
+            type: string
+            default: GET
+            description: HTTP method (GET or POST).
+          data:
+            type: string
+            description: POST data with * marking injection point (e.g., 'name=*&submit=1').
+          headers:
+            type: object
+            description: Custom HTTP headers as key-value pairs.
+          cookies:
+            type: string
+            description: Cookie header value.
+          level:
+            type: integer
+            default: 1
+            description: Escaping level 1-5. Higher tries more complex escaping to bypass filters.
+          engine:
+            type: string
+            description: 'Test specific engines only (comma-separated, e.g., ''jinja2,twig''). Default: all.'
+          technique:
+            type: string
+            default: RE
+            description: 'Detection techniques: R(endered) E(rror-based) B(oolean-blind) T(ime-blind). Default: RE.'
+          proxy:
+            type: string
+            description: HTTP proxy (e.g., 'http://127.0.0.1:8080').
+          timeout:
+            type: integer
+            default: 60
+            description: Overall timeout in seconds.
+        returns:
+          vulnerable:
+            type: boolean
+            description: Whether SSTI was confirmed.
+          engine:
+            type: string
+            description: Identified template engine (e.g., 'Jinja2', 'Twig', 'Mako').
+          os_shell_available:
+            type: boolean
+            description: Whether OS command execution is possible.
+          eval_shell_available:
+            type: boolean
+            description: Whether code evaluation is possible.
+          technique:
+            type: string
+            description: Detection technique that worked (rendered, error-based, boolean-blind, time-blind).
+      exploit:
+        description: Exploit a confirmed SSTI vulnerability to execute an OS command on the target. Returns the command output.
+        when_to_use: After detect confirms SSTI — execute OS commands for RCE. Use 'id' or 'whoami' first to confirm execution
+          context, then escalate to reverse shell or file reads.
+        params:
+          url:
+            type: string
+            required: true
+            description: Target URL with * marking injection point.
+          command:
+            type: string
+            required: true
+            description: OS command to execute (e.g., 'id', 'cat /etc/passwd', 'whoami').
+          method:
+            type: string
+            default: GET
+            description: HTTP method.
+          data:
+            type: string
+            description: POST data with * marking injection point.
+          headers:
+            type: object
+            description: Custom HTTP headers.
+          cookies:
+            type: string
+            description: Cookie header value.
+          level:
+            type: integer
+            default: 1
+            description: Escaping level 1-5.
+          engine:
+            type: string
+            description: Force specific engine (skips detection). Use if detect already identified the engine.
+          proxy:
+            type: string
+            description: HTTP proxy.
+          timeout:
+            type: integer
+            default: 60
+            description: Overall timeout in seconds.
+        returns:
+          output:
+            type: string
+            description: Command execution output.
+          engine:
+            type: string
+            description: Template engine used.
+          vulnerable:
+            type: boolean
+            description: Whether exploitation succeeded.
+      list_engines:
+        description: List all template engines supported by SSTImap, grouped by programming language.
+        when_to_use: Reference — check which engines SSTImap can detect and exploit. Useful when you know the target's tech
+          stack and want to confirm coverage.
+        params: {}
+        returns:
+          engines_by_language:
+            type: object
+            description: Engines grouped by language (Python, PHP, Java, JavaScript, Ruby, Go, Rust).
+          total:
+            type: integer
+            description: Total number of supported engines.
   target-tracker:
     name: target-tracker
     version: '1.0'
@@ -16449,6 +18752,152 @@ tools:
           top_critical:
             type: array
             description: Up to 10 critical CVEs with details.
+  trufflehog:
+    name: trufflehog
+    version: '3.0'
+    description: 'Secret and credential discovery via TruffleHog v3 — scans git repos, filesystems, S3 buckets, and Docker
+      images for 800+ credential types with auto-verification. 3 methods: scan_git (scan git repo history for leaked AWS keys,
+      API tokens, passwords, private keys), scan_filesystem (scan directories for secrets in config files), scan_s3 (scan
+      S3 bucket contents for leaked credentials). Auto-verifies discovered credentials by attempting authentication. For exploit
+      database search use searchsploit. For S3 bucket discovery use s3scanner.'
+    image: ghcr.io/silicon-works/mcp-tools-trufflehog:latest
+    image_size_mb: 400
+    timeout_seconds: 600
+    capabilities:
+    - secret_scanning
+    - credential_discovery
+    - git_history_analysis
+    - s3_scanning
+    phases:
+    - reconnaissance
+    requirements:
+      network: true
+      privileged: false
+    resources:
+      memory_mb: 512
+      cpu: 1.0
+    routing:
+      use_for:
+      - scan git repositories for leaked credentials (AWS keys, API tokens, passwords)
+      - find secrets in filesystem directories and config files
+      - scan S3 buckets for leaked credentials and sensitive data
+      - detect leaked private keys, database connection strings, and API tokens
+      - verify discovered credentials by attempting authentication
+      never_use_for:
+      - exploit database search (use searchsploit)
+      - S3 bucket discovery/brute-force (use s3scanner — trufflehog scans CONTENTS, not discovers buckets)
+      - web vulnerability scanning (use nuclei)
+      - password cracking (use hashcat or john)
+      triggers:
+      - trufflehog
+      - secret scanning
+      - credential scanning
+      - leaked credentials
+      - leaked secrets
+      - API key scan
+      - git secrets
+      - secret detection
+      prefer_over: []
+    see_also:
+    - tool: git-dumper
+      reason: Use git-dumper to extract a repo from an exposed .git directory, then use trufflehog scan_git on the extracted
+        repo for automated secret detection.
+    - tool: s3scanner
+      reason: Use s3scanner to discover and test S3 bucket permissions. Use trufflehog scan_s3 to scan bucket contents for
+        leaked secrets.
+    - tool: aws
+      reason: After trufflehog finds AWS credentials, use aws tool to enumerate and exploit the AWS account.
+    methods:
+      scan_git:
+        description: Scan a git repository for leaked secrets across all commits. Detects 800+ credential types including
+          AWS keys, API tokens, passwords, private keys, database connection strings. Auto-verifies by attempting authentication.
+        when_to_use: After cloning or dumping a git repo (via git-dumper or git clone) — scan the entire commit history for
+          credentials that may have been committed and later removed (they persist in git history). Also works on remote GitHub/GitLab
+          URLs.
+        params:
+          uri:
+            type: string
+            required: true
+            description: Git repo — local path (/session/repo) or remote URL (https://github.com/org/repo).
+          no_verification:
+            type: boolean
+            default: false
+            description: Skip auto-verification (faster but no confirmation of credential validity).
+          branch:
+            type: string
+            description: 'Specific branch to scan (default: all branches).'
+          max_depth:
+            type: integer
+            description: Maximum commit depth to scan.
+          timeout:
+            type: integer
+            default: 300
+            description: Scan timeout in seconds.
+        returns:
+          secrets:
+            type: array
+            description: 'Found secrets, each with: detector_type, verified, raw, source (file, commit, line).'
+          total_found:
+            type: integer
+            description: Total secrets found.
+          verified_count:
+            type: integer
+            description: Secrets confirmed valid by auto-verification.
+      scan_filesystem:
+        description: Scan a filesystem directory for leaked secrets in files. Checks config files, scripts, logs, and other
+          text files for credentials.
+        when_to_use: On a compromised host — scan directories for credentials in config files (.env, .conf, .ini, .yaml, etc.).
+          Also useful for scanning loot directories after data exfiltration.
+        params:
+          path:
+            type: string
+            required: true
+            description: Directory path to scan.
+          no_verification:
+            type: boolean
+            default: false
+            description: Skip auto-verification.
+          timeout:
+            type: integer
+            default: 300
+            description: Scan timeout in seconds.
+        returns:
+          secrets:
+            type: array
+            description: Found secrets with source file and line info.
+          total_found:
+            type: integer
+            description: Total secrets found.
+      scan_s3:
+        description: Scan an S3 bucket's contents for leaked secrets. Requires read access to the bucket.
+        when_to_use: When you have read access to an S3 bucket (via discovered AWS credentials or public bucket) — scan all
+          objects for leaked credentials.
+        params:
+          bucket:
+            type: string
+            required: true
+            description: S3 bucket name or URI (e.g., 'my-bucket' or 's3://my-bucket').
+          aws_access_key:
+            type: string
+            description: AWS access key for authenticated access.
+          aws_secret_key:
+            type: string
+            description: AWS secret key.
+          aws_region:
+            type: string
+            default: us-east-1
+            description: AWS region.
+          timeout:
+            type: integer
+            default: 600
+            description: Scan timeout in seconds.
+        returns:
+          secrets:
+            type: array
+            description: Found secrets with S3 object key info.
+          total_found:
+            type: integer
+            description: Total secrets found.
   tunnel:
     name: tunnel
     version: '1.0'
@@ -17569,6 +20018,125 @@ tools:
           vulnerability_count:
             type: integer
             description: Total vulnerabilities found across all themes.
+  ysoserial:
+    name: ysoserial
+    version: '1.36'
+    description: '.NET deserialization gadget chain generator via ysoserial.net v1.36. 3 methods: list_gadgets (30+ chains
+      with compatible formatters — WindowsIdentity, TypeConfuseDelegate, TextFormattingRunProperties, ObjectDataProvider,
+      etc.), list_formatters (BinaryFormatter, JavaScriptSerializer, Json.NET, SoapFormatter, LosFormatter, DataContractSerializer,
+      XmlSerializer, etc. with their compatible gadgets), generate (create serialized .NET payload with output format options:
+      raw, base64, hex). For PHP deserialization use phpggc. For exploit delivery use curl or exploit-runner.'
+    image: ghcr.io/silicon-works/mcp-tools-ysoserial:latest
+    image_size_mb: 500
+    timeout_seconds: 60
+    capabilities:
+    - dotnet_deserialization
+    - gadget_chain_generation
+    - payload_creation
+    phases:
+    - exploitation
+    requirements:
+      network: false
+      privileged: false
+    resources:
+      memory_mb: 256
+      cpu: 0.5
+    routing:
+      use_for:
+      - generate .NET deserialization payloads for BinaryFormatter, JavaScriptSerializer, Json.NET vulnerabilities
+      - create gadget chains for .NET applications (ASP.NET, WCF, Remoting)
+      - exploit insecure deserialization in .NET ViewState, cookies, or API endpoints
+      - list available .NET gadget chains and their compatible formatters
+      never_use_for:
+      - PHP deserialization (use phpggc)
+      - Java deserialization (use exploit-runner with ysoserial-java)
+      - running or delivering exploits (use curl or exploit-runner — ysoserial only generates the payload)
+      - .NET binary decompilation (use ilspy)
+      triggers:
+      - ysoserial
+      - .NET deserialization
+      - BinaryFormatter
+      - JavaScriptSerializer
+      - Json.NET deserialization
+      - SoapFormatter
+      - LosFormatter
+      - ViewState deserialization
+      - .NET gadget chain
+      - insecure deserialization .NET
+      prefer_over: []
+    see_also:
+    - tool: phpggc
+      reason: ysoserial is for .NET deserialization. phpggc is for PHP deserialization. Different ecosystems.
+    - tool: ilspy
+      reason: Use ilspy to decompile .NET assemblies to understand which formatter/gadget the target uses. Then use ysoserial
+        to generate the payload.
+    - tool: curl
+      reason: Use ysoserial to generate the payload, then curl to deliver it (e.g., as a base64 cookie value or JSON body).
+    methods:
+      list_gadgets:
+        description: List all available .NET gadget chains with their descriptions and compatible formatters.
+        when_to_use: First step after confirming .NET deserialization — check which gadgets are available and which formatters
+          they support.
+        params: {}
+        returns:
+          gadgets:
+            type: array
+            description: 'Available gadgets, each with: name, description, formatters (list of compatible formatters).'
+          gadget_count:
+            type: integer
+            description: Total number of available gadgets.
+          gadget_names:
+            type: array
+            description: Just the gadget names for quick reference.
+      list_formatters:
+        description: List all available .NET serialization formatters and which gadgets work with each.
+        when_to_use: When you know which formatter the target uses (from ilspy decompilation or error messages) — find compatible
+          gadgets.
+        params: {}
+        returns:
+          formatters:
+            type: array
+            description: Available formatter names.
+          formatter_count:
+            type: integer
+            description: Total number of formatters.
+          formatter_gadgets:
+            type: object
+            description: Map of formatter → list of compatible gadget names.
+      generate:
+        description: Generate a serialized .NET deserialization payload for a specific gadget chain and formatter. Returns
+          the payload in base64, hex, or raw format.
+        when_to_use: After identifying the target formatter (from ilspy decompilation, error messages, or known framework).
+          Choose a compatible gadget from list_gadgets, set the command to execute, and generate the payload. Use base64 output
+          for cookie injection, raw for binary protocols.
+        params:
+          gadget:
+            type: string
+            required: true
+            description: Gadget chain name (e.g., 'WindowsIdentity', 'TypeConfuseDelegate', 'TextFormattingRunProperties').
+          formatter:
+            type: string
+            required: true
+            description: Serialization formatter (e.g., 'Json.Net', 'BinaryFormatter', 'JavaScriptSerializer').
+          command:
+            type: string
+            required: true
+            description: OS command to execute (e.g., 'calc', 'cmd /c whoami', 'powershell -e <base64>').
+          output_format:
+            type: string
+            default: base64
+            description: 'Output format: raw (binary), base64, hex.'
+          minify:
+            type: boolean
+            default: false
+            description: Minify output (remove whitespace from JSON/XML formatters).
+        returns:
+          payload:
+            type: string
+            description: The serialized .NET payload (ready to deliver).
+          payload_length:
+            type: integer
+            description: Payload length in characters.
   zap:
     name: zap
     version: '2.14'

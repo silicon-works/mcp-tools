@@ -1,0 +1,140 @@
+name: git-dumper
+version: "1.0"
+description: "Extract git repositories from exposed .git directories on web servers via git-dumper. 2 methods: dump (download .git objects/packs/refs and reconstruct full repository with commit history), analyze (show git log with diffs, list branches, search history for secrets/credentials, find interesting config files). Reconstructed repos often contain hardcoded credentials, API keys, and application source code not visible on the live site. For web directory fuzzing to find .git use ffuf. For web content inspection use curl."
+image: "ghcr.io/silicon-works/mcp-tools-git-dumper:latest"
+image_size_mb: 250
+timeout_seconds: 300
+
+capabilities:
+  - git_extraction
+  - source_code_recovery
+  - credential_discovery
+  - commit_history_analysis
+
+phases:
+  - enumeration
+
+requirements:
+  network: true
+  privileged: false
+
+resources:
+  memory_mb: 256
+  cpu: 0.5
+
+routing:
+  use_for:
+    - "extract source code from exposed .git directory on a web server"
+    - "reconstruct git repository with full commit history from a web-accessible .git"
+    - "find credentials, API keys, and secrets in git commit history"
+    - "recover application source code for vulnerability analysis"
+    - "analyze git log and diffs for information leakage"
+  never_use_for:
+    - "directory brute-forcing to find .git (use ffuf with common.txt wordlist)"
+    - "cloning git repos you have credentials for (use git clone via bash)"
+    - "web content inspection (use curl)"
+    - "source code static analysis (use the recovered files directly)"
+  triggers:
+    - .git
+    - git directory
+    - git-dumper
+    - exposed git
+    - git repository
+    - source code recovery
+    - git dump
+  prefer_over: []
+
+see_also:
+  - tool: ffuf
+    reason: Use ffuf to discover if .git is exposed (fuzz with common.txt, look for 200/301 on /.git/HEAD). Then use git-dumper to extract the repo.
+  - tool: curl
+    reason: Use curl to quickly check if /.git/HEAD is accessible before running git-dumper. A response containing 'ref:' confirms an exposed .git.
+  - tool: trufflehog
+    reason: After dumping with git-dumper, use trufflehog scan_git on the recovered repo for automated secret detection (800+ credential types).
+
+methods:
+  dump:
+    description: "Dump an exposed .git directory from a URL and reconstruct the full git repository. Downloads objects, packs, refs, and other .git internals, then runs git checkout to recover working tree files. Returns the repo path, file list, branch names, and commit count."
+    when_to_use: "After discovering an exposed .git directory (typically found via ffuf directory fuzzing or by checking /.git/HEAD manually with curl). Common finding on PHP, Python, and Node.js web applications where the deployment process left the .git directory accessible. The recovered source code often contains hardcoded credentials, API keys, database connection strings, and application logic that reveals vulnerabilities."
+    params:
+      url:
+        type: string
+        required: true
+        description: "Base URL of the website (e.g., 'http://10.10.10.5/' or 'http://target.htb/.git/'). The /.git/ suffix is handled automatically."
+      jobs:
+        type: integer
+        default: 10
+        description: "Number of simultaneous download requests. Higher = faster but noisier."
+      retry:
+        type: integer
+        default: 3
+        description: "Number of retry attempts per failed request."
+      timeout:
+        type: integer
+        default: 30
+        description: "Timeout per request in seconds."
+      user_agent:
+        type: string
+        description: "Custom User-Agent header to avoid detection."
+      headers:
+        type: array
+        description: "Additional HTTP headers as 'NAME=VALUE' strings (e.g., 'Cookie=session=abc123')."
+      proxy:
+        type: string
+        description: "HTTP proxy (e.g., 'http://127.0.0.1:8080' for Burp Suite)."
+    returns:
+      repo_path:
+        type: string
+        description: "Path to the reconstructed repository (use this in analyze method)."
+      files:
+        type: array
+        description: "List of recovered files (up to 100)."
+      file_count:
+        type: integer
+        description: "Total number of files recovered."
+      branches:
+        type: array
+        description: "Git branches found."
+      commit_count:
+        type: integer
+        description: "Number of commits in history."
+
+  analyze:
+    description: "Analyze a previously dumped git repository. Shows commit log with diffs, searches history for leaked secrets (passwords, API keys, tokens, private keys), and lists interesting configuration files."
+    when_to_use: "After dump succeeds — analyze the recovered repo for secrets and vulnerabilities. The commit history often reveals credentials that were committed then 'removed' (but remain in git history). Also reveals how the application works, which endpoints exist, and where to look for vulnerabilities."
+    params:
+      repo_path:
+        type: string
+        required: true
+        description: "Path to the dumped repository (from dump method's repo_path return value)."
+      log_count:
+        type: integer
+        default: 20
+        description: "Number of recent commits to show in the log."
+      show_diff:
+        type: boolean
+        default: true
+        description: "Include diffs in commit log (shows exactly what changed — essential for finding removed secrets)."
+      grep_secrets:
+        type: boolean
+        default: true
+        description: "Search commit history and files for potential secrets (passwords, keys, tokens, connection strings)."
+    returns:
+      log:
+        type: string
+        description: "Git log output (with diffs if show_diff=true)."
+      commits:
+        type: array
+        description: "Parsed commits (hash, author, email, message, date) — only when show_diff=false."
+      secrets_in_history:
+        type: string
+        description: "Commits that added/removed password-related content."
+      secrets_in_files:
+        type: array
+        description: "Lines in current files matching secret patterns."
+      secrets_count:
+        type: integer
+        description: "Number of potential secrets found in files."
+      interesting_files:
+        type: array
+        description: "Files with interesting names (.env, config, credentials, .key, .pem, etc.)."

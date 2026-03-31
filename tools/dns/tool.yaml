@@ -1,0 +1,172 @@
+name: dns
+version: "9.18"
+description: "DNS enumeration via dig (dnsutils 9.18) — zone transfers, reverse lookups, and record queries. 3 methods: lookup (forward/reverse DNS query for specific record types with optional DNS server targeting), zone_transfer (attempt AXFR to retrieve all records for a domain — extracts hostnames and record counts), enum (enumerate all common record types A/AAAA/CNAME/MX/NS/SOA/TXT/SRV for a domain in one call). Supports TCP mode, custom DNS servers, and short-form output. For subdomain brute-force discovery use amass. For port scanning discovered hosts use nmap."
+image: "ghcr.io/silicon-works/mcp-tools-dns:latest"
+image_size_mb: 200
+timeout_seconds: 120
+
+capabilities:
+  - dns_enumeration
+  - zone_transfer
+  - reverse_lookup
+  - record_query
+
+phases:
+  - reconnaissance
+
+requirements:
+  network: true
+  privileged: false
+
+resources:
+  memory_mb: 128
+  cpu: 0.25
+
+routing:
+  use_for:
+    - "DNS zone transfer (AXFR) to discover all subdomains and records for a domain"
+    - "reverse DNS lookup to identify hostnames from IP addresses"
+    - "query specific DNS record types (A, AAAA, MX, TXT, SRV, NS, SOA, PTR, CNAME)"
+    - "enumerate all DNS record types for a target domain in one call"
+    - "query a specific DNS server (e.g., target's internal DNS) for internal hostnames"
+    - "check SOA record to identify authoritative nameservers"
+  never_use_for:
+    - "subdomain brute-force discovery (use amass for passive OSINT, ffuf for DNS brute-force)"
+    - "port scanning discovered hosts (use nmap)"
+    - "web content discovery (use ffuf)"
+    - "DNS-based vulnerability scanning (use nuclei with dns templates)"
+  triggers:
+    - dig
+    - zone transfer
+    - AXFR
+    - reverse DNS
+    - DNS lookup
+    - DNS records
+    - DNS query
+    - MX record
+    - TXT record
+    - SOA record
+    - NS record
+    - SRV record
+    - PTR record
+    - nameserver
+  prefer_over: []
+
+see_also:
+  - tool: amass
+    reason: Use amass for OSINT-based subdomain discovery (passive sources, no target contact). Use dns for interactive queries, zone transfers, and specific record lookups against known DNS servers.
+  - tool: nmap
+    reason: After DNS enumeration discovers hostnames, use nmap to port scan those hosts. Nmap has basic DNS NSE scripts but dns (dig) provides much more control for zone transfers and record queries.
+  - tool: ffuf
+    reason: Use ffuf for DNS subdomain brute-force when amass passive enumeration and dns zone transfer both fail to find subdomains.
+
+methods:
+  lookup:
+    description: "Perform a DNS lookup for a specific record type. Supports forward lookups (domain → IP), reverse lookups (IP → hostname via -x), and queries against custom DNS servers. Returns parsed answer records with TTL, class, type, and value."
+    when_to_use: "First DNS interaction after identifying a target domain or IP. Try reverse lookup on target IP to discover hostnames. Query the target's DNS server directly for internal records that public DNS won't have. Check MX records to find mail servers, TXT records for SPF/DKIM, NS records for nameservers, SOA for the authoritative DNS server (needed for zone_transfer)."
+    params:
+      target:
+        type: string
+        required: true
+        description: "Domain name (e.g., 'target.htb') or IP address (for reverse lookups)."
+      record_type:
+        type: string
+        default: "A"
+        description: "DNS record type: A, AAAA, MX, TXT, NS, SOA, SRV, PTR, CNAME, ANY, DNSKEY, DS, HINFO, NAPTR, TLSA."
+      server:
+        type: string
+        description: "DNS server to query (e.g., '10.10.10.5'). Omit to use system default. Use target's DNS server for internal records."
+      reverse:
+        type: boolean
+        default: false
+        description: "Perform reverse DNS lookup (-x flag). Target should be an IP address."
+      short:
+        type: boolean
+        default: false
+        description: "Return short-form answer only (+short). Cleaner output for scripting."
+      tcp:
+        type: boolean
+        default: false
+        description: "Use TCP instead of UDP (+tcp). Required for large responses or when UDP is filtered."
+      timeout:
+        type: integer
+        default: 10
+        description: "Query timeout in seconds."
+    returns:
+      target:
+        type: string
+        description: "The queried target."
+      record_type:
+        type: string
+        description: "The record type queried."
+      records:
+        type: array
+        description: "Parsed DNS records, each with: name, ttl, class, type, value."
+      count:
+        type: integer
+        description: "Number of records returned."
+
+  zone_transfer:
+    description: "Attempt a DNS zone transfer (AXFR) to retrieve all DNS records for a domain. Zone transfers are often misconfigured on internal DNS servers and leak the entire zone — all subdomains, mail servers, service records, and internal hostnames. Returns parsed records and extracted unique hostnames."
+    when_to_use: "After identifying the authoritative DNS server for a domain (via SOA record or nmap). Zone transfers are a quick win — if allowed, they reveal the entire DNS zone without brute-forcing. Always try AXFR before resorting to subdomain brute-force. Common in HTB/CTF where DNS misconfiguration is a deliberate vulnerability."
+    params:
+      domain:
+        type: string
+        required: true
+        description: "Domain to attempt zone transfer on (e.g., 'target.htb', 'hackfail.htb')."
+      server:
+        type: string
+        required: true
+        description: "DNS server to query — must be the authoritative nameserver for the domain."
+      timeout:
+        type: integer
+        default: 30
+        description: "Query timeout in seconds. Zone transfers can be slow for large zones."
+    returns:
+      domain:
+        type: string
+        description: "The domain queried."
+      transfer_allowed:
+        type: boolean
+        description: "Whether the zone transfer was permitted by the server."
+      records:
+        type: array
+        description: "All DNS records from the zone, each with: name, ttl, class, type, value."
+      record_count:
+        type: integer
+        description: "Total number of records in the zone."
+      hostnames:
+        type: array
+        description: "Unique hostnames (A/AAAA/CNAME records) extracted from the zone — the subdomains you discovered."
+      hostname_count:
+        type: integer
+        description: "Number of unique hostnames discovered."
+
+  enum:
+    description: "Enumerate all common DNS record types (A, AAAA, CNAME, MX, NS, SOA, TXT, SRV, PTR) for a domain in one call. Returns results grouped by record type with short-form values. Quick way to get a complete DNS picture of a domain."
+    when_to_use: "Early reconnaissance to get a full DNS overview of a target domain. Discovers mail servers (MX), nameservers (NS), SPF/DKIM records (TXT), service locations (SRV), and IPv6 addresses (AAAA) in a single call. Use before zone_transfer to understand the DNS landscape."
+    params:
+      domain:
+        type: string
+        required: true
+        description: "Domain to enumerate (e.g., 'target.htb')."
+      server:
+        type: string
+        description: "DNS server to query. Omit to use system default."
+      timeout:
+        type: integer
+        default: 10
+        description: "Timeout per query in seconds."
+    returns:
+      domain:
+        type: string
+        description: "The enumerated domain."
+      records:
+        type: object
+        description: "Records grouped by type, e.g., {'A': ['10.10.10.1'], 'MX': ['mail.target.htb'], 'TXT': ['v=spf1 ...']}."
+      record_types_found:
+        type: array
+        description: "List of record types that returned results (e.g., ['A', 'MX', 'NS', 'SOA', 'TXT'])."
+      total_records:
+        type: integer
+        description: "Total number of records across all types."

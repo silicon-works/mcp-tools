@@ -1,0 +1,121 @@
+name: phpggc
+version: "1.0"
+description: "PHP Generic Gadget Chains — generates serialized PHP payloads for deserialization attacks via phpggc. 3 methods: list_gadgets (list all chains filterable by framework — Symfony, Laravel, Monolog, Doctrine, Drupal, WordPress, Magento, Guzzle, etc.), get_info (detailed info on a specific chain), generate (create serialized payload with encoding options: base64, URL-encode, JSON, PHAR wrapper, fast-destruct). For .NET deserialization use ysoserial. For exploit execution use exploit-runner."
+image: "ghcr.io/silicon-works/mcp-tools-phpggc:latest"
+image_size_mb: 300
+timeout_seconds: 60
+
+capabilities:
+  - php_deserialization
+  - gadget_chain_generation
+  - phar_creation
+
+phases:
+  - exploitation
+
+requirements:
+  network: false
+  privileged: false
+
+resources:
+  memory_mb: 128
+  cpu: 0.25
+
+routing:
+  use_for:
+    - "generate PHP deserialization payloads for unserialize() vulnerabilities"
+    - "create gadget chains for Symfony, Laravel, Monolog, Doctrine, Drupal, WordPress, Guzzle"
+    - "exploit PHP deserialization via phar:// wrapper (PHAR polyglot payloads)"
+    - "list available gadget chains for a specific PHP framework"
+    - "generate serialized PHP objects with various encodings (base64, URL-encode)"
+  never_use_for:
+    - ".NET deserialization (use ysoserial)"
+    - "Java deserialization (use exploit-runner with ysoserial-java)"
+    - "running exploits (use exploit-runner — phpggc only generates the payload)"
+    - "web scanning or vulnerability detection (use nuclei, sqlmap, ssti)"
+  triggers:
+    - phpggc
+    - PHP deserialization
+    - unserialize
+    - gadget chain
+    - PHP gadget
+    - phar deserialization
+    - Monolog RCE
+    - Symfony RCE
+    - Laravel RCE
+  prefer_over: []
+
+see_also:
+  - tool: ysoserial
+    reason: phpggc is for PHP deserialization. ysoserial is for .NET deserialization. Different language ecosystems.
+  - tool: exploit-runner
+    reason: phpggc generates the serialized payload. Use exploit-runner or curl to deliver it to the target.
+  - tool: ssti
+    reason: Both exploit PHP applications but different vulnerability classes — SSTI injects template code, phpggc exploits insecure deserialization.
+
+methods:
+  list_gadgets:
+    description: "List all available PHP gadget chains, optionally filtered by framework name. Returns chain name, affected versions, type (RCE/file write/file delete/etc.), and trigger vector (__destruct/__wakeup/__toString)."
+    when_to_use: "First step after confirming PHP deserialization — check which gadget chains are available for the target framework. Filter by framework name (e.g., 'symfony', 'laravel', 'monolog') to see only relevant chains."
+    params:
+      filter:
+        type: string
+        description: "Filter by framework name (e.g., 'symfony', 'laravel', 'monolog', 'drupal', 'wordpress', 'guzzle')."
+    returns:
+      chains:
+        type: array
+        description: "Available chains, each with: name, version, type, vector."
+      chain_count:
+        type: integer
+        description: "Total number of matching chains."
+      frameworks:
+        type: array
+        description: "Unique framework names found."
+
+  get_info:
+    description: "Get detailed information about a specific gadget chain — required arguments, affected versions, and usage notes."
+    when_to_use: "Before generating a payload — understand what arguments the chain needs and which versions it supports."
+    params:
+      chain:
+        type: string
+        required: true
+        description: "Gadget chain name (e.g., 'Monolog/RCE1', 'Symfony/RCE4', 'Laravel/RCE1')."
+    returns:
+      info:
+        type: string
+        description: "Detailed chain information (arguments, versions, notes)."
+
+  generate:
+    description: "Generate a serialized PHP payload for a specific gadget chain. The payload can be delivered via any mechanism that triggers unserialize() — cookie values, POST parameters, file uploads, session data, or phar:// wrapper."
+    when_to_use: "After identifying the target framework and selecting a chain from list_gadgets. For RCE chains, arguments are typically [function, command] (e.g., ['system', 'id']). For file write chains, arguments are [remote_path, local_path]. Use base64 encoding for safe transport in URLs/cookies."
+    params:
+      chain:
+        type: string
+        required: true
+        description: "Gadget chain name (e.g., 'Monolog/RCE1')."
+      arguments:
+        type: array
+        required: true
+        description: "Chain arguments (e.g., ['system', 'id'] for RCE, ['/var/www/shell.php', '/tmp/shell.php'] for file write)."
+      encoding:
+        type: string
+        default: "none"
+        description: "Output encoding: none (raw serialized), base64, url, soft-url, json."
+      fast_destruct:
+        type: boolean
+        default: false
+        description: "Fast-destruct technique — triggers immediately after unserialize() instead of at script end."
+      ascii_strings:
+        type: boolean
+        default: false
+        description: "Replace non-ASCII bytes with hex (experimental, avoids null bytes)."
+      phar:
+        type: string
+        description: "Generate PHAR file (tar/zip/phar format) for phar:// wrapper attacks."
+    returns:
+      payload:
+        type: string
+        description: "The serialized PHP payload (ready to deliver)."
+      payload_length:
+        type: integer
+        description: "Payload length in characters."

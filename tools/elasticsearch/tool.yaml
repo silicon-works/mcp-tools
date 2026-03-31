@@ -1,0 +1,182 @@
+name: elasticsearch
+version: "1.0"
+description: "Elasticsearch enumeration and data extraction via REST API. 6 methods: cluster_info (version, health, nodes, plugins), enum_indices (list all indices with doc counts and sizes), get_mappings (field schema for an index), search (full Query DSL with pagination), dump (bulk extraction via scroll API — no 10K document limit), enum_snapshots (list snapshot repos and backups). Connects to unauthenticated or Basic auth instances. For MongoDB use mongodb. For MySQL use mysql."
+image: "ghcr.io/silicon-works/mcp-tools-elasticsearch:latest"
+image_size_mb: 250
+timeout_seconds: 600
+
+capabilities:
+  - elasticsearch_enumeration
+  - data_extraction
+  - scroll_api
+  - cluster_reconnaissance
+
+phases:
+  - enumeration
+  - post-exploitation
+
+requirements:
+  network: true
+  privileged: false
+
+resources:
+  memory_mb: 256
+  cpu: 0.5
+
+routing:
+  use_for:
+    - "enumerate Elasticsearch cluster info, indices, and mappings"
+    - "search Elasticsearch indices for credentials, PII, API keys, or sensitive data"
+    - "bulk dump data from Elasticsearch indices using scroll API"
+    - "enumerate Elasticsearch snapshot repositories for backup data"
+    - "probe unauthenticated Elasticsearch instances on port 9200"
+  never_use_for:
+    - "MongoDB databases (use mongodb)"
+    - "MySQL databases (use mysql)"
+    - "MSSQL databases (use mssql)"
+    - "port scanning to find Elasticsearch (use nmap)"
+  triggers:
+    - elasticsearch
+    - elastic
+    - kibana
+    - port 9200
+    - ELK
+    - logstash
+    - elastic search
+    - ES cluster
+  prefer_over: []
+
+see_also:
+  - tool: nmap
+    reason: Use nmap to discover Elasticsearch on port 9200/9300 before using elasticsearch tool.
+  - tool: curl
+    reason: Use curl for quick one-off ES API calls. Use elasticsearch for structured enumeration and bulk extraction with scroll API.
+  - tool: mongodb
+    reason: Different NoSQL database. Use mongodb for MongoDB, elasticsearch for Elasticsearch.
+
+methods:
+  cluster_info:
+    description: "Get Elasticsearch cluster health, version, node info, and installed plugins. First step after discovering ES."
+    when_to_use: "After nmap discovers port 9200 — check if Elasticsearch is unauthenticated, identify version (for CVE research), enumerate nodes and plugins."
+    params:
+      host:
+        type: string
+        required: true
+        description: "Elasticsearch URL (e.g., 'http://10.10.10.5:9200')."
+    returns:
+      cluster_name:
+        type: string
+        description: "Cluster name."
+      version:
+        type: string
+        description: "Elasticsearch version."
+      status:
+        type: string
+        description: "Cluster health (green/yellow/red)."
+      nodes:
+        type: array
+        description: "Node information."
+
+  enum_indices:
+    description: "List all indices with document count, size, and health status."
+    when_to_use: "After confirming ES access — discover what data is stored. Look for indices named 'users', 'accounts', 'logs', 'emails', 'secrets', etc."
+    params:
+      host:
+        type: string
+        required: true
+        description: "Elasticsearch URL."
+    returns:
+      indices:
+        type: array
+        description: "Index details (name, status, health, doc count, size)."
+      index_names:
+        type: array
+        description: "Just the index names."
+
+  get_mappings:
+    description: "Get field mappings for a specific index. Shows the schema — what fields exist and their types."
+    when_to_use: "Before searching an index — understand its structure to craft targeted queries."
+    params:
+      host:
+        type: string
+        required: true
+        description: "Elasticsearch URL."
+      index:
+        type: string
+        required: true
+        description: "Index name."
+    returns:
+      mappings:
+        type: object
+        description: "Index field mappings."
+
+  search:
+    description: "Search an index using Elasticsearch Query DSL. Supports match_all, match, term, range, bool, and all other Query DSL constructs."
+    when_to_use: "Targeted data extraction — search for passwords, credentials, API keys, PII. Use match_all for overview, match for keyword search, bool for complex queries."
+    params:
+      host:
+        type: string
+        required: true
+        description: "Elasticsearch URL."
+      index:
+        type: string
+        default: "_all"
+        description: "Index to search (default: all)."
+      query:
+        type: object
+        description: "Query DSL (default: match_all). Example: {'match': {'field': 'password'}}."
+      size:
+        type: integer
+        default: 20
+        description: "Results per page."
+      from_offset:
+        type: integer
+        default: 0
+        description: "Pagination offset."
+    returns:
+      documents:
+        type: array
+        description: "Matching documents."
+      total:
+        type: integer
+        description: "Total matching documents."
+
+  dump:
+    description: "Bulk dump all documents from an index using the scroll API. Bypasses the default 10,000 document limit."
+    when_to_use: "When you need ALL data from an index — full user databases, credential stores, log archives. Use max_docs to limit output size."
+    params:
+      host:
+        type: string
+        required: true
+        description: "Elasticsearch URL."
+      index:
+        type: string
+        required: true
+        description: "Index to dump."
+      max_docs:
+        type: integer
+        default: 1000
+        description: "Maximum documents to retrieve."
+    returns:
+      documents:
+        type: array
+        description: "All dumped documents."
+      document_count:
+        type: integer
+        description: "Number of documents retrieved."
+
+  enum_snapshots:
+    description: "List snapshot repositories and their snapshots. Snapshots may contain older data or data from other indices."
+    when_to_use: "Check for backup data that might contain credentials or historical records not in current indices."
+    params:
+      host:
+        type: string
+        required: true
+        description: "Elasticsearch URL."
+    returns:
+      repositories:
+        type: array
+        description: "Snapshot repository names."
+      snapshots:
+        type: object
+        description: "Snapshots per repository."

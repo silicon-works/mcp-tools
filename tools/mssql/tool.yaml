@@ -1,0 +1,246 @@
+name: mssql
+version: "1.0"
+description: "Microsoft SQL Server exploitation via impacket TDS client. 7 methods: query (execute arbitrary SQL), enum (enumerate databases, tables, users, linked servers, assemblies, impersonation targets), xp_cmdshell (enable and execute OS commands), xp_dirtree (read filesystem or trigger NTLM authentication for relay), linked_query (execute queries through linked servers via OPENQUERY), extract_assembly (retrieve CLR assembly DLLs), escalate (attempt privilege escalation via impersonation or trustworthy DB). Supports SQL and Windows authentication plus pass-the-hash. Stateless — connection params provided with every call. For MySQL use mysql. For credential relay use impacket-relay."
+image: "ghcr.io/silicon-works/mcp-tools-mssql:latest"
+image_size_mb: 350
+timeout_seconds: 300
+
+capabilities:
+  - mssql_query
+  - command_execution
+  - linked_server_traversal
+  - assembly_extraction
+  - privilege_escalation
+
+phases:
+  - enumeration
+  - exploitation
+  - post-exploitation
+
+requirements:
+  network: true
+  privileged: false
+
+resources:
+  memory_mb: 256
+  cpu: 0.5
+
+routing:
+  use_for:
+    - "connect to and query Microsoft SQL Server"
+    - "execute OS commands via xp_cmdshell on MSSQL"
+    - "enumerate MSSQL databases, tables, users, linked servers, and CLR assemblies"
+    - "traverse linked MSSQL servers via OPENQUERY"
+    - "trigger NTLM authentication via xp_dirtree to UNC paths (for relay attacks)"
+    - "extract .NET DLLs from MSSQL CLR assemblies for decompilation"
+    - "attempt MSSQL privilege escalation via impersonation or trustworthy databases"
+  never_use_for:
+    - "MySQL databases (use mysql)"
+    - "MongoDB databases (use mongodb)"
+    - "SQL injection testing (use sqlmap)"
+    - "NTLM relay attacks (use impacket-relay — mssql only triggers the auth)"
+  triggers:
+    - MSSQL
+    - SQL Server
+    - Microsoft SQL
+    - xp_cmdshell
+    - linked server
+    - OPENQUERY
+    - CLR assembly
+    - port 1433
+    - xp_dirtree
+    - sa password
+  prefer_over: []
+
+see_also:
+  - tool: mysql
+    reason: Use mysql for MySQL databases. Use mssql for Microsoft SQL Server. Different protocols and exploitation techniques.
+  - tool: ilspy
+    reason: After extracting CLR assemblies with mssql extract_assembly, decompile the DLLs with ilspy to find hardcoded credentials.
+  - tool: responder
+    reason: Use mssql xp_dirtree to trigger NTLM authentication to your IP, and responder to capture the Net-NTLMv2 hash.
+  - tool: impacket-relay
+    reason: Use mssql xp_dirtree to trigger NTLM auth, and impacket-relay to relay it for lateral movement.
+
+methods:
+  query:
+    description: "Execute an arbitrary SQL query against MSSQL Server. Returns parsed tabular results."
+    when_to_use: "General SQL interaction — enumerate data, check permissions, read tables. First try: 'SELECT @@version', 'SELECT DB_NAME()', 'SELECT SYSTEM_USER', 'SELECT IS_SRVROLEMEMBER(''sysadmin'')'."
+    params:
+      host:
+        type: string
+        required: true
+        description: "MSSQL server hostname or IP."
+      username:
+        type: string
+        required: true
+        description: "SQL or Windows username."
+      password:
+        type: string
+        description: "Password."
+      sql:
+        type: string
+        required: true
+        description: "SQL query to execute."
+      port:
+        type: integer
+        default: 1433
+        description: "MSSQL port."
+      windows_auth:
+        type: boolean
+        default: false
+        description: "Use Windows authentication."
+    returns:
+      rows:
+        type: array
+        description: "Query results as list of row dicts."
+      row_count:
+        type: integer
+        description: "Number of rows returned."
+
+  enum:
+    description: "Enumerate MSSQL server — databases, tables, users, linked servers, CLR assemblies, impersonation targets."
+    when_to_use: "After gaining MSSQL access — discover the attack surface. Check linked_servers for lateral movement, assemblies for .NET DLLs with credentials, impersonation for privilege escalation."
+    params:
+      host:
+        type: string
+        required: true
+        description: "MSSQL server hostname or IP."
+      username:
+        type: string
+        required: true
+        description: "SQL or Windows username."
+      password:
+        type: string
+        description: "Password."
+      target:
+        type: string
+        default: "all"
+        description: "What to enumerate: databases, tables, users, linked_servers, assemblies, impersonation, all."
+    returns:
+      results:
+        type: object
+        description: "Enumeration results grouped by category."
+
+  xp_cmdshell:
+    description: "Execute OS commands via MSSQL xp_cmdshell. Automatically enables xp_cmdshell if disabled (requires sysadmin)."
+    when_to_use: "When you have sysadmin access to MSSQL and need RCE. Enables xp_cmdshell via sp_configure, then executes the command. Common first commands: 'whoami', 'hostname', 'ipconfig'."
+    params:
+      host:
+        type: string
+        required: true
+        description: "MSSQL server hostname or IP."
+      username:
+        type: string
+        required: true
+        description: "Username (must be sysadmin)."
+      password:
+        type: string
+        description: "Password."
+      command:
+        type: string
+        required: true
+        description: "OS command to execute."
+    returns:
+      output:
+        type: string
+        description: "Command execution output."
+
+  xp_dirtree:
+    description: "Use xp_dirtree to list directory contents or trigger NTLM authentication. When given a UNC path (\\\\attacker_ip\\share), the MSSQL service account authenticates to the attacker, leaking its Net-NTLMv2 hash."
+    when_to_use: "Two uses: (1) File enumeration — list files on the MSSQL server filesystem. (2) NTLM relay — provide a UNC path pointing to your responder/ntlmrelayx to capture the service account hash."
+    params:
+      host:
+        type: string
+        required: true
+        description: "MSSQL server hostname or IP."
+      username:
+        type: string
+        required: true
+        description: "Username."
+      password:
+        type: string
+        description: "Password."
+      path:
+        type: string
+        required: true
+        description: "Path to list (C:\\Users) or UNC path for NTLM capture (\\\\attacker_ip\\share)."
+    returns:
+      entries:
+        type: array
+        description: "Directory entries."
+      is_unc:
+        type: boolean
+        description: "Whether a UNC path was used (NTLM trigger)."
+
+  linked_query:
+    description: "Execute a SQL query through a linked MSSQL server via OPENQUERY. Used for lateral movement between linked SQL instances."
+    when_to_use: "After enum discovers linked servers — query data on the linked instance or attempt to escalate via double-hop (linked server that links back with higher privileges)."
+    params:
+      host:
+        type: string
+        required: true
+        description: "MSSQL server to connect to."
+      username:
+        type: string
+        required: true
+        description: "Username."
+      password:
+        type: string
+        description: "Password."
+      linked_server:
+        type: string
+        required: true
+        description: "Linked server name."
+      sql:
+        type: string
+        required: true
+        description: "SQL query for the linked server."
+    returns:
+      rows:
+        type: array
+        description: "Query results from the linked server."
+
+  extract_assembly:
+    description: "Extract CLR assembly DLLs stored in MSSQL sys.assembly_files. These DLLs often contain hardcoded credentials or business logic."
+    when_to_use: "After enum discovers assemblies — extract the DLL content, decode from hex, then decompile with ilspy to find credentials."
+    params:
+      host:
+        type: string
+        required: true
+        description: "MSSQL server."
+      username:
+        type: string
+        required: true
+        description: "Username."
+      password:
+        type: string
+        description: "Password."
+      assembly_name:
+        type: string
+        description: "Assembly name to extract. Omit to list all assemblies."
+    returns:
+      results:
+        type: array
+        description: "Assembly data (name + hex content if specific assembly requested)."
+
+  escalate:
+    description: "Attempt MSSQL privilege escalation via impersonation (EXECUTE AS LOGIN), trustworthy database abuse, or linked server double-hop."
+    when_to_use: "When current user is not sysadmin but needs to escalate. impersonate: check and use IMPERSONATE permission. trustworthy: abuse databases with TRUSTWORTHY ON. linked_hop: find linked server double-hops with higher privileges."
+    params:
+      host:
+        type: string
+        required: true
+        description: "MSSQL server."
+      username:
+        type: string
+        required: true
+        description: "Username."
+      password:
+        type: string
+        description: "Password."
+      technique:
+        type: string
+        default: "impersonate"
+        description: "Technique: impersonate, trustworthy, linked_hop."
+    returns: {}

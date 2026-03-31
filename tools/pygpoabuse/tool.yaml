@@ -1,0 +1,119 @@
+name: pygpoabuse
+version: "1.0"
+description: "Active Directory GPO exploitation via pyGPOAbuse — create immediate scheduled tasks as SYSTEM, add local administrators, or inject startup scripts through Group Policy Objects. 2 methods: scheduled_task (create GPO-based immediate scheduled task executing as SYSTEM on all domain computers), cleanup (remove task and roll back GPO version). Supports password auth, pass-the-hash, and Kerberos. For finding GPO write access use bloodhound. For other AD attacks use impacket."
+image: "ghcr.io/silicon-works/mcp-tools-pygpoabuse:latest"
+image_size_mb: 300
+timeout_seconds: 120
+
+capabilities:
+  - gpo_exploitation
+  - scheduled_task_injection
+  - privilege_escalation
+
+phases:
+  - exploitation
+
+requirements:
+  network: true
+  privileged: false
+
+resources:
+  memory_mb: 256
+  cpu: 0.5
+
+routing:
+  use_for:
+    - "exploit GPO write access to create scheduled tasks running as SYSTEM"
+    - "escalate privileges via Group Policy Object modification in Active Directory"
+    - "add users to local administrators group via GPO"
+    - "inject startup scripts via GPO for persistence"
+    - "clean up GPO modifications after exploitation"
+  never_use_for:
+    - "finding who has GPO write access (use bloodhound to identify GPO owners)"
+    - "Kerberoasting or AS-REP roasting (use impacket)"
+    - "credential dumping (use impacket secretsdump)"
+    - "general AD enumeration (use bloodhound or netexec)"
+  triggers:
+    - GPO abuse
+    - Group Policy
+    - pyGPOAbuse
+    - scheduled task GPO
+    - GPO privilege escalation
+    - GenericAll GPO
+    - GenericWrite GPO
+  prefer_over: []
+
+see_also:
+  - tool: bloodhound
+    reason: Use bloodhound to identify which users have write access to GPOs (GenericAll, GenericWrite). Then use pygpoabuse to exploit that access.
+  - tool: impacket
+    reason: Use impacket for other AD attacks (secretsdump, kerberoast, psexec). pygpoabuse specifically exploits GPO write access.
+  - tool: netexec
+    reason: Use netexec to validate credentials and enumerate SMB/LDAP before GPO exploitation.
+
+methods:
+  scheduled_task:
+    description: "Create an immediate scheduled task via GPO that executes a command as SYSTEM on domain computers. The task runs within minutes when Group Policy refreshes (or force with gpupdate /force on target)."
+    when_to_use: "When bloodhound shows the compromised user has write access (GenericAll, GenericWrite, WriteDACL) to a GPO linked to Domain Controllers or target OUs. Creates a scheduled task that runs the specified command as SYSTEM — use for adding local admins, executing reverse shells, or running post-exploitation commands."
+    params:
+      target:
+        type: string
+        required: true
+        description: "domain/username[:password] format (e.g., 'TEIGNTON/jay.teignton:D0ntL0seSk3l3tonK3y!')."
+      gpo_id:
+        type: string
+        description: "GPO GUID to target (from bloodhound or GPMC)."
+      gpo_name:
+        type: string
+        description: "GPO display name (resolved via LDAP). Provide either gpo_id or gpo_name."
+      command:
+        type: string
+        required: true
+        description: "Command to execute as SYSTEM."
+      dc_ip:
+        type: string
+        description: "Domain controller IP."
+      taskname:
+        type: string
+        description: "Custom task name (default: TASK_<random>)."
+      powershell:
+        type: boolean
+        default: false
+        description: "Use PowerShell for execution."
+      force:
+        type: boolean
+        default: false
+        description: "Force add even if task already exists."
+    returns:
+      gpo:
+        type: string
+        description: "GPO that was modified."
+      command:
+        type: string
+        description: "Command that will execute as SYSTEM."
+
+  cleanup:
+    description: "Remove a previously created scheduled task and roll back the GPO version to cover tracks."
+    when_to_use: "After exploitation is complete — remove the malicious GPO entry and restore the original GPO version number."
+    params:
+      target:
+        type: string
+        required: true
+        description: "domain/username[:password] format."
+      gpo_id:
+        type: string
+        description: "GPO GUID."
+      gpo_name:
+        type: string
+        description: "GPO display name."
+      taskname:
+        type: string
+        required: true
+        description: "Name of the task to remove."
+      dc_ip:
+        type: string
+        description: "Domain controller IP."
+    returns:
+      cleaned_up:
+        type: boolean
+        description: "Whether cleanup succeeded."

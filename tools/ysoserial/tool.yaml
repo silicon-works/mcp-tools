@@ -1,0 +1,117 @@
+name: ysoserial
+version: "1.36"
+description: ".NET deserialization gadget chain generator via ysoserial.net v1.36. 3 methods: list_gadgets (30+ chains with compatible formatters — WindowsIdentity, TypeConfuseDelegate, TextFormattingRunProperties, ObjectDataProvider, etc.), list_formatters (BinaryFormatter, JavaScriptSerializer, Json.NET, SoapFormatter, LosFormatter, DataContractSerializer, XmlSerializer, etc. with their compatible gadgets), generate (create serialized .NET payload with output format options: raw, base64, hex). For PHP deserialization use phpggc. For exploit delivery use curl or exploit-runner."
+image: "ghcr.io/silicon-works/mcp-tools-ysoserial:latest"
+image_size_mb: 500
+timeout_seconds: 60
+
+capabilities:
+  - dotnet_deserialization
+  - gadget_chain_generation
+  - payload_creation
+
+phases:
+  - exploitation
+
+requirements:
+  network: false
+  privileged: false
+
+resources:
+  memory_mb: 256
+  cpu: 0.5
+
+routing:
+  use_for:
+    - "generate .NET deserialization payloads for BinaryFormatter, JavaScriptSerializer, Json.NET vulnerabilities"
+    - "create gadget chains for .NET applications (ASP.NET, WCF, Remoting)"
+    - "exploit insecure deserialization in .NET ViewState, cookies, or API endpoints"
+    - "list available .NET gadget chains and their compatible formatters"
+  never_use_for:
+    - "PHP deserialization (use phpggc)"
+    - "Java deserialization (use exploit-runner with ysoserial-java)"
+    - "running or delivering exploits (use curl or exploit-runner — ysoserial only generates the payload)"
+    - ".NET binary decompilation (use ilspy)"
+  triggers:
+    - ysoserial
+    - .NET deserialization
+    - BinaryFormatter
+    - JavaScriptSerializer
+    - Json.NET deserialization
+    - SoapFormatter
+    - LosFormatter
+    - ViewState deserialization
+    - .NET gadget chain
+    - insecure deserialization .NET
+  prefer_over: []
+
+see_also:
+  - tool: phpggc
+    reason: ysoserial is for .NET deserialization. phpggc is for PHP deserialization. Different ecosystems.
+  - tool: ilspy
+    reason: Use ilspy to decompile .NET assemblies to understand which formatter/gadget the target uses. Then use ysoserial to generate the payload.
+  - tool: curl
+    reason: Use ysoserial to generate the payload, then curl to deliver it (e.g., as a base64 cookie value or JSON body).
+
+methods:
+  list_gadgets:
+    description: "List all available .NET gadget chains with their descriptions and compatible formatters."
+    when_to_use: "First step after confirming .NET deserialization — check which gadgets are available and which formatters they support."
+    params: {}
+    returns:
+      gadgets:
+        type: array
+        description: "Available gadgets, each with: name, description, formatters (list of compatible formatters)."
+      gadget_count:
+        type: integer
+        description: "Total number of available gadgets."
+      gadget_names:
+        type: array
+        description: "Just the gadget names for quick reference."
+
+  list_formatters:
+    description: "List all available .NET serialization formatters and which gadgets work with each."
+    when_to_use: "When you know which formatter the target uses (from ilspy decompilation or error messages) — find compatible gadgets."
+    params: {}
+    returns:
+      formatters:
+        type: array
+        description: "Available formatter names."
+      formatter_count:
+        type: integer
+        description: "Total number of formatters."
+      formatter_gadgets:
+        type: object
+        description: "Map of formatter → list of compatible gadget names."
+
+  generate:
+    description: "Generate a serialized .NET deserialization payload for a specific gadget chain and formatter. Returns the payload in base64, hex, or raw format."
+    when_to_use: "After identifying the target formatter (from ilspy decompilation, error messages, or known framework). Choose a compatible gadget from list_gadgets, set the command to execute, and generate the payload. Use base64 output for cookie injection, raw for binary protocols."
+    params:
+      gadget:
+        type: string
+        required: true
+        description: "Gadget chain name (e.g., 'WindowsIdentity', 'TypeConfuseDelegate', 'TextFormattingRunProperties')."
+      formatter:
+        type: string
+        required: true
+        description: "Serialization formatter (e.g., 'Json.Net', 'BinaryFormatter', 'JavaScriptSerializer')."
+      command:
+        type: string
+        required: true
+        description: "OS command to execute (e.g., 'calc', 'cmd /c whoami', 'powershell -e <base64>')."
+      output_format:
+        type: string
+        default: "base64"
+        description: "Output format: raw (binary), base64, hex."
+      minify:
+        type: boolean
+        default: false
+        description: "Minify output (remove whitespace from JSON/XML formatters)."
+    returns:
+      payload:
+        type: string
+        description: "The serialized .NET payload (ready to deliver)."
+      payload_length:
+        type: integer
+        description: "Payload length in characters."

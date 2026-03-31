@@ -1,0 +1,175 @@
+name: ssti
+version: "1.0"
+description: "Server-Side Template Injection detection and exploitation via SSTImap. 3 methods: detect (test URL/parameter for SSTI across 15+ template engines with 4 detection techniques — Rendered, Error-based, Boolean-blind, Time-blind), exploit (execute OS commands via confirmed SSTI), list_engines (show all supported engines by language). Supports Jinja2, Twig, Mako, Smarty, Freemarker, Velocity, Pug/Jade, Tornado, Django, ERB, Slim, Nunjucks, Pebble, EJS, Handlebars, and more. For file inclusion use lfi-rfi. For SQL injection use sqlmap."
+image: "ghcr.io/silicon-works/mcp-tools-ssti:latest"
+image_size_mb: 300
+timeout_seconds: 300
+
+capabilities:
+  - ssti_detection
+  - ssti_exploitation
+  - template_engine_identification
+  - remote_code_execution
+
+phases:
+  - exploitation
+
+requirements:
+  network: true
+  privileged: false
+
+resources:
+  memory_mb: 256
+  cpu: 0.5
+
+routing:
+  use_for:
+    - "detect Server-Side Template Injection in web application parameters"
+    - "identify which template engine is vulnerable (Jinja2, Twig, Mako, Freemarker, etc.)"
+    - "exploit SSTI for remote code execution (OS commands, reverse shell)"
+    - "test parameters where user input is reflected in rendered pages"
+    - "bypass template sandbox restrictions with multiple escaping levels"
+  never_use_for:
+    - "Local/Remote File Inclusion (use lfi-rfi)"
+    - "SQL injection (use sqlmap)"
+    - "XSS detection (use nuclei or zap)"
+    - "web directory fuzzing (use ffuf)"
+  triggers:
+    - SSTI
+    - template injection
+    - server-side template injection
+    - Jinja2
+    - Twig
+    - Mako
+    - Freemarker
+    - render_template
+    - template engine
+    - "{{7*7}}"
+  prefer_over: []
+
+see_also:
+  - tool: lfi-rfi
+    reason: SSTI is template injection (code execution in template engine). LFI/RFI is file inclusion (reading/including files). Different vulnerability classes — use lfi-rfi for path traversal and file reads.
+  - tool: sqlmap
+    reason: Both test for injection but in different contexts. sqlmap tests SQL injection in database queries. ssti tests template injection in page rendering.
+  - tool: curl
+    reason: Use curl to manually send SSTI payloads (e.g., {{7*7}}) for quick checks. Use ssti (SSTImap) for automated detection across all engines with sandbox escape.
+
+methods:
+  detect:
+    description: "Test a URL/parameter for Server-Side Template Injection. Tries multiple template engine payloads and 4 detection techniques (Rendered, Error-based, Boolean-blind, Time-blind). Identifies the vulnerable engine and available capabilities (OS shell, code eval, template shell)."
+    when_to_use: "When user input is reflected in rendered web pages — potential template injection. Mark the injection point with * in the URL or POST data. SSTImap tests across 15+ engines automatically. Try increasing the level (1-5) if initial detection fails — higher levels attempt more complex escaping to bypass WAFs and filters."
+    params:
+      url:
+        type: string
+        required: true
+        description: "Target URL with * marking injection point (e.g., 'http://target/page?name=*'). If no * present, tests all parameters."
+      method:
+        type: string
+        default: "GET"
+        description: "HTTP method (GET or POST)."
+      data:
+        type: string
+        description: "POST data with * marking injection point (e.g., 'name=*&submit=1')."
+      headers:
+        type: object
+        description: "Custom HTTP headers as key-value pairs."
+      cookies:
+        type: string
+        description: "Cookie header value."
+      level:
+        type: integer
+        default: 1
+        description: "Escaping level 1-5. Higher tries more complex escaping to bypass filters."
+      engine:
+        type: string
+        description: "Test specific engines only (comma-separated, e.g., 'jinja2,twig'). Default: all."
+      technique:
+        type: string
+        default: "RE"
+        description: "Detection techniques: R(endered) E(rror-based) B(oolean-blind) T(ime-blind). Default: RE."
+      proxy:
+        type: string
+        description: "HTTP proxy (e.g., 'http://127.0.0.1:8080')."
+      timeout:
+        type: integer
+        default: 60
+        description: "Overall timeout in seconds."
+    returns:
+      vulnerable:
+        type: boolean
+        description: "Whether SSTI was confirmed."
+      engine:
+        type: string
+        description: "Identified template engine (e.g., 'Jinja2', 'Twig', 'Mako')."
+      os_shell_available:
+        type: boolean
+        description: "Whether OS command execution is possible."
+      eval_shell_available:
+        type: boolean
+        description: "Whether code evaluation is possible."
+      technique:
+        type: string
+        description: "Detection technique that worked (rendered, error-based, boolean-blind, time-blind)."
+
+  exploit:
+    description: "Exploit a confirmed SSTI vulnerability to execute an OS command on the target. Returns the command output."
+    when_to_use: "After detect confirms SSTI — execute OS commands for RCE. Use 'id' or 'whoami' first to confirm execution context, then escalate to reverse shell or file reads."
+    params:
+      url:
+        type: string
+        required: true
+        description: "Target URL with * marking injection point."
+      command:
+        type: string
+        required: true
+        description: "OS command to execute (e.g., 'id', 'cat /etc/passwd', 'whoami')."
+      method:
+        type: string
+        default: "GET"
+        description: "HTTP method."
+      data:
+        type: string
+        description: "POST data with * marking injection point."
+      headers:
+        type: object
+        description: "Custom HTTP headers."
+      cookies:
+        type: string
+        description: "Cookie header value."
+      level:
+        type: integer
+        default: 1
+        description: "Escaping level 1-5."
+      engine:
+        type: string
+        description: "Force specific engine (skips detection). Use if detect already identified the engine."
+      proxy:
+        type: string
+        description: "HTTP proxy."
+      timeout:
+        type: integer
+        default: 60
+        description: "Overall timeout in seconds."
+    returns:
+      output:
+        type: string
+        description: "Command execution output."
+      engine:
+        type: string
+        description: "Template engine used."
+      vulnerable:
+        type: boolean
+        description: "Whether exploitation succeeded."
+
+  list_engines:
+    description: "List all template engines supported by SSTImap, grouped by programming language."
+    when_to_use: "Reference — check which engines SSTImap can detect and exploit. Useful when you know the target's tech stack and want to confirm coverage."
+    params: {}
+    returns:
+      engines_by_language:
+        type: object
+        description: "Engines grouped by language (Python, PHP, Java, JavaScript, Ruby, Go, Rust)."
+      total:
+        type: integer
+        description: "Total number of supported engines."

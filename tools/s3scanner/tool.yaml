@@ -1,0 +1,110 @@
+name: s3scanner
+version: "3.0"
+description: "S3 bucket discovery and misconfiguration testing via S3Scanner 3.0. 2 methods: scan (test a list of bucket names for existence and public access — brute-force discovery via name mutations), test (test a single known bucket for misconfigurations — anonymous list/read/write permissions and object enumeration). Supports AWS, GCP, DigitalOcean, Dreamhost, Linode. For scanning bucket CONTENTS for secrets use trufflehog. For AWS API interaction use aws."
+image: "ghcr.io/silicon-works/mcp-tools-s3scanner:latest"
+image_size_mb: 250
+timeout_seconds: 300
+
+capabilities:
+  - s3_discovery
+  - bucket_testing
+  - misconfiguration_detection
+
+phases:
+  - reconnaissance
+
+requirements:
+  network: true
+  privileged: false
+
+resources:
+  memory_mb: 256
+  cpu: 0.5
+
+routing:
+  use_for:
+    - "discover S3 buckets by brute-forcing bucket names with mutations"
+    - "test known S3 buckets for anonymous read/write/list permissions"
+    - "enumerate objects in misconfigured S3 buckets"
+    - "check for public S3 bucket access on AWS, GCP, DigitalOcean"
+  never_use_for:
+    - "scanning bucket contents for secrets (use trufflehog scan_s3)"
+    - "interacting with AWS APIs (use aws)"
+    - "port scanning (use nmap)"
+  triggers:
+    - s3scanner
+    - S3 bucket
+    - bucket discovery
+    - public bucket
+    - S3 misconfiguration
+    - bucket brute force
+    - open bucket
+  prefer_over: []
+
+see_also:
+  - tool: trufflehog
+    reason: s3scanner discovers and tests bucket permissions. trufflehog scan_s3 scans bucket CONTENTS for leaked secrets. Use s3scanner first to find accessible buckets, then trufflehog to scan their contents.
+  - tool: aws
+    reason: Use aws for authenticated S3 operations (listing your own buckets, reading/writing objects with credentials). Use s3scanner for unauthenticated discovery of OTHER buckets.
+
+methods:
+  scan:
+    description: "Test a list of bucket names for existence and misconfigurations. Used for bucket name brute-forcing — provide a list of name guesses (company-backup, company-dev, company-prod, etc.)."
+    when_to_use: "External recon — guess target's bucket names using company name, project names, and common suffixes (backup, dev, prod, staging, assets, uploads, logs). Also useful for testing a wordlist of bucket names."
+    params:
+      buckets:
+        type: array
+        required: true
+        description: "List of bucket names to test."
+      provider:
+        type: string
+        default: "aws"
+        description: "Cloud provider: aws, gcp, digitalocean, dreamhost, linode."
+      enumerate:
+        type: boolean
+        default: false
+        description: "Enumerate bucket objects (slow for large buckets)."
+      threads:
+        type: integer
+        default: 4
+        description: "Concurrent threads."
+    returns:
+      buckets_tested:
+        type: integer
+        description: "Number of buckets tested."
+      results:
+        type: array
+        description: "Per-bucket results."
+      existing_count:
+        type: integer
+        description: "Buckets that exist."
+      public_count:
+        type: integer
+        description: "Buckets with public access."
+
+  test:
+    description: "Test a single known bucket for misconfigurations — anonymous list, read, write permissions."
+    when_to_use: "When you know a specific bucket name (from OSINT, source code, or config files) and want to check its permissions."
+    params:
+      bucket:
+        type: string
+        required: true
+        description: "Bucket name to test."
+      provider:
+        type: string
+        default: "aws"
+        description: "Cloud provider."
+      enumerate:
+        type: boolean
+        default: true
+        description: "Enumerate bucket objects."
+    returns:
+      exists:
+        type: boolean
+        description: "Whether the bucket exists."
+      info:
+        type: object
+        description: "Bucket permissions and details."
+      object_count:
+        type: integer
+        description: "Number of objects found (if enumerated)."

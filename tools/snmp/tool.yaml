@@ -1,0 +1,200 @@
+name: snmp
+version: "5.9"
+description: "SNMP enumeration via net-snmp 5.9 (snmpwalk, snmpbulkwalk, snmpget) and community string brute-force via onesixtyone 0.3.3. 4 methods: walk (enumerate OID subtree with v1/v2c/v3 support and named OID shortcuts for system/processes/interfaces/software), get (query specific OID), bulk_walk (high-performance v2c walk for large trees), brute_community (brute-force community strings with onesixtyone). Supports SNMPv3 authentication and encryption. MIB translation enabled. For port scanning to find SNMP use nmap UDP scan. For password brute-force use hydra."
+image: "ghcr.io/silicon-works/mcp-tools-snmp:latest"
+image_size_mb: 250
+timeout_seconds: 300
+
+capabilities:
+  - snmp_enumeration
+  - community_bruteforce
+  - oid_walking
+  - system_info_extraction
+
+phases:
+  - enumeration
+
+requirements:
+  network: true
+  privileged: false
+
+resources:
+  memory_mb: 256
+  cpu: 0.5
+
+routing:
+  use_for:
+    - "SNMP enumeration with community strings (v1/v2c/v3)"
+    - "walk OID trees to discover system info, running processes, interfaces, installed software"
+    - "brute-force SNMP community strings when port 161/UDP is open"
+    - "extract credentials from running process command lines via HOST-RESOURCES-MIB"
+    - "enumerate network interfaces and IP addresses via SNMP"
+    - "discover installed software versions for vulnerability research"
+    - "query specific SNMP OIDs for targeted information extraction"
+  never_use_for:
+    - "port scanning (use nmap with -sU for UDP to find SNMP on port 161 first)"
+    - "password brute-force for non-SNMP services (use hydra)"
+    - "SNMP trap handling or monitoring"
+  triggers:
+    - snmp
+    - snmpwalk
+    - snmpbulkwalk
+    - community string
+    - OID
+    - SNMP enumeration
+    - port 161
+    - onesixtyone
+    - MIB
+  prefer_over: []
+
+see_also:
+  - tool: nmap
+    reason: Use nmap UDP scan (-sU --top-ports 200) to discover SNMP on port 161 before using snmp tool.
+  - tool: hydra
+    reason: Use hydra for credential brute-force on other protocols. Use snmp brute_community specifically for SNMP community strings.
+
+methods:
+  walk:
+    description: "Perform an SNMP walk to enumerate an OID subtree. Supports v1/v2c/v3, named OID shortcuts (system, processes, interfaces, installed_software, storage, users), and full tree walks. Returns parsed OID/type/value triples."
+    when_to_use: "After discovering SNMP on port 161 — first try with 'public' community string. Walk 'system' for OS info and hostname, 'processes' for running processes (often leaks credentials in command-line arguments), 'interfaces' for network config, 'installed_software' for version enumeration. Try discovered community strings from brute_community."
+    params:
+      target:
+        type: string
+        required: true
+        description: "Target hostname or IP address."
+      community:
+        type: string
+        default: "public"
+        description: "SNMP community string. Try 'public' first, then results from brute_community."
+      version:
+        type: string
+        default: "2c"
+        description: "SNMP version: 1, 2c, or 3."
+      oid:
+        type: string
+        description: "OID subtree to walk (e.g., '1.3.6.1.2.1.25.4' for processes). Omit for full walk."
+      oid_name:
+        type: string
+        description: "Named OID shortcut: system, interfaces, ip_addresses, routes, processes, installed_software, storage, users."
+      port:
+        type: integer
+        default: 161
+        description: "SNMP port."
+      timeout:
+        type: integer
+        default: 30
+        description: "Timeout per request in seconds."
+    returns:
+      entries:
+        type: array
+        description: "Parsed SNMP entries, each with: oid, type, value."
+      entry_count:
+        type: integer
+        description: "Number of entries returned."
+
+  get:
+    description: "Get a specific SNMP OID value. Returns the type and value for a single OID."
+    when_to_use: "When you know the exact OID to query — for targeted information extraction. Common OIDs: 1.3.6.1.2.1.1.1.0 (sysDescr), 1.3.6.1.2.1.1.5.0 (sysName), 1.3.6.1.2.1.1.3.0 (sysUpTime)."
+    params:
+      target:
+        type: string
+        required: true
+        description: "Target hostname or IP address."
+      oid:
+        type: string
+        required: true
+        description: "OID to query (e.g., '1.3.6.1.2.1.1.1.0' for sysDescr)."
+      community:
+        type: string
+        default: "public"
+        description: "SNMP community string."
+      version:
+        type: string
+        default: "2c"
+        description: "SNMP version."
+      port:
+        type: integer
+        default: 161
+        description: "SNMP port."
+      timeout:
+        type: integer
+        default: 10
+        description: "Timeout in seconds."
+    returns:
+      oid:
+        type: string
+        description: "The queried OID."
+      type:
+        type: string
+        description: "SNMP data type (STRING, INTEGER, Counter32, etc.)."
+      value:
+        type: string
+        description: "The OID value."
+
+  bulk_walk:
+    description: "High-performance SNMP bulk walk using GETBULK requests (v2c/v3 only). Faster than walk for large OID trees."
+    when_to_use: "When walk is too slow for large SNMP trees — bulk_walk retrieves multiple OIDs per request. Use for full tree enumeration or large subtrees like installed_software. Only works with SNMPv2c or v3."
+    params:
+      target:
+        type: string
+        required: true
+        description: "Target hostname or IP address."
+      community:
+        type: string
+        default: "public"
+        description: "SNMP community string."
+      oid:
+        type: string
+        description: "OID subtree to walk. Omit for full walk."
+      oid_name:
+        type: string
+        description: "Named OID shortcut."
+      port:
+        type: integer
+        default: 161
+        description: "SNMP port."
+      timeout:
+        type: integer
+        default: 30
+        description: "Timeout in seconds."
+      max_repetitions:
+        type: integer
+        default: 25
+        description: "Max OIDs per GETBULK request (higher = faster, more memory)."
+    returns:
+      entries:
+        type: array
+        description: "Parsed SNMP entries, each with: oid, type, value."
+      entry_count:
+        type: integer
+        description: "Number of entries returned."
+
+  brute_community:
+    description: "Brute-force SNMP community strings using onesixtyone. Sends SNMP requests with different community strings and reports which ones get a valid response. Fast — tests hundreds of strings in seconds."
+    when_to_use: "When nmap discovers SNMP on port 161/UDP but the community string is unknown. Always try this before giving up on SNMP — many devices use non-default strings like 'internal', 'private', 'monitor', or company-specific strings. Results feed directly into walk/get/bulk_walk."
+    params:
+      target:
+        type: string
+        required: true
+        description: "Target hostname or IP address."
+      wordlist:
+        type: array
+        description: "Custom community strings to try. If omitted, uses built-in list (public, private, community, manager, admin, internal, etc.)."
+      port:
+        type: integer
+        default: 161
+        description: "SNMP port."
+      wait:
+        type: integer
+        default: 10
+        description: "Milliseconds between packets (lower = faster but may miss responses)."
+    returns:
+      found:
+        type: array
+        description: "Valid community strings found, each with: host, community, sysDescr."
+      found_count:
+        type: integer
+        description: "Number of valid community strings discovered."
+      communities:
+        type: array
+        description: "Just the community string names (for easy use in walk/get calls)."

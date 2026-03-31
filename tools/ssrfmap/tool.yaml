@@ -1,0 +1,146 @@
+name: ssrfmap
+version: "1.0"
+description: "SSRF exploitation framework via SSRFmap — 3 methods: scan (test parameter for SSRF using 12 modules: readfiles, portscan, networkscan, redis, mysql, fastcgi, memcache, smtp, tomcat, axfr, github, custom), exploit_metadata (extract cloud instance metadata from AWS/GCE/Azure/DigitalOcean/Alibaba via SSRF to 169.254.169.254), generate_gopher (create gopher:// protocol payloads for attacking Redis, MySQL, FastCGI, Memcached, SMTP, PostgreSQL, Zabbix through SSRF). Supports WAF bypass levels 1-5. For basic HTTP requests use curl. For web vulnerability scanning use nuclei."
+image: "ghcr.io/silicon-works/mcp-tools-ssrfmap:latest"
+image_size_mb: 300
+timeout_seconds: 300
+
+capabilities:
+  - ssrf_exploitation
+  - cloud_metadata_extraction
+  - gopher_payload_generation
+  - backend_service_rce
+
+phases:
+  - exploitation
+
+requirements:
+  network: true
+  privileged: false
+
+resources:
+  memory_mb: 256
+  cpu: 0.5
+
+routing:
+  use_for:
+    - "exploit SSRF vulnerability to read internal files or access internal services"
+    - "extract AWS/GCE/Azure cloud instance metadata credentials via SSRF"
+    - "attack backend services (Redis, MySQL, FastCGI, Memcached) through SSRF"
+    - "generate gopher:// protocol payloads for SSRF exploitation"
+    - "port scan internal network through SSRF"
+    - "bypass WAF protections on SSRF endpoints with multiple encoding levels"
+  never_use_for:
+    - "basic HTTP requests (use curl)"
+    - "web vulnerability scanning (use nuclei)"
+    - "direct service exploitation without SSRF (use dedicated tools: redis via netcat, mysql via mysql tool)"
+  triggers:
+    - SSRF
+    - server-side request forgery
+    - ssrfmap
+    - cloud metadata
+    - 169.254.169.254
+    - instance metadata
+    - gopher payload
+    - internal service access
+  prefer_over: []
+
+see_also:
+  - tool: curl
+    reason: Use curl for manual SSRF testing with specific URLs. Use ssrfmap for automated exploitation with modules and WAF bypass.
+  - tool: nuclei
+    reason: Use nuclei for SSRF detection (has SSRF templates). Use ssrfmap for exploitation after confirming SSRF.
+  - tool: aws
+    reason: After extracting AWS credentials via ssrfmap exploit_metadata, use aws tool to enumerate and exploit the AWS account.
+
+methods:
+  scan:
+    description: "Test a parameter for SSRF vulnerability using SSRFmap modules. Supports 12 modules: readfiles (read local files), portscan (scan internal ports), networkscan (scan internal network), redis/mysql/fastcgi/memcache/smtp (exploit backend services), tomcat (Tomcat manager), axfr (DNS zone transfer), github (GitHub Enterprise RCE)."
+    when_to_use: "When a web parameter accepts URLs or file paths and might be used for server-side requests. Start with readfiles module to confirm SSRF, then escalate to service-specific modules."
+    params:
+      url:
+        type: string
+        required: true
+        description: "Target URL with the vulnerable parameter."
+      param:
+        type: string
+        required: true
+        description: "Name of the SSRF-vulnerable parameter."
+      module:
+        type: string
+        default: "readfiles"
+        description: "SSRFmap module to use."
+      level:
+        type: integer
+        default: 1
+        description: "WAF bypass level (1-5)."
+      lhost:
+        type: string
+        description: "Attacker IP for reverse connections."
+      lport:
+        type: integer
+        description: "Attacker port for reverse connections."
+      timeout:
+        type: integer
+        default: 60
+        description: "Timeout in seconds."
+    returns: {}
+
+  exploit_metadata:
+    description: "Extract cloud instance metadata via SSRF. Targets the cloud metadata endpoints (169.254.169.254 for AWS/Azure/DO, metadata.google.internal for GCE) to steal IAM credentials, instance identity, and user data."
+    when_to_use: "When SSRF is confirmed and target is a cloud instance (AWS EC2, GCE, Azure VM). AWS metadata is the most valuable — steals temporary IAM credentials for account takeover."
+    params:
+      url:
+        type: string
+        required: true
+        description: "Target URL with SSRF-vulnerable parameter."
+      param:
+        type: string
+        required: true
+        description: "Vulnerable parameter name."
+      cloud:
+        type: string
+        default: "aws"
+        description: "Cloud provider: aws, gce, azure, digitalocean, alibaba."
+      level:
+        type: integer
+        default: 1
+        description: "WAF bypass level (1-5)."
+      timeout:
+        type: integer
+        default: 30
+        description: "Timeout in seconds."
+    returns:
+      metadata_found:
+        type: boolean
+        description: "Whether cloud metadata was successfully extracted."
+      credentials:
+        type: object
+        description: "Extracted AWS credentials (AccessKeyId, SecretAccessKey, Token) if found."
+
+  generate_gopher:
+    description: "Generate a gopher:// protocol payload for attacking backend services through SSRF. Gopher allows sending raw TCP data, enabling exploitation of services that don't speak HTTP."
+    when_to_use: "When SSRF supports the gopher:// protocol (many URL parsers do). Generate payloads for Redis RCE (webshell via CONFIG SET), MySQL queries, FastCGI RCE, Memcached injection, SMTP relay."
+    params:
+      service:
+        type: string
+        required: true
+        description: "Target backend service: redis, mysql, fastcgi, memcached, smtp, postgres, zabbix."
+      command:
+        type: string
+        required: true
+        description: "Command or query to execute on the backend service."
+      target_host:
+        type: string
+        default: "127.0.0.1"
+        description: "Backend service host."
+      target_port:
+        type: integer
+        description: "Backend service port (auto-detected from service type if omitted)."
+    returns:
+      payload:
+        type: string
+        description: "The gopher:// URL payload to inject into the SSRF parameter."
+      usage:
+        type: string
+        description: "Instructions on how to use the generated payload."

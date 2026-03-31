@@ -1,0 +1,136 @@
+name: ilspy
+version: "9.1"
+description: ".NET assembly decompilation to readable C# source code via ILSpy CLI (ilspycmd 9.1). 4 methods: decompile (entire assembly to C# — single file or project with one file per type), decompile_type (specific class/struct by fully qualified name), list_types (list all classes, interfaces, structs, delegates, enums), list_resources (list embedded resources). Produces clean C# source code far superior to Ghidra's .NET output. For native binary analysis use ghidra. For .NET deserialization payloads use ysoserial."
+image: "ghcr.io/silicon-works/mcp-tools-ilspy:latest"
+image_size_mb: 500
+timeout_seconds: 120
+
+capabilities:
+  - dotnet_decompilation
+  - source_code_recovery
+  - type_enumeration
+  - resource_extraction
+
+phases:
+  - enumeration
+  - post-exploitation
+
+requirements:
+  network: false
+  privileged: false
+
+resources:
+  memory_mb: 512
+  cpu: 0.5
+
+routing:
+  use_for:
+    - "decompile .NET DLL or EXE to readable C# source code"
+    - "analyze .NET assemblies extracted from MSSQL, Windows services, or compromised hosts"
+    - "find hardcoded credentials, encryption keys, or logic flaws in .NET binaries"
+    - "list classes and methods in a .NET binary before targeted decompilation"
+    - "understand custom .NET services, protocols, or authentication logic"
+  never_use_for:
+    - "native binary analysis (x86/ARM — use ghidra)"
+    - "generating .NET deserialization payloads (use ysoserial)"
+    - "Java decompilation (use exploit-runner with jadx/procyon)"
+  triggers:
+    - decompile .NET
+    - ilspy
+    - dnSpy
+    - .NET decompile
+    - DLL decompile
+    - C# decompile
+    - assembly decompile
+    - .NET binary
+    - .NET reverse engineering
+  prefer_over:
+    - ghidra  # For .NET assemblies specifically — ILSpy produces far better C# than Ghidra
+
+see_also:
+  - tool: ghidra
+    reason: Use ghidra for native binary analysis (ELF, PE x86/ARM). Use ilspy for .NET assemblies — it produces clean C# source code.
+  - tool: ysoserial
+    reason: After decompiling with ilspy to understand which formatter/gadget the target uses, use ysoserial to generate the deserialization payload.
+  - tool: mssql
+    reason: Use mssql extract_assembly to retrieve .NET DLLs from MSSQL CLR assemblies, then decompile with ilspy.
+
+methods:
+  decompile:
+    description: "Decompile an entire .NET assembly (DLL or EXE) to C# source code. Can output as a single concatenated file (default) or as a project with one source file per type."
+    when_to_use: "When you have a .NET binary and need to understand its logic — find hardcoded credentials, understand authentication mechanisms, discover protocol details, or identify vulnerabilities. Common sources: MSSQL CLR assemblies (via mssql extract_assembly), Windows services found during post-exploitation, custom .NET applications."
+    params:
+      assembly_path:
+        type: string
+        required: true
+        description: "Path to the .NET DLL or EXE file (e.g., '/session/ClientsBackup.dll')."
+      as_project:
+        type: boolean
+        default: false
+        description: "Decompile as project (one file per type with .csproj). More organized but larger output."
+    returns:
+      source:
+        type: string
+        description: "Decompiled C# source code (when as_project=false)."
+      output_dir:
+        type: string
+        description: "Output directory path (when as_project=true)."
+      class_count:
+        type: integer
+        description: "Number of classes found."
+      method_count:
+        type: integer
+        description: "Number of methods found."
+
+  decompile_type:
+    description: "Decompile a specific type (class/struct/enum) from a .NET assembly. Faster and less output than full decompilation."
+    when_to_use: "When you know which class to examine (from list_types or error messages). Faster than decompiling the entire assembly."
+    params:
+      assembly_path:
+        type: string
+        required: true
+        description: "Path to the .NET DLL or EXE file."
+      type_name:
+        type: string
+        required: true
+        description: "Fully qualified type name (e.g., 'BackupService.BackupClients', 'WindowsService.TcpServer')."
+    returns:
+      source:
+        type: string
+        description: "Decompiled C# source code for the specified type."
+
+  list_types:
+    description: "List all types in a .NET assembly — classes, interfaces, structs, delegates, and enums."
+    when_to_use: "First step when analyzing an unknown .NET binary — survey what's inside before decompiling. Identifies the interesting classes to focus on."
+    params:
+      assembly_path:
+        type: string
+        required: true
+        description: "Path to the .NET DLL or EXE file."
+      entity_type:
+        type: string
+        default: "all"
+        description: "Filter by entity type: all, class, interface, struct, delegate, enum."
+    returns:
+      types:
+        type: array
+        description: "Fully qualified type names."
+      type_count:
+        type: integer
+        description: "Number of types found."
+
+  list_resources:
+    description: "List embedded resources in a .NET assembly (icons, config files, embedded data)."
+    when_to_use: "Check for embedded configuration files, certificates, or data that might contain credentials or secrets."
+    params:
+      assembly_path:
+        type: string
+        required: true
+        description: "Path to the .NET DLL or EXE file."
+    returns:
+      resources:
+        type: array
+        description: "List of embedded resource names."
+      resource_count:
+        type: integer
+        description: "Number of resources found."

@@ -1,0 +1,142 @@
+name: trufflehog
+version: "3.0"
+description: "Secret and credential discovery via TruffleHog v3 — scans git repos, filesystems, S3 buckets, and Docker images for 800+ credential types with auto-verification. 3 methods: scan_git (scan git repo history for leaked AWS keys, API tokens, passwords, private keys), scan_filesystem (scan directories for secrets in config files), scan_s3 (scan S3 bucket contents for leaked credentials). Auto-verifies discovered credentials by attempting authentication. For exploit database search use searchsploit. For S3 bucket discovery use s3scanner."
+image: "ghcr.io/silicon-works/mcp-tools-trufflehog:latest"
+image_size_mb: 400
+timeout_seconds: 600
+
+capabilities:
+  - secret_scanning
+  - credential_discovery
+  - git_history_analysis
+  - s3_scanning
+
+phases:
+  - reconnaissance
+
+requirements:
+  network: true
+  privileged: false
+
+resources:
+  memory_mb: 512
+  cpu: 1.0
+
+routing:
+  use_for:
+    - "scan git repositories for leaked credentials (AWS keys, API tokens, passwords)"
+    - "find secrets in filesystem directories and config files"
+    - "scan S3 buckets for leaked credentials and sensitive data"
+    - "detect leaked private keys, database connection strings, and API tokens"
+    - "verify discovered credentials by attempting authentication"
+  never_use_for:
+    - "exploit database search (use searchsploit)"
+    - "S3 bucket discovery/brute-force (use s3scanner — trufflehog scans CONTENTS, not discovers buckets)"
+    - "web vulnerability scanning (use nuclei)"
+    - "password cracking (use hashcat or john)"
+  triggers:
+    - trufflehog
+    - secret scanning
+    - credential scanning
+    - leaked credentials
+    - leaked secrets
+    - API key scan
+    - git secrets
+    - secret detection
+  prefer_over: []
+
+see_also:
+  - tool: git-dumper
+    reason: Use git-dumper to extract a repo from an exposed .git directory, then use trufflehog scan_git on the extracted repo for automated secret detection.
+  - tool: s3scanner
+    reason: Use s3scanner to discover and test S3 bucket permissions. Use trufflehog scan_s3 to scan bucket contents for leaked secrets.
+  - tool: aws
+    reason: After trufflehog finds AWS credentials, use aws tool to enumerate and exploit the AWS account.
+
+methods:
+  scan_git:
+    description: "Scan a git repository for leaked secrets across all commits. Detects 800+ credential types including AWS keys, API tokens, passwords, private keys, database connection strings. Auto-verifies by attempting authentication."
+    when_to_use: "After cloning or dumping a git repo (via git-dumper or git clone) — scan the entire commit history for credentials that may have been committed and later removed (they persist in git history). Also works on remote GitHub/GitLab URLs."
+    params:
+      uri:
+        type: string
+        required: true
+        description: "Git repo — local path (/session/repo) or remote URL (https://github.com/org/repo)."
+      no_verification:
+        type: boolean
+        default: false
+        description: "Skip auto-verification (faster but no confirmation of credential validity)."
+      branch:
+        type: string
+        description: "Specific branch to scan (default: all branches)."
+      max_depth:
+        type: integer
+        description: "Maximum commit depth to scan."
+      timeout:
+        type: integer
+        default: 300
+        description: "Scan timeout in seconds."
+    returns:
+      secrets:
+        type: array
+        description: "Found secrets, each with: detector_type, verified, raw, source (file, commit, line)."
+      total_found:
+        type: integer
+        description: "Total secrets found."
+      verified_count:
+        type: integer
+        description: "Secrets confirmed valid by auto-verification."
+
+  scan_filesystem:
+    description: "Scan a filesystem directory for leaked secrets in files. Checks config files, scripts, logs, and other text files for credentials."
+    when_to_use: "On a compromised host — scan directories for credentials in config files (.env, .conf, .ini, .yaml, etc.). Also useful for scanning loot directories after data exfiltration."
+    params:
+      path:
+        type: string
+        required: true
+        description: "Directory path to scan."
+      no_verification:
+        type: boolean
+        default: false
+        description: "Skip auto-verification."
+      timeout:
+        type: integer
+        default: 300
+        description: "Scan timeout in seconds."
+    returns:
+      secrets:
+        type: array
+        description: "Found secrets with source file and line info."
+      total_found:
+        type: integer
+        description: "Total secrets found."
+
+  scan_s3:
+    description: "Scan an S3 bucket's contents for leaked secrets. Requires read access to the bucket."
+    when_to_use: "When you have read access to an S3 bucket (via discovered AWS credentials or public bucket) — scan all objects for leaked credentials."
+    params:
+      bucket:
+        type: string
+        required: true
+        description: "S3 bucket name or URI (e.g., 'my-bucket' or 's3://my-bucket')."
+      aws_access_key:
+        type: string
+        description: "AWS access key for authenticated access."
+      aws_secret_key:
+        type: string
+        description: "AWS secret key."
+      aws_region:
+        type: string
+        default: "us-east-1"
+        description: "AWS region."
+      timeout:
+        type: integer
+        default: 600
+        description: "Scan timeout in seconds."
+    returns:
+      secrets:
+        type: array
+        description: "Found secrets with S3 object key info."
+      total_found:
+        type: integer
+        description: "Total secrets found."
