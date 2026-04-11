@@ -5,12 +5,13 @@ Provides a foundation for building MCP servers that wrap security tools.
 """
 
 import asyncio
+import datetime
 import json
 import logging
 import os
+import re
 import subprocess
 import sys
-import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional
@@ -34,9 +35,17 @@ class ToolResult:
     data: Dict[str, Any] = field(default_factory=dict)
     raw_output: str = ""
     error: Optional[str] = None
+    error_class: Optional[str] = None  # "timeout" | "auth" | "network" | "permission" | "config" | "params" | "unknown"
+    retryable: bool = False
+    suggestions: List[str] = field(default_factory=list)
 
     def to_content(self) -> List[TextContent]:
-        """Convert result to MCP TextContent."""
+        """Convert result to MCP TextContent.
+
+        When suggestions is non-empty, they are appended after the error line.
+        When suggestions is empty, the format is identical to the original
+        (preserves backward compatibility for existing tools).
+        """
         if self.success:
             # Include raw_output in successful results when present
             result_data = dict(self.data)
@@ -44,7 +53,12 @@ class ToolResult:
                 result_data["raw_output"] = self.raw_output
             return [TextContent(type="text", text=json.dumps(result_data, indent=2))]
         else:
-            return [TextContent(type="text", text=f"Error: {self.error}\n\nRaw output:\n{self.raw_output}")]
+            parts = [f"Error: {self.error}"]
+            if self.suggestions:
+                parts.append("Suggestions: " + "; ".join(self.suggestions))
+            if self.raw_output:
+                parts.append(f"\nRaw output:\n{self.raw_output}")
+            return [TextContent(type="text", text="\n".join(parts))]
 
 
 @dataclass
@@ -89,6 +103,11 @@ class BaseMCPServer(ABC):
                 ...
     """
 
+    # Meta-parameters injected by the opensploit client that should be stripped
+    # before calling the handler — UNLESS the method's registered params include them
+    # (e.g., nmap and hydra have 'timeout' as a real param).
+    META_PARAMS = {"timeout", "clock_offset"}
+
     def __init__(self, name: str, description: str, version: str = "1.0.0"):
         self.name = name
         self.description = description
@@ -96,6 +115,81 @@ class BaseMCPServer(ABC):
         self.methods: Dict[str, MethodDefinition] = {}
         self.logger = logging.getLogger(f"mcp.{name}")
         self._server: Optional[Server] = None
+
+        # Register test-only methods when MCP_TEST_MODE is set
+        if os.environ.get("MCP_TEST_MODE"):
+            self.register_method(
+                name="verify_clock",
+                description="Return container's current time and FAKETIME status (test-only)",
+                params={},
+                handler=self._verify_clock,
+            )
+
+    async def _verify_clock(self) -> "ToolResult":
+        """Return the container's current time and FAKETIME configuration.
+
+        Only registered when MCP_TEST_MODE=1 is set.  Returns enough detail
+        to verify that libfaketime is working (or not installed).
+        """
+        faketime_val = os.environ.get("FAKETIME", "")
+        ld_preload_val = os.environ.get("LD_PRELOAD", "")
+
+        # Check if the libfaketime .so actually exists on disk
+        libfaketime_exists = False
+        if ld_preload_val:
+            libfaketime_exists = os.path.isfile(ld_preload_val)
+        else:
+            # Search common locations
+            import glob as _glob
+            hits = _glob.glob("/usr/lib/**/libfaketime.so.1", recursive=True)
+            libfaketime_exists = len(hits) > 0
+
+        return ToolResult(
+            success=True,
+            data={
+                "current_time": datetime.datetime.now().isoformat(),
+                "utc_time": datetime.datetime.utcnow().isoformat(),
+                "faketime": faketime_val,
+                "ld_preload": ld_preload_val,
+                "libfaketime_exists": libfaketime_exists,
+            },
+        )
+
+    def _classify_unhandled_error(self, returncode: int, output: str) -> tuple:
+        """Fallback classifier for universal CLI error patterns.
+
+        Checks the LAST line of output for Python exception class names.
+        In a Python traceback, the exception is always on the very last
+        line at column 0 (e.g., ``PermissionError: [Errno 13] ...``).
+        Checking only the last line avoids false positives from scan
+        output that mentions error class names in the middle.
+
+        Returns (error_class, retryable).  Defaults to ("unknown", False).
+        """
+        if not output:
+            return ("unknown", False)
+
+        # Get the last non-empty line — where Python puts the exception class
+        lines = output.strip().splitlines()
+        last_line = (lines[-1].strip()) if lines else ""
+
+        # Python tracebacks: exception class on the last line.
+        # Use 'in' to handle module-prefixed forms like asyncio.TimeoutError,
+        # OSError subclasses, etc. Safe because we only check the last line.
+        if "PermissionError" in last_line:
+            return ("permission", False)
+        if "TimeoutError" in last_line:
+            return ("timeout", True)
+        if "ConnectionRefusedError" in last_line:
+            return ("network", True)
+        if "FileNotFoundError" in last_line:
+            return ("config", False)
+
+        # "Connection refused" at start of any line (system-level, not in scan output)
+        if re.search(r"^Connection refused", output, re.MULTILINE):
+            return ("network", True)
+
+        return ("unknown", False)
 
     def register_method(
         self,
@@ -173,6 +267,11 @@ class BaseMCPServer(ABC):
     ) -> subprocess.CompletedProcess:
         """
         Run a shell command asynchronously.
+
+        .. deprecated::
+            Use :meth:`run_command_with_progress` instead.  It sends MCP
+            heartbeat notifications that prevent client-side idle timeouts
+            and supports ``timeout=None`` for unlimited duration.
 
         Args:
             cmd: Command and arguments as list
@@ -277,7 +376,7 @@ class BaseMCPServer(ABC):
     async def run_command_with_progress(
         self,
         cmd: List[str],
-        timeout: int = 300,
+        timeout: int | None = None,
         check: bool = False,
         progress_filter: Callable[[str], str | None] | None = None,
         heartbeat_interval: float = 30.0,
@@ -291,7 +390,9 @@ class BaseMCPServer(ABC):
 
         Args:
             cmd: Command and arguments as list.
-            timeout: Overall wall-clock timeout in seconds.
+            timeout: Overall wall-clock timeout in seconds, or ``None`` for
+                unlimited (the client controls the deadline via MCP request
+                cancellation).
             check: Raise ``ToolError`` on non-zero exit code.
             progress_filter: ``(line) -> message | None``.  Return a short
                 string to emit as a progress notification, or ``None`` to skip.
@@ -317,11 +418,11 @@ class BaseMCPServer(ABC):
 
         stdout_buf: list[str] = []
         stderr_buf: list[str] = []
-        last_progress_time = time.monotonic()
         progress_count = 0
 
         async def _read_stream(stream: asyncio.StreamReader, buf: list[str]) -> None:
-            nonlocal last_progress_time, progress_count
+            """Read lines from a stream, sending progress_filter matches as status."""
+            nonlocal progress_count
             while True:
                 line_bytes = await stream.readline()
                 if not line_bytes:
@@ -329,30 +430,31 @@ class BaseMCPServer(ABC):
                 line = line_bytes.decode("utf-8", errors="replace")
                 buf.append(line)
 
-                # Try caller-supplied filter
-                msg: str | None = None
+                # progress_filter is for meaningful status messages, NOT heartbeating
                 if progress_filter is not None:
                     msg = progress_filter(line)
+                    if msg is not None:
+                        progress_count += 1
+                        await self.send_progress(msg, progress=float(progress_count))
 
-                # Heartbeat if no filter match and enough time has elapsed
-                if msg is None:
-                    now = time.monotonic()
-                    if now - last_progress_time >= heartbeat_interval:
-                        msg = "Still running\u2026"
+        async def _heartbeat_loop() -> None:
+            """Send heartbeats on a timer, independent of tool output."""
+            nonlocal progress_count
+            while True:
+                await asyncio.sleep(heartbeat_interval)
+                progress_count += 1
+                await self.send_progress("Still running\u2026", progress=float(progress_count))
 
-                if msg is not None:
-                    progress_count += 1
-                    last_progress_time = time.monotonic()
-                    await self.send_progress(msg, progress=float(progress_count))
-
+        heartbeat_task = asyncio.create_task(_heartbeat_loop())
         try:
-            await asyncio.wait_for(
-                asyncio.gather(
-                    _read_stream(proc.stdout, stdout_buf),
-                    _read_stream(proc.stderr, stderr_buf),
-                ),
-                timeout=timeout,
+            gather_coro = asyncio.gather(
+                _read_stream(proc.stdout, stdout_buf),
+                _read_stream(proc.stderr, stderr_buf),
             )
+            if timeout is not None:
+                await asyncio.wait_for(gather_coro, timeout=timeout)
+            else:
+                await gather_coro
             await proc.wait()
         except asyncio.TimeoutError:
             try:
@@ -372,6 +474,12 @@ class BaseMCPServer(ABC):
             except ProcessLookupError:
                 pass
             raise
+        finally:
+            heartbeat_task.cancel()
+            try:
+                await heartbeat_task
+            except asyncio.CancelledError:
+                pass
 
         result = subprocess.CompletedProcess(
             args=cmd,
@@ -403,34 +511,97 @@ class BaseMCPServer(ABC):
             )
 
         method = self.methods[name]
+
+        # --- Meta-parameter stripping ---
+        # Strip known meta-params that the client sometimes passes inside args
+        # by mistake, but ONLY if the method doesn't declare them as real params.
+        arguments = dict(arguments)  # shallow copy to avoid mutating caller's dict
+        for meta in self.META_PARAMS:
+            if meta in arguments and meta not in method.params:
+                self.logger.debug(f"Stripped meta-param '{meta}' from {name} call")
+                del arguments[meta]
+
+        # --- Unknown parameter stripping ---
+        # Strip params not declared by the method to prevent **kwargs crashes.
+        # LLMs sometimes pass params meant for other methods (e.g., 'scripts'
+        # on service_scan when it belongs to vuln_scan). Log a warning so the
+        # issue is visible, but don't crash.
+        unknown = set(arguments.keys()) - set(method.params.keys())
+        if unknown:
+            self.logger.warning(
+                f"Stripped unknown params for {name}: {unknown}. "
+                f"Valid: {list(method.params.keys())}"
+            )
+            for key in unknown:
+                del arguments[key]
+
         self.logger.info(f"Handling call to {name} with args: {arguments}")
 
         try:
             result = await method.handler(**arguments)
 
             if isinstance(result, ToolResult):
+                # --- Fallback error classification ---
+                if not result.success and result.error_class is None:
+                    error_class, retryable = self._classify_unhandled_error(
+                        0, result.raw_output
+                    )
+                    result.error_class = error_class
+                    result.retryable = retryable
+
                 return CallToolResult(
                     content=result.to_content(),
                     isError=not result.success,
+                    structuredContent={
+                        "success": result.success,
+                        "error_class": result.error_class,
+                        "retryable": result.retryable,
+                        "suggestions": result.suggestions,
+                        "data": result.data,
+                    },
                 )
             else:
                 # Assume raw dict/string response
                 return CallToolResult(
                     content=[TextContent(type="text", text=json.dumps(result, indent=2) if isinstance(result, dict) else str(result))],
                     isError=False,
+                    structuredContent={
+                        "success": True,
+                        "error_class": None,
+                        "retryable": False,
+                        "suggestions": [],
+                        "data": result if isinstance(result, dict) else {"raw": str(result)},
+                    },
                 )
 
         except ToolError as e:
             self.logger.error(f"Tool error in {name}: {e}")
+            error_class, retryable = self._classify_unhandled_error(
+                0, e.details or ""
+            )
             return CallToolResult(
                 content=[TextContent(type="text", text=str(e))],
                 isError=True,
+                structuredContent={
+                    "success": False,
+                    "error_class": error_class,
+                    "retryable": retryable,
+                    "suggestions": [],
+                    "data": {},
+                },
             )
         except Exception as e:
             self.logger.exception(f"Unexpected error in {name}")
             return CallToolResult(
                 content=[TextContent(type="text", text=f"Internal error: {str(e)}")],
                 isError=True,
+                structuredContent={
+                    "success": False,
+                    "error_class": "unknown",
+                    "retryable": False,
+                    "suggestions": [],
+                    "data": {},
+                },
             )
 
     def _get_tools(self) -> List[Tool]:

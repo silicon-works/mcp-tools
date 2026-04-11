@@ -1,6 +1,6 @@
 name: nmap
 version: "7.98"
-description: "Network scanner (v7.98) for port discovery, service/version detection, OS fingerprinting, and NSE script-based vulnerability scanning. Supports TCP SYN/Connect/ACK/UDP scan types, 613 NSE scripts across categories (vuln, exploit, brute, auth, default, discovery, safe), timing templates T0-T5, and XML output parsing. Compiled with libssh2, openssl, lua 5.4. Requires privileged mode for SYN scans, UDP scans, and OS detection."
+description: "Network scanner (v7.98) for port discovery, service/version detection, OS fingerprinting, and NSE script-based vulnerability scanning. Supports TCP SYN/Connect/ACK/UDP/FIN/Window/NULL/Xmas/Maimon scan types, 613 NSE scripts across categories (vuln, exploit, brute, auth, default, discovery, safe), timing templates T0-T5, and XML output parsing. Compiled with libssh2, openssl, lua 5.4. Requires privileged mode for SYN scans, UDP scans, and OS detection. Custom NSE scripts can be written to /session/nmap-scripts/ and referenced by absolute path in vuln_scan's scripts parameter, enabling engagement-specific checks beyond nmap's built-in script library."
 image: "ghcr.io/silicon-works/mcp-tools-nmap:latest"
 image_size_mb: 150
 timeout_seconds: 600
@@ -21,10 +21,12 @@ routing:
     - "host discovery and ping sweep"
     - "network enumeration and initial reconnaissance"
     - "NSE vulnerability script scanning"
-    - "TCP SYN UDP ACK scan types"
+    - "TCP SYN UDP ACK FIN Window NULL Xmas Maimon scan types"
     - "determine what services are running on a target"
     - "find open ports on IP address or CIDR range"
     - "identify local network interfaces and LHOST IP"
+    - "run custom NSE scripts from /session/nmap-scripts/"
+    - "engagement-specific vulnerability checks with custom NSE scripts"
   never_use_for:
     - "web fuzzing (use ffuf)"
     - "SQL injection (use sqlmap)"
@@ -38,6 +40,14 @@ routing:
     - "network scan"
     - "open ports"
     - "what services"
+    - "custom NSE script"
+    - "custom nmap script"
+    - "fast scan"
+    - "stealth scan"
+    - "evasion"
+    - "decoy scan"
+    - "rate limit"
+    - "min-rate"
   prefer_over:
     - "masscan"  # More reliable, better service detection
 
@@ -60,13 +70,18 @@ resources:
 
 methods:
   port_scan:
-    description: "Scan for open ports on a target using the specified scan technique. Runs nmap with XML output parsing. Supports TCP Connect (-sT, unprivileged), SYN stealth (-sS, requires privileged), UDP (-sU, requires privileged, slower), and ACK (-sA, requires privileged, for firewall rule detection). Results include port number, state (open/closed/filtered), protocol, and basic service name."
-    when_to_use: "The very first step in any engagement — run this to discover what ports are open and what services are exposed. Use tcp_connect scan type if running unprivileged, syn for faster stealth scanning with privileges. Scan common ports first (default 1-1000), then expand to all 65535 if needed. For targets behind a firewall that filter ICMP, the scan may report 'host down' — use skip_discovery=true (-Pn) to bypass host discovery and scan anyway. Follow up open ports with service_scan for version detection."
+    description: "Scan for open ports on a target using the specified scan technique. Runs nmap with XML output parsing. Supports TCP Connect (-sT, unprivileged), SYN stealth (-sS), UDP (-sU, slower), ACK (-sA, firewall rule detection), FIN (-sF, stealth), Window (-sW, like ACK with window analysis), NULL (-sN, no flags), Xmas (-sX, FIN/PSH/URG), and Maimon (-sM, FIN/ACK). All except tcp_connect require privileged mode. Results include port number, state (open/closed/filtered), protocol, and basic service name."
+    when_to_use: "The very first step in any engagement — run this to discover what ports are open and what services are exposed. Use tcp_connect scan type if running unprivileged, syn for faster stealth scanning with privileges. Scan common ports first (default 1-1000), then expand to all 65535 if needed. For targets behind a firewall that filter ICMP, the scan may report 'host down' — use skip_discovery=true (-Pn) to bypass host discovery and scan anyway. Follow up open ports with service_scan for version detection. Use min_rate for fast scans on reliable networks (e.g., HTB labs). Use extra_args for advanced evasion techniques like decoy scans (-D RND:5), fragmentation (-f), or source port spoofing (--source-port 53)."
     requires_privileged:
       tcp_connect: false
       syn: true
       udp: true
       ack: true
+      fin: true
+      window: true
+      null: true
+      xmas: true
+      maimon: true
     params:
       target:
         type: string
@@ -78,9 +93,9 @@ methods:
         description: "Port specification. Formats: single port '80', list '22,80,443,8080', range '1-1000', all '1-65535', combined 'T:80,443,U:53,161' (TCP and UDP). Default scans ports 1-1000. Use '1-65535' for comprehensive scan (slower). Common quick targets: '21,22,23,25,53,80,110,111,135,139,143,443,445,993,995,1723,3306,3389,5900,8080'."
       scan_type:
         type: enum
-        values: [tcp_connect, syn, udp, ack]
+        values: [tcp_connect, syn, udp, ack, fin, window, null, xmas, maimon]
         default: tcp_connect
-        description: "Scan technique: 'tcp_connect' (-sT, completes TCP handshake, unprivileged, logged by target), 'syn' (-sS, half-open stealth scan, requires privileged, faster and less detectable), 'udp' (-sU, UDP scan, requires privileged, much slower — combine with specific ports), 'ack' (-sA, ACK scan, requires privileged, maps firewall rules, does NOT find open ports — only filtered/unfiltered)."
+        description: "Scan technique: 'tcp_connect' (-sT, completes TCP handshake, unprivileged, logged by target), 'syn' (-sS, half-open stealth scan, requires privileged, faster and less detectable), 'udp' (-sU, UDP scan, requires privileged, much slower — combine with specific ports), 'ack' (-sA, ACK scan, requires privileged, maps firewall rules, does NOT find open ports — only filtered/unfiltered), 'fin' (-sF, FIN scan, stealthy — sets only TCP FIN bit, evades non-stateful firewalls), 'window' (-sW, Window scan, like ACK but uses TCP window size to distinguish open/closed), 'null' (-sN, NULL scan, sends packet with no TCP flags set, evades non-stateful firewalls), 'xmas' (-sX, Xmas scan, sets FIN/PSH/URG flags, stealthy against non-stateful firewalls), 'maimon' (-sM, Maimon scan, FIN/ACK probe, some BSD systems drop packet for open ports)."
       timing:
         type: enum
         values: [paranoid, sneaky, polite, normal, aggressive, insane]
@@ -93,6 +108,39 @@ methods:
       top_ports:
         type: integer
         description: "Scan the N most common ports instead of a range. Mutually exclusive with 'ports'. Common values: 100 (fast), 1000 (thorough)."
+      min_rate:
+        type: integer
+        description: "Minimum packets per second (--min-rate). Speeds up scans on reliable networks. Common values: 1000 (fast), 5000 (aggressive), 10000 (insane). Example: min_rate=5000 with timing=aggressive for fast lab scanning."
+      max_rate:
+        type: integer
+        description: "Maximum packets per second (--max-rate). Limits scan speed to avoid detection or network overload. Use for stealth or when scanning production networks."
+      max_retries:
+        type: integer
+        description: "Maximum probe retransmissions (--max-retries). Default is 10. Use 1-2 for faster scans on reliable networks, 0 for no retries."
+      no_dns:
+        type: boolean
+        default: false
+        description: "Skip DNS resolution (-n). Faster when you already have IP addresses and don't need hostnames. Recommended for HTB/lab environments."
+      open_only:
+        type: boolean
+        default: false
+        description: "Only show open ports (--open). Filters out closed/filtered ports from output for cleaner results."
+      reason:
+        type: boolean
+        default: false
+        description: "Show reason each port is in its state (--reason). Useful for understanding firewall behavior (e.g., 'syn-ack' vs 'no-response')."
+      host_timeout:
+        type: string
+        description: "Max time per host (--host-timeout). Examples: '30s', '5m', '1h'. Skips hosts that take too long. Useful for subnet scans where some hosts are slow."
+      exclude:
+        type: string
+        description: "Hosts to exclude from scan (--exclude). Comma-separated IPs or CIDR ranges. Example: '10.10.10.1,10.10.10.254' to skip gateways."
+      input_file:
+        type: string
+        description: "Read targets from file (-iL). Path to a file with one target per line. Can reference /session/ files (e.g., '/session/targets.txt')."
+      extra_args:
+        type: string
+        description: "Additional nmap flags appended to the command. Use for flags not exposed as named parameters. Common examples: '-D RND:5' (decoy scan), '-f' (fragment packets), '--source-port 53' (spoof source port), '--data-length 50' (append random data), '-g 53' (source port alias), '--spoof-mac 0' (random MAC). Flags are split by whitespace and appended safely."
     returns:
       open_ports:
         type: array
@@ -106,7 +154,7 @@ methods:
 
   service_scan:
     description: "Probe open ports to identify service names, product names, and version numbers using nmap's -sV flag. Sends service-specific probes and matches responses against nmap's signature database. Returns structured service info: service name (e.g., 'http', 'ssh'), product (e.g., 'Apache httpd', 'OpenSSH'), version (e.g., '2.4.41', '8.2p1'), and extra info (e.g., 'Ubuntu 4ubuntu0.3', 'protocol 2.0'). Timeout is 600s (10 min) as version detection can be slow."
-    when_to_use: "After port_scan identifies open ports. Version information is critical for: finding CVEs (e.g., Apache 2.4.49 → CVE-2021-41773), choosing exploit tools, identifying technology stack. Always run this on all discovered open ports before moving to vulnerability scanning. Pass the open ports from port_scan results as a comma-separated list."
+    when_to_use: "After port_scan identifies open ports. Version information is critical for: finding CVEs (e.g., Apache 2.4.49 → CVE-2021-41773), choosing exploit tools, identifying technology stack. Always run this on all discovered open ports before moving to vulnerability scanning. Pass the open ports from port_scan results as a comma-separated list. Use default_scripts=true to also run safe default NSE scripts (-sC) for additional enumeration alongside version detection."
     requires_privileged: true
     params:
       target:
@@ -124,6 +172,21 @@ methods:
       version_intensity:
         type: integer
         description: "Version detection probe intensity 0-9. Default uses nmap's default 7. Use 2 for fast scan, 9 for thorough."
+      no_dns:
+        type: boolean
+        default: false
+        description: "Skip DNS resolution (-n). Faster when you already have IP addresses."
+      open_only:
+        type: boolean
+        default: false
+        description: "Only show open ports (--open). Filters out closed/filtered ports from output."
+      default_scripts:
+        type: boolean
+        default: false
+        description: "Run default safe scripts alongside version detection (-sC). Equivalent to --script=default. Adds banner grabbing, service enumeration, and safe checks. Combines -sV and -sC for thorough service identification."
+      extra_args:
+        type: string
+        description: "Additional nmap flags appended to the command. Common examples: '--min-rate 5000' (faster probing), '-n --open' (skip DNS, open only). Flags are split by whitespace and appended safely."
     returns:
       services_summary:
         type: array
@@ -145,6 +208,13 @@ methods:
         type: boolean
         default: false
         description: "Skip host discovery (-Pn). Use when target filters ICMP and nmap reports 'host seems down'."
+      no_dns:
+        type: boolean
+        default: false
+        description: "Skip DNS resolution (-n). Faster when you already have IP addresses."
+      extra_args:
+        type: string
+        description: "Additional nmap flags appended to the command. Flags are split by whitespace and appended safely."
     returns:
       os_summary:
         type: object
@@ -155,7 +225,7 @@ methods:
 
   vuln_scan:
     description: "Run NSE (Nmap Scripting Engine) scripts against a target with service version detection (-sV). Nmap has 613 NSE scripts across categories: 'vuln' (vulnerability checks with CVE references), 'exploit' (active exploitation attempts), 'brute' (brute-force login attacks), 'auth' (authentication bypass checks), 'default' (safe default scripts, same as -sC), 'discovery' (active service enumeration), 'safe' (non-intrusive information gathering). Scripts can also be specified individually (e.g., 'http-shellshock', 'smb-vuln-ms17-010'). Timeout is 900s (15 min) as scripts can be slow. Results are filtered for findings containing 'vulnerable', 'CVE-', 'exploit', 'critical', or 'high'."
-    when_to_use: "After service_scan identifies specific services and versions. Use the 'vuln' category for general vulnerability scanning. For targeted checks, use specific scripts: 'smb-vuln-ms17-010' (EternalBlue), 'http-shellshock' (Shellshock), 'ssl-heartbleed' (Heartbleed), 'http-vuln-cve2017-5638' (Struts2). Can combine categories: 'vuln and safe' for non-intrusive vuln checks. For web-specific vulnerabilities, prefer nuclei which has more templates. NSE vuln scanning is best for: SMB vulnerabilities, SSL/TLS issues, and service-specific CVEs."
+    when_to_use: "After service_scan identifies specific services and versions. Use the 'vuln' category for general vulnerability scanning. For targeted checks, use specific scripts: 'smb-vuln-ms17-010' (EternalBlue), 'http-shellshock' (Shellshock), 'ssl-heartbleed' (Heartbleed), 'http-vuln-cve2017-5638' (Struts2). Can combine categories: 'vuln and safe' for non-intrusive vuln checks. For web-specific vulnerabilities, prefer nuclei which has more templates. NSE vuln scanning is best for: SMB vulnerabilities, SSL/TLS issues, and service-specific CVEs. For engagement-specific checks not covered by nmap's built-in 613 scripts, write a custom NSE script to /session/nmap-scripts/ and pass its absolute path as the scripts parameter. This is useful for testing specific CVEs, custom service probes, or environment-specific checks. The /session/ directory is shared across all containers in the engagement."
     requires_privileged: true
     params:
       target:
@@ -169,7 +239,7 @@ methods:
       scripts:
         type: string
         default: "vuln"
-        description: "NSE script specification. Categories: 'vuln' (vulnerability detection), 'exploit' (active exploitation), 'brute' (brute-force), 'auth' (auth bypass), 'default' (safe defaults), 'discovery' (enumeration), 'safe' (non-intrusive). Specific scripts: 'smb-vuln-ms17-010', 'http-shellshock', 'ssl-heartbleed', 'ftp-anon'. Combine with 'and'/'or'/'not': 'vuln and safe', 'smb-vuln-*'. Comma-separated for multiple: 'http-shellshock,http-vuln-cve2017-5638'."
+        description: "NSE script specification. Categories: 'vuln' (vulnerability detection), 'exploit' (active exploitation), 'brute' (brute-force), 'auth' (auth bypass), 'default' (safe defaults), 'discovery' (enumeration), 'safe' (non-intrusive). Specific scripts: 'smb-vuln-ms17-010', 'http-shellshock', 'ssl-heartbleed', 'ftp-anon'. Combine with 'and'/'or'/'not': 'vuln and safe', 'smb-vuln-*'. Comma-separated for multiple: 'http-shellshock,http-vuln-cve2017-5638'. Custom NSE scripts: write .nse files to /session/nmap-scripts/ and reference by absolute path (e.g., '/session/nmap-scripts/check-cve-2024-1234.nse'). Multiple custom scripts can be comma-separated or mixed with built-in scripts: '/session/nmap-scripts/custom.nse,vuln'."
       script_args:
         type: string
         description: "Arguments for NSE scripts (e.g., 'userdb=users.txt,passdb=pass.txt' for brute scripts)"
@@ -177,6 +247,13 @@ methods:
         type: boolean
         default: false
         description: "Skip host discovery (-Pn). Use when target filters ICMP and nmap reports 'host seems down'."
+      no_dns:
+        type: boolean
+        default: false
+        description: "Skip DNS resolution (-n). Faster when you already have IP addresses."
+      extra_args:
+        type: string
+        description: "Additional nmap flags appended to the command. Common examples: '--min-rate 5000' (faster), '--script-timeout 30s' (limit per-script time), '-n' (skip DNS). Flags are split by whitespace and appended safely."
     returns:
       vulnerabilities:
         type: array
@@ -201,6 +278,19 @@ methods:
         values: [paranoid, sneaky, polite, normal, aggressive, insane]
         default: normal
         description: "Timing template"
+      no_dns:
+        type: boolean
+        default: false
+        description: "Skip DNS resolution (-n). Faster for large subnet sweeps when you don't need hostnames."
+      exclude:
+        type: string
+        description: "Hosts to exclude from scan (--exclude). Comma-separated IPs or CIDR ranges. Example: '10.10.10.1,10.10.10.254' to skip gateways."
+      input_file:
+        type: string
+        description: "Read targets from file (-iL). Path to a file with one target per line. Can reference /session/ files (e.g., '/session/targets.txt')."
+      extra_args:
+        type: string
+        description: "Additional nmap flags appended to the command. Common examples: '--min-rate 1000' (faster), '-PE' (ICMP echo only), '-PA 80,443' (TCP ACK discovery). Flags are split by whitespace and appended safely."
     returns:
       live_hosts:
         type: array
@@ -212,7 +302,10 @@ methods:
   get_interfaces:
     description: "Get local network interfaces and IP addresses using 'ip -j addr'. Returns all interfaces with their IPv4/IPv6 addresses, MAC addresses, and link state. Automatically identifies the best LHOST candidate (first non-loopback IPv4 address). Does NOT require network access or privileged mode."
     when_to_use: "Before setting up reverse shells, listeners, or any tool that needs LHOST (your IP address). The recommended_lhost value is the Docker container's IP on the engagement network — use this for reverse shell callbacks, netcat listeners, and Metasploit LHOST. Also useful for understanding the container's network connectivity."
-    params: {}
+    params:
+      extra_args:
+        type: string
+        description: "Additional flags (currently unused for get_interfaces, which uses 'ip addr' not nmap). Reserved for future use."
     returns:
       interfaces:
         type: array
