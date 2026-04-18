@@ -50,5 +50,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends git && \
 # Copy MCP server code
 COPY tools/impacket/mcp-server.py .
 
-# MCP servers communicate via stdio - no entrypoint needed (stateless tool)
-CMD ["python3", "mcp-server.py"]
+# Entrypoint for dynamic faketime discovery (libfaketime installed above)
+COPY packages/mcp-common/entrypoint.sh /app/entrypoint.sh
+RUN chmod +x /app/entrypoint.sh
+
+CMD ["/app/entrypoint.sh"]
