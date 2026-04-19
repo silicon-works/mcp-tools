@@ -2,10 +2,10 @@ name: bloodyad
 version: "2.1.7"
 description: >
   Active Directory privilege escalation via LDAP using bloodyAD.
-  20 methods covering ACL abuse (GenericAll, WriteDacl), RBCD delegation,
+  27 methods covering ACL abuse (GenericAll, WriteDacl), RBCD delegation,
   shadow credentials, password resets, group manipulation, DCSync rights,
-  UAC flag modification, and AD object enumeration/search.
-  Supports both NTLM and Kerberos authentication with ccache files.
+  UAC flag modification, DNS record management, object deletion, and AD enumeration/search.
+  Supports NTLM, Kerberos (ccache), and certificate (PKINIT) authentication.
 
 image: ghcr.io/silicon-works/mcp-tools-bloodyad:latest
 image_size_mb: 650
@@ -49,6 +49,9 @@ routing:
     - "Search AD with LDAP filters"
     - "Find writable AD objects"
     - "Set ownership of AD objects (WriteOwner abuse)"
+    - "Remove DNS records from AD-integrated DNS zones"
+    - "Delete AD objects (cleanup machine accounts, users)"
+    - "Authenticate to AD with certificates (PKINIT) after ADCS abuse"
   never_use_for:
     - "Network scanning or port discovery (use nmap)"
     - "Kerberos ticket requests (use impacket get_tgt/get_st)"
@@ -72,6 +75,10 @@ routing:
     - TRUSTED_TO_AUTH_FOR_DELEGATION
     - AD ACL abuse
     - LDAP privesc
+    - remove DNS record
+    - delete AD object
+    - certificate auth LDAP
+    - PKINIT LDAP
   prefer_over:
     - impacket  # for ACL/RBCD/shadow creds operations (bloodyAD has dedicated methods vs generic LDAP)
 
@@ -95,8 +102,11 @@ methods:
       password: { type: string, description: "Auth password or hash" }
       kerberos: { type: boolean, default: false, description: "Use Kerberos auth" }
       ccache_path: { type: string, description: "Path to ccache file" }
+      certificate: { type: string, description: "Certificate auth: 'key_path:cert_path' for PKINIT after ADCS abuse" }
+      format: { type: string, enum: [b64, hex, aes, rc4, default], description: "Format for --password or -k keyfile" }
       target: { type: string, required: true, description: "Target user sAMAccountName" }
       new_password: { type: string, required: true, description: "New password" }
+      extra_args: { type: string, description: "Additional bloodyAD flags as a single string" }
 
   set_owner:
     description: "Change ownership of an AD object (WriteOwner required)"
@@ -109,8 +119,11 @@ methods:
       password: { type: string, description: "Auth password or hash" }
       kerberos: { type: boolean, default: false, description: "Use Kerberos auth" }
       ccache_path: { type: string, description: "Path to ccache file" }
+      certificate: { type: string, description: "Certificate auth: 'key_path:cert_path' for PKINIT after ADCS abuse" }
+      format: { type: string, enum: [b64, hex, aes, rc4, default], description: "Format for --password or -k keyfile" }
       target: { type: string, required: true, description: "Target object" }
       owner: { type: string, required: true, description: "New owner" }
+      extra_args: { type: string, description: "Additional bloodyAD flags as a single string" }
 
   set_object:
     description: "Add/replace/delete attributes on AD objects"
@@ -123,9 +136,12 @@ methods:
       password: { type: string, description: "Auth password or hash" }
       kerberos: { type: boolean, default: false, description: "Use Kerberos auth" }
       ccache_path: { type: string, description: "Path to ccache file" }
+      certificate: { type: string, description: "Certificate auth: 'key_path:cert_path' for PKINIT after ADCS abuse" }
+      format: { type: string, enum: [b64, hex, aes, rc4, default], description: "Format for --password or -k keyfile" }
       target: { type: string, required: true, description: "Target object" }
       attribute: { type: string, required: true, description: "Attribute name" }
       values: { type: array, description: "Values to set (omit to delete)" }
+      extra_args: { type: string, description: "Additional bloodyAD flags as a single string" }
 
   add_genericall:
     description: "Grant full control (GenericAll) to a principal on a target (WriteDacl required)"
@@ -138,8 +154,11 @@ methods:
       password: { type: string, description: "Auth password or hash" }
       kerberos: { type: boolean, default: false, description: "Use Kerberos auth" }
       ccache_path: { type: string, description: "Path to ccache file" }
+      certificate: { type: string, description: "Certificate auth: 'key_path:cert_path' for PKINIT after ADCS abuse" }
+      format: { type: string, enum: [b64, hex, aes, rc4, default], description: "Format for --password or -k keyfile" }
       target: { type: string, required: true, description: "Target object" }
       trustee: { type: string, required: true, description: "Principal to grant access to" }
+      extra_args: { type: string, description: "Additional bloodyAD flags as a single string" }
 
   add_rbcd:
     description: "Configure RBCD on target to allow impersonation via a controlled service account"
@@ -152,8 +171,11 @@ methods:
       password: { type: string, description: "Auth password or hash" }
       kerberos: { type: boolean, default: false, description: "Use Kerberos auth" }
       ccache_path: { type: string, description: "Path to ccache file" }
+      certificate: { type: string, description: "Certificate auth: 'key_path:cert_path' for PKINIT after ADCS abuse" }
+      format: { type: string, enum: [b64, hex, aes, rc4, default], description: "Format for --password or -k keyfile" }
       target: { type: string, required: true, description: "Target machine" }
       service: { type: string, required: true, description: "Attacker service account" }
+      extra_args: { type: string, description: "Additional bloodyAD flags as a single string" }
 
   add_shadow_credentials:
     description: "Add Key Credentials for shadow credentials attack"
@@ -166,8 +188,11 @@ methods:
       password: { type: string, description: "Auth password or hash" }
       kerberos: { type: boolean, default: false, description: "Use Kerberos auth" }
       ccache_path: { type: string, description: "Path to ccache file" }
+      certificate: { type: string, description: "Certificate auth: 'key_path:cert_path' for PKINIT after ADCS abuse" }
+      format: { type: string, enum: [b64, hex, aes, rc4, default], description: "Format for --password or -k keyfile" }
       target: { type: string, required: true, description: "Target account" }
       cert_path: { type: string, description: "Output path for certificate" }
+      extra_args: { type: string, description: "Additional bloodyAD flags as a single string" }
 
   add_group_member:
     description: "Add a principal to an AD group"
@@ -180,8 +205,11 @@ methods:
       password: { type: string, description: "Auth password or hash" }
       kerberos: { type: boolean, default: false, description: "Use Kerberos auth" }
       ccache_path: { type: string, description: "Path to ccache file" }
+      certificate: { type: string, description: "Certificate auth: 'key_path:cert_path' for PKINIT after ADCS abuse" }
+      format: { type: string, enum: [b64, hex, aes, rc4, default], description: "Format for --password or -k keyfile" }
       group: { type: string, required: true, description: "Target group" }
       member: { type: string, required: true, description: "Member to add" }
+      extra_args: { type: string, description: "Additional bloodyAD flags as a single string" }
 
   add_computer:
     description: "Create a machine account in AD"
@@ -194,8 +222,11 @@ methods:
       password: { type: string, description: "Auth password or hash" }
       kerberos: { type: boolean, default: false, description: "Use Kerberos auth" }
       ccache_path: { type: string, description: "Path to ccache file" }
+      certificate: { type: string, description: "Certificate auth: 'key_path:cert_path' for PKINIT after ADCS abuse" }
+      format: { type: string, enum: [b64, hex, aes, rc4, default], description: "Format for --password or -k keyfile" }
       hostname: { type: string, required: true, description: "Computer name (no trailing $)" }
       computer_pass: { type: string, required: true, description: "Password for machine account" }
+      extra_args: { type: string, description: "Additional bloodyAD flags as a single string" }
 
   add_dcsync:
     description: "Grant DCSync (Replicating Directory Changes) rights to a principal"
@@ -208,7 +239,10 @@ methods:
       password: { type: string, description: "Auth password or hash" }
       kerberos: { type: boolean, default: false, description: "Use Kerberos auth" }
       ccache_path: { type: string, description: "Path to ccache file" }
+      certificate: { type: string, description: "Certificate auth: 'key_path:cert_path' for PKINIT after ADCS abuse" }
+      format: { type: string, enum: [b64, hex, aes, rc4, default], description: "Format for --password or -k keyfile" }
       trustee: { type: string, required: true, description: "Principal to grant DCSync to" }
+      extra_args: { type: string, description: "Additional bloodyAD flags as a single string" }
 
   add_uac:
     description: "Add UAC flags to user/computer objects"
@@ -221,12 +255,15 @@ methods:
       password: { type: string, description: "Auth password or hash" }
       kerberos: { type: boolean, default: false, description: "Use Kerberos auth" }
       ccache_path: { type: string, description: "Path to ccache file" }
+      certificate: { type: string, description: "Certificate auth: 'key_path:cert_path' for PKINIT after ADCS abuse" }
+      format: { type: string, enum: [b64, hex, aes, rc4, default], description: "Format for --password or -k keyfile" }
       target: { type: string, required: true, description: "Target object" }
       flags: { type: array, required: true, description: "UAC flags to add" }
+      extra_args: { type: string, description: "Additional bloodyAD flags as a single string" }
 
   add_dns_record:
     description: "Add a DNS record to the AD-integrated DNS zone"
-    when_to_use: "To add DNS records for phishing, MITM attacks, or pointing a hostname to an attacker-controlled IP"
+    when_to_use: "To add DNS records for phishing, MITM attacks, or pointing a hostname to an attacker-controlled IP. Supports A, AAAA, CNAME, MX, PTR, SRV, TXT record types."
     required_ports: [389, 636]
     params:
       host: { type: string, required: true, description: "DC hostname or IP" }
@@ -235,11 +272,19 @@ methods:
       password: { type: string, description: "Auth password or hash" }
       kerberos: { type: boolean, default: false, description: "Use Kerberos auth" }
       ccache_path: { type: string, description: "Path to ccache file" }
+      certificate: { type: string, description: "Certificate auth: 'key_path:cert_path' for PKINIT after ADCS abuse" }
+      format: { type: string, enum: [b64, hex, aes, rc4, default], description: "Format for --password or -k keyfile" }
       name: { type: string, required: true, description: "DNS record name" }
       data: { type: string, required: true, description: "DNS record data (e.g., IP address)" }
-      dnstype: { type: string, default: "A", description: "DNS record type (A, AAAA, CNAME, TXT)" }
+      dnstype: { type: string, enum: [A, AAAA, CNAME, MX, PTR, SRV, TXT], default: "A", description: "DNS record type" }
       zone: { type: string, description: "DNS zone (default: domain zone)" }
       ttl: { type: integer, description: "TTL in seconds" }
+      port: { type: integer, description: "Listening port of the service (SRV records only)" }
+      priority: { type: integer, description: "Priority of a DNS SRV record (lower = preferred)" }
+      weight: { type: integer, description: "Weight of a DNS SRV record (higher = preferred at same priority)" }
+      preference: { type: integer, description: "MX record preference (lower = preferred)" }
+      forest: { type: boolean, default: false, description: "Register DNS record in forest instead of domain" }
+      extra_args: { type: string, description: "Additional bloodyAD flags as a single string" }
 
   add_user:
     description: "Create a new user account in the domain"
@@ -252,9 +297,12 @@ methods:
       password: { type: string, description: "Auth password or hash" }
       kerberos: { type: boolean, default: false, description: "Use Kerberos auth" }
       ccache_path: { type: string, description: "Path to ccache file" }
+      certificate: { type: string, description: "Certificate auth: 'key_path:cert_path' for PKINIT after ADCS abuse" }
+      format: { type: string, enum: [b64, hex, aes, rc4, default], description: "Format for --password or -k keyfile" }
       sam_account_name: { type: string, required: true, description: "sAMAccountName for the new user" }
       new_password: { type: string, required: true, description: "Password for the new user" }
       ou: { type: string, description: "Organizational Unit DN" }
+      extra_args: { type: string, description: "Additional bloodyAD flags as a single string" }
 
   get_object:
     description: "Read LDAP attributes of an AD object"
@@ -267,8 +315,11 @@ methods:
       password: { type: string, description: "Auth password or hash" }
       kerberos: { type: boolean, default: false, description: "Use Kerberos auth" }
       ccache_path: { type: string, description: "Path to ccache file" }
+      certificate: { type: string, description: "Certificate auth: 'key_path:cert_path' for PKINIT after ADCS abuse" }
+      format: { type: string, enum: [b64, hex, aes, rc4, default], description: "Format for --password or -k keyfile" }
       target: { type: string, required: true, description: "Target object" }
       attr: { type: string, description: "Comma-separated attributes" }
+      extra_args: { type: string, description: "Additional bloodyAD flags as a single string" }
 
   get_children:
     description: "List child objects of an AD container/OU"
@@ -281,8 +332,11 @@ methods:
       password: { type: string, description: "Auth password or hash" }
       kerberos: { type: boolean, default: false, description: "Use Kerberos auth" }
       ccache_path: { type: string, description: "Path to ccache file" }
+      certificate: { type: string, description: "Certificate auth: 'key_path:cert_path' for PKINIT after ADCS abuse" }
+      format: { type: string, enum: [b64, hex, aes, rc4, default], description: "Format for --password or -k keyfile" }
       target: { type: string, description: "Parent object (default: domain)" }
       otype: { type: string, description: "Object class filter" }
+      extra_args: { type: string, description: "Additional bloodyAD flags as a single string" }
 
   get_search:
     description: "Search AD with LDAP filter"
@@ -295,8 +349,12 @@ methods:
       password: { type: string, description: "Auth password or hash" }
       kerberos: { type: boolean, default: false, description: "Use Kerberos auth" }
       ccache_path: { type: string, description: "Path to ccache file" }
+      certificate: { type: string, description: "Certificate auth: 'key_path:cert_path' for PKINIT after ADCS abuse" }
+      format: { type: string, enum: [b64, hex, aes, rc4, default], description: "Format for --password or -k keyfile" }
       filter: { type: string, required: true, description: "LDAP filter" }
       attr: { type: string, description: "Comma-separated attributes" }
+      resolve_sd: { type: boolean, default: false, description: "Resolve security descriptor permissions in results" }
+      extra_args: { type: string, description: "Additional bloodyAD flags as a single string" }
 
   get_writable:
     description: "Find AD objects writable by the current user"
@@ -309,8 +367,11 @@ methods:
       password: { type: string, description: "Auth password or hash" }
       kerberos: { type: boolean, default: false, description: "Use Kerberos auth" }
       ccache_path: { type: string, description: "Path to ccache file" }
+      certificate: { type: string, description: "Certificate auth: 'key_path:cert_path' for PKINIT after ADCS abuse" }
+      format: { type: string, enum: [b64, hex, aes, rc4, default], description: "Format for --password or -k keyfile" }
       otype: { type: string, default: "ALL", description: "Object type filter" }
       right: { type: string, default: "ALL", description: "Right type filter" }
+      extra_args: { type: string, description: "Additional bloodyAD flags as a single string" }
 
   get_membership:
     description: "List all groups a target belongs to (recursive)"
@@ -323,7 +384,10 @@ methods:
       password: { type: string, description: "Auth password or hash" }
       kerberos: { type: boolean, default: false, description: "Use Kerberos auth" }
       ccache_path: { type: string, description: "Path to ccache file" }
+      certificate: { type: string, description: "Certificate auth: 'key_path:cert_path' for PKINIT after ADCS abuse" }
+      format: { type: string, enum: [b64, hex, aes, rc4, default], description: "Format for --password or -k keyfile" }
       target: { type: string, required: true, description: "Target object" }
+      extra_args: { type: string, description: "Additional bloodyAD flags as a single string" }
 
   get_dnsdump:
     description: "Dump all DNS records from the AD-integrated DNS zone"
@@ -336,6 +400,12 @@ methods:
       password: { type: string, description: "Auth password or hash" }
       kerberos: { type: boolean, default: false, description: "Use Kerberos auth" }
       ccache_path: { type: string, description: "Path to ccache file" }
+      certificate: { type: string, description: "Certificate auth: 'key_path:cert_path' for PKINIT after ADCS abuse" }
+      format: { type: string, enum: [b64, hex, aes, rc4, default], description: "Format for --password or -k keyfile" }
+      zone: { type: string, description: "Only print records in this DNS zone" }
+      no_detail: { type: boolean, default: false, description: "Exclude system records (_ldap, _kerberos, @, etc.)" }
+      transitive: { type: boolean, default: false, description: "Fetch DNS records across AD trust boundaries" }
+      extra_args: { type: string, description: "Additional bloodyAD flags as a single string" }
 
   get_trusts:
     description: "Enumerate all Active Directory trust relationships"
@@ -348,6 +418,9 @@ methods:
       password: { type: string, description: "Auth password or hash" }
       kerberos: { type: boolean, default: false, description: "Use Kerberos auth" }
       ccache_path: { type: string, description: "Path to ccache file" }
+      certificate: { type: string, description: "Certificate auth: 'key_path:cert_path' for PKINIT after ADCS abuse" }
+      format: { type: string, enum: [b64, hex, aes, rc4, default], description: "Format for --password or -k keyfile" }
+      extra_args: { type: string, description: "Additional bloodyAD flags as a single string" }
 
   remove_genericall:
     description: "Remove GenericAll ACE from a target (cleanup)"
@@ -360,8 +433,11 @@ methods:
       password: { type: string, description: "Auth password or hash" }
       kerberos: { type: boolean, default: false, description: "Use Kerberos auth" }
       ccache_path: { type: string, description: "Path to ccache file" }
+      certificate: { type: string, description: "Certificate auth: 'key_path:cert_path' for PKINIT after ADCS abuse" }
+      format: { type: string, enum: [b64, hex, aes, rc4, default], description: "Format for --password or -k keyfile" }
       target: { type: string, required: true, description: "Target object" }
       trustee: { type: string, required: true, description: "Trustee to remove" }
+      extra_args: { type: string, description: "Additional bloodyAD flags as a single string" }
 
   remove_rbcd:
     description: "Remove RBCD delegation (cleanup)"
@@ -374,8 +450,11 @@ methods:
       password: { type: string, description: "Auth password or hash" }
       kerberos: { type: boolean, default: false, description: "Use Kerberos auth" }
       ccache_path: { type: string, description: "Path to ccache file" }
+      certificate: { type: string, description: "Certificate auth: 'key_path:cert_path' for PKINIT after ADCS abuse" }
+      format: { type: string, enum: [b64, hex, aes, rc4, default], description: "Format for --password or -k keyfile" }
       target: { type: string, required: true, description: "Target machine" }
       service: { type: string, required: true, description: "Service account to remove" }
+      extra_args: { type: string, description: "Additional bloodyAD flags as a single string" }
 
   remove_group_member:
     description: "Remove a member from a group (cleanup)"
@@ -388,8 +467,11 @@ methods:
       password: { type: string, description: "Auth password or hash" }
       kerberos: { type: boolean, default: false, description: "Use Kerberos auth" }
       ccache_path: { type: string, description: "Path to ccache file" }
+      certificate: { type: string, description: "Certificate auth: 'key_path:cert_path' for PKINIT after ADCS abuse" }
+      format: { type: string, enum: [b64, hex, aes, rc4, default], description: "Format for --password or -k keyfile" }
       group: { type: string, required: true, description: "Target group" }
       member: { type: string, required: true, description: "Member to remove" }
+      extra_args: { type: string, description: "Additional bloodyAD flags as a single string" }
 
   remove_shadow_credentials:
     description: "Remove shadow credentials (Key Credentials) from a target (cleanup)"
@@ -402,8 +484,11 @@ methods:
       password: { type: string, description: "Auth password or hash" }
       kerberos: { type: boolean, default: false, description: "Use Kerberos auth" }
       ccache_path: { type: string, description: "Path to ccache file" }
+      certificate: { type: string, description: "Certificate auth: 'key_path:cert_path' for PKINIT after ADCS abuse" }
+      format: { type: string, enum: [b64, hex, aes, rc4, default], description: "Format for --password or -k keyfile" }
       target: { type: string, required: true, description: "Target account" }
       key: { type: string, description: "Specific key identifier to remove" }
+      extra_args: { type: string, description: "Additional bloodyAD flags as a single string" }
 
   remove_dcsync:
     description: "Remove DCSync rights from a principal (cleanup)"
@@ -416,7 +501,10 @@ methods:
       password: { type: string, description: "Auth password or hash" }
       kerberos: { type: boolean, default: false, description: "Use Kerberos auth" }
       ccache_path: { type: string, description: "Path to ccache file" }
+      certificate: { type: string, description: "Certificate auth: 'key_path:cert_path' for PKINIT after ADCS abuse" }
+      format: { type: string, enum: [b64, hex, aes, rc4, default], description: "Format for --password or -k keyfile" }
       trustee: { type: string, required: true, description: "Principal to remove DCSync from" }
+      extra_args: { type: string, description: "Additional bloodyAD flags as a single string" }
 
   remove_uac:
     description: "Remove UAC flags from a user/computer object (cleanup)"
@@ -429,5 +517,49 @@ methods:
       password: { type: string, description: "Auth password or hash" }
       kerberos: { type: boolean, default: false, description: "Use Kerberos auth" }
       ccache_path: { type: string, description: "Path to ccache file" }
+      certificate: { type: string, description: "Certificate auth: 'key_path:cert_path' for PKINIT after ADCS abuse" }
+      format: { type: string, enum: [b64, hex, aes, rc4, default], description: "Format for --password or -k keyfile" }
       target: { type: string, required: true, description: "Target object" }
       flags: { type: array, required: true, description: "UAC flags to remove" }
+      extra_args: { type: string, description: "Additional bloodyAD flags as a single string" }
+
+  remove_dns_record:
+    description: "Remove a DNS record from the AD-integrated DNS zone (cleanup)"
+    when_to_use: "Post-exploitation cleanup — remove DNS records you added, or to remove legitimate records for MITM"
+    required_ports: [389, 636]
+    params:
+      host: { type: string, required: true, description: "DC hostname or IP" }
+      domain: { type: string, required: true, description: "AD domain name" }
+      username: { type: string, description: "Auth username" }
+      password: { type: string, description: "Auth password or hash" }
+      kerberos: { type: boolean, default: false, description: "Use Kerberos auth" }
+      ccache_path: { type: string, description: "Path to ccache file" }
+      certificate: { type: string, description: "Certificate auth: 'key_path:cert_path' for PKINIT after ADCS abuse" }
+      format: { type: string, enum: [b64, hex, aes, rc4, default], description: "Format for --password or -k keyfile" }
+      name: { type: string, required: true, description: "DNS record name (hostname)" }
+      data: { type: string, required: true, description: "DNS record data to remove" }
+      dnstype: { type: string, enum: [A, AAAA, CNAME, MX, PTR, SRV, TXT], default: "A", description: "DNS record type" }
+      zone: { type: string, description: "DNS zone (default: domain zone)" }
+      ttl: { type: integer, description: "TTL in seconds" }
+      port: { type: integer, description: "Listening port of the service (SRV records only)" }
+      priority: { type: integer, description: "Priority of a DNS SRV record" }
+      weight: { type: integer, description: "Weight of a DNS SRV record" }
+      preference: { type: integer, description: "MX record preference" }
+      forest: { type: boolean, default: false, description: "Remove DNS record from forest instead of domain" }
+      extra_args: { type: string, description: "Additional bloodyAD flags as a single string" }
+
+  remove_object:
+    description: "Delete an AD object entirely (user, computer, group, etc.)"
+    when_to_use: "Post-exploitation cleanup — delete objects you created (machine accounts, users). Requires Delete permission on the object."
+    required_ports: [389, 636]
+    params:
+      host: { type: string, required: true, description: "DC hostname or IP" }
+      domain: { type: string, required: true, description: "AD domain name" }
+      username: { type: string, description: "Auth username" }
+      password: { type: string, description: "Auth password or hash" }
+      kerberos: { type: boolean, default: false, description: "Use Kerberos auth" }
+      ccache_path: { type: string, description: "Path to ccache file" }
+      certificate: { type: string, description: "Certificate auth: 'key_path:cert_path' for PKINIT after ADCS abuse" }
+      format: { type: string, enum: [b64, hex, aes, rc4, default], description: "Format for --password or -k keyfile" }
+      target: { type: string, required: true, description: "sAMAccountName, DN, GUID or SID of the object to delete" }
+      extra_args: { type: string, description: "Additional bloodyAD flags as a single string" }

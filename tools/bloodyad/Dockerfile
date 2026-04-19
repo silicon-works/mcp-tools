@@ -36,4 +36,8 @@ RUN mkdir -p /session
 # Copy MCP server
 COPY tools/bloodyad/mcp-server.py /app/mcp-server.py
 
-CMD ["python3", "/app/mcp-server.py"]
+# Entrypoint handles FAKETIME injection
+COPY packages/mcp-common/entrypoint.sh /app/entrypoint.sh
+RUN chmod +x /app/entrypoint.sh
+
+CMD ["/app/entrypoint.sh"]

