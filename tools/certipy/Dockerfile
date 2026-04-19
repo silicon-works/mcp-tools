@@ -36,8 +36,8 @@ ENV PATH="/app/venv/bin:$PATH"
 COPY packages/mcp-common /app/packages/mcp-common
 RUN pip install --no-cache-dir /app/packages/mcp-common
 
-# Install certipy-ad
-RUN pip install --no-cache-dir certipy-ad
+# Install certipy-ad and PyYAML (needed for dynamic recipe system)
+RUN pip install --no-cache-dir certipy-ad pyyaml
 
 # Create session output directories
 RUN mkdir -p /session/certipy
@@ -45,4 +45,8 @@ RUN mkdir -p /session/certipy
 # Copy MCP server code
 COPY tools/certipy/mcp-server.py .
 
-CMD ["python3", "mcp-server.py"]
+# Dynamic faketime discovery entrypoint (libfaketime is installed in this image)
+COPY packages/mcp-common/entrypoint.sh /app/entrypoint.sh
+RUN chmod +x /app/entrypoint.sh
+
+CMD ["/app/entrypoint.sh"]

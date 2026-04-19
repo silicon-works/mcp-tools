@@ -554,6 +554,7 @@ class BaseMCPServer(ABC):
                     isError=not result.success,
                     structuredContent={
                         "success": result.success,
+                        "error": result.error,
                         "error_class": result.error_class,
                         "retryable": result.retryable,
                         "suggestions": result.suggestions,
