@@ -36,5 +36,9 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy MCP server code
 COPY tools/netexec/mcp-server.py .
 
+# Copy entrypoint for dynamic faketime discovery
+COPY packages/mcp-common/entrypoint.sh /app/entrypoint.sh
+RUN chmod +x /app/entrypoint.sh
+
 # MCP servers communicate via stdio
-CMD ["python3", "mcp-server.py"]
+CMD ["/app/entrypoint.sh"]
