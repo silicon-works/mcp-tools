@@ -1,52 +1,55 @@
 name: sqlmap
-version: "2.0"
-description: "Automatic SQL injection detection and exploitation tool (v1.10#stable). Supports 6 injection techniques: Boolean-based blind (B), Error-based (E), Union query-based (U), Stacked queries (S), Time-based blind (T), Inline queries (Q). Detects and exploits MySQL, PostgreSQL, Oracle, MSSQL, SQLite, DB2, MariaDB, and more. Beyond database enumeration, provides OS command execution (--os-cmd/--os-shell), file read/write on the target server, raw SQL query execution, and password hash dumping. Includes 60+ WAF bypass tamper scripts. Handles CSRF tokens, HTTP auth, custom HTTP methods, second-order injection. Streams progress notifications during long-running operations. Runs non-interactively with --batch flag."
+kind: cli
+binary: sqlmap
+version: "1.x"
+description: "Automatic SQL injection detection and exploitation tool. Supports six injection techniques (Boolean, Error, UNION, Stacked, Time-based, Inline). Detects MySQL, PostgreSQL, MSSQL, Oracle, SQLite, MariaDB, DB2, and others. Beyond enumeration: OS command execution (--os-cmd / --os-shell), file read/write on the target host, raw SQL queries (--sql-query), password hash dumping (--passwords), 60+ WAF-bypass tamper scripts. Verbose prose output (no -oJ/-oX equivalent — tool_runner must parse text). Native CLI; LLM constructs the full sqlmap invocation. Use for confirmed or suspected SQL injection only — NOT for NoSQL (use nosqlmap), MongoDB (use mongodb), or directory enumeration (use ffuf)."
 image: "ghcr.io/silicon-works/mcp-tools-sqlmap:latest"
 image_size_mb: 150
-timeout_seconds: 7200
+timeout_seconds: 1800
 
 capabilities:
-  - sql_injection
+  - sql_injection_detection
+  - sql_injection_exploitation
   - database_enumeration
   - data_extraction
-  - os_shell
-
-# Routing hints for tool selection
-routing:
-  use_for:
-    - "SQL injection detection and exploitation"
-    - "test GET POST parameters for SQL injection vulnerabilities"
-    - "enumerate databases tables columns via SQL injection"
-    - "dump database contents through SQL injection"
-    - "OS command execution via SQL injection"
-    - "read files from target server via SQL injection"
-    - "write files webshells to target via SQL injection"
-    - "extract password hashes from database via SQL injection"
-    - "boolean error union stacked time-based blind injection"
-    - "WAF bypass with tamper scripts for SQL injection"
-    - "execute custom SQL queries through injection"
-    - "second-order injection testing"
-    - "CSRF-protected forms with SQL injection"
-    - "HTTP Basic Digest NTLM authenticated SQL injection"
-  never_use_for:
-    - "NoSQL injection (use nosqlmap)"
-    - "MongoDB (use mongodb or nosqlmap)"
-    - "directory enumeration (use ffuf)"
-  triggers:
-    - "sql injection"
-    - "sqli"
-    - "sqlmap"
-    - "database dump"
-    - "union injection"
-    - "blind injection"
-    - "sql query"
-    - "second-order injection"
-    - "csrf sql injection"
-    - "http auth sql injection"
-  prefer_over: []
+  - os_command_execution
+  - file_read_write
+  - waf_bypass
 
 phases:
   - exploitation
+
+routing:
+  use_for:
+    - "test a URL parameter for SQL injection"
+    - "exploit confirmed SQL injection to enumerate databases / tables / columns"
+    - "dump database contents through SQL injection"
+    - "execute OS commands via SQL injection (--os-shell / --os-cmd)"
+    - "read or write files on the target server via SQL injection"
+    - "extract password hashes from a database via SQL injection"
+    - "bypass a WAF blocking direct SQL injection payloads"
+    - "execute a custom SQL query via injection (--sql-query)"
+    - "test second-order SQL injection (--second-url)"
+    - "test CSRF-protected forms or HTTP-authed endpoints for SQL injection"
+  never_use_for:
+    - "NoSQL injection — use nosqlmap"
+    - "MongoDB or other document-store enumeration — use mongodb tool"
+    - "directory or parameter brute-forcing — use ffuf"
+    - "automated CVE / vulnerability scanning — use nuclei"
+    - "stateful authenticated session flows beyond a single Cookie/auth-cred — use web-session"
+  triggers:
+    - "sqlmap"
+    - "sql injection"
+    - "sqli"
+    - "database dump"
+    - "union injection"
+    - "blind injection"
+    - "boolean injection"
+    - "time-based injection"
+    - "second-order injection"
+    - "os-shell"
+    - "os-cmd"
+    - "tamper"
 
 requirements:
   network: true
@@ -56,393 +59,350 @@ resources:
   memory_mb: 512
   cpu: 0.5
 
-# ── Common params shared by all methods ───────────────────────────────────
-_common_params: &common_params
-  data:
-    type: string
-    description: "POST request body data. Switches sqlmap to POST method. Format: 'param1=value1&param2=value2'. Use * to mark injection point in POST data: 'username=admin&password=*'."
-  cookie:
-    type: string
-    description: "HTTP Cookie header value (e.g., 'PHPSESSID=abc123; session=xyz'). Required for testing authenticated endpoints. At level >= 2, sqlmap also tests cookie values for injection."
-  headers:
-    type: string
-    description: "Additional HTTP headers, semicolon-separated (e.g., 'Authorization: Bearer eyJ...;X-Custom: value')."
-  method:
-    type: enum
-    values: ["GET", "POST", "PUT", "PATCH", "DELETE"]
-    description: "Force HTTP method. By default sqlmap uses GET (or POST if --data is set). Use for REST APIs that require PUT/PATCH/DELETE."
-  auth_type:
-    type: enum
-    values: ["Basic", "Digest", "NTLM", "PKI"]
-    description: "HTTP authentication type. Use with auth_cred."
-  auth_cred:
-    type: string
-    description: "HTTP authentication credentials. Format: 'user:password'. Use with auth_type."
-  csrf_token:
-    type: string
-    description: "Parameter name holding the anti-CSRF token (e.g., 'csrf_token', '_token'). Sqlmap auto-fetches a fresh token before each request."
-  csrf_url:
-    type: string
-    description: "URL to fetch the anti-CSRF token from, if different from the target URL."
-  dbms:
-    type: string
-    description: "Force DBMS type to skip detection (e.g., 'MySQL', 'PostgreSQL', 'Microsoft SQL Server'). Speeds up exploitation when DBMS is known."
-  ignore_code:
-    type: string
-    description: "Ignore problematic HTTP status codes (e.g., '401' or '401,500'). Critical when the target endpoint returns non-200 status — without this, sqlmap may refuse to test. Use for endpoints behind authentication that return 401/403."
-  string:
-    type: string
-    description: "String that is always present in TRUE responses (boolean-based detection). Dramatically speeds up blind injection when set correctly. Example: if successful queries show 'Welcome', set string='Welcome'."
-  not_string:
-    type: string
-    description: "String that is always present in FALSE responses. The inverse of --string."
-  code:
-    type: integer
-    description: "HTTP status code that indicates TRUE response (e.g., 200). Alternative to --string for boolean-based detection."
-  text_only:
-    type: boolean
-    default: false
-    description: "Compare pages based only on textual content (strip HTML tags). Useful when pages have dynamic non-text content (ads, JS, etc.)."
-  titles:
-    type: boolean
-    default: false
-    description: "Compare pages based only on their titles. Useful when page body is highly dynamic but title changes predictably."
-  level:
-    type: integer
-    default: 1
-    description: "Test level 1-5. Level 1: tests GET/POST params. Level 2: adds Cookie testing. Level 3: adds User-Agent/Referer testing. Level 4-5: adds more payloads. Higher = slower but more thorough. Start with 1, increase if no results."
-  risk:
-    type: integer
-    default: 1
-    description: "Risk level 1-3. Risk 1: safe tests only. Risk 2: adds heavy time-based tests. Risk 3: adds OR-based tests (can modify/delete data — use with caution). For CTF/HTB use risk=2 freely, risk=3 on non-production targets only."
-  technique:
-    type: string
-    default: "BEUSTQ"
-    description: "SQL injection techniques to test. B=Boolean-based blind, E=Error-based, U=Union query, S=Stacked queries (needed for os_shell/file_write), T=Time-based blind, Q=Inline queries. Default 'BEUSTQ' tests all. Use 'BEU' for faster testing if you don't need stacked queries. Use 'T' alone for time-based only when other methods fail."
-  param:
-    type: string
-    description: "Specific parameter to test (e.g., 'id'). Without this, sqlmap tests all parameters."
-  tamper:
-    type: string
-    description: "Tamper script(s) for WAF bypass. Comma-separated. Common: 'space2comment' (spaces→/**/), 'between' (>→BETWEEN), 'charencode' (URL-encode), 'randomcase' (random keyword case). Use multiple for layered bypass."
-  prefix:
-    type: string
-    description: "Injection payload prefix (e.g., \"')\"). Use when you know the exact SQL context from manual testing."
-  suffix:
-    type: string
-    description: "Injection payload suffix (e.g., '-- -'). Use when you know the exact SQL context."
-  union_cols:
-    type: string
-    description: "Range of columns to test for UNION query injection (e.g., '5-10'). Narrows search when you know approximate column count from manual testing."
-  second_url:
-    type: string
-    description: "URL where the injection result appears (second-order injection). The injection is sent to the target URL but the result is read from this URL."
-  eval:
-    type: string
-    description: "Python code evaluated before each request (e.g., \"import hashlib; token=hashlib.md5(id.encode()).hexdigest()\"). Use for computed parameters."
-  time_sec:
-    type: integer
-    default: 5
-    description: "Seconds to delay for time-based blind injection. Increase to 10-15 on high-latency targets to avoid false negatives."
-  threads:
-    type: integer
-    default: 4
-    description: "Number of concurrent HTTP requests (1-10). Default 4. Increase for faster extraction on stable targets. Reduce to 1 if target has rate limiting."
-  delay:
-    type: number
-    default: 0
-    description: "Delay in seconds between each HTTP request. Use 1-3 to avoid rate limiting or WAF bans."
-  retries:
-    type: integer
-    default: 3
-    description: "Retries on connection failure."
-  safe_url:
-    type: string
-    description: "URL to visit between injection requests to keep session alive or avoid detection patterns."
-  safe_freq:
-    type: integer
-    description: "How often to visit --safe-url (every N requests)."
-  null_connection:
-    type: boolean
-    default: false
-    description: "Use HTTP Range/HEAD to detect boolean responses without downloading full pages. Faster but may not work on all targets."
-  proxy:
-    type: string
-    description: "HTTP/SOCKS proxy (e.g., 'http://127.0.0.1:8080', 'socks5://127.0.0.1:1080'). Use for scanning through tunnels or Burp interception."
-  random_agent:
-    type: boolean
-    default: false
-    description: "Use random HTTP User-Agent to avoid WAF detection. Sqlmap's default UA is commonly blocked."
-  flush_session:
-    type: boolean
-    default: false
-    description: "Clear cached session data and re-test from scratch."
+see_also:
+  - tool: nosqlmap
+    reason: "For MongoDB / NoSQL injection testing — sqlmap only handles SQL"
+  - tool: ffuf
+    reason: "Use ffuf to discover URL parameters first; feed them to sqlmap"
+  - tool: nuclei
+    reason: "For automated SQLi-template scans across many endpoints"
+  - tool: john
+    reason: "Crack the hash dumps that --passwords / dump_table extract"
+  - tool: hashcat
+    reason: "GPU cracker for the same hashes"
+  - tool: web-session
+    reason: "Use to obtain an authenticated cookie before passing --cookie to sqlmap"
 
-methods:
-  test_injection:
-    description: "Test URL parameters for SQL injection vulnerabilities using sqlmap's detection engine. Runs with --batch (non-interactive) and 4 threads by default. Tests all 6 injection techniques by default (BEUSTQ). Parses output for vulnerability confirmation, injectable parameters, injection types, and detected DBMS. Sqlmap caches results in session files — subsequent calls to the same URL skip already-tested parameters. Sends progress notifications for [INFO]/[WARNING]/[CRITICAL] lines."
-    when_to_use: "When you've identified a potentially injectable parameter in a web application — either from manual testing, web fuzzing (ffuf), or source code review. Mark the injection point with * in the URL (e.g., 'http://target/page?id=1*') or let sqlmap auto-detect GET parameters. For POST injection, use the data parameter. Start with level=1/risk=1 (default), increase to level=3/risk=2 if no results, and level=5/risk=3 as last resort (risk=3 may use OR-based tests that can modify data). If the target uses a WAF, use tamper scripts. Use param to test a specific parameter and skip others. If the endpoint returns 401/500, use ignore_code to prevent sqlmap from refusing to test. Use string/code for faster boolean-based detection when you know the TRUE response signature."
-    params:
-      url:
-        type: string
-        required: true
-        description: "Target URL with parameters. Use * to mark specific injection point (e.g., 'http://target/page?id=1*'). Without *, sqlmap tests all GET parameters. For REST-style URLs: 'http://target/api/users/1*/profile'."
-      <<: *common_params
-      timeout:
-        type: integer
-        default: 1800
-        description: "Process timeout in seconds. Full level=1 testing typically takes 1-5 minutes. Level=3+ or slow targets may take 15-30 minutes. Default 1800s (30 min)."
-    returns:
-      vulnerable:
-        type: boolean
-        description: "Whether SQL injection was confirmed"
-      injection_type:
-        type: string
-        description: "Type of injection found (e.g., 'boolean-based blind', 'UNION query', 'time-based blind')"
-      dbms:
-        type: string
-        description: "Detected DBMS (e.g., 'MySQL >= 5.0', 'PostgreSQL', 'Microsoft SQL Server 2019')"
-      parameters:
-        type: array
-        description: "List of injectable parameter names"
-      details:
-        type: array
-        description: "Relevant detail lines from sqlmap output (injection info, payloads, techniques)"
+# ── kind:cli specific sections ──────────────────────────────────────
 
-  enumerate_dbs:
-    description: "Enumerate all databases on a confirmed vulnerable target using sqlmap's --dbs flag. Sqlmap reuses the cached injection point and technique from prior test_injection calls (stored in session files), so no re-detection is needed. Parses the '[*] database_name' output lines. Sends progress notifications during extraction."
-    when_to_use: "Immediately after test_injection confirms SQL injection. This is the standard next step in the SQL injection exploitation workflow: test_injection → enumerate_dbs → dump_table. The URL must be the same one used in test_injection so sqlmap can reuse its cached session. System databases (information_schema, mysql, master, postgres, etc.) are normal — look for application databases."
-    params:
-      url:
-        type: string
-        required: true
-        description: "Target URL — must be the same URL used in test_injection so sqlmap reuses the cached injection session."
-      <<: *common_params
-      timeout:
-        type: integer
-        default: 1800
-        description: "Process timeout in seconds. Database enumeration is usually fast (under 1 minute) for error-based and UNION injection. Time-based blind may take 5-15 minutes. Default 1800s."
-    returns:
-      databases:
-        type: array
-        description: "List of database name strings (e.g., ['information_schema', 'mysql', 'webapp'])"
-      count:
-        type: integer
-        description: "Number of databases found"
+target_extraction:
+  # sqlmap target is supplied via -u / --url / --url= flag (most common form),
+  # or as a URL embedded in -r request files / -m URL lists / -g google dorks.
+  # The latter forms are rejected up front (see reject_flags) — they put the
+  # target outside the command line where scope validation can't reach it.
+  # We extract the URL host from the simple -u / --url cases.
+  - rule: "flag_value"
+    flag: "-u"
+    parse_as: "url_host"
+  - rule: "flag_value"
+    flag: "--url"
+    parse_as: "url_host"
+  # Some LLMs may emit --url= (with equals sign). Most flag parsers handle this
+  # transparently; positional_match is the safety net.
+  - rule: "positional_match"
+    pattern: "^(?:--url=|-u=)?(https?|ftp|ftps|file|gopher)://([^:/?#*]+)"
+    group: 2
+    parse_as: "url_host"
 
-  enumerate_tables:
-    description: "List all tables in a database using sqlmap's --tables flag with -D (database). Parses pipe-delimited table name output. Sqlmap reuses cached injection from prior test_injection calls."
-    when_to_use: "After enumerate_dbs identifies databases, use this to discover table names before dumping data. The workflow: test_injection → enumerate_dbs → enumerate_tables → dump_table. Look for high-value tables: 'users', 'accounts', 'credentials', 'config', 'sessions', 'wp_users'."
-    params:
-      url:
-        type: string
-        required: true
-        description: "Target URL — same URL used in test_injection."
-      database:
-        type: string
-        required: true
-        description: "Database name from enumerate_dbs results."
-      <<: *common_params
-      timeout:
-        type: integer
-        default: 1800
-        description: "Process timeout in seconds."
-    returns:
-      tables:
-        type: array
-        description: "List of table name strings"
-      count:
-        type: integer
-        description: "Number of tables found"
+# Flags whose presence makes target scope un-validatable. The plugin's
+# cli_in_container rejects the call before docker spawn when any of these
+# appear, with the reason below. The LLM can extract the target from the
+# file/log first and pass it via -u for the actual scan.
+reject_flags:
+  - "-r"   # load HTTP request from file
+  - "-l"   # parse Burp/WebScarab proxy log
+  - "-m"   # bulk file of URLs
+  - "-g"   # Google dork search
+reject_flags_reason: "Multi-target/file-based ingestion forms put the target outside the command line. Extract the target into a regular -u/--url value first."
 
-  dump_table:
-    description: "Dump contents of a specific database table using sqlmap's --dump flag with -D (database) and -T (table). Uses --dump-format CSV for structured output. Parses the pipe-delimited table output into column names and row dictionaries. Supports column selection (-C), row limiting (--stop), and WHERE clause (--where) for targeted extraction. Sends progress notifications during long-running blind extractions."
-    when_to_use: "After enumerate_tables lists tables, use this to extract data. Workflow: enumerate_dbs → enumerate_tables → dump_table on high-value tables like 'users', 'accounts', 'credentials'. Use the columns parameter to extract only credential fields ('username,password,email'). Use where for targeted extraction (e.g., \"role='admin'\") instead of full table dumps. For blind injection, each row/cell requires separate requests, so limiting columns/rows/where dramatically reduces extraction time."
-    params:
-      url:
-        type: string
-        required: true
-        description: "Target URL — same URL used in test_injection."
-      database:
-        type: string
-        required: true
-        description: "Database name from enumerate_dbs results. Case-sensitive on some DBMS."
-      table:
-        type: string
-        required: true
-        description: "Table name to dump. Common targets: 'users', 'accounts', 'admins', 'credentials', 'config'. Case-sensitive on MySQL/PostgreSQL with Linux."
-      columns:
-        type: string
-        description: "Comma-separated column names to extract (e.g., 'username,password,email'). Omit to dump all columns. Fewer columns = much faster for blind injection."
-      limit:
-        type: integer
-        default: 100
-        description: "Maximum rows to extract (maps to sqlmap --stop). For blind injection, use 10-20 for initial sampling. For UNION/error-based, 100+ is fine."
-      where:
-        type: string
-        description: "SQL WHERE clause for targeted extraction (e.g., \"role='admin'\", \"id>100\"). Reduces extraction time vs full table dump."
-      <<: *common_params
-      timeout:
-        type: integer
-        default: 3600
-        description: "Process timeout in seconds. UNION/error-based dumps are fast (1-2 min). Blind injection of 100 rows can take 30-60+ minutes. Default 3600s (1 hour)."
-    returns:
-      columns:
-        type: array
-        description: "List of column name strings from the parsed table header"
-      rows:
-        type: array
-        description: "List of row dictionaries, each mapping column name to cell value"
-      row_count:
-        type: integer
-        description: "Number of rows extracted"
+# Per-tool value-taking flags whose values must NOT be confused with positional
+# targets. The DSL merges these with its built-in defaults. Only flags whose
+# values could leak as URL hosts (or otherwise look like targets) need to be
+# listed — flags taking obvious non-target values (--tamper, --threads, paths)
+# don't need to be here, the URL regex naturally won't match them.
+value_flags:
+  - "--proxy"          # http://proxy:8080 — NOT the target
+  - "--proxy-cred"     # creds, may contain @
+  - "--safe-url"       # decoy URL between probes — NOT the target
+  - "--safe-post"
+  - "--safe-req"
+  - "--csrf-url"       # CSRF token-fetching URL — NOT the target
+  - "--csrf-token"
+  - "--csrf-method"
+  - "--csrf-data"
+  - "--second-url"     # blind-injection result URL — different scope to track
+  - "--second-req"
+  - "--referer"        # arbitrary URL header value
+  - "-e"
+  - "--host"           # Host header override — NEVER the connection target
+  - "--user-agent"
+  - "--auth-cred"
+  - "--auth-file"
+  - "--cookie"
+  - "--load-cookies"
+  - "--data"
+  - "--headers"
+  - "--header"
+  - "-H"
+  - "--output-dir"
+  - "-o"
+  - "--prefix"
+  - "--suffix"
+  - "--string"
+  - "--not-string"
+  - "--regexp"
+  - "--code"
+  - "--tamper"
+  - "--technique"
+  - "--level"
+  - "--risk"
+  - "--threads"
+  - "--time-sec"
+  - "--union-cols"
+  - "--union-char"
+  - "--union-from"
+  - "--dns-domain"
+  - "--dbms"
+  - "--os"
+  - "--method"
+  - "--skip"
+  - "--param-filter"
+  - "--param-exclude"
+  - "--eval"
+  - "--retries"
+  - "--timeout"
+  - "--delay"
+  - "--encoding"
+  - "--charset"
+  - "-D"               # database name
+  - "-T"               # table name
+  - "-C"               # column name
+  - "-X"               # exclude
+  - "-U"               # user
 
-  dump_all:
-    description: "Dump all tables from a database at once using sqlmap's --dump-all flag with -D (database). Iterates through every table and extracts all rows. Returns an unstructured status message. For blind injection, this can take hours."
-    when_to_use: "When you need everything from a database and have fast injection (UNION or error-based). Prefer dump_table for targeted extraction of specific high-value tables. Use dump_all as a last resort or when the database is small."
-    params:
-      url:
-        type: string
-        required: true
-        description: "Target URL — same URL used in test_injection."
-      database:
-        type: string
-        required: true
-        description: "Database name to dump entirely."
-      <<: *common_params
-      timeout:
-        type: integer
-        default: 7200
-        description: "Process timeout in seconds. Default 7200s (2 hours). UNION/error-based may complete in 2-5 minutes. Blind injection will need more."
-    returns:
-      database:
-        type: string
-        description: "Name of the database that was dumped"
-      message:
-        type: string
-        description: "Status message. Actual table data is in raw_output."
+usage_patterns:
+  - name: "Detect SQLi on a GET parameter (default scan)"
+    command: "sqlmap -u {url} --batch --random-agent --output-dir /session/sqlmap"
+    when: "First-pass SQLi probe on a URL with a parameter (e.g., http://target/page.php?id=1). Use --batch to avoid the interactive prompts."
 
-  dump_passwords:
-    description: "Dump database user password hashes using sqlmap's --passwords flag. Extracts DBMS user accounts and their password hashes. For MySQL: mysql.user. For MSSQL: master.sys.sql_logins. For PostgreSQL: pg_shadow."
-    when_to_use: "After confirming SQL injection, use this to extract database user password hashes for offline cracking. Useful for finding reused passwords or getting direct DB access."
-    params:
-      url:
-        type: string
-        required: true
-        description: "Target URL — same URL used in test_injection."
-      <<: *common_params
-      timeout:
-        type: integer
-        default: 3600
-        description: "Process timeout in seconds. Default 3600s."
-    returns:
-      hashes:
-        type: array
-        description: "List of {user, hash} objects with DBMS username and password hash"
-      count:
-        type: integer
-        description: "Number of hashes extracted"
+  - name: "Detect SQLi with explicit injection point marker"
+    command: "sqlmap -u '{url_with_asterisk}' --batch --random-agent --output-dir /session/sqlmap"
+    when: "Target has an unusual injection point that sqlmap won't auto-detect — mark it with * (e.g., http://target/api/users/1*/profile)."
 
-  os_shell:
-    description: "Execute an OS command on the target server via SQL injection using sqlmap's --os-cmd flag. Mechanism depends on DBMS: MySQL uses UDF (requires FILE privilege), MSSQL uses xp_cmdshell, PostgreSQL uses COPY TO/FROM or PL/Python. Single-command execution, not a persistent shell."
-    when_to_use: "When you need RCE through confirmed SQL injection. Requirements: stacked queries or specific DBMS features + sufficient privileges. Common first commands: 'id', 'whoami', 'hostname'. For a reverse shell, execute a shell payload."
-    params:
-      url:
-        type: string
-        required: true
-        description: "Target URL — same URL used in test_injection."
-      command:
-        type: string
-        required: true
-        description: "OS command to execute on the target server."
-      <<: *common_params
-      timeout:
-        type: integer
-        default: 600
-        description: "Process timeout in seconds. Default 600s."
-    returns:
-      command:
-        type: string
-        description: "The command that was executed"
-      output:
-        type: string
-        description: "Command stdout as captured by sqlmap."
+  - name: "Detect SQLi in a POST body parameter"
+    command: "sqlmap -u {url} --data='{post_body}' --batch --random-agent --output-dir /session/sqlmap"
+    when: "Form/API endpoint that accepts POST data. Use * inside --data to mark the injection point (e.g., 'username=admin&password=*')."
 
-  file_read:
-    description: "Read a file from the target server's filesystem via SQL injection using sqlmap's --file-read flag. Mechanism depends on DBMS: MySQL uses LOAD_FILE(), PostgreSQL uses pg_read_file(), MSSQL uses OPENROWSET(BULK)."
-    when_to_use: "When you need to read files through SQL injection — config files, source code, /etc/passwd, SSH keys. Requires database FILE privilege on MySQL."
-    params:
-      url:
-        type: string
-        required: true
-        description: "Target URL — same URL used in test_injection."
-      file_path:
-        type: string
-        required: true
-        description: "Absolute path to the file on the target server."
-      <<: *common_params
-      timeout:
-        type: integer
-        default: 600
-        description: "Process timeout in seconds. Default 600s."
-    returns:
-      file_path:
-        type: string
-        description: "The path of the file that was read"
-      content:
-        type: string
-        description: "File contents as text."
+  - name: "Detect SQLi behind a session cookie"
+    command: "sqlmap -u {url} --cookie='{cookie_string}' --batch --random-agent --output-dir /session/sqlmap"
+    when: "Endpoint requires an authenticated session — paste the Cookie header value."
 
-  file_write:
-    description: "Write a file to the target server's filesystem via SQL injection using sqlmap's --file-write and --file-dest flags. MySQL uses SELECT INTO OUTFILE, MSSQL uses xp_cmdshell, PostgreSQL uses COPY TO."
-    when_to_use: "When you need to upload files through SQL injection — primary use case is webshell upload. Requires database FILE privilege and writable destination directory."
-    params:
-      url:
-        type: string
-        required: true
-        description: "Target URL — same URL used in test_injection."
-      local_file:
-        type: string
-        required: true
-        description: "Either a local file path to upload, or raw file content as a string."
-      remote_path:
-        type: string
-        required: true
-        description: "Absolute destination path on the target server."
-      <<: *common_params
-      timeout:
-        type: integer
-        default: 600
-        description: "Process timeout in seconds. Default 600s."
-    returns:
-      remote_path:
-        type: string
-        description: "The destination path where the file was written"
-      written:
-        type: boolean
-        description: "Whether the write succeeded."
+  - name: "Detect SQLi from a captured Burp request"
+    command: "sqlmap -r {request_file} --batch --random-agent --output-dir /session/sqlmap"
+    when: "Use a saved HTTP request file (Burp 'Save item') instead of reconstructing flags. Best when the request has many headers, multipart bodies, or CSRF tokens."
 
-  sql_query:
-    description: "Execute a raw SQL query via injection using sqlmap's --sql-query flag. Returns the query result text. Supports any SELECT query the DBMS allows. For INSERT/UPDATE/DELETE, use stacked queries technique."
-    when_to_use: "When you need to run a specific SQL query that doesn't fit the enumerate/dump workflow — e.g., 'SELECT @@version', 'SELECT user()', 'SELECT load_file(\"/etc/passwd\")', or custom JOINs across tables. Also useful for verifying injection or checking DBMS-specific variables. More flexible than dump_table for complex queries."
-    params:
-      url:
-        type: string
-        required: true
-        description: "Target URL — same URL used in test_injection."
-      query:
-        type: string
-        required: true
-        description: "SQL query to execute (e.g., 'SELECT @@version', 'SELECT user,password FROM mysql.user', 'SELECT table_name FROM information_schema.tables WHERE table_schema=db()')."
-      <<: *common_params
-      timeout:
-        type: integer
-        default: 1800
-        description: "Process timeout in seconds. Default 1800s."
-    returns:
-      query:
-        type: string
-        description: "The SQL query that was executed"
-      result:
-        type: string
-        description: "Query result text as returned by sqlmap. May be a single value, table, or multi-line output depending on the query."
+  - name: "Enumerate databases (after SQLi confirmed)"
+    command: "sqlmap -u {url} --batch --random-agent --dbs --output-dir /session/sqlmap"
+    when: "Run after a successful detection to list all DB schemas. sqlmap reuses the cached injection point from the session."
+
+  - name: "Enumerate tables in a specific database"
+    command: "sqlmap -u {url} --batch -D {database} --tables --output-dir /session/sqlmap"
+    when: "After --dbs returns schema names. Quote {database} if it contains spaces."
+
+  - name: "Enumerate columns in a specific table"
+    command: "sqlmap -u {url} --batch -D {database} -T {table} --columns --output-dir /session/sqlmap"
+    when: "After --tables identifies a target table. Use before --dump if you only want certain columns."
+
+  - name: "Dump a specific table"
+    command: "sqlmap -u {url} --batch -D {database} -T {table} --dump --output-dir /session/sqlmap"
+    when: "Extract data from one table. Add -C 'col1,col2' to limit columns; --where 'role=\"admin\"' for filtered rows; --start N --stop M for row windows."
+
+  - name: "Dump only credential columns (faster on blind)"
+    command: "sqlmap -u {url} --batch -D {database} -T {table} -C 'username,password,email' --dump --output-dir /session/sqlmap"
+    when: "Targeted credential extraction. Crucial speed win on time-based blind injection — every cell is a separate request."
+
+  - name: "Dump database user password hashes"
+    command: "sqlmap -u {url} --batch --passwords --output-dir /session/sqlmap"
+    when: "Extracts DBMS user accounts (mysql.user / pg_shadow / sys.sql_logins) for offline cracking. Often DBA-only privilege required."
+
+  - name: "Run a custom SQL query"
+    command: "sqlmap -u {url} --batch --sql-query='{query}' --output-dir /session/sqlmap"
+    when: "When --dbs/--tables/--dump don't fit the question (e.g., SELECT @@version, SELECT user(), JOINs). Single-statement only — use --sql-shell for an interactive REPL."
+
+  - name: "Get an OS shell on the DB server"
+    command: "sqlmap -u {url} --batch --os-shell --output-dir /session/sqlmap"
+    when: "Confirmed SQLi + sufficient DB privileges (FILE on MySQL / xp_cmdshell on MSSQL / superuser on PostgreSQL). Returns an interactive shell via stacked queries or DBMS-specific exec primitives."
+
+  - name: "Execute a single OS command"
+    command: "sqlmap -u {url} --batch --os-cmd='{command}' --output-dir /session/sqlmap"
+    when: "One-shot RCE via SQLi. Use for 'id', 'whoami', or to drop a one-line reverse shell. Same DBMS prerequisites as --os-shell."
+
+  - name: "Read a file from the target server"
+    command: "sqlmap -u {url} --batch --file-read='{remote_path}' --output-dir /session/sqlmap"
+    when: "Pull /etc/passwd, web app config, SSH keys, source code. Requires LOAD_FILE / pg_read_file / OPENROWSET privileges."
+
+  - name: "Write a file to the target server (webshell upload)"
+    command: "sqlmap -u {url} --batch --file-write={local_file} --file-dest={remote_path} --output-dir /session/sqlmap"
+    when: "Drop a webshell via SELECT INTO OUTFILE / xp_cmdshell / COPY TO. Requires write privilege and a writable path inside the webroot."
+
+  - name: "WAF bypass with tamper scripts"
+    command: "sqlmap -u {url} --batch --random-agent --tamper={tamper_list} --output-dir /session/sqlmap"
+    when: "Detection failed and you suspect WAF interference. Common combos: 'space2comment,between' (lightweight), 'charencode,randomcase,space2comment' (medium), 'space2morehash,charunicodeencode' (heavy). List all tampers with `sqlmap --list-tampers`."
+
+  - name: "Aggressive deep scan (level 5 / risk 3)"
+    command: "sqlmap -u {url} --batch --random-agent --level=5 --risk=3 --output-dir /session/sqlmap"
+    when: "Last resort when default scan finds nothing. Risk 3 includes OR-based payloads that can MODIFY DATA — never on production. Level 5 tests cookies, headers, User-Agent, Referer (slow)."
+
+  - name: "Force time-based blind only (when other techniques fail)"
+    command: "sqlmap -u {url} --batch --random-agent --technique=T --time-sec=10 --output-dir /session/sqlmap"
+    when: "Boolean / error / UNION all fail and you suspect blind injection on a slow target. Increase --time-sec on high-latency or noisy networks."
+
+  - name: "Inject behind a CSRF-protected form"
+    command: "sqlmap -u {url} --data='{post_body}' --csrf-token={csrf_param} --csrf-url={csrf_fetch_url} --batch --output-dir /session/sqlmap"
+    when: "Form requires a freshly-issued CSRF token per request. sqlmap fetches a new token before each injection attempt."
+
+  - name: "Inject through a Burp / SOCKS proxy"
+    command: "sqlmap -u {url} --batch --proxy='{proxy_url}' --output-dir /session/sqlmap"
+    when: "Pivot through Burp Suite (http://127.0.0.1:8080) for inspection, or through a SOCKS tunnel to reach internal-only targets."
+
+output_formats:
+  # sqlmap has NO native JSON / XML output flag for findings — output is verbose
+  # prose. The closest to structured output is the per-target session directory
+  # under --output-dir, which contains session.sqlite, log files, and dump CSVs.
+  # tool_runner MUST parse the prose; the session dir provides raw_ref backup.
+  - flag: "--output-dir {path}"
+    format: "session_dir"
+    preferred: true
+  - flag: "--dump-format=CSV"
+    format: "csv_dump"
+    preferred: false
+  - flag: "-v 6"
+    format: "verbose_prose"
+    preferred: false
+  - flag: "--flush-session"
+    format: "fresh_session"
+    preferred: false
+
+common_options:
+  target_input:
+    - "-u URL: single target URL (most common)"
+    - "--url=URL: same as -u"
+    - "-r FILE: load HTTP request from file (Burp save format)"
+    - "-l FILE: load Burp / WebScarab proxy log"
+    - "-m FILE: file with multiple target URLs"
+    - "-g DORK: process Google dork results"
+    - "-c FILE: load options from a sqlmap config file"
+  request:
+    - "--data=BODY: POST body (auto-switches method to POST)"
+    - "--cookie=STRING: Cookie header"
+    - "-H 'Header: value': extra HTTP header (repeatable)"
+    - "--method=METHOD: force HTTP method (GET/POST/PUT/PATCH/DELETE)"
+    - "--user-agent=STRING: custom User-Agent"
+    - "--random-agent: rotate UA from a pool (WAF evasion)"
+    - "--referer=STRING: Referer header"
+    - "--auth-type=Basic|Digest|NTLM|PKI"
+    - "--auth-cred=USER:PASS"
+  injection_point:
+    - "Mark in URL/body/cookie with *: e.g., -u 'http://t/?id=1*' or --data='user=*&pass=x'"
+    - "-p PARAM: test only this param (skip others)"
+    - "--skip=PARAMS: don't test these"
+    - "--prefix=STR --suffix=STR: wrap payloads with known SQL context"
+  detection:
+    - "--level=1..5: depth of testing (1 default; 2 adds Cookie; 3 adds UA/Referer; 4-5 adds payloads)"
+    - "--risk=1..3: aggressiveness (1 safe; 2 adds heavy time-based; 3 adds OR-based — CAN MODIFY DATA)"
+    - "--technique=BEUSTQ: enable specific techniques only"
+    - "--dbms=NAME: skip DBMS detection by forcing it"
+    - "--code=N --string=S --not-string=S: response signature for boolean detection"
+    - "--time-sec=N: delay for time-based blind (raise on slow nets)"
+  enumeration:
+    - "--dbs: list databases"
+    - "-D NAME --tables: list tables in DB"
+    - "-D NAME -T TABLE --columns: list columns"
+    - "-D NAME -T TABLE --dump: dump table contents"
+    - "-D NAME -T TABLE -C col1,col2 --dump: dump only chosen columns"
+    - "--dump-all: dump all DBs (long; usually too much)"
+    - "--start=N --stop=M: row window"
+    - "--where='col=val': filtered dump"
+    - "--passwords: dump DBMS account hashes"
+    - "--privileges --roles --users: enumerate DBMS-side accounts"
+  exploitation:
+    - "--sql-query='SELECT ...': run raw SQL via injection"
+    - "--sql-shell: interactive SQL REPL via injection"
+    - "--os-cmd='id': single OS command"
+    - "--os-shell: interactive OS shell"
+    - "--file-read=/etc/passwd: read file from server"
+    - "--file-write=local --file-dest=/var/www/html/s.php: write file to server"
+  waf_bypass:
+    - "--tamper=script1,script2: chain tamper scripts (run --list-tampers in container)"
+    - "--random-agent: rotate UA"
+    - "--delay=N --safe-url=URL --safe-freq=N: throttling + decoy traffic"
+    - "--proxy=http://burp:8080: route through interception proxy"
+  performance:
+    - "--threads=N: 1-10 concurrent requests"
+    - "--retries=N: per-request retries"
+    - "--timeout=N: per-request timeout"
+    - "--null-connection: HEAD/Range trick for boolean — much faster but doesn't work everywhere"
+    - "--keep-alive: HTTP keep-alive (default on)"
+  noise_control:
+    - "--batch: NEVER skip — answers all interactive prompts with defaults"
+    - "-v 0..6: verbosity (0=quiet, 1=default, 6=full HTTP)"
+    - "--purge: wipe sqlmap session data (history, logs)"
+    - "--flush-session: discard cached injection points and re-detect"
+  output:
+    - "--output-dir=/session/sqlmap: where session.sqlite + dump CSVs land"
+    - "--dump-format=CSV|HTML|SQLITE"
+
+gotchas:
+  - "ALWAYS pass --batch — sqlmap is interactive by default and will hang waiting for stdin in a container"
+  - "ALWAYS pass --random-agent (or set --user-agent) — sqlmap's default UA contains 'sqlmap' and is blocked by every modern WAF"
+  - "Pin --output-dir to /session/sqlmap so dumps and session.sqlite persist across tool calls and become the raw_ref"
+  - "* in the URL or --data marks a manual injection point. If you're sure where the bug is from prior recon, use it — sqlmap then SKIPS auto-detection on other params and is much faster"
+  - "Re-running on the same URL reuses cached results from session.sqlite — pass --flush-session if you intentionally want a fresh detection (e.g., target changed)"
+  - "Use --ignore-code=401,403,500 when the endpoint returns non-200 — without it sqlmap may refuse to test"
+  - "For POST: the URL goes to -u, the body to --data; the LLM should NOT cram the body into the URL"
+  - "URL-encode special chars in --data manually if needed; sqlmap's auto-encoding sometimes mangles complex bodies. Use -r request_file for messy payloads"
+  - "--risk=3 includes OR-based payloads that can DELETE rows — never use without explicit user authorization on the target"
+  - "Time-based blind on a noisy network needs --time-sec >=10 to avoid false positives from latency jitter"
+  - "Tamper scripts can interact badly with each other — start with one (e.g., space2comment), add more only if still blocked"
+  - "--threads=1 is the default for time-based blind (parallel time tests are unreliable). For UNION/error-based, raise to 4-8 on stable targets"
+  - "When sqlmap reports 'might not be injectable' or 'does not seem injectable', it is NOT a confirmed finding — false-positive guard rejects these in any vulnerability flag"
+  - "--proxy=http://127.0.0.1:8080 routes through Burp/ZAP for live inspection of every payload"
+  - "On a fully-patched target, default scan finishes in 1-3 minutes saying 'all tested parameters do not appear to be injectable'. That is a real result, not a tool failure — increase --level/--risk or move on"
+
+failure_signatures:
+  # IMPORTANT: sqlmap EXITS 0 even on hard failures (DNS, refused, timeout).
+  # tool_runner MUST NOT trust the exit code alone — every signal here is the
+  # actual stderr/stdout substring from sqlmap 1.7.2 (verified 2026-04-25 in
+  # the kind:cli image). Strings have been live-verified against the container.
+  - signal: "all tested parameters do not appear to be injectable"
+    remediation: "raise --level (3-5) and --risk (2-3); add --tamper=space2comment,between; add --random-agent; verify the parameter is reachable manually; if injection is second-order, use --second-url; consider that the target really isn't vulnerable"
+  - signal: "host '"
+    remediation: "DNS resolution failed — sqlmap reports 'host \\'<name>\\' does not exist, skipping to the next target'. Fix the hostname, check /etc/hosts inside the container, or use IP"
+  - signal: "does not exist, skipping to the next target"
+    remediation: "DNS or target enumeration error — same as host '...' does not exist"
+  - signal: "unable to connect to the target URL"
+    remediation: "TCP connect failed (refused/closed/filtered) — sqlmap echoes the underlying socket error in parens, e.g. ('Connection refused'). Confirm the port with nmap -p N <host> and check --proxy"
+  - signal: "Connection refused"
+    remediation: "the port is closed or filtered — confirm the web service is up with nmap -p 80,443 <host>"
+  - signal: "connection timed out to the target URL"
+    remediation: "TCP connect or response timeout — raise --timeout (default 30s) and --retries; reduce --threads; check VPN / network path"
+  - signal: "Timeout was reached"
+    remediation: "same — target slow; raise --timeout and reduce --threads"
+  - signal: "invalid target URL"
+    remediation: "the URL must include http:// or https:// scheme; quote the URL if it contains shell metacharacters (& ? # *)"
+  - signal: "WAF/IPS"
+    remediation: "WAF detected — try --tamper=space2comment,between,charencode and --random-agent; route through Burp (--proxy) to see what's getting blocked"
+  - signal: "protected by some kind of WAF"
+    remediation: "same as WAF/IPS"
+  - signal: "no parameter(s) found for testing"
+    remediation: "the URL has no GET params and no --data was supplied; add a parameter (?id=1) or pass --data='param=value'"
+  - signal: "unable to retrieve the page content"
+    remediation: "the target returned an empty/error response — verify with curl, check --ignore-code=N for a 401/500 endpoint, or pass --headers if a custom Accept is needed"
+  - signal: "permission denied"
+    remediation: "DB user lacks the privilege for this operation (FILE for --file-read/--file-write, DBA for --passwords). Try a different injection point or escalate first"
+  - signal: "unable to evaluate the provided expression"
+    remediation: "the SQL query / payload contains a syntax error — quote special chars and check sqlmap is using the right --dbms"
+  - signal: "your sqlmap version is outdated"
+    remediation: "informational only — sqlmap warns on every run. Not a failure; ignore unless updating image is in scope"
+
+help_commands:
+  - command: "sqlmap --help"
+    purpose: "Common flags (concise)"
+  - command: "sqlmap -hh"
+    purpose: "Full flag reference (long help)"
+  - command: "sqlmap --version"
+    purpose: "Version + Python info"
+  - command: "sqlmap --list-tampers"
+    purpose: "List all available WAF-bypass tamper scripts"
+  - command: "sqlmap --dependencies"
+    purpose: "Check optional Python dependencies (e.g., for NTLM auth)"

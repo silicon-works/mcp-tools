@@ -1,410 +1,289 @@
 name: curl
-version: "8.18"
-description: "HTTP client (curl 8.18.0 with HTTP/2, HTTP/3, NTLM, Kerberos support) wrapped in 5 specialized methods: request (any HTTP method with timing/debug), inject (RCE payload delivery with {PAYLOAD} placeholder and auto-encoding), upload (multipart file upload for web shells), download (small files as base64), and download_to_file (large files with auto .gz decompression). Returns structured response data: status code, parsed headers, body (50KB cap), timing breakdown (DNS/connect/TLS/TTFB/total), and error classification. Default User-Agent mimics Chrome on Windows. For login forms and JS pages, use playwright-mcp instead."
+kind: cli
+binary: curl
+version: "7.88.1"
+description: "HTTP/HTTPS/FTP client with HTTP/2, HTTP/3, NTLM, Kerberos, and TLS 1.3 support. The Swiss Army knife for web-layer pentesting: send arbitrary requests with custom methods/headers/bodies, deliver RCE payloads, upload web shells via multipart, download files (text or binary). Supports cookies, auth (basic/digest/NTLM/negotiate), redirect following, proxy chains, SSL bypass, certificate auth, and per-step timing instrumentation. The native CLI; LLM constructs the full curl invocation. Use playwright for JavaScript-rendered pages or web-session for stateful login flows."
 image: "ghcr.io/silicon-works/mcp-tools-curl:latest"
 image_size_mb: 100
 timeout_seconds: 60
 
 capabilities:
-  - http_requests
+  - http_request
+  - http_post
   - file_download
-  - exploit_testing
+  - file_upload
+  - exploit_payload_delivery
   - api_interaction
-
-# Cross-references to related tools
-see_also:
-  - playwright-mcp  # For JavaScript-rendered pages, login forms, when curl returns empty
-  - ffuf            # For directory/parameter fuzzing
-  - zap             # For automated security scanning
-
-# Routing hints for tool selection
-routing:
-  use_for:
-    - "make a single HTTP request to test an endpoint or check headers"
-    - "deliver exploit payloads to web RCE endpoints with auto-encoding"
-    - "upload web shells or malicious files via multipart form"
-    - "download wordlists or exploit scripts to session directory"
-    - "interact with a deployed web shell via command injection"
-    - "check server response headers for version fingerprinting"
-    - "send POST data to test for SQL injection or command injection"
-    - "download files from target (configs SSH keys databases)"
-    - "API request with authentication cookies or bearer tokens"
-  never_use_for:
-    - "directory brute-forcing"
-    - "web fuzzing"
-    - "automated scanning"
-    - "login form filling"
-    - "JavaScript rendered pages"
-    - "pages that return empty bodies"
-  triggers:
-    - "download wordlist"
-    - "get rockyou"
-    - "fetch wordlist"
-    - "download to session"
-    - "api request"
-    - "exploit payload"
-  prefer_over: []
-
-warnings:
-  - "Returns raw HTTP response - does NOT execute JavaScript"
-  - "If response body is empty, the page likely requires JavaScript - use playwright-mcp instead"
-  - "For login forms, playwright-mcp is usually better (handles cookies, CSRF, JS validation)"
-  - "Cannot see rendered page content - use playwright-mcp browser_snapshot for that"
+  - header_inspection
+  - tls_test
 
 phases:
   - reconnaissance
   - enumeration
   - exploitation
 
+routing:
+  use_for:
+    - "make a single HTTP request to test an endpoint or check headers"
+    - "send a POST/PUT body (JSON, form-urlencoded, raw) to a web app"
+    - "deliver an RCE payload to a confirmed command-injection endpoint"
+    - "upload a web shell or arbitrary file via multipart/form-data"
+    - "download a file (wordlist, exploit, config, key) to /session"
+    - "interact with a REST/GraphQL API using bearer tokens or cookies"
+    - "check response headers for server/framework version fingerprinting"
+    - "test SSL/TLS configuration or follow a redirect chain"
+    - "exercise NTLM/Negotiate/Digest auth against an HTTP service"
+    - "trigger SSRF via crafted URL parameters"
+  never_use_for:
+    - "directory or parameter brute-forcing — use ffuf"
+    - "rendering JavaScript-heavy pages — use playwright"
+    - "stateful multi-request login flows — use web-session"
+    - "automated vulnerability scanning — use nuclei or zap"
+    - "cracking HTTP basic auth via wordlist — use hydra"
+  triggers:
+    - "curl"
+    - "http request"
+    - "fetch url"
+    - "download wordlist"
+    - "upload web shell"
+    - "exploit payload"
+    - "api call"
+    - "check headers"
+
 requirements:
   network: true
   privileged: false
 
 resources:
-  memory_mb: 128
+  memory_mb: 64
   cpu: 0.25
 
-methods:
-  request:
-    description: "Make an HTTP request with any method (GET/POST/PUT/DELETE/HEAD/OPTIONS/PATCH). Uses curl -s -S -i under the hood with response header parsing, redirect following (up to 10), and structured timing breakdown. Returns parsed status code, response headers as dict, body text (capped at 50KB), and timing (DNS lookup, TCP connect, TLS handshake, TTFB, total in ms, remote IP/port). Supports cookies, basic auth, custom headers, SSL bypass, and 4 debug levels. Body is NOT returned as base64 by default — use raw_response=true for binary content."
-    when_to_use: "For any single HTTP request: testing an endpoint, checking response headers, verifying a vulnerability, sending API calls, or confirming exploit success. Common pentest uses: (1) Check server headers for version info (HEAD request), (2) Test for open redirects or SSRF by checking redirect chains, (3) Send POST data to test for injection, (4) Verify web shell was uploaded by requesting it, (5) Interact with REST APIs. Use inject method instead when you need automatic payload encoding for RCE. Use playwright-mcp for JavaScript-rendered pages or when response body is empty."
-    params:
-      url:
-        type: string
-        required: true
-        description: "Target URL"
-      method:
-        type: enum
-        values: [GET, POST, PUT, DELETE, HEAD, OPTIONS, PATCH]
-        default: GET
-        description: "HTTP method"
-      headers:
-        type: [object, array]
-        description: "Custom headers as key-value pairs (object) or array of 'Header: value' strings"
-      data:
-        type: string
-        description: "Request body data"
-      body:
-        type: string
-        description: "Request body data (alias for 'data')"
-      follow_redirects:
-        type: boolean
-        default: true
-        description: "Follow HTTP redirects"
-      timeout:
-        type: integer
-        default: 30
-        description: "Request timeout in seconds"
-      connect_timeout:
-        type: integer
-        default: 10
-        description: "Connection timeout in seconds"
-      insecure:
-        type: boolean
-        default: false
-        description: "Skip SSL certificate verification"
-      user_agent:
-        type: string
-        description: "Custom User-Agent header"
-      cookie:
-        type: string
-        description: "Cookie header value"
-      auth:
-        type: string
-        description: "Basic auth in user:password format"
-      debug_level:
-        type: integer
-        enum: [0, 1, 2, 3]
-        default: 0
-        description: "Debug level: 0=none, 1=request headers, 2=verbose output, 3=full trace"
-      raw_response:
-        type: boolean
-        default: false
-        description: "Return raw binary response as base64 (for binary downloads)"
-    returns:
-      status_code:
-        type: integer
-        description: "HTTP response status code"
-      headers:
-        type: object
-        description: "Response headers"
-      body:
-        type: string
-        description: "Response body"
-      body_length:
-        type: integer
-        description: "Length of response body in bytes"
-      timing:
-        type: object
-        description: "Request timing breakdown"
-        properties:
-          dns_lookup_ms:
-            type: integer
-            description: "DNS lookup time in milliseconds"
-          connect_ms:
-            type: integer
-            description: "TCP connection time in milliseconds"
-          tls_handshake_ms:
-            type: integer
-            description: "TLS handshake time in milliseconds"
-          first_byte_ms:
-            type: integer
-            description: "Time to first byte in milliseconds"
-          total_ms:
-            type: integer
-            description: "Total request time in milliseconds"
-          remote_ip:
-            type: string
-            description: "IP address of the remote server"
-          remote_port:
-            type: integer
-            description: "Port of the remote server"
-      debug:
-        type: object
-        description: "Debug information (when debug_level >= 1)"
-        properties:
-          request_headers:
-            type: object
-            description: "Headers sent in the request"
-          verbose_output:
-            type: string
-            description: "Full verbose output (debug_level >= 2)"
-      error:
-        type: object
-        description: "Error details (on failure)"
-        properties:
-          type:
-            type: string
-            description: "Error type (e.g., 'connection_refused', 'timeout', 'could_not_resolve_host')"
-          message:
-            type: string
-            description: "Human-readable error message"
-          curl_exit_code:
-            type: integer
-            description: "Curl exit code"
+see_also:
+  - tool: web-session
+    reason: "For stateful authenticated multi-request flows requiring cookie persistence"
+  - tool: playwright
+    reason: "For JavaScript-rendered pages or DOM interaction"
+  - tool: ffuf
+    reason: "For directory/parameter fuzzing — curl is one-shot only"
+  - tool: nuclei
+    reason: "For automated CVE / misconfiguration scanning"
+  - tool: zap
+    reason: "For proxy-based interception and automated scanning"
 
-  download:
-    description: "Download a file from a URL and return contents as base64-encoded string. Uses curl -s -S -L (follows redirects). Filename extracted from URL path. For large files (>10MB), use download_to_file instead — this method loads the entire file into memory and base64-encodes it."
-    when_to_use: "For downloading small files (<10MB) that you need to inspect or process: exploit scripts, configuration files, SSH keys, small binaries. The base64 content can be decoded and written to disk. For wordlists, large binaries, or files >10MB, use download_to_file instead (writes directly to disk)."
-    params:
-      url:
-        type: string
-        required: true
-        description: "URL to download from"
-      timeout:
-        type: integer
-        default: 120
-        description: "Download timeout in seconds"
-      insecure:
-        type: boolean
-        default: false
-        description: "Skip SSL certificate verification"
-    returns:
-      filename:
-        type: string
-        description: "Extracted filename"
-      size_bytes:
-        type: integer
-        description: "File size in bytes"
-      content_base64:
-        type: string
-        description: "File contents as base64"
+# ── kind:cli specific sections ──────────────────────────────────────
 
-  download_to_file:
-    description: "Download a large file directly to a filesystem path using curl -o (no memory buffering). Follows redirects, shows progress bar. Auto-decompresses .gz files when decompress=true (default). Creates parent directories automatically. For text files (.txt), counts lines after download. 10-minute default timeout for large files."
-    when_to_use: "For downloading wordlists, large exploit tools, or binaries directly to disk. Common workflow: (1) Use web_search to find a wordlist URL (e.g., rockyou.txt, SecLists), (2) download_to_file to save to /session/wordlists/. Example: url='https://github.com/.../rockyou.txt.gz', output_path='/session/wordlists/rockyou.txt' (auto-decompresses .gz). Also useful for downloading large exploit scripts or toolkits that need to be saved locally before execution."
-    params:
-      url:
-        type: string
-        required: true
-        description: "URL to download from"
-      output_path:
-        type: string
-        required: true
-        description: "Path to save file (e.g., /session/wordlists/rockyou.txt)"
-      timeout:
-        type: integer
-        default: 600
-        description: "Download timeout in seconds (default 10 minutes for large files)"
-      insecure:
-        type: boolean
-        default: false
-        description: "Skip SSL certificate verification"
-      decompress:
-        type: boolean
-        default: true
-        description: "Auto-decompress .gz files after download"
-    returns:
-      output_path:
-        type: string
-        description: "Path where file was saved"
-      size_bytes:
-        type: integer
-        description: "File size in bytes"
-      size_mb:
-        type: number
-        description: "File size in MB"
-      line_count:
-        type: integer
-        description: "Number of lines (for text files)"
-      decompressed:
-        type: boolean
-        description: "Whether file was decompressed"
+target_extraction:
+  # curl URL is typically the LAST positional argument, e.g. `curl -sS -H 'X: y' https://target/path`
+  # First rule: try last positional that parses as a URL.
+  - rule: "positional_match"
+    pattern: "^(https?|ftp|ftps|file|gopher|telnet|dict|ldap|ldaps|scp|sftp|smb|smbs|imap|imaps|pop3|pop3s|smtp|smtps|tftp|rtsp|rtmp|wss?)://([^:/?#]+)"
+    group: 2
+  # Fallback: bare URL via -u/--url flag (curl does support --url explicitly)
+  - rule: "flag_value"
+    flag: "--url"
+    parse_as: "url_host"
 
-  inject:
-    description: "Send a command to a web RCE endpoint via {PAYLOAD} placeholder substitution with automatic encoding (URL, double-URL, base64, or none). Replaces {PAYLOAD} in both URL and POST body with the encoded command. Extracts command output from the response using optional start/end markers, strips HTML tags by default. Built on the request method — inherits timing, error handling, and redirect following."
-    when_to_use: "For exploiting confirmed web RCE vulnerabilities — command injection, PHP code injection, template injection, etc. Typical workflow: (1) Confirm RCE via request method with manual payload, (2) Switch to inject for repeated command execution with auto-encoding. The {PAYLOAD} placeholder goes in the URL for GET-based injection (e.g., url='http://target/vuln.php?cmd={PAYLOAD}') or in the POST body (data='cmd={PAYLOAD}'). Use output_markers to extract clean output from noisy HTML responses. Use encoding='double-url' for WAF bypass, 'base64' for payloads with special characters."
-    params:
-      url:
-        type: string
-        required: true
-        description: "Target URL (use {PAYLOAD} as placeholder for command)"
-      command:
-        type: string
-        required: true
-        description: "Command to execute"
-      method:
-        type: enum
-        values: [GET, POST]
-        default: GET
-        description: "HTTP method"
-      encoding:
-        type: enum
-        values: [url, double-url, base64, none]
-        default: url
-        description: "Payload encoding method"
-      output_markers:
-        type: object
-        description: "Start/end markers to extract output: {start: str, end: str}"
-      strip_html:
-        type: boolean
-        default: true
-        description: "Strip HTML tags from output"
-      headers:
-        type: [object, array]
-        description: "Custom headers as key-value pairs (object) or array of 'Header: value' strings"
-      data:
-        type: string
-        description: "POST body (use {PAYLOAD} as placeholder)"
-      body:
-        type: string
-        description: "POST body (alias for 'data', use {PAYLOAD} as placeholder)"
-      cookie:
-        type: string
-        description: "Cookie header value"
-      timeout:
-        type: integer
-        default: 30
-        description: "Request timeout in seconds"
-      connect_timeout:
-        type: integer
-        default: 10
-        description: "Connection timeout in seconds"
-      insecure:
-        type: boolean
-        default: false
-        description: "Skip SSL certificate verification"
-      debug_level:
-        type: integer
-        enum: [0, 1, 2, 3]
-        default: 0
-        description: "Debug level: 0=none, 1=request headers, 2=verbose output, 3=full trace"
-    returns:
-      output:
-        type: string
-        description: "Extracted command output"
-      status_code:
-        type: integer
-        description: "HTTP response status code"
-      raw_body_length:
-        type: integer
-        description: "Length of raw response body"
-      timing:
-        type: object
-        description: "Request timing breakdown (same as request method)"
-      debug:
-        type: object
-        description: "Debug information (when debug_level >= 1)"
-      error:
-        type: object
-        description: "Error details (on failure)"
+usage_patterns:
+  - name: "Basic GET"
+    command: "curl -sS -o {output} -w '%{http_code} %{size_download}b %{time_total}s\\n' {url}"
+    when: "Fetch a URL, save body to file, print status and size"
 
-  upload:
-    description: "Upload a file via multipart/form-data POST request. Content can be plain text (for web shells, scripts) or base64-encoded (for binary files). Uses curl -F with automatic temp file creation and cleanup. Supports custom MIME type spoofing, extra form fields, cookies, and custom headers. Returns parsed response including status code, headers, body, and timing."
-    when_to_use: "For exploiting file upload vulnerabilities: (1) Upload a PHP/JSP/ASP web shell through a file upload form, (2) Upload a reverse shell binary, (3) Exploit unrestricted file upload for RCE. You need to know the form field name (inspect the HTML form for the <input type='file' name='...'> attribute). Common field names: 'file', 'upload', 'avatar', 'image', 'attachment'. Set content_type to 'image/jpeg' or 'image/png' to bypass MIME type checks. Use extra_fields for additional required form parameters."
-    params:
-      url:
-        type: string
-        required: true
-        description: "Target upload URL"
-      file_field:
-        type: string
-        required: true
-        description: "Form field name for file (e.g., 'file', 'upload', 'avatar')"
-      filename:
-        type: string
-        required: true
-        description: "Filename to send (e.g., 'shell.php', 'image.png')"
-      content:
-        type: string
-        required: true
-        description: "File content (plain text or base64 encoded)"
-      content_type:
-        type: string
-        default: "application/octet-stream"
-        description: "MIME type for the uploaded file"
-      is_base64:
-        type: boolean
-        default: false
-        description: "Whether content is base64 encoded"
-      extra_fields:
-        type: object
-        description: "Additional form fields as key-value pairs"
-      headers:
-        type: [object, array]
-        description: "Custom HTTP headers as key-value pairs (object) or array of 'Header: value' strings"
-      cookie:
-        type: string
-        description: "Cookie header value"
-      timeout:
-        type: integer
-        default: 60
-        description: "Upload timeout in seconds"
-      connect_timeout:
-        type: integer
-        default: 10
-        description: "Connection timeout in seconds"
-      insecure:
-        type: boolean
-        default: false
-        description: "Skip SSL certificate verification"
-      debug_level:
-        type: integer
-        enum: [0, 1, 2, 3]
-        default: 0
-        description: "Debug level: 0=none, 1=request headers, 2=verbose output, 3=full trace"
-    returns:
-      status_code:
-        type: integer
-        description: "HTTP response status code"
-      filename:
-        type: string
-        description: "Uploaded filename"
-      file_size:
-        type: integer
-        description: "Size of uploaded content"
-      body:
-        type: string
-        description: "Response body"
-      body_length:
-        type: integer
-        description: "Length of response body"
-      timing:
-        type: object
-        description: "Request timing breakdown (same as request method)"
-      debug:
-        type: object
-        description: "Debug information (when debug_level >= 1)"
-      error:
-        type: object
-        description: "Error details (on failure)"
+  - name: "GET with custom headers"
+    command: "curl -sS -H {header1} -H {header2} -o {output} {url}"
+    when: "Fetch with one or more custom headers (e.g., Authorization, User-Agent)"
+
+  - name: "HEAD only"
+    command: "curl -sSI -o {output} {url}"
+    when: "Get response headers only (no body) — useful for fingerprinting and CORS checks"
+
+  - name: "POST JSON body"
+    command: "curl -sS -X POST -H 'Content-Type: application/json' -d '{json_body}' -o {output} {url}"
+    when: "Send a JSON payload to a REST API"
+
+  - name: "POST form-urlencoded"
+    command: "curl -sS -X POST -d '{field1}={value1}&{field2}={value2}' -o {output} {url}"
+    when: "Send classic form-encoded data (login forms, search queries)"
+
+  - name: "POST multipart file upload"
+    command: "curl -sS -F '{file_field}=@{local_path};type={mime_type};filename={remote_name}' -o {output} {url}"
+    when: "Upload a file via multipart/form-data — web shells, profile pictures, etc."
+
+  - name: "Follow redirects with cookie jar"
+    command: "curl -sSL -b {cookie_jar} -c {cookie_jar} -o {output} {url}"
+    when: "Maintain cookie state through a chain of redirects"
+
+  - name: "Basic auth"
+    command: "curl -sS -u {user}:{password} -o {output} {url}"
+    when: "Authenticate with HTTP Basic auth"
+
+  - name: "Bearer token auth"
+    command: "curl -sS -H 'Authorization: Bearer {token}' -o {output} {url}"
+    when: "Call a token-protected API endpoint"
+
+  - name: "NTLM auth (Windows endpoint)"
+    command: "curl -sS --ntlm -u {domain}\\\\{user}:{password} -o {output} {url}"
+    when: "Authenticate to an IIS or other NTLM-protected endpoint"
+
+  - name: "Negotiate (Kerberos) auth"
+    command: "curl -sS --negotiate -u : -o {output} {url}"
+    when: "Authenticate via Kerberos using existing ccache (KRB5CCNAME env)"
+
+  - name: "Skip TLS verification"
+    command: "curl -sSk -o {output} {url}"
+    when: "Lab/HTB environments with self-signed certs — never in production assessment"
+
+  - name: "Download large file directly to disk"
+    command: "curl -sSL -o {output_path} {url}"
+    when: "Save wordlists, exploits, binaries to /session/ — no memory buffering"
+
+  - name: "Verbose for debugging"
+    command: "curl -vv -o {output} {url} 2>{trace_log}"
+    when: "Capture full request/response handshake into a separate log for debugging"
+
+  - name: "Chunked timing breakdown"
+    command: "curl -sS -o {output} -w '%{json}' {url}"
+    when: "Get timing JSON: DNS, connect, TLS, TTFB, total — useful for timing-based attacks"
+
+  - name: "POST raw binary body from file"
+    command: "curl -sS -X POST --data-binary @{local_file} -H 'Content-Type: {mime_type}' -o {output} {url}"
+    when: "Send a raw binary payload (file upload via PUT, custom protocol)"
+
+  - name: "Proxy through a SOCKS5"
+    command: "curl -sS --socks5 {proxy_host}:{proxy_port} -o {output} {url}"
+    when: "Pivot through a SOCKS proxy (e.g., chisel, tunnel, ssh -D)"
+
+  - name: "Cookie-based exploit/payload delivery"
+    command: "curl -sS -b 'session={session_cookie}' -X POST -d 'cmd={url_encoded_command}' -o {output} {url}"
+    when: "Deliver an RCE payload to a vulnerable endpoint requiring a valid session cookie"
+
+output_formats:
+  - flag: "-o {path}"
+    format: "body_to_file"
+    preferred: true
+  - flag: "-w '%{json}'"
+    format: "stats_json"
+    preferred: false
+  - flag: "-i"
+    format: "include_response_headers"
+    preferred: false
+  - flag: "-D {path}"
+    format: "headers_to_file"
+    preferred: false
+  - flag: "-v"
+    format: "verbose_to_stderr"
+    preferred: false
+
+common_options:
+  request_method:
+    - "-X METHOD: HTTP method (GET, POST, PUT, DELETE, HEAD, OPTIONS, PATCH)"
+    - "-G: Convert -d data to URL query string (forces GET)"
+  request_body:
+    - "-d 'data': URL-encoded body (sets Content-Type: application/x-www-form-urlencoded)"
+    - "--data-binary @file: Send file contents raw (no encoding)"
+    - "--data-urlencode 'k=v': URL-encode the value"
+    - "--data-raw 'data': Like -d but no @file expansion"
+  request_headers:
+    - "-H 'Name: value': Custom header (repeat for multiple)"
+    - "-A 'string': Set User-Agent (shorthand for -H 'User-Agent: ...')"
+    - "-e 'url': Set Referer"
+  cookies:
+    - "-b 'name=val' or -b file: Send cookies"
+    - "-c file: Save received cookies to jar (combine with -b for round-trip)"
+  auth:
+    - "-u user:password: Basic auth (default)"
+    - "--ntlm -u DOMAIN\\\\user:pass: NTLM auth"
+    - "--negotiate -u : : Kerberos/SPNEGO (uses existing ccache)"
+    - "--digest -u user:pass: Digest auth"
+    - "-E cert.pem --key key.pem: Client certificate auth"
+  multipart:
+    - "-F 'name=value': Form field"
+    - "-F 'name=@/path/to/file': File upload"
+    - "-F 'name=@/path;type=mime;filename=newname': File with type override + rename"
+  redirects:
+    - "-L: Follow redirects (default 50 hops)"
+    - "--max-redirs N: Limit redirect count"
+    - "--post301 / --post302 / --post303: Keep POST body across redirect"
+  output:
+    - "-o file: Body to file"
+    - "-O: Save with remote filename"
+    - "-D file: Response headers to file"
+    - "-i: Include response headers in body output"
+    - "-w 'fmt': Write-out format (e.g., '%{http_code}', '%{json}', '%{size_download}')"
+  ssl_tls:
+    - "-k / --insecure: Skip cert verification (HTB/labs only)"
+    - "--cacert / --capath: Custom CA"
+    - "--tlsv1.2 / --tls-max 1.3: Force TLS version range"
+    - "--ciphers LIST: Restrict cipher suites"
+  timing_and_retry:
+    - "--max-time N: Hard timeout for whole operation (seconds)"
+    - "--connect-timeout N: TCP connect timeout"
+    - "--retry N: Retry on transient failures"
+    - "--retry-delay N: Wait between retries"
+  proxy:
+    - "-x http://host:port: HTTP proxy"
+    - "--socks5 host:port: SOCKS5 proxy"
+    - "--proxy-user user:pass: Proxy auth"
+  verbosity:
+    - "-s: Silent (no progress bar)"
+    - "-S: Show errors even with -s"
+    - "-v / -vv / -vvv: Verbose request/response headers (to stderr)"
+    - "--trace-ascii file: Full wire trace to file"
+
+gotchas:
+  - "Always use -sS together (silent + show-errors) so progress bar doesn't pollute parsed output, but errors still surface"
+  - "For binary / large responses use -o FILE — never let multi-MB content land in stdout (it bloats LLM context and breaks JSON parsing)"
+  - "When piping JSON responses to jq, add -sS or pipe stderr separately — the curl progress bar will corrupt JSON"
+  - "Default User-Agent is 'curl/X.Y.Z' — many WAFs block this. Use -A to mimic a real browser"
+  - "When following redirects with -L, the server may strip Authorization header on cross-origin hops. Use --location-trusted to keep it (DANGEROUS — only inside scope)"
+  - "POST + -L by default downgrades to GET on 301/302/303. Use --post301/--post302/--post303 to keep the body"
+  - "--data-binary @file vs -d @file: -d strips newlines; --data-binary preserves bytes exactly"
+  - "For NTLM, the user format is DOMAIN\\\\user (note: DOUBLE backslash inside shell quotes, single backslash in YAML strings)"
+  - "Kerberos --negotiate needs KRB5CCNAME env pointing at a valid ccache. Get a TGT first via impacket-getTGT and pass --use-kcache equivalents"
+  - "On HTB / labs, --insecure is fine. NEVER use it on real engagements without explicit authorization — masks MITM"
+  - "If a response body is empty but status is 200, the page likely needs JavaScript — switch to playwright"
+  - "Multi-line -d values: use --data-binary @/path/to/file instead of trying to embed newlines in shell quoting"
+  - "HTTP/3 is opt-in: --http3 (or --http3-only). Some lab targets only speak HTTP/3 for testing"
+  - "When uploading with -F to bypass MIME checks, set type explicitly: -F 'file=@shell.php;type=image/jpeg'"
+  - "%{json} write-out gives you everything: timing, sizes, headers — use it for one-shot diagnostic runs"
+
+failure_signatures:
+  - signal: "Could not resolve host"
+    remediation: "Check hostname spelling, verify /etc/hosts mapping inside the container, or use IP directly"
+  - signal: "Connection refused"
+    remediation: "Verify port is open with nmap; target may be filtered by firewall"
+  - signal: "Couldn't connect to server"
+    remediation: "Verify port is open with nmap; target may be filtered by firewall"
+  - signal: "Failed to connect to"
+    remediation: "Connection failed — verify target IP/hostname and that the port is open"
+  - signal: "Operation timed out"
+    remediation: "Increase --max-time or --connect-timeout; check network path"
+  - signal: "Timeout was reached"
+    remediation: "Increase --max-time or --connect-timeout; check network path or VPN"
+  - signal: "Connection timed out"
+    remediation: "TCP connect timed out — target may be filtered or down. Verify with nmap"
+  - signal: "SSL certificate problem"
+    remediation: "Add -k for HTB/lab targets; on real engagements verify the cert chain"
+  - signal: "SSL handshake failed"
+    remediation: "Try --tlsv1.2 / --ciphers DEFAULT@SECLEVEL=0 for weak/legacy servers"
+  - signal: "Maximum (50) redirects followed"
+    remediation: "Likely a redirect loop — drop -L and inspect the chain manually"
+  - signal: "Empty reply from server"
+    remediation: "Server dropped the connection — try with -v to see what curl sent, or switch to playwright if JS is involved"
+  - signal: "HTTP/2 stream"
+    remediation: "Some servers reject HTTP/2; force --http1.1"
+  - signal: "Send failure"
+    remediation: "Connection broken mid-request — retry with --retry 2"
+  - signal: "401 Unauthorized"
+    remediation: "Add credentials with -u user:pass, --ntlm, --negotiate, or -H 'Authorization: Bearer ...'"
+  - signal: "403 Forbidden"
+    remediation: "Try a different User-Agent (-A), add a Referer (-e), or check IP allowlist"
+
+help_commands:
+  - command: "curl --help all"
+    purpose: "Full flag reference (curl 8.x — categorized by area)"
+  - command: "curl --manual"
+    purpose: "Comprehensive manual page"
+  - command: "curl -V"
+    purpose: "Version and feature support (HTTP/2, HTTP/3, NTLM, Kerberos, libssh, etc.)"
+  - command: "curl --help category"
+    purpose: "List flag categories (auth, dns, http, output, etc.)"

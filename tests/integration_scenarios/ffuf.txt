@@ -1,0 +1,790 @@
+# Integration Scenarios: ffuf
+# Required HTB Machine: Any web box with HTTP/HTTPS
+# Recommended FIRST box: Sau (easy Linux, Maltrail 0.53, exercises dir_fuzz
+#   with filtering, extensions, recursion, and auto-calibrate. Also has vhost
+#   potential via request-baskets. After Sau, try Topology for vhost_fuzz.)
+# Prerequisites: Target reachable on VPN, web server running on port 80/443
+# Run with: pytest tests/tools/test_ffuf.py -m integration --tool=ffuf \
+#           --target=<IP> -v
+#
+# Data source: Trajectory analysis of 32 real ffuf calls across 9 HTB
+#   engagements (Pirate, CCTV, Hercules, Arcane, and 5 others).
+#   Method calls: dir_fuzz=18, vhost_fuzz=10, param_fuzz=3, invalid=1
+#   Error data: 3 timeouts (9.4%), 1 invalid method name ("fuzz"), 8 uses of
+#     non-existent "filter_status" param, 3 uses of dot-prefixed extensions
+#   Timeout breakdown: dir_fuzz=2, param_fuzz=1 (all post-heartbeat fix)
+#   Pre-heartbeat timeout rate was 71.4% on dir_fuzz; now 11.1%
+
+# ===============================================================================
+# TEST EXECUTION LOG
+# ===============================================================================
+#
+# (No tests executed yet. Log entries here after live HTB testing.)
+
+# ===============================================================================
+# DIRECTORY FUZZING SCENARIOS (dir_fuzz)
+# ===============================================================================
+#
+# Engagement data: 18 calls (56% of all ffuf usage).
+# Dominant pattern: common wordlist + technology-appropriate extensions.
+# Real extensions observed:
+#   IIS/ASP targets: asp,aspx,html,txt,config,bak,old
+#   PHP targets: php,html,txt,bak,conf,xml,json,js
+#   Node.js targets: (no extensions, just directory paths)
+#   Broad scan: php,html,txt,bak,conf,xml,json,js,py,sh (10 extensions)
+# Timeout triggers: (1) 16+ extensions in a single call, (2) big wordlist + many exts
+
+## Scenario 1: Basic directory fuzzing with common wordlist
+Method: dir_fuzz
+Args: {url: "http://<IP>/FUZZ", wordlist: "common"}
+Expected: success=true, results contains entries with status 200/301/302/403
+Notes: Standard first-step directory scan. The common wordlist has 4,614 entries
+  and completes in under 60s on most targets. 6 of 18 real dir_fuzz calls used
+  common without extensions. This is the fast-pass before adding extensions.
+
+## Scenario 2: Directory fuzzing with auto FUZZ keyword insertion
+Method: dir_fuzz
+Args: {url: "http://<IP>/", wordlist: "common"}
+Expected: success=true, server auto-appends FUZZ -> "http://<IP>/FUZZ"
+Notes: Tests the FUZZ keyword auto-insertion. The mcp-server.py code strips
+  trailing slash and appends /FUZZ if not present. Agent sometimes forgets FUZZ.
+
+## Scenario 3: PHP target extensions (common HTB pattern)
+Method: dir_fuzz
+Args: {url: "http://<IP>/FUZZ", wordlist: "common", extensions: "php,html,txt,bak"}
+Expected: success=true, results may contain index.php, config.php.bak, etc.
+Notes: Most common extension set from engagements. Used on CCTV (ZoneMinder),
+  Variatype portal, and multiple tunnel targets. 4 extensions x 4,614 words =
+  ~23K requests. Completes in ~4 minutes.
+
+## Scenario 4: IIS/ASP target extensions (Pirate HTB pattern)
+Method: dir_fuzz
+Args: {url: "http://<IP>/FUZZ", wordlist: "common", extensions: "asp,aspx,html,txt,config"}
+Expected: success=true, finds .aspx pages, web.config, etc.
+Notes: Exact pattern from Pirate HTB (IIS 10.0). 5 extensions. The "config"
+  extension catches web.config, app.config, machine.config. Real engagement found
+  aspx pages via this scan. Also used: "asp,aspx,html,txt,bak,old,config" (7 exts).
+
+## Scenario 5: Broad extension scan (10 extensions)
+Method: dir_fuzz
+Args: {url: "http://<IP>/FUZZ", wordlist: "big", extensions: "php,html,txt,bak,conf,xml,json,js,py,sh"}
+Expected: success=true, comprehensive but slower scan
+Notes: Real pattern from CCTV HTB engagement. 10 extensions x 20,469 words =
+  ~225K requests. Takes 30-40 minutes. The big wordlist finds paths that common
+  misses. Used when initial common scan is sparse.
+
+## Scenario 6: Extension count explosion (too many extensions - timeout risk)
+Method: dir_fuzz
+Args: {url: "http://<IP>/FUZZ", wordlist: "common", extensions: "php,phps,bak,txt,html,conf,cfg,ini,inc,old,orig,save,log,sql,xml,json"}
+Expected: success=true OR timeout (16 extensions x 4,614 = 73K requests)
+Notes: Real call from engagement timed out. This tests the _estimate_timeout()
+  calculation. With 16 extensions, even the common wordlist produces 73K requests
+  taking ~12 minutes at 100 req/s. Agent should use 4-6 targeted extensions.
+  Also validates graceful timeout handling (error_class="timeout", retryable=true).
+
+## Scenario 7: Dot-prefixed extensions (LLM parameter mistake)
+Method: dir_fuzz
+Args: {url: "http://<IP>/FUZZ", wordlist: "common", extensions: ".php,.html,.txt"}
+Expected: success=true, ffuf handles dot-prefixed extensions correctly
+Notes: Agent used dot-prefixed extensions in 3 real calls. ffuf adds its own dot,
+  so ".php" becomes "..php" in the actual request. ffuf -e actually strips leading
+  dots, so this works but is a documentation/prompt clarity issue. Both formats
+  should produce identical results. Test both to confirm.
+
+## Scenario 8: Big wordlist directory fuzzing
+Method: dir_fuzz
+Args: {url: "http://<IP>/FUZZ", wordlist: "big"}
+Expected: success=true, more paths than common wordlist
+Notes: 20,469 entries. 3 real calls used "big" wordlist. Takes 3-4 minutes without
+  extensions. Finds deeper paths, backup files, and uncommon admin panels.
+
+## Scenario 9: Dirbuster medium wordlist (largest built-in)
+Method: dir_fuzz
+Args: {url: "http://<IP>/FUZZ", wordlist: "dirbuster-medium", threads: 50}
+Expected: success=true, most comprehensive scan
+Notes: 220,546 entries. No real engagement used this yet, but it is the nuclear
+  option when common and big both miss. Takes 30+ minutes without extensions.
+  Increasing threads to 50 helps but may trigger rate limiting on some targets.
+
+## Scenario 10: Raft wordlist (different word source)
+Method: dir_fuzz
+Args: {url: "http://<IP>/FUZZ", wordlist: "raft-small"}
+Expected: success=true, results from raft-curated word list
+Notes: 1 real call used "raft-small-words" (which resolved to common fallback
+  because the WORDLISTS dict uses "raft-small" not "raft-small-words"). Tests
+  wordlist name resolution and fallback behavior.
+
+## Scenario 11: Non-existent wordlist name (fallback behavior)
+Method: dir_fuzz
+Args: {url: "http://<IP>/FUZZ", wordlist: "raft-small-words"}
+Expected: success=true, falls back to common wordlist (with warning in logs)
+Notes: Real call from Pirate HTB. The wordlist name "raft-small-words" is NOT
+  in the WORDLISTS dict (correct name is "raft-small"). _resolve_wordlist() falls
+  back to common. Agent gets correct results but may not realize the wordlist
+  changed. Tests the silent fallback behavior.
+
+## Scenario 12: Custom wordlist path
+Method: dir_fuzz
+Args: {url: "http://<IP>/FUZZ", wordlist: "/session/wordlists/custom.txt"}
+Expected: success=true if file exists, error if not
+Notes: Agent used custom wordlist paths in param_fuzz engagements. When wordlist
+  is not a known name, _resolve_wordlist() returns it as-is (assumes path).
+  The /session/ directory maps to the session working directory in the container.
+
+# -------------------------------------------------------------------------------
+# FILTER COMBINATION SCENARIOS (dir_fuzz)
+# -------------------------------------------------------------------------------
+
+## Scenario 13: Status code filtering (filter out 403/404)
+Method: dir_fuzz
+Args: {url: "http://<IP>/FUZZ", wordlist: "common", filter_codes: "404,403"}
+Expected: success=true, results exclude 404/403 responses
+Notes: Removes noise from forbidden directories and not-found pages. The default
+  match_status already includes 403, so filter_codes overrides the default match
+  to further remove unwanted codes. Common for IIS targets that return 403 for
+  every directory.
+
+## Scenario 14: Match status whitelist (200 and 301 only)
+Method: dir_fuzz
+Args: {url: "http://<IP>/FUZZ", wordlist: "common", match_status: "200,301"}
+Expected: success=true, only 200 and 301 results shown
+Notes: Whitelist approach. Tighter than the default (200,204,301,302,307,401,403,405).
+  Useful when you only want actual content (200) and redirects (301). Eliminates
+  401/403 noise on locked-down targets.
+
+## Scenario 15: Match status with 401 included (auth-required endpoints)
+Method: dir_fuzz
+Args: {url: "http://<IP>/FUZZ", wordlist: "common", match_status: "200,301,302,401"}
+Expected: success=true, shows endpoints requiring authentication
+Notes: Including 401 reveals protected endpoints that exist but need credentials.
+  Good for mapping attack surface before credential testing.
+
+## Scenario 16: Auto-calibrate filtering (recommended default)
+Method: dir_fuzz
+Args: {url: "http://<IP>/FUZZ", wordlist: "common", auto_calibrate: true}
+Expected: success=true, automatically filters default responses
+Notes: ffuf's -ac flag sends random strings first, measures the baseline response,
+  then filters results matching that baseline. Most effective single setting for
+  eliminating false positives. 1 real call used auto_calibrate with dir_fuzz,
+  more with vhost_fuzz where it is critical.
+
+## Scenario 17: Size-based filtering
+Method: dir_fuzz
+Args: {url: "http://<IP>/FUZZ", wordlist: "common", filter_size: "277"}
+Expected: success=true, responses of size 277 are excluded
+Notes: Real pattern: filter the known "not found" page size. Workflow: (1) curl
+  a non-existent path, note Content-Length, (2) use that as filter_size. The value
+  "277" is a real default 404 page size from engagement data. Multiple size values
+  can be comma-separated: filter_size: "273,274,276,277".
+
+## Scenario 18: Multiple size filtering (range of default pages)
+Method: dir_fuzz
+Args: {url: "http://<IP>/FUZZ", wordlist: "common", filter_size: "273,274,276,277"}
+Expected: success=true, all four sizes filtered out
+Notes: Real pattern from tunnel target engagement. Some servers return slightly
+  different sizes for the same 404 page due to path echoing in the response body.
+  Comma-separated filter_size handles this variation.
+
+## Scenario 19: Word count filtering
+Method: dir_fuzz
+Args: {url: "http://<IP>/FUZZ", wordlist: "common", filter_words: "42"}
+Expected: success=true, responses with 42 words are excluded
+Notes: Alternative to size filtering when pages have dynamic elements that change
+  size but consistent word count. Also handles: "10-50" (range), "0" (empty).
+
+## Scenario 20: Line count filtering
+Method: dir_fuzz
+Args: {url: "http://<IP>/FUZZ", wordlist: "common", filter_lines: "0"}
+Expected: success=true, empty responses filtered out
+Notes: filter_lines: "0" removes empty responses. Useful when target returns
+  200 OK with empty body for non-existent paths (instead of proper 404).
+
+## Scenario 21: Combined filters (auto-calibrate + status filter)
+Method: dir_fuzz
+Args: {url: "http://<IP>/FUZZ", wordlist: "common", auto_calibrate: true, filter_codes: "403"}
+Expected: success=true, both auto-calibrate and 403 filter applied
+Notes: Real pattern from WinRM engagement (10.129.231.186:5985). Combining
+  auto_calibrate with explicit filters gives most precise results. The auto_calibrate
+  handles unknown baseline, filter_codes removes known-unwanted status codes.
+
+## Scenario 22: Combined match + filter (whitelist with exclusions)
+Method: dir_fuzz
+Args: {url: "http://<IP>/FUZZ", wordlist: "common", match_status: "200,301,302,401", filter_size: "0"}
+Expected: success=true, only matched statuses minus empty responses
+Notes: Advanced filtering: whitelist interesting codes, then exclude empties.
+  match_status and filter_codes/filter_size are not mutually exclusive in ffuf.
+
+# -------------------------------------------------------------------------------
+# HEADER AND AUTHENTICATION SCENARIOS (dir_fuzz)
+# -------------------------------------------------------------------------------
+
+## Scenario 23: Custom Host header (vhost-routed target)
+Method: dir_fuzz
+Args: {url: "http://<IP>/FUZZ", wordlist: "common", headers: {"Host": "target.htb"}}
+Expected: success=true, requests sent with custom Host header
+Notes: Real pattern from Variatype (portal.variatype.htb) and Bank HTB. Required
+  when web server routes based on Host header. Without the correct Host header,
+  all requests hit the default vhost (usually a redirect or error page).
+
+## Scenario 24: Cookie-based authenticated fuzzing
+Method: dir_fuzz
+Args: {url: "http://<IP>/admin/FUZZ", wordlist: "common", cookies: "PHPSESSID=abc123def456", extensions: "php"}
+Expected: success=true, finds admin panel files visible only after login
+Notes: Post-authentication directory fuzzing. Obtain session cookie from login,
+  then fuzz protected directories. Common workflow after credential discovery.
+
+## Scenario 25: Multiple custom headers
+Method: dir_fuzz
+Args: {url: "http://<IP>/api/FUZZ", wordlist: "common", headers: {"Authorization": "Bearer <token>", "Content-Type": "application/json"}}
+Expected: success=true, API endpoint discovery with auth headers
+Notes: For API targets requiring Bearer token authentication. Each header becomes
+  a separate -H flag in the ffuf command.
+
+## Scenario 26: HTTPS target (TLS)
+Method: dir_fuzz
+Args: {url: "https://<IP>/FUZZ", wordlist: "common", extensions: "aspx,asp,html,txt,config,bak,old,json,xml"}
+Expected: success=true, handles HTTPS without certificate errors
+Notes: Real pattern from Hercules HTB (ADCS box). ffuf handles self-signed certs
+  by default. 9 extensions on big wordlist was used in the real engagement.
+  HTTPS targets are common for Windows/AD boxes.
+
+# -------------------------------------------------------------------------------
+# RECURSIVE AND MULTI-STAGE DIRECTORY FUZZING
+# -------------------------------------------------------------------------------
+
+## Scenario 27: Manual recursion - fuzz subdirectory found in first scan
+Method: dir_fuzz
+Args: {url: "http://<IP>/admin/FUZZ", wordlist: "common", extensions: "php,html"}
+Expected: success=true, finds files under /admin/
+Notes: ffuf does not natively support recursive scanning. The agent pattern is:
+  (1) dir_fuzz on root, (2) dir_fuzz on each interesting directory found. Real
+  engagement data shows this two-stage approach on CCTV (/zm/FUZZ after finding
+  /zm/ in first scan) and Nibbles (/nibbleblog/FUZZ after finding /nibbleblog/).
+
+## Scenario 28: Fuzz API endpoint paths
+Method: dir_fuzz
+Args: {url: "http://<IP>:3552/api/FUZZ", wordlist: "common", threads: 40}
+Expected: success=true, finds API endpoints like /auth, /users, /config
+Notes: Real pattern from Arcane HTB engagement. Non-standard ports are common
+  for API services. No extensions needed for REST API paths.
+
+## Scenario 29: Fuzz through SSH tunnel (localhost target)
+Method: dir_fuzz
+Args: {url: "http://127.0.0.1:50149/FUZZ", wordlist: "common", extensions: "php,html,txt,bak,old,conf"}
+Expected: success=true, finds internal web application files
+Notes: 5 real calls targeted 127.0.0.1 through SSH port forwards. The internal
+  service is only reachable via tunnel. Common in post-exploitation phase when
+  pivoting to internal web services. Used with both common and big wordlists.
+
+## Scenario 30: Fuzz through tunnel with size filtering
+Method: dir_fuzz
+Args: {url: "http://127.0.0.1:39439/FUZZ", wordlist: "common", extensions: "php,phps,bak,txt,conf,ini", filter_size: "277"}
+Expected: success=true, internal service files with 404 page filtered
+Notes: Real pattern: agent first discovered default 404 size (277), then added
+  filter_size on retry. The progression was: (1) scan with 16 extensions -> timeout,
+  (2) retry with 6 extensions -> success, (3) retry with big wordlist + 4 exts +
+  filter_size -> success. Shows the iterative refinement pattern.
+
+## Scenario 31: Fuzz ADCS vhost subdirectory
+Method: dir_fuzz
+Args: {url: "https://dc.hercules.htb/FUZZ", wordlist: "common", extensions: "aspx,ashx,asmx,axd"}
+Expected: success=true, finds ADCS web enrollment pages
+Notes: Real call from Hercules HTB. The extensions target ASP.NET handler types:
+  aspx (pages), ashx (generic handlers), asmx (web services), axd (trace handler).
+  This is the IIS-specific extension set for .NET applications.
+
+## Scenario 32: Large wordlist with targeted extensions and filter
+Method: dir_fuzz
+Args: {url: "http://<IP>/FUZZ", wordlist: "big", extensions: "php,phps,txt,bak", filter_size: "277", threads: 40}
+Expected: success=true, deep scan with noise filtered
+Notes: Real pattern from tunnel target. 4 extensions x 20,469 = ~102K requests.
+  Takes ~17 minutes. The filter_size reduces output noise significantly. This is
+  the "thorough but practical" scan after initial common scan finds something.
+
+# ===============================================================================
+# PARAMETER FUZZING SCENARIOS (param_fuzz)
+# ===============================================================================
+#
+# Engagement data: 3 calls (9% of all ffuf usage). All were POST JSON body
+#   fuzzing for password brute-force on an API endpoint. No GET parameter
+#   discovery calls observed. 1 timeout on 10k-word custom wordlist.
+# Key finding: Agent used invalid "filter_status" param (8 times across all
+#   methods). The correct params are "match_status" or "filter_codes".
+
+## Scenario 33: GET parameter name discovery
+Method: param_fuzz
+Args: {url: "http://<IP>/index.php?FUZZ=test", wordlist: "common"}
+Expected: success=true, discovered parameters with different response sizes
+Notes: Place FUZZ as the parameter name to discover hidden GET parameters.
+  Filter by response size to find parameters that change server behavior.
+  No real engagement data for this pattern yet, but it is a core use case.
+
+## Scenario 34: GET parameter value fuzzing (IDOR)
+Method: param_fuzz
+Args: {url: "http://<IP>/page.php?id=FUZZ", wordlist: "common", filter_codes: "404", auto_calibrate: true}
+Expected: success=true, valid parameter values found
+Notes: Fuzz numeric IDs or string values. Auto-calibrate removes the default
+  response. Useful for IDOR testing (insecure direct object reference).
+
+## Scenario 35: POST form parameter fuzzing
+Method: param_fuzz
+Args: {url: "http://<IP>/login.php", method: "POST", data: "username=admin&password=FUZZ", wordlist: "common"}
+Expected: success=true, responses vary for valid vs invalid passwords
+Notes: Classic login brute-force pattern with URL-encoded form data. Filter by
+  response size or status to identify successful login attempts.
+
+## Scenario 36: POST JSON body password brute-force (real Arcane HTB pattern)
+Method: param_fuzz
+Args: {url: "http://<IP>:3552/api/auth/login", method: "POST", data: "{\"username\":\"arcane\",\"password\":\"FUZZ\"}", wordlist: "common", headers: {"Content-Type": "application/json"}, threads: 16}
+Expected: success=true, response differs for correct password
+Notes: Exact real pattern from Arcane HTB engagement. 3 calls targeted this
+  endpoint with different wordlists. Key details: (1) JSON body requires
+  Content-Type header, (2) threads reduced to 16 to avoid rate limiting,
+  (3) FUZZ placed inside JSON string value. The first call used a custom
+  session wordlist (16 threads), second used common (40 threads), third used
+  10k-common (40 threads, timed out).
+
+## Scenario 37: POST JSON with custom wordlist
+Method: param_fuzz
+Args: {url: "http://<IP>:3552/api/auth/login", method: "POST", data: "{\"username\":\"admin\",\"password\":\"FUZZ\"}", wordlist: "/session/wordlists/custom-passwords.txt", headers: {"Content-Type": "application/json"}, threads: 16}
+Expected: success=true if wordlist exists in container, error if not
+Notes: Real pattern used /session/wordlists/arcane-passwords.txt (a custom
+  wordlist the agent generated from reconnaissance). Tests custom wordlist path
+  resolution and session directory mounting in the container.
+
+## Scenario 38: POST JSON with large wordlist (timeout risk)
+Method: param_fuzz
+Args: {url: "http://<IP>/api/auth/login", method: "POST", data: "{\"username\":\"admin\",\"password\":\"FUZZ\"}", wordlist: "/session/wordlists/10k-common.txt", headers: {"Content-Type": "application/json"}, threads: 40}
+Expected: timeout OR success (depends on target response time)
+Notes: Real call timed out with 10k-word custom wordlist at 40 threads. The
+  _estimate_timeout() may underestimate for slow API endpoints that add latency
+  per request. Validates timeout handling and suggestions.
+
+## Scenario 39: Parameter fuzzing with auto-calibrate
+Method: param_fuzz
+Args: {url: "http://<IP>/api/FUZZ", wordlist: "common", auto_calibrate: true}
+Expected: success=true, auto-filtered results
+Notes: Best approach for API endpoint discovery when you don't know the default
+  response pattern. FUZZ in the URL path discovers API routes.
+
+## Scenario 40: Missing FUZZ keyword validation
+Method: param_fuzz
+Args: {url: "http://<IP>/page.php?id=123", wordlist: "common"}
+Expected: success=false, error explains FUZZ keyword requirement
+Notes: Tests the validation in param_fuzz that checks for FUZZ in url or data.
+  Returns error_class="params" with suggestions for correct placement.
+  The error message should list examples: GET param discovery, value fuzzing,
+  POST fuzzing.
+
+## Scenario 41: POST parameter with match_status (not filter_status)
+Method: param_fuzz
+Args: {url: "http://<IP>/login", method: "POST", data: "user=admin&pass=FUZZ", wordlist: "common", match_status: "200"}
+Expected: success=true, only 200 responses shown
+Notes: The correct parameter name is "match_status" NOT "filter_status". The
+  agent used "filter_status" in 3/3 real param_fuzz calls. "filter_status" is
+  silently ignored by the server (not in the param schema), so the agent got
+  unfiltered results. This scenario validates correct parameter usage.
+
+## Scenario 42: POST with cookies (session-authenticated parameter fuzzing)
+Method: param_fuzz
+Args: {url: "http://<IP>/admin/api", method: "POST", data: "action=FUZZ", wordlist: "common", cookies: "session=abc123", headers: {"X-CSRF-Token": "token123"}}
+Expected: success=true, discovers admin API actions
+Notes: Combines POST data fuzzing with session authentication and CSRF token.
+  Common for testing authenticated web applications after obtaining credentials.
+
+# ===============================================================================
+# VIRTUAL HOST ENUMERATION SCENARIOS (vhost_fuzz)
+# ===============================================================================
+#
+# Engagement data: 10 calls (31% of all ffuf usage). Used on Pirate (6 calls,
+#   IIS), CCTV (1), Hercules (2, HTTPS), and one unidentified target.
+# Dominant pattern: First scan without filter_size to measure default, then
+#   rescan with filter_size to isolate real vhosts. Auto-calibrate also used.
+# Real findings: Pirate found vhosts with filter_size=703 using both common
+#   and big wordlists. Hercules found vhosts with filter_size=27342 over HTTPS.
+
+## Scenario 43: Basic vhost fuzzing (measure baseline)
+Method: vhost_fuzz
+Args: {url: "http://<IP>", domain: "target.htb", wordlist: "common"}
+Expected: success=true, ALL results have similar size (the default vhost response)
+Notes: First vhost scan should be run WITHOUT any filter to measure the default
+  response size. Real pattern from Pirate HTB: first call returned results all
+  with size 703, which became the filter_size for subsequent scans. Also used on
+  CCTV (cctv.htb domain).
+
+## Scenario 44: Vhost fuzzing with size filter (real Pirate HTB pattern)
+Method: vhost_fuzz
+Args: {url: "http://<IP>", domain: "pirate.htb", wordlist: "common", filter_size: "703"}
+Expected: success=true, only non-default vhosts shown
+Notes: Exact real pattern. The 703-byte response is the IIS default page. After
+  filtering, any remaining results are real subdomains (e.g., dev.pirate.htb,
+  admin.pirate.htb). This was the most successful vhost pattern across 4 separate
+  Pirate sessions.
+
+## Scenario 45: Vhost fuzzing with big wordlist and filter
+Method: vhost_fuzz
+Args: {url: "http://<IP>", domain: "pirate.htb", wordlist: "big", filter_size: "703"}
+Expected: success=true, deeper subdomain scan
+Notes: Real pattern from Pirate HTB. Escalation from common -> big when common
+  found results. 20,469 entries takes ~3 minutes. Found additional subdomains
+  not in the common wordlist.
+
+## Scenario 46: Vhost fuzzing with auto-calibrate
+Method: vhost_fuzz
+Args: {url: "http://<IP>", domain: "target.htb", wordlist: "common", auto_calibrate: true}
+Expected: success=true, auto-filtered vhosts
+Notes: Alternative to manual filter_size workflow. Auto-calibrate sends random
+  subdomain requests, measures the baseline, and filters automatically. Best
+  when you don't want to run two scans (measure + filter). Slightly less precise
+  than manual filter_size when the default response has variable size.
+
+## Scenario 47: HTTPS vhost fuzzing (Hercules HTB pattern)
+Method: vhost_fuzz
+Args: {url: "https://<IP>/", domain: "hercules.htb", wordlist: "common", filter_size: "27342"}
+Expected: success=true, HTTPS vhosts discovered
+Notes: Real pattern from Hercules HTB (ADCS box). Note the trailing slash in the
+  URL and the large filter_size (27,342 bytes = the default HTTPS landing page).
+  HTTPS vhost fuzzing works identically to HTTP.
+
+## Scenario 48: Vhost fuzzing with alternate TLD domain
+Method: vhost_fuzz
+Args: {url: "https://<IP>/", domain: "htb", wordlist: "small", filter_size: "27342"}
+Expected: success=true, finds <name>.htb subdomains
+Notes: Real pattern from Hercules HTB. Instead of fuzzing FUZZ.hercules.htb,
+  this scans FUZZ.htb to discover entirely different domains on the same IP.
+  The small wordlist (959 entries) is fast for this broad exploration.
+
+## Scenario 49: Vhost fuzzing with match status only 200
+Method: vhost_fuzz
+Args: {url: "http://<IP>", domain: "target.htb", wordlist: "common", match_status: "200"}
+Expected: success=true, only 200 OK vhosts
+Notes: Strict matching. Misses redirects (301/302) which may indicate real vhosts
+  that redirect to a login page. Generally filter_size is more reliable than
+  match_status for vhost discovery.
+
+## Scenario 50: Vhost with non-existent wordlist name (fallback test)
+Method: vhost_fuzz
+Args: {url: "http://<IP>", domain: "target.htb", wordlist: "subdomains-top1million-5000"}
+Expected: success=true (falls back to common, 0 results if default not filtered)
+Notes: Real call from Pirate HTB. "subdomains-top1million-5000" is a SecLists
+  path component but not a key in the WORDLISTS dict. Falls back to common
+  wordlist silently. The agent got 0 results (no filter_size was set, so all
+  results matched the default). Tests fallback + lack of filtering interaction.
+
+## Scenario 51: Vhost fuzzing with filter_codes
+Method: vhost_fuzz
+Args: {url: "http://<IP>", domain: "target.htb", wordlist: "common", filter_codes: "400"}
+Expected: success=true, 400 Bad Request responses filtered
+Notes: Some servers return 400 for invalid Host headers. Filtering 400 removes
+  these while keeping 200/301/302 responses that indicate valid vhosts.
+
+## Scenario 52: Vhost fuzzing with combined filter_size and filter_words
+Method: vhost_fuzz
+Args: {url: "http://<IP>", domain: "target.htb", wordlist: "common", filter_size: "703", filter_words: "15"}
+Expected: success=true, double-filtered results
+Notes: When the default vhost has consistent size AND word count, combining both
+  filters provides higher precision. Handles edge cases where a real vhost happens
+  to match one dimension but not both.
+
+# ===============================================================================
+# HEARTBEAT AND TIMEOUT BEHAVIOR SCENARIOS
+# ===============================================================================
+#
+# The 71.4% timeout rate on dir_fuzz was caused by the MCP client killing idle
+# connections after 300s with no output. Fixed by adding heartbeat support via
+# run_command_with_progress() with heartbeat_interval=15s. Post-fix timeout rate
+# dropped to 11.1% for dir_fuzz (2/18 calls, both caused by extreme extension
+# counts). ffuf runs in silent mode (-s) so there is no meaningful stdout, but
+# the heartbeat timer fires every 15 seconds to keep the connection alive.
+
+## Scenario 53: Heartbeat regression test (common wordlist, no extensions)
+Method: dir_fuzz
+Args: {url: "http://<IP>/FUZZ", wordlist: "common"}
+Expected: success=true, completes in <60s without timeout
+Notes: Baseline test. common wordlist (4,614 entries) at 40 threads should
+  complete in ~46 seconds. If this times out, the heartbeat mechanism has
+  regressed. Run with client timeout >= 120s.
+
+## Scenario 54: Heartbeat regression test (big wordlist with extensions)
+Method: dir_fuzz
+Args: {url: "http://<IP>/FUZZ", wordlist: "big", extensions: "php,txt,bak"}
+Expected: success=true, completes in <10 minutes without timeout
+Notes: 3 extensions x 20,469 = ~82K requests. At 40 threads and ~100 req/s,
+  takes ~14 minutes. The heartbeat fires every 15s throughout. If this times
+  out, check _estimate_timeout() (should calculate ~850s, capped at 900s).
+
+## Scenario 55: Timeout handling (intentional timeout scenario)
+Method: dir_fuzz
+Args: {url: "http://<IP>/FUZZ", wordlist: "dirbuster-medium", extensions: "php,html,txt,bak,asp,aspx,jsp,do,action,old", threads: 10, timeout: 2}
+Expected: timeout with error_class="timeout", retryable=true, suggestions present
+Notes: 10 extensions x 220,546 words = 2.2M requests at 10 threads = ~6 hours.
+  The _estimate_timeout() caps at 900s (15 min). This WILL timeout. Validates:
+  (1) ToolError is caught, (2) error_class is set, (3) retryable is true,
+  (4) suggestions recommend smaller wordlist/fewer extensions.
+
+# ===============================================================================
+# ERROR AND EDGE CASE SCENARIOS
+# ===============================================================================
+
+## Scenario 56: Invalid method name ("fuzz" instead of "dir_fuzz")
+Method: fuzz
+Args: {url: "http://<IP>/FUZZ", wordlist: "common"}
+Expected: Error: Method "fuzz" not found on tool "ffuf". Available methods: dir_fuzz, param_fuzz, vhost_fuzz
+Notes: Real agent mistake from engagement. The agent tried "fuzz" instead of
+  "dir_fuzz". Tests that the error message lists available methods clearly.
+
+## Scenario 57: Invalid param name ("filter_status" - most common LLM mistake)
+Method: dir_fuzz
+Args: {url: "http://<IP>/FUZZ", wordlist: "common", filter_status: "200,204,301,302,307,401,403,405"}
+Expected: success=true, BUT filter_status is silently ignored (no filtering applied)
+Notes: "filter_status" was used 8 times across real engagements. It is NOT a valid
+  parameter. The server ignores unknown params, so the agent gets unfiltered results
+  without any error. This is a silent failure. The correct params are:
+  - match_status: whitelist codes to SHOW
+  - filter_codes: blacklist codes to HIDE
+  Scenario validates the silent ignore behavior. Consider adding server-side
+  validation for unknown params in a future update.
+
+## Scenario 58: Connection refused (target not running)
+Method: dir_fuzz
+Args: {url: "http://<IP>:9999/FUZZ", wordlist: "common"}
+Expected: success=false, error contains "connection refused", error_class="network", retryable=true
+Notes: Target port 9999 is not running. Tests the connection error handling in
+  _run_ffuf(). Should suggest verifying URL/port and checking with nmap.
+
+## Scenario 59: Empty results (no matches found)
+Method: dir_fuzz
+Args: {url: "http://<IP>/nonexistent-base-path/FUZZ", wordlist: "small"}
+Expected: success=true, total_results=0, message="No results found"
+Notes: When ffuf finds nothing, the JSON output file is empty or has 0 results.
+  The server returns success=true with empty results (not an error). Tests the
+  empty-result path in _run_ffuf().
+
+## Scenario 60: URL without scheme
+Method: dir_fuzz
+Args: {url: "<IP>/FUZZ", wordlist: "common"}
+Expected: Error or ffuf failure (no http:// prefix)
+Notes: Tests whether ffuf handles missing scheme gracefully. The mcp-server does
+  NOT validate URL format, so this passes through to ffuf which will fail.
+
+## Scenario 61: Special characters in URL path
+Method: dir_fuzz
+Args: {url: "http://<IP>/api/v1/FUZZ", wordlist: "common"}
+Expected: success=true, handles URL encoding correctly
+Notes: ffuf URL-encodes FUZZ values by default. Tests that paths with special
+  characters in the wordlist (e.g., %20, #, ?) are handled correctly.
+
+## Scenario 62: Thread count zero
+Method: dir_fuzz
+Args: {url: "http://<IP>/FUZZ", wordlist: "common", threads: 0}
+Expected: Error from ffuf (invalid thread count)
+Notes: Edge case - zero threads is invalid. Tests error propagation from ffuf.
+
+## Scenario 63: HTTP timeout too low
+Method: dir_fuzz
+Args: {url: "http://<IP>/FUZZ", wordlist: "common", timeout: 1}
+Expected: success=true but many results may be missed due to timeout
+Notes: HTTP request timeout of 1 second. Fast responses will be captured but
+  any page taking >1s to respond will be missed. The wall-clock timeout
+  (estimated by _estimate_timeout) is separate from the per-request timeout.
+
+# ===============================================================================
+# HTB-SPECIFIC WORKFLOWS
+# ===============================================================================
+#
+# These scenarios reproduce real engagement patterns from trajectory data.
+# IP addresses are placeholders - substitute the current HTB box IP.
+
+## Scenario 64: Pirate HTB - Full enumeration workflow (IIS)
+# Box: Pirate (was 10.129.17.93/10.129.9.217)
+# Technology: IIS 10.0, ASP.NET
+# Step 1: Vhost discovery (measure baseline)
+Method: vhost_fuzz
+Args: {url: "http://<IP>", domain: "pirate.htb", wordlist: "common"}
+Expected: All results show similar size (703 bytes = IIS default page)
+Notes: First scan reveals the default response size for filtering.
+# Step 2: Vhost discovery (filtered)
+Method: vhost_fuzz
+Args: {url: "http://<IP>", domain: "pirate.htb", wordlist: "common", filter_size: "703"}
+Expected: Real subdomains discovered
+Notes: Filter the 703-byte default to see actual vhosts.
+# Step 3: Vhost escalation with big wordlist
+Method: vhost_fuzz
+Args: {url: "http://<IP>", domain: "pirate.htb", wordlist: "big", filter_size: "703"}
+Expected: Additional subdomains from larger wordlist
+Notes: Big wordlist may find subdomains that common missed.
+# Step 4: Directory fuzzing with IIS extensions
+Method: dir_fuzz
+Args: {url: "http://pirate.htb/FUZZ", wordlist: "common", extensions: "asp,aspx,html,txt,bak,old,config", threads: 40}
+Expected: Finds ASP.NET pages, web.config, backup files
+Notes: Full IIS extension set. Requires pirate.htb in /etc/hosts.
+# Step 5: Big wordlist directory scan
+Method: dir_fuzz
+Args: {url: "http://pirate.htb/FUZZ", wordlist: "big", extensions: "asp,aspx,txt", threads: 40}
+Expected: Deeper directory scan with fewer extensions to manage time
+Notes: Reduced to 3 extensions for the big wordlist to stay under timeout.
+
+## Scenario 65: CCTV HTB - ZoneMinder enumeration workflow (PHP)
+# Box: CCTV (was 10.129.7.81)
+# Technology: Linux, Apache, PHP, ZoneMinder
+# Step 1: Vhost discovery
+Method: vhost_fuzz
+Args: {url: "http://<IP>", domain: "cctv.htb", wordlist: "common"}
+Expected: May find additional subdomains
+Notes: One real call. Set filter_size after measuring default response.
+# Step 2: Broad directory scan
+Method: dir_fuzz
+Args: {url: "http://cctv.htb/FUZZ", wordlist: "big", extensions: "php,html,txt,bak,conf,xml,json,js,py,sh", threads: 40}
+Expected: Finds /zm/ (ZoneMinder) directory and other paths
+Notes: Real call with 10 extensions on big wordlist. Comprehensive but slow.
+# Step 3: Recursive scan of ZoneMinder directory
+Method: dir_fuzz
+Args: {url: "http://cctv.htb/zm/FUZZ", wordlist: "common", extensions: "php,html,txt,json,js", threads: 40}
+Expected: Finds ZoneMinder-specific files (api.php, index.php, etc.)
+Notes: After finding /zm/ in step 2, recursively fuzz the CMS directory.
+
+## Scenario 66: Hercules HTB - ADCS enumeration workflow (HTTPS/AD)
+# Box: Hercules (was 10.129.242.196)
+# Technology: IIS, HTTPS, Active Directory Certificate Services
+# Step 1: HTTPS vhost discovery
+Method: vhost_fuzz
+Args: {url: "https://<IP>/", domain: "hercules.htb", wordlist: "common", filter_size: "27342"}
+Expected: Finds dc.hercules.htb or other AD-related subdomains
+Notes: Large default page (27,342 bytes). HTTPS is mandatory.
+# Step 2: Alternate TLD discovery
+Method: vhost_fuzz
+Args: {url: "https://<IP>/", domain: "htb", wordlist: "small", filter_size: "27342"}
+Expected: Finds <name>.htb domains hosted on same IP
+Notes: Broader search across all .htb domains, not just hercules.htb subdomains.
+# Step 3: ADCS directory enumeration
+Method: dir_fuzz
+Args: {url: "https://dc.hercules.htb/FUZZ", wordlist: "common", extensions: "aspx,ashx,asmx,axd"}
+Expected: Finds ADCS web enrollment pages (certsrv/, etc.)
+Notes: ASP.NET handler extensions for ADCS discovery.
+
+## Scenario 67: Arcane HTB - API brute-force workflow (Node.js)
+# Box: Arcane (was 10.129.13.195:3552)
+# Technology: Node.js, REST API, JSON authentication
+# Step 1: API endpoint discovery
+Method: dir_fuzz
+Args: {url: "http://<IP>:3552/api/FUZZ", wordlist: "common", threads: 40}
+Expected: Finds /auth, /users, /config, etc.
+Notes: No extensions needed for REST API paths.
+# Step 2: Password brute-force with custom wordlist
+Method: param_fuzz
+Args: {url: "http://<IP>:3552/api/auth/login", method: "POST", data: "{\"username\":\"arcane\",\"password\":\"FUZZ\"}", wordlist: "/session/wordlists/arcane-passwords.txt", headers: {"Content-Type": "application/json"}, threads: 16}
+Expected: One response differs in size/status (the correct password)
+Notes: Reduced threads (16) to avoid API rate limiting. Custom wordlist
+  generated from recon data.
+# Step 3: Password brute-force with standard wordlist
+Method: param_fuzz
+Args: {url: "http://<IP>:3552/api/auth/login", method: "POST", data: "{\"username\":\"arcane\",\"password\":\"FUZZ\"}", wordlist: "common", headers: {"Content-Type": "application/json"}, match_status: "200"}
+Expected: Identifies successful login (200 OK vs 401 Unauthorized)
+Notes: Uses match_status (not filter_status!) to show only successful logins.
+
+## Scenario 68: Internal service through tunnel (post-exploitation)
+# Pattern: SSH tunnel to internal web service
+# Step 1: Quick scan with many extensions (may timeout)
+Method: dir_fuzz
+Args: {url: "http://127.0.0.1:<PORT>/FUZZ", wordlist: "common", extensions: "php,phps,bak,txt,conf,ini", threads: 30}
+Expected: success=true, finds internal service files
+Notes: Real pattern through SSH port forward. Reduced threads (30) for tunnel
+  stability. 6 extensions is the practical limit before timeout risk increases.
+# Step 2: Targeted scan with filter
+Method: dir_fuzz
+Args: {url: "http://127.0.0.1:<PORT>/FUZZ", wordlist: "big", extensions: "php,phps,txt,bak", filter_size: "277"}
+Expected: success=true, deeper scan with noise filtered
+Notes: Escalate to big wordlist after initial scan. Filter the default 404 size.
+  4 extensions with big wordlist is the sweet spot for tunnel targets.
+
+## Scenario 69: Nibbles HTB - CMS discovery workflow
+# Box: Nibbles (10.10.10.75)
+# Technology: Apache, PHP, Nibbleblog CMS
+Method: dir_fuzz
+Args: {url: "http://<IP>/FUZZ", wordlist: "common", extensions: "php"}
+Expected: Finds /nibbleblog/ directory
+Notes: Initial directory discovery reveals CMS installation.
+# Follow-up:
+Method: dir_fuzz
+Args: {url: "http://<IP>/nibbleblog/FUZZ", wordlist: "common", extensions: "php"}
+Expected: Finds admin.php, content/, plugins/
+Notes: Recursive fuzzing of CMS directory reveals admin panel.
+
+## Scenario 70: Bank HTB - Vhost-routed directory scan
+# Box: Bank (10.10.10.29)
+# Technology: Apache, PHP, virtual hosting
+Method: dir_fuzz
+Args: {url: "http://<IP>/FUZZ", wordlist: "common", headers: {"Host": "bank.htb"}}
+Expected: Finds /balance-transfer/, /uploads/, /assets/
+Notes: Must use Host header. Without it, Apache returns the default vhost.
+
+## Scenario 71: Bashed HTB - Web shell discovery
+# Box: Bashed (10.10.10.68)
+# Technology: Apache, PHP, phpbash
+Method: dir_fuzz
+Args: {url: "http://<IP>/FUZZ", wordlist: "common"}
+Expected: Finds /dev/ directory
+Notes: /dev/ contains phpbash.php web shell.
+# Follow-up:
+Method: dir_fuzz
+Args: {url: "http://<IP>/dev/FUZZ", wordlist: "common", extensions: "php"}
+Expected: Finds phpbash.php
+Notes: Direct path to web shell for initial foothold.
+
+## Scenario 72: WordPress enumeration (Tenten HTB)
+# Box: Tenten (10.10.10.10)
+# Technology: Apache, PHP, WordPress
+Method: dir_fuzz
+Args: {url: "http://<IP>/FUZZ", wordlist: "common", extensions: "php,txt"}
+Expected: Finds /wp-admin/, /wp-content/, /wp-includes/, xmlrpc.php
+Notes: WordPress directory structure discovery. Follow up with WPScan for
+  plugin/theme enumeration.
+
+# ===============================================================================
+# RECOMMENDED TESTING ORDER
+# ===============================================================================
+#
+# Phase 1: Core functionality (any web box)
+#   Scenarios 1-2: Basic dir_fuzz, FUZZ auto-insertion
+#   Scenario 53: Heartbeat regression
+#   Scenario 43-44: Basic vhost_fuzz workflow
+#   Scenario 33: Basic param_fuzz
+#
+# Phase 2: Filtering (any web box)
+#   Scenarios 13-22: All filter combinations
+#   Scenario 57: Invalid param (filter_status) behavior
+#
+# Phase 3: Wordlists (any web box)
+#   Scenarios 8-12: Different wordlists, fallback behavior
+#   Scenario 54: Big wordlist heartbeat test
+#
+# Phase 4: Technology-specific (specific boxes)
+#   Scenario 69: Nibbles (PHP CMS)
+#   Scenario 70: Bank (vhost routing)
+#   Scenario 71: Bashed (web shell)
+#   Scenario 72: Tenten (WordPress)
+#
+# Phase 5: Advanced patterns (any box with auth or API)
+#   Scenarios 23-26: Headers and auth
+#   Scenarios 35-38: POST fuzzing
+#
+# Phase 6: Error handling
+#   Scenarios 56-63: All error/edge cases
+#   Scenario 55: Intentional timeout
+#
+# Phase 7: Full workflows (specific boxes)
+#   Scenario 64: Pirate (IIS vhost + dir)
+#   Scenario 65: CCTV (PHP + recursion)
+#   Scenario 66: Hercules (HTTPS + ADCS)
+#   Scenario 67: Arcane (API + JSON brute-force)
+#   Scenario 68: Tunnel target (post-exploitation)
+#
+# Recommended first box: Sau (Easy Linux)
+#   - HTTP on port 55555 (request-baskets) and internal Maltrail on 80
+#   - Exercises: dir_fuzz with filtering, vhost potential, tunnel target
+#   - Fast scans, clear results, good for validating core functionality
+#
+# Recommended second box: Topology (Easy Linux)
+#   - Multiple vhosts on same IP (latex.topology.htb, dev.topology.htb, etc.)
+#   - Exercises: vhost_fuzz end-to-end, filter_size workflow, Host header
+#   - The definitive vhost_fuzz validation box

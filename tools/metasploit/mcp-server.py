@@ -293,6 +293,45 @@ class MetasploitServer(BaseMCPServer):
 
     # ── Helpers ──────────────────────────────────────────────────────────
 
+    @staticmethod
+    def _classify_msf_error(output: str) -> tuple:
+        """Classify metasploit-specific error patterns.
+
+        Returns (error_class, retryable, suggestions).
+        """
+        lower = output.lower()
+
+        if "timed out" in lower or "unreachable" in lower:
+            return ("network", True, [
+                "Check that the target host is reachable",
+                "Increase timeout if the target is behind a slow link",
+            ])
+        if "connection refused" in lower or "connectionrefused" in lower:
+            return ("network", True, [
+                "Target port may be closed or service not running",
+                "Verify the target IP and port are correct",
+            ])
+        if "unknown datastore option" in lower:
+            return ("params", False, [
+                "Check module options with 'search_modules' or MSF docs",
+                "The option name may be misspelled or not supported by this module",
+            ])
+        if "module not found" in lower or "failed to load" in lower:
+            return ("config", False, [
+                "Use search_modules to verify the module path",
+            ])
+        if "handler failed to bind" in lower or "address is already in use" in lower:
+            return ("config", False, [
+                "The port is already in use by another handler or process",
+                "Choose a different LPORT value",
+            ])
+        if "session" in lower and ("not found" in lower or "dead" in lower or "closed" in lower):
+            return ("config", False, [
+                "The session may have died; use list_sessions to check active sessions",
+            ])
+
+        return (None, False, [])
+
     def _resolve_payload(self, payload: str) -> str:
         """Resolve payload shortcut to full name."""
         return self.COMMON_PAYLOADS.get(payload, payload)
@@ -430,7 +469,7 @@ class MetasploitServer(BaseMCPServer):
                 args.extend(["-e", encoder, "-i", str(iterations)])
 
             self.logger.info(f"Running: msfvenom -p {payload_name} ...")
-            result = await self.run_command(args, timeout=120)
+            result = await self.run_command_with_progress(args)
 
             # Read generated payload
             payload_data = None
@@ -455,10 +494,14 @@ class MetasploitServer(BaseMCPServer):
             )
 
         except ToolError as e:
+            error_class, retryable, suggestions = self._classify_msf_error(str(e))
             return ToolResult(
                 success=False,
                 data={},
                 error=str(e),
+                error_class=error_class or "unknown",
+                retryable=retryable,
+                suggestions=suggestions,
             )
         finally:
             if os.path.exists(output_file):
@@ -492,10 +535,14 @@ class MetasploitServer(BaseMCPServer):
             )
 
         except ToolError as e:
+            error_class, retryable, suggestions = self._classify_msf_error(str(e))
             return ToolResult(
                 success=False,
                 data={},
                 error=str(e),
+                error_class=error_class or "unknown",
+                retryable=retryable,
+                suggestions=suggestions,
             )
 
     async def check_vuln(
@@ -522,10 +569,29 @@ class MetasploitServer(BaseMCPServer):
         try:
             output = await self._console_exec("\n".join(cmds), timeout=timeout)
 
-            vulnerable = any(
-                x in output.lower()
-                for x in ["vulnerable", "likely vulnerable", "is vulnerable"]
+            # Check for positive vulnerability indicators while excluding
+            # negation phrases like "does NOT appear vulnerable"
+            output_lower = output.lower()
+            negated = (
+                "not appear vulnerable" in output_lower
+                or "not vulnerable" in output_lower
+                or "does not appear" in output_lower
             )
+            positive = (
+                "is vulnerable" in output_lower
+                or "likely vulnerable" in output_lower
+            )
+            # [+] lines with "vulnerable" are msf's positive confirmation
+            has_plus_vuln = any(
+                line.startswith("[+]") and "vulnerable" in line.lower()
+                for line in output.split("\n")
+            )
+            vulnerable = has_plus_vuln or positive or (
+                "vulnerable" in output_lower and not negated
+            )
+
+            # Classify any error patterns in the output even on "success"
+            error_class, retryable, suggestions = self._classify_msf_error(output)
 
             return ToolResult(
                 success=True,
@@ -538,10 +604,14 @@ class MetasploitServer(BaseMCPServer):
             )
 
         except ToolError as e:
+            error_class, retryable, suggestions = self._classify_msf_error(str(e))
             return ToolResult(
                 success=False,
                 data={},
                 error=str(e),
+                error_class=error_class or "unknown",
+                retryable=retryable,
+                suggestions=suggestions,
             )
 
     async def run_exploit(
@@ -619,10 +689,14 @@ class MetasploitServer(BaseMCPServer):
             )
 
         except ToolError as e:
+            error_class, retryable, suggestions = self._classify_msf_error(str(e))
             return ToolResult(
                 success=False,
                 data={},
                 error=str(e),
+                error_class=error_class or "unknown",
+                retryable=retryable,
+                suggestions=suggestions,
             )
 
     async def exec_command(
@@ -684,10 +758,14 @@ class MetasploitServer(BaseMCPServer):
             )
 
         except ToolError as e:
+            error_class, retryable, suggestions = self._classify_msf_error(str(e))
             return ToolResult(
                 success=False,
                 data={},
                 error=str(e),
+                error_class=error_class or "unknown",
+                retryable=retryable,
+                suggestions=suggestions,
             )
 
     async def list_sessions(
@@ -724,10 +802,14 @@ class MetasploitServer(BaseMCPServer):
             )
 
         except ToolError as e:
+            error_class, retryable, suggestions = self._classify_msf_error(str(e))
             return ToolResult(
                 success=False,
                 data={},
                 error=str(e),
+                error_class=error_class or "unknown",
+                retryable=retryable,
+                suggestions=suggestions,
             )
 
     async def session_command(
@@ -800,10 +882,14 @@ class MetasploitServer(BaseMCPServer):
             )
 
         except ToolError as e:
+            error_class, retryable, suggestions = self._classify_msf_error(str(e))
             return ToolResult(
                 success=False,
                 data={},
                 error=str(e),
+                error_class=error_class or "unknown",
+                retryable=retryable,
+                suggestions=suggestions,
             )
         except Exception as e:
             return ToolResult(
@@ -846,10 +932,14 @@ class MetasploitServer(BaseMCPServer):
             )
 
         except ToolError as e:
+            error_class, retryable, suggestions = self._classify_msf_error(str(e))
             return ToolResult(
                 success=False,
                 data={},
                 error=str(e),
+                error_class=error_class or "unknown",
+                retryable=retryable,
+                suggestions=suggestions,
             )
 
     async def start_handler(
@@ -897,10 +987,14 @@ class MetasploitServer(BaseMCPServer):
             )
 
         except ToolError as e:
+            error_class, retryable, suggestions = self._classify_msf_error(str(e))
             return ToolResult(
                 success=False,
                 data={},
                 error=str(e),
+                error_class=error_class or "unknown",
+                retryable=retryable,
+                suggestions=suggestions,
             )
 
 

@@ -22,7 +22,7 @@ import ssl
 import time
 import uuid
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -51,7 +51,7 @@ def generate_id(prefix: str) -> str:
 
 def get_timestamp() -> str:
     """Get ISO format timestamp."""
-    return datetime.utcnow().isoformat() + "Z"
+    return datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
 
 
 def ensure_session_dir() -> Path:
@@ -706,8 +706,8 @@ class NetcatServer(BaseMCPServer):
             .issuer_name(issuer)
             .public_key(key.public_key())
             .serial_number(x509.random_serial_number())
-            .not_valid_before(datetime.utcnow())
-            .not_valid_after(datetime(2099, 12, 31))
+            .not_valid_before(datetime.now(timezone.utc))
+            .not_valid_after(datetime(2099, 12, 31, tzinfo=timezone.utc))
             .sign(key, hashes.SHA256(), default_backend())
         )
 
@@ -1356,7 +1356,7 @@ class NetcatServer(BaseMCPServer):
         """Get non-loopback IPv4 addresses."""
         ips = []
         try:
-            result = await self.run_command(["ip", "-j", "addr"], timeout=5)
+            result = await self.run_command_with_progress(["ip", "-j", "addr"])
             interfaces = json.loads(result.stdout)
             for iface in interfaces:
                 if iface.get("ifname") == "lo":
@@ -1373,7 +1373,7 @@ class NetcatServer(BaseMCPServer):
         self.logger.info("Getting network interfaces")
 
         try:
-            result = await self.run_command(["ip", "-j", "addr"], timeout=5)
+            result = await self.run_command_with_progress(["ip", "-j", "addr"])
             interfaces = json.loads(result.stdout)
 
             output = []

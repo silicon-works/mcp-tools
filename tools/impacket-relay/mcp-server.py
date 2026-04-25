@@ -12,8 +12,10 @@ Follows the chisel MCP server pattern for stateful process tracking.
 import asyncio
 import glob
 import os
+import signal
 import shutil
 import socket
+import subprocess
 from typing import Any, Dict, Optional
 
 from mcp_common.base_server import BaseMCPServer, ToolResult
@@ -137,6 +139,93 @@ class ImpacketRelayServer(BaseMCPServer):
             handler=self.stop_relay,
         )
 
+        self.register_method(
+            name="force_restart",
+            description="Kill ALL relay processes and reset state. Use when relay is stuck or unresponsive.",
+            params={},
+            handler=self.force_restart,
+        )
+
+    # ── Error Classification ──────────────────────────────────────
+
+    def _classify_relay_error(self, text: str) -> tuple:
+        """Classify ntlmrelayx errors into structured error categories.
+
+        Returns (error_class, retryable, suggestions).
+        """
+        if not text:
+            return ("unknown", False, [])
+
+        lower = text.lower()
+
+        # Port already in use
+        if "address already in use" in lower or "bind" in lower and "error" in lower:
+            return ("network", False, [
+                "Another process is using the relay port",
+                "Use force_restart to kill all relays, or choose a different listen_port",
+            ])
+
+        # Connection refused to relay target
+        if "connection refused" in lower or "errno 111" in lower:
+            return ("network", True, [
+                "Connection refused to relay target — verify target is reachable and service is running",
+                "Check that the target URL protocol and port are correct (ldap://DC:389, ldaps://DC:636)",
+            ])
+
+        # Authentication / relay failures
+        if "status_logon_failure" in lower or "invalid credentials" in lower:
+            return ("auth", False, [
+                "Relayed authentication was rejected by the target",
+                "The captured credentials may not have access to the target service",
+            ])
+        if "status_access_denied" in lower or "access denied" in lower:
+            return ("permission", False, [
+                "Access denied on the relay target — insufficient privileges for the relayed account",
+            ])
+
+        # ADCS-specific errors
+        if "certipy" in lower or "certificate" in lower and "error" in lower:
+            return ("config", False, [
+                "AD CS relay error — verify the certificate template name and CA accessibility",
+            ])
+        if "template" in lower and ("not found" in lower or "denied" in lower):
+            return ("config", False, [
+                "Certificate template not found or access denied — verify adcs_template value",
+                "Use certipy to enumerate available templates",
+            ])
+
+        # Shadow Credentials errors
+        if "keycredentiallink" in lower and ("error" in lower or "failed" in lower):
+            return ("permission", False, [
+                "Shadow Credentials relay failed — target may not support msDS-KeyCredentialLink",
+                "Verify the relayed account has write access to the target's msDS-KeyCredentialLink attribute",
+            ])
+
+        # LDAP channel binding / signing
+        if "ldap channel binding" in lower or "ldap signing" in lower or "strongerauthrequired" in lower:
+            return ("config", False, [
+                "LDAP signing or channel binding is enforced — relay to LDAP is blocked",
+                "Try relaying to LDAPS with --remove-mic, or target a different service (SMB, MSSQL, HTTP)",
+            ])
+
+        # Timeout
+        if "timed out" in lower or "timeout" in lower:
+            return ("timeout", True, [
+                "Relay operation timed out — increase timeout or verify network connectivity",
+            ])
+
+        # Binary not found
+        if "not found" in lower and "ntlmrelayx" in lower:
+            return ("config", False, [
+                "ntlmrelayx binary not found — ensure impacket-scripts is installed in the container",
+            ])
+
+        # Generic fallback
+        if "[-]" in text or "error" in lower:
+            return ("unknown", False, [])
+
+        return ("unknown", False, [])
+
     # ── Helpers ─────────────────────────────────────────────────
 
     def _get_next_id(self) -> str:
@@ -171,12 +260,13 @@ class ImpacketRelayServer(BaseMCPServer):
                 continue
 
             lower = stripped.lower()
+            is_error_line = stripped.startswith("[-]") or "failed" in lower
 
             # Connection received
             if "connection from" in lower:
                 result["connections"].append(stripped)
-            # Relay success indicators
-            if any(ind in lower for ind in [
+            # Relay success indicators (only on non-error lines)
+            if not is_error_line and any(ind in lower for ind in [
                 "authenticating against",
                 "modify_add",
                 "written successfully",
@@ -185,14 +275,14 @@ class ImpacketRelayServer(BaseMCPServer):
             ]):
                 result["relay_succeeded"] = True
             # RBCD delegation
-            if "delegation" in lower and "written" in lower:
+            if not is_error_line and "delegation" in lower and "written" in lower:
                 result["delegation_written"] = True
             # ADCS relay success (certificate obtained)
-            if "certificate" in lower and ("generated" in lower or "saved" in lower or "obtained" in lower):
+            if not is_error_line and "certificate" in lower and ("generated" in lower or "saved" in lower or "obtained" in lower):
                 result["adcs_succeeded"] = True
                 result["relay_succeeded"] = True
             # Shadow Credentials success
-            if "keycredentiallink" in lower and ("added" in lower or "written" in lower or "updated" in lower):
+            if not is_error_line and "keycredentiallink" in lower and ("added" in lower or "written" in lower or "updated" in lower):
                 result["shadow_credentials_succeeded"] = True
                 result["relay_succeeded"] = True
             # Errors
@@ -201,18 +291,9 @@ class ImpacketRelayServer(BaseMCPServer):
 
         return result
 
-    async def _read_output(self, proc, max_bytes: int = 65536) -> str:
-        """Non-blocking read of process stdout+stderr."""
-        output = ""
-        for stream in [proc.stdout, proc.stderr]:
-            if stream is None:
-                continue
-            try:
-                data = await asyncio.wait_for(stream.read(max_bytes), timeout=0.5)
-                output += data.decode(errors="replace")
-            except asyncio.TimeoutError:
-                pass
-        return output
+    def _get_output_file(self, relay_id: str) -> str:
+        """Return the path to the output file for a relay."""
+        return f"/tmp/{relay_id}.log"
 
     # ── Method Handlers ────────────────────────────────────────
 
@@ -234,11 +315,19 @@ class ImpacketRelayServer(BaseMCPServer):
         timeout: int = 300,
     ) -> ToolResult:
         """Start ntlmrelayx relay listener."""
+        # Clean up stale relays whose processes have already exited (REQ-RES-006)
+        cleaned = self._cleanup_stale_relays()
+        if cleaned:
+            self.logger.info(f"Cleaned up {cleaned} stale relay(s) before starting new one")
+
         # Check port availability
         if not self._is_port_available(listen_port):
             return ToolResult(
                 success=False,
                 error=f"Port {listen_port} is already in use. Choose a different port or stop the existing listener.",
+                error_class="network",
+                retryable=False,
+                suggestions=["Use force_restart to kill all relays, or choose a different listen_port"],
             )
 
         cmd = [NTLMRELAYX_BIN, "-t", target]
@@ -282,25 +371,46 @@ class ImpacketRelayServer(BaseMCPServer):
         self.logger.info(f"Starting {relay_id}: {' '.join(cmd)}")
 
         try:
-            proc = await asyncio.create_subprocess_exec(
-                *cmd,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
+            # Use subprocess.Popen (not asyncio.create_subprocess_exec) with output
+            # redirected to a file. asyncio subprocess management caused event loop
+            # deadlocks when the MCP server processed multiple concurrent requests
+            # while a relay process was running (Pirate engagement bug).
+            output_file = self._get_output_file(relay_id)
+            output_fh = open(output_file, "w+")
+
+            proc = subprocess.Popen(
+                cmd,
+                stdin=subprocess.PIPE,  # own pipe: doesn't steal MCP stdin, doesn't EOF
+                stdout=output_fh,
+                stderr=subprocess.STDOUT,
+                start_new_session=True,  # prevent SIGTERM from propagating
             )
 
             # Wait briefly to detect immediate failures
             await asyncio.sleep(3)
 
-            if proc.returncode is not None:
-                combined = await self._read_remaining(proc)
+            exit_code = proc.poll()
+            if exit_code is not None:
+                output_fh.seek(0)
+                combined = output_fh.read()
+                output_fh.close()
+                try:
+                    os.unlink(output_file)
+                except OSError:
+                    pass
+                error_class, retryable, suggestions = self._classify_relay_error(combined)
                 return ToolResult(
                     success=False,
-                    error=f"ntlmrelayx exited immediately (code {proc.returncode}): {combined[:500]}",
+                    error=f"ntlmrelayx exited immediately (code {exit_code}): {combined[:500]}",
                     raw_output=sanitize_output(combined),
+                    error_class=error_class,
+                    retryable=retryable,
+                    suggestions=suggestions,
                 )
 
-            # Read initial output
-            initial_output = await self._read_output(proc)
+            # Read initial output from file
+            output_fh.seek(0)
+            initial_output = output_fh.read()
 
             self.relays[relay_id] = {
                 "process": proc,
@@ -308,7 +418,9 @@ class ImpacketRelayServer(BaseMCPServer):
                 "target": target,
                 "listen_port": listen_port,
                 "delegate_access": delegate_access,
-                "output_buffer": initial_output,
+                "output_file": output_file,
+                "output_fh": output_fh,
+                "last_read_pos": output_fh.tell(),
             }
 
             return ToolResult(
@@ -328,49 +440,103 @@ class ImpacketRelayServer(BaseMCPServer):
             return ToolResult(
                 success=False,
                 error=f"ntlmrelayx binary not found at {NTLMRELAYX_BIN}. Ensure impacket-scripts is installed.",
+                error_class="config",
+                retryable=False,
+                suggestions=["ntlmrelayx binary not found — ensure impacket-scripts is installed in the container"],
             )
         except Exception as e:
-            return ToolResult(success=False, error=str(e))
+            error_class, retryable, suggestions = self._classify_relay_error(str(e))
+            return ToolResult(
+                success=False,
+                error=str(e),
+                error_class=error_class,
+                retryable=retryable,
+                suggestions=suggestions,
+            )
 
     async def relay_status(self, relay_id: str) -> ToolResult:
-        """Check status of a running relay and retrieve captured output."""
+        """Check status of a running relay and retrieve captured output.
+
+        Wraps the actual check in a 10-second timeout. If the relay process
+        is stuck (zombie, blocked on I/O), force-kills it and returns
+        status='stuck' instead of hanging indefinitely (REQ-RES-004).
+        """
         if relay_id not in self.relays:
             return ToolResult(
                 success=False,
                 error=f"Relay {relay_id} not found. Use 'start' to create a relay.",
+                error_class="params",
+                retryable=False,
+                suggestions=["Use 'start' to create a new relay before checking status"],
             )
 
+        try:
+            return await asyncio.wait_for(
+                self._relay_status_inner(relay_id),
+                timeout=10,
+            )
+        except asyncio.TimeoutError:
+            self.logger.warning(f"status() timed out for {relay_id} — force-killing")
+            await self._force_kill_relay(relay_id)
+            return ToolResult(
+                success=False,
+                data={"relay_id": relay_id, "status": "stuck", "action": "force-killed"},
+                raw_output="Relay process was stuck and has been force-killed.",
+                error_class="timeout",
+                retryable=False,
+                suggestions=["Relay process was stuck — use force_restart if it recurs, or start a new relay"],
+            )
+
+    async def _relay_status_inner(self, relay_id: str) -> ToolResult:
+        """Inner status check — called within a timeout wrapper."""
         info = self.relays[relay_id]
         proc = info["process"]
 
-        # Read any new output
-        new_output = await self._read_output(proc)
-        info["output_buffer"] += new_output
+        # Read all output from the log file (non-blocking, no pipe interaction)
+        fh = info["output_fh"]
+        fh.seek(0)
+        all_output = fh.read()
 
-        # Check if process is still running
-        if proc.returncode is not None:
-            # Process ended — drain remaining output safely
-            info["output_buffer"] += await self._read_remaining(proc)
+        # Read new output since last status call
+        last_pos = info.get("last_read_pos", 0)
+        new_output = all_output[last_pos:]
+        info["last_read_pos"] = len(all_output)
 
-            parsed = self._parse_relay_output(info["output_buffer"])
+        # Check if process is still running (uses Popen.poll(), not asyncio)
+        exit_code = proc.poll()
+        if exit_code is not None:
+            parsed = self._parse_relay_output(all_output)
             status = "completed" if parsed["relay_succeeded"] else "exited"
+
+            error_class = None
+            retryable = False
+            suggestions = []
+            error_msg = None
+            if not parsed["relay_succeeded"] and parsed["errors"]:
+                error_text = "\n".join(parsed["errors"])
+                error_class, retryable, suggestions = self._classify_relay_error(error_text)
+                error_msg = parsed["errors"][-1] if parsed["errors"] else None
 
             return ToolResult(
                 success=parsed["relay_succeeded"],
                 data={
                     "relay_id": relay_id,
                     "status": status,
-                    "exit_code": proc.returncode,
+                    "exit_code": exit_code,
                     "relay_succeeded": parsed["relay_succeeded"],
                     "delegation_written": parsed["delegation_written"],
                     "connections": parsed["connections"],
                     "errors": parsed["errors"],
                 },
-                raw_output=sanitize_output(info["output_buffer"]),
+                raw_output=sanitize_output(all_output),
+                error=error_msg,
+                error_class=error_class,
+                retryable=retryable,
+                suggestions=suggestions,
             )
 
         # Process still running
-        parsed = self._parse_relay_output(info["output_buffer"])
+        parsed = self._parse_relay_output(all_output)
 
         return ToolResult(
             success=True,
@@ -387,33 +553,76 @@ class ImpacketRelayServer(BaseMCPServer):
         )
 
     async def stop_relay(self, relay_id: str) -> ToolResult:
-        """Stop a running relay and return final results."""
+        """Stop a running relay and return final results.
+
+        Uses SIGTERM → 5s wait → SIGKILL → 5s wait escalation.
+        Overall 20s timeout to prevent indefinite hang (REQ-RES-005).
+        """
         if relay_id not in self.relays:
             return ToolResult(
                 success=False,
                 error=f"Relay {relay_id} not found.",
+                error_class="params",
+                retryable=False,
+                suggestions=["Relay may have already been stopped or never started"],
             )
 
+        try:
+            return await asyncio.wait_for(
+                self._stop_relay_inner(relay_id),
+                timeout=20,
+            )
+        except asyncio.TimeoutError:
+            self.logger.error(f"stop() timed out for {relay_id} — force-killing")
+            await self._force_kill_relay(relay_id)
+            return ToolResult(
+                success=True,
+                data={
+                    "relay_id": relay_id,
+                    "status": "force-killed",
+                    "relay_succeeded": False,
+                    "delegation_written": False,
+                    "connections": [],
+                    "errors": ["stop() timed out, process force-killed"],
+                },
+                raw_output="Relay process did not stop cleanly within 20s. Force-killed.",
+                error_class="timeout",
+                retryable=False,
+                suggestions=["Relay process was stuck — use force_restart if it recurs"],
+            )
+
+    async def _stop_relay_inner(self, relay_id: str) -> ToolResult:
+        """Inner stop logic — called within a timeout wrapper."""
         info = self.relays[relay_id]
         proc = info["process"]
 
-        # Terminate process
-        if proc.returncode is None:
+        # Kill process (SIGKILL — ntlmrelayx doesn't handle SIGTERM cleanly)
+        if proc.poll() is None:
+            self.logger.info(f"Sending SIGKILL to {relay_id} (pid {proc.pid})")
             try:
-                proc.terminate()
-                await asyncio.wait_for(proc.wait(), timeout=5)
-            except asyncio.TimeoutError:
-                proc.kill()
-                try:
-                    await asyncio.wait_for(proc.wait(), timeout=3)
-                except asyncio.TimeoutError:
-                    pass  # Process stuck — move on
+                os.kill(proc.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            # Wait in a non-blocking loop (yields to event loop)
+            for _ in range(50):  # 5 seconds max
+                if proc.poll() is not None:
+                    break
+                await asyncio.sleep(0.1)
+            if proc.poll() is None:
+                self.logger.error(f"Relay {relay_id} did not die after SIGKILL")
 
-        # Drain remaining output safely (with timeout to avoid hanging on broken pipes)
-        info["output_buffer"] += await self._read_remaining(proc)
+        # Read final output from log file
+        fh = info["output_fh"]
+        fh.seek(0)
+        final_output = fh.read()
+        fh.close()
+        # Clean up log file
+        try:
+            os.unlink(info["output_file"])
+        except OSError:
+            pass
 
-        parsed = self._parse_relay_output(info["output_buffer"])
-        final_output = info["output_buffer"]
+        parsed = self._parse_relay_output(final_output)
 
         # Collect relay artifacts (certificates, keys, etc.)
         artifact_dir = "/session/relay"
@@ -429,15 +638,23 @@ class ImpacketRelayServer(BaseMCPServer):
         if collected_artifacts:
             parsed["artifacts"] = collected_artifacts
 
-        # Wait for port release
+        # Wait for port release (max 3s — don't block)
         listen_port = info.get("listen_port")
         if listen_port:
-            for _ in range(5):
+            for _ in range(3):
                 if self._is_port_available(listen_port):
                     break
                 await asyncio.sleep(1)
 
         del self.relays[relay_id]
+
+        # Classify errors if the relay had failures
+        error_class = None
+        retryable = False
+        suggestions = []
+        if parsed["errors"]:
+            error_text = "\n".join(parsed["errors"])
+            error_class, retryable, suggestions = self._classify_relay_error(error_text)
 
         return ToolResult(
             success=True,
@@ -450,6 +667,82 @@ class ImpacketRelayServer(BaseMCPServer):
                 "errors": parsed["errors"],
             },
             raw_output=sanitize_output(final_output),
+            error_class=error_class,
+            retryable=retryable,
+            suggestions=suggestions,
+        )
+
+    # ── Shared Helpers for Stuck/Stale Process Cleanup ─────────
+
+    async def _force_kill_relay(self, relay_id: str) -> None:
+        """Force-kill a single relay and remove it from tracking."""
+        if relay_id not in self.relays:
+            return
+        info = self.relays[relay_id]
+        proc = info["process"]
+        if proc.poll() is None:
+            try:
+                os.kill(proc.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            # Brief wait
+            for _ in range(50):
+                if proc.poll() is not None:
+                    break
+                await asyncio.sleep(0.1)
+        # Clean up file handle and log file
+        fh = info.get("output_fh")
+        if fh and not fh.closed:
+            fh.close()
+        try:
+            os.unlink(info.get("output_file", ""))
+        except OSError:
+            pass
+        del self.relays[relay_id]
+
+    def _cleanup_stale_relays(self) -> int:
+        """Remove relay entries whose processes have already exited.
+
+        Returns the number of stale entries cleaned up.
+        """
+        stale_ids = [
+            rid for rid, info in self.relays.items()
+            if info["process"].poll() is not None
+        ]
+        for rid in stale_ids:
+            self.logger.info(f"Cleaning up stale relay {rid}")
+            del self.relays[rid]
+        return len(stale_ids)
+
+    async def force_restart(self) -> ToolResult:
+        """Kill ALL relay processes and reset state.
+
+        Use when a relay is stuck or unresponsive and normal stop() fails.
+        """
+        killed = 0
+        for rid, info in list(self.relays.items()):
+            proc = info["process"]
+            if proc.poll() is None:
+                try:
+                    os.kill(proc.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                killed += 1
+                self.logger.info(f"Force-killed {rid} (pid {proc.pid})")
+            # Clean up file handle and log file
+            fh = info.get("output_fh")
+            if fh and not fh.closed:
+                fh.close()
+            try:
+                os.unlink(info.get("output_file", ""))
+            except OSError:
+                pass
+        self.relays.clear()
+        self.logger.info(f"force_restart: killed {killed} process(es), state cleared")
+        return ToolResult(
+            success=True,
+            data={"killed": killed, "status": "cleared"},
+            raw_output=f"Force-killed {killed} relay process(es). State cleared.",
         )
 
 

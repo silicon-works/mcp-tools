@@ -1,40 +1,29 @@
-# OpenSploit MCP Server: curl
-# HTTP client for web requests, exploit testing, and file downloads
+# OpenSploit kind:cli image: curl
+# HTTP/HTTPS/FTP client for web requests, exploit testing, and file downloads.
+# Plain CLI — no Python wrapper, no MCP server. Plugin invokes `curl` directly
+# via cli_in_container() with the full command constructed by the LLM.
 
-FROM kalilinux/kali-rolling
+FROM debian:bookworm-slim
 
 LABEL org.opencontainers.image.source="https://github.com/silicon-works/mcp-tools"
-LABEL org.opencontainers.image.description="curl MCP server for OpenSploit"
+LABEL org.opencontainers.image.description="curl (kind:cli) for OpenSploit"
 LABEL org.opencontainers.image.licenses="MIT"
 
-# Install curl and Python
+# Install curl + the libraries it needs for the full feature surface our YAML
+# advertises (NTLM/Kerberos/HTTP2/HTTP3, libidn2 for IDN URLs, libpsl for cookies).
+# libcurl4-gnutls-dev is dropped in favour of the openssl-backed package.
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
         curl \
         ca-certificates \
-        python3 \
-        python3-pip \
-        python3-venv && \
-    rm -rf /var/lib/apt/lists/* && \
-    apt-get clean
+        krb5-user \
+        libgssapi-krb5-2 \
+        libpsl5 \
+        libidn2-0 \
+    && rm -rf /var/lib/apt/lists/* \
+    && apt-get clean
 
-# Create app directory
-WORKDIR /app
+WORKDIR /session
 
-# Create virtual environment
-RUN python3 -m venv /app/venv
-ENV PATH="/app/venv/bin:$PATH"
-
-# Copy and install shared mcp-common package
-COPY packages/mcp-common /app/packages/mcp-common
-RUN pip install --no-cache-dir /app/packages/mcp-common
-
-# Install tool-specific dependencies
-COPY tools/curl/requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
-
-# Copy MCP server code
-COPY tools/curl/mcp-server.py .
-
-# MCP servers communicate via stdio
-CMD ["python3", "mcp-server.py"]
+# Plugin will pass the full curl invocation via `docker run <image> curl ...`.
+# No CMD set on purpose — the cli_in_container primitive overrides it per call.

@@ -543,7 +543,8 @@ class SqlmapServer(BaseMCPServer):
 
     _SQLMAP_PROGRESS_RE = re.compile(r"^\[(\d{2}:\d{2}:\d{2})\]\s+\[(INFO|WARNING|CRITICAL)\]\s+(.+)")
     _SQLMAP_NOISY_PATTERNS = re.compile(
-        r"testing connection|heuristic|loaded tamper|starting at|ending at|legal disclaimer|"
+        r"testing connection|heuristic \(basic\)|heuristic \(XSS\)|loaded tamper|"
+        r"starting at|ending at|legal disclaimer|"
         r"flushing session|cleaning up|shutting down",
         re.IGNORECASE,
     )
@@ -560,6 +561,47 @@ class SqlmapServer(BaseMCPServer):
         label = f"[{severity}] {msg}"
         return label[:120]
 
+    # ── Error classification ─────────────────────────────────────────────
+
+    @staticmethod
+    def _classify_sqlmap_error(output: str) -> tuple:
+        """Classify sqlmap-specific error patterns.
+
+        Returns (error_class, retryable, suggestions).
+        """
+        lower = output.lower()
+
+        # WAF/IPS detection
+        if "waf/ips" in lower or "protected by some kind of waf" in lower:
+            return ("config", False, [
+                "Use --tamper scripts (e.g., tamper='space2comment,between')",
+                "Try --random-agent to avoid default sqlmap User-Agent detection",
+            ])
+
+        # Connection failures
+        if "unable to connect" in lower:
+            suggestions = ["Check target URL is reachable", "Check proxy settings"]
+            if "proxy" in lower:
+                suggestions.append("Verify proxy is running")
+            return ("network", True, suggestions)
+
+        # Target URL issues
+        if "invalid target url" in lower:
+            return ("params", False, [
+                "Check URL format (must include http:// or https://)",
+            ])
+
+        # Not injectable (informational, not really an error)
+        if "all tested parameters do not appear to be injectable" in lower:
+            return ("config", False, [
+                "Increase --level and --risk for more tests",
+                "Use --tamper for WAF bypass",
+                "Use --random-agent",
+                "Verify the parameter is actually injectable via manual testing",
+            ])
+
+        return ("unknown", False, [])
+
     # ── Output parsers ────────────────────────────────────────────────────
 
     def _parse_sqlmap_output(self, output: str) -> Dict[str, Any]:
@@ -573,10 +615,14 @@ class SqlmapServer(BaseMCPServer):
         }
 
         for line in output.split("\n"):
-            if ("is vulnerable" in line.lower()
-                    or ("parameter" in line.lower() and "injectable" in line.lower()
-                        and "not appear" not in line.lower())
-                    or "identified the following injection point" in line.lower()):
+            lower_line = line.lower()
+            if ("is vulnerable" in lower_line
+                    or ("parameter" in lower_line and "injectable" in lower_line
+                        and "not appear" not in lower_line
+                        and "not be injectable" not in lower_line
+                        and "might not" not in lower_line
+                        and "does not seem" not in lower_line)
+                    or "identified the following injection point" in lower_line):
                 result["vulnerable"] = True
 
             param_match = re.search(r"Parameter: (\S+)", line)
@@ -637,7 +683,9 @@ class SqlmapServer(BaseMCPServer):
         for line in output.split("\n"):
             line = line.strip()
 
-            if re.match(r"^[\+\-]+$", line):
+            # Match table separators like +----+-------+ but NOT --- (injection
+            # point delimiters).  A real table separator always has at least one +.
+            if re.match(r"^\+[\+\-]+\+$", line):
                 in_table = True
                 continue
 
@@ -667,7 +715,7 @@ class SqlmapServer(BaseMCPServer):
         try:
             self.logger.info(f"Running: {' '.join(args)}")
             result = await self.run_command_with_progress(
-                args, timeout=timeout,
+                args,
                 progress_filter=self._sqlmap_progress_filter,
             )
 
@@ -681,6 +729,11 @@ class SqlmapServer(BaseMCPServer):
                 "vulnerable": parsed["vulnerable"],
             }
 
+            # Add suggestions from sqlmap-specific error classifier
+            err_class, _, suggestions = self._classify_sqlmap_error(output)
+            if suggestions:
+                parsed["suggestions"] = suggestions
+
             return ToolResult(
                 success=True,
                 data=parsed,
@@ -688,7 +741,11 @@ class SqlmapServer(BaseMCPServer):
             )
 
         except ToolError as e:
-            return ToolResult(success=False, data={}, error=str(e))
+            err_class, retryable, suggestions = self._classify_sqlmap_error(str(e))
+            return ToolResult(
+                success=False, data={}, error=str(e),
+                error_class=err_class, retryable=retryable, suggestions=suggestions,
+            )
 
     async def enumerate_dbs(self, url: str, **kwargs) -> ToolResult:
         """Enumerate databases on a confirmed vulnerable target."""
@@ -701,7 +758,7 @@ class SqlmapServer(BaseMCPServer):
         try:
             self.logger.info(f"Running: {' '.join(args)}")
             result = await self.run_command_with_progress(
-                args, timeout=timeout,
+                args,
                 progress_filter=self._sqlmap_progress_filter,
             )
 
@@ -719,7 +776,11 @@ class SqlmapServer(BaseMCPServer):
             )
 
         except ToolError as e:
-            return ToolResult(success=False, data={}, error=str(e))
+            err_class, retryable, suggestions = self._classify_sqlmap_error(str(e))
+            return ToolResult(
+                success=False, data={}, error=str(e),
+                error_class=err_class, retryable=retryable, suggestions=suggestions,
+            )
 
     async def enumerate_tables(self, url: str, database: str, **kwargs) -> ToolResult:
         """List all tables in a database."""
@@ -731,7 +792,7 @@ class SqlmapServer(BaseMCPServer):
 
         try:
             result = await self.run_command_with_progress(
-                args, timeout=timeout,
+                args,
                 progress_filter=self._sqlmap_progress_filter,
             )
             output = result.stdout + result.stderr
@@ -766,7 +827,11 @@ class SqlmapServer(BaseMCPServer):
                 raw_output=sanitize_output(output),
             )
         except ToolError as e:
-            return ToolResult(success=False, data={}, error=str(e))
+            err_class, retryable, suggestions = self._classify_sqlmap_error(str(e))
+            return ToolResult(
+                success=False, data={}, error=str(e),
+                error_class=err_class, retryable=retryable, suggestions=suggestions,
+            )
 
     async def dump_table(self, url: str, database: str, table: str, **kwargs) -> ToolResult:
         """Dump contents of a database table."""
@@ -794,7 +859,7 @@ class SqlmapServer(BaseMCPServer):
         try:
             self.logger.info(f"Running: {' '.join(args)}")
             result = await self.run_command_with_progress(
-                args, timeout=timeout,
+                args,
                 progress_filter=self._sqlmap_progress_filter,
             )
 
@@ -812,7 +877,11 @@ class SqlmapServer(BaseMCPServer):
             )
 
         except ToolError as e:
-            return ToolResult(success=False, data={}, error=str(e))
+            err_class, retryable, suggestions = self._classify_sqlmap_error(str(e))
+            return ToolResult(
+                success=False, data={}, error=str(e),
+                error_class=err_class, retryable=retryable, suggestions=suggestions,
+            )
 
     async def dump_all(self, url: str, database: str, **kwargs) -> ToolResult:
         """Dump all tables from a database."""
@@ -825,7 +894,7 @@ class SqlmapServer(BaseMCPServer):
         try:
             self.logger.info(f"Running: {' '.join(args)}")
             result = await self.run_command_with_progress(
-                args, timeout=timeout,
+                args,
                 progress_filter=self._sqlmap_progress_filter,
             )
 
@@ -842,7 +911,11 @@ class SqlmapServer(BaseMCPServer):
             )
 
         except ToolError as e:
-            return ToolResult(success=False, data={}, error=str(e))
+            err_class, retryable, suggestions = self._classify_sqlmap_error(str(e))
+            return ToolResult(
+                success=False, data={}, error=str(e),
+                error_class=err_class, retryable=retryable, suggestions=suggestions,
+            )
 
     async def dump_passwords(self, url: str, **kwargs) -> ToolResult:
         """Dump database user password hashes."""
@@ -854,7 +927,7 @@ class SqlmapServer(BaseMCPServer):
 
         try:
             result = await self.run_command_with_progress(
-                args, timeout=timeout,
+                args,
                 progress_filter=self._sqlmap_progress_filter,
             )
             output = result.stdout + result.stderr
@@ -885,7 +958,11 @@ class SqlmapServer(BaseMCPServer):
                 raw_output=sanitize_output(output),
             )
         except ToolError as e:
-            return ToolResult(success=False, data={}, error=str(e))
+            err_class, retryable, suggestions = self._classify_sqlmap_error(str(e))
+            return ToolResult(
+                success=False, data={}, error=str(e),
+                error_class=err_class, retryable=retryable, suggestions=suggestions,
+            )
 
     async def os_shell(self, url: str, command: str, **kwargs) -> ToolResult:
         """Execute an OS command via SQL injection."""
@@ -898,7 +975,7 @@ class SqlmapServer(BaseMCPServer):
         try:
             self.logger.info(f"Running: {' '.join(args)}")
             result = await self.run_command_with_progress(
-                args, timeout=timeout,
+                args,
                 progress_filter=self._sqlmap_progress_filter,
             )
 
@@ -906,12 +983,22 @@ class SqlmapServer(BaseMCPServer):
 
             cmd_output = ""
             in_output = False
+            past_first_delimiter = False
             for line in output.split("\n"):
                 if "command standard output" in line.lower():
                     in_output = True
+                    past_first_delimiter = False
                     continue
                 if in_output:
-                    if line.startswith("[") or line.startswith("---"):
+                    if line.startswith("---"):
+                        if not past_first_delimiter:
+                            # Skip the opening --- delimiter
+                            past_first_delimiter = True
+                            continue
+                        else:
+                            # Closing --- delimiter ends the output
+                            in_output = False
+                    elif line.startswith("["):
                         in_output = False
                     else:
                         cmd_output += line + "\n"
@@ -927,7 +1014,11 @@ class SqlmapServer(BaseMCPServer):
             )
 
         except ToolError as e:
-            return ToolResult(success=False, data={}, error=str(e))
+            err_class, retryable, suggestions = self._classify_sqlmap_error(str(e))
+            return ToolResult(
+                success=False, data={}, error=str(e),
+                error_class=err_class, retryable=retryable, suggestions=suggestions,
+            )
 
     async def file_read(self, url: str, file_path: str, **kwargs) -> ToolResult:
         """Read a file from the target server."""
@@ -940,7 +1031,7 @@ class SqlmapServer(BaseMCPServer):
         try:
             self.logger.info(f"Running: {' '.join(args)}")
             result = await self.run_command_with_progress(
-                args, timeout=timeout,
+                args,
                 progress_filter=self._sqlmap_progress_filter,
             )
 
@@ -958,6 +1049,17 @@ class SqlmapServer(BaseMCPServer):
                         except Exception:
                             file_content = f"File saved to: {local_path}"
 
+            # Fallback: extract from [INFO] retrieved: lines if local file
+            # was not found (e.g., path format changed, or file not saved yet)
+            if not file_content:
+                retrieved_parts = []
+                for line in output.split("\n"):
+                    m = re.search(r"\[INFO\]\s+retrieved:\s+'?(.+?)'?\s*$", line)
+                    if m:
+                        retrieved_parts.append(m.group(1))
+                if retrieved_parts:
+                    file_content = "\n".join(retrieved_parts)
+
             return ToolResult(
                 success=True,
                 data={
@@ -969,7 +1071,11 @@ class SqlmapServer(BaseMCPServer):
             )
 
         except ToolError as e:
-            return ToolResult(success=False, data={}, error=str(e))
+            err_class, retryable, suggestions = self._classify_sqlmap_error(str(e))
+            return ToolResult(
+                success=False, data={}, error=str(e),
+                error_class=err_class, retryable=retryable, suggestions=suggestions,
+            )
 
     async def file_write(self, url: str, local_file: str, remote_path: str, **kwargs) -> ToolResult:
         """Write a file to the target server."""
@@ -992,25 +1098,31 @@ class SqlmapServer(BaseMCPServer):
         try:
             self.logger.info(f"Running: {' '.join(args)}")
             result = await self.run_command_with_progress(
-                args, timeout=timeout,
+                args,
                 progress_filter=self._sqlmap_progress_filter,
             )
 
             output = result.stdout + result.stderr
-            success = "file has been successfully written" in output.lower()
+            written = "file has been successfully written" in output.lower()
 
+            # Tool ran successfully even if the file write itself failed
+            # (e.g., no FILE privilege). Report write status in data.written.
             return ToolResult(
-                success=success,
+                success=True,
                 data={
                     "remote_path": remote_path,
-                    "written": success,
+                    "written": written,
                     "target": url,
                 },
                 raw_output=sanitize_output(output),
             )
 
         except ToolError as e:
-            return ToolResult(success=False, data={}, error=str(e))
+            err_class, retryable, suggestions = self._classify_sqlmap_error(str(e))
+            return ToolResult(
+                success=False, data={}, error=str(e),
+                error_class=err_class, retryable=retryable, suggestions=suggestions,
+            )
 
     async def sql_query(self, url: str, query: str, **kwargs) -> ToolResult:
         """Execute a raw SQL query via injection and return the result."""
@@ -1023,7 +1135,7 @@ class SqlmapServer(BaseMCPServer):
         try:
             self.logger.info(f"Running: {' '.join(args)}")
             result = await self.run_command_with_progress(
-                args, timeout=timeout,
+                args,
                 progress_filter=self._sqlmap_progress_filter,
             )
 
@@ -1064,7 +1176,11 @@ class SqlmapServer(BaseMCPServer):
             )
 
         except ToolError as e:
-            return ToolResult(success=False, data={}, error=str(e))
+            err_class, retryable, suggestions = self._classify_sqlmap_error(str(e))
+            return ToolResult(
+                success=False, data={}, error=str(e),
+                error_class=err_class, retryable=retryable, suggestions=suggestions,
+            )
 
 
 if __name__ == "__main__":

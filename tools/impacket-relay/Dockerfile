@@ -35,5 +35,9 @@ RUN pip install --no-cache-dir /app/packages/mcp-common
 # Copy MCP server code
 COPY tools/impacket-relay/mcp-server.py .
 
+# Copy entrypoint script (handles FAKETIME/clock offset)
+COPY packages/mcp-common/entrypoint.sh /app/entrypoint.sh
+RUN chmod +x /app/entrypoint.sh
+
 # MCP servers communicate via stdio
-CMD ["python3", "mcp-server.py"]
+CMD ["/app/entrypoint.sh"]

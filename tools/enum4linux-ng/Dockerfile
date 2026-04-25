@@ -37,5 +37,9 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy MCP server code
 COPY tools/enum4linux-ng/mcp-server.py .
 
+# Copy entrypoint (FAKETIME support)
+COPY packages/mcp-common/entrypoint.sh /app/entrypoint.sh
+RUN chmod +x /app/entrypoint.sh
+
 # MCP servers communicate via stdio
-CMD ["python3", "mcp-server.py"]
+CMD ["/app/entrypoint.sh"]

@@ -29,8 +29,16 @@ RESPONDER_DB = os.path.join(RESPONDER_DIR, "Responder.db")
 
 SESSION_DIR = "/session"
 
+# Max duration: leave 60s headroom within the 600s tool timeout for cleanup
+MAX_DURATION = 540
+
 # ANSI color code stripper (from Responder's utils.py)
 ANSI_RE = re.compile(r'\x1b\[([0-9,A-Z]{1,2}(;[0-9]{1,2})?(;[0-9]{3})?)?[m|K]?')
+
+# Pattern to detect port binding errors in Responder output
+PORT_BIND_ERROR_RE = re.compile(
+    r'\[!\]\s*Error starting (?:TCP|UDP) server on port (\d+)',
+)
 
 
 class ResponderServer(BaseMCPServer):
@@ -156,6 +164,76 @@ class ResponderServer(BaseMCPServer):
     def _capture_params(self) -> Dict[str, Dict[str, Any]]:
         return self._common_params()
 
+    # ── Duration Validation ────────────────────────────────
+
+    def _validate_duration(self, duration: int) -> Optional[str]:
+        """Validate duration, return error message or None if valid."""
+        if duration < 5:
+            return "Duration must be at least 5 seconds."
+        if duration > MAX_DURATION:
+            return (
+                f"Duration must be at most {MAX_DURATION} seconds "
+                f"(tool timeout is 600s, need headroom for cleanup)."
+            )
+        return None
+
+    # ── Error Classification ──────────────────────────────
+
+    def _classify_responder_error(
+        self, raw_output: str, error_msg: str = ""
+    ) -> tuple:
+        """Classify Responder errors into (error_class, retryable, suggestions).
+
+        Returns (error_class, retryable, suggestions_list).
+        """
+        combined = f"{error_msg}\n{raw_output}"
+
+        # Port binding failure (most common)
+        if "Error starting TCP server on port" in combined or "Error starting UDP server on port" in combined:
+            failed_ports = PORT_BIND_ERROR_RE.findall(combined)
+            port_list = ", ".join(failed_ports) if failed_ports else "unknown"
+            return (
+                "config",
+                True,
+                [
+                    f"Port(s) {port_list} already in use or insufficient permissions.",
+                    "Ensure --privileged and --network=host are set.",
+                    "Check for other services binding to the same ports (netstat -tlnp).",
+                ],
+            )
+
+        # Permission denied
+        if "PermissionError" in combined or "Operation not permitted" in combined:
+            return (
+                "permission",
+                False,
+                [
+                    "Responder requires privileged mode for raw sockets.",
+                    "Run the container with --privileged --network=host.",
+                ],
+            )
+
+        # Interface not found
+        if "not found" in combined and "interface" in combined.lower():
+            return (
+                "config",
+                False,
+                [
+                    "Specified network interface does not exist.",
+                    "Run 'ip link' to list available interfaces.",
+                ],
+            )
+
+        # Timeout (process killed)
+        if "timed out" in combined.lower() or "TimeoutError" in combined:
+            return ("timeout", True, ["Increase duration or check network connectivity."])
+
+        return ("unknown", False, [])
+
+    def _detect_port_bind_errors(self, raw_output: str) -> List[int]:
+        """Extract failed port numbers from Responder output."""
+        return [int(p) for p in PORT_BIND_ERROR_RE.findall(raw_output)]
+
     # ── Interface Detection ────────────────────────────────
 
     async def _detect_interface(self) -> Optional[str]:
@@ -195,6 +273,28 @@ class ResponderServer(BaseMCPServer):
 
     # ── Config Manipulation ────────────────────────────────
 
+    def _backup_config(self) -> Optional[str]:
+        """Backup Responder.conf, return backup path or None on failure."""
+        backup_path = RESPONDER_CONF + ".bak"
+        try:
+            shutil.copy2(RESPONDER_CONF, backup_path)
+            return backup_path
+        except OSError as e:
+            self.logger.warning(f"Failed to backup Responder.conf: {e}")
+            return None
+
+    def _restore_config(self) -> bool:
+        """Restore Responder.conf from backup, return success."""
+        backup_path = RESPONDER_CONF + ".bak"
+        try:
+            if os.path.exists(backup_path):
+                shutil.copy2(backup_path, RESPONDER_CONF)
+                os.remove(backup_path)
+                return True
+        except OSError as e:
+            self.logger.warning(f"Failed to restore Responder.conf: {e}")
+        return False
+
     def _write_smb_only_config(self):
         """Rewrite Responder.conf: disable all poisoners and servers except SMB."""
         config = configparser.ConfigParser()
@@ -229,15 +329,26 @@ class ResponderServer(BaseMCPServer):
     # ── Hash Parsing ───────────────────────────────────────
 
     def _parse_hashes_from_db(self) -> List[Dict[str, Any]]:
-        """Parse captured hashes from Responder's SQLite database (primary source)."""
+        """Parse captured hashes from Responder's SQLite database (primary source).
+
+        Uses a 5-second SQLite timeout to handle potential lock contention
+        from a recently-terminated Responder process.
+        """
         hashes = []
         # DB may be in RESPONDER_DIR or RESPONDER_LOGS
         for db_path in [RESPONDER_DB, os.path.join(RESPONDER_LOGS, "Responder.db")]:
             if not os.path.exists(db_path):
                 continue
+            conn = None
             try:
-                conn = sqlite3.connect(db_path)
+                conn = sqlite3.connect(db_path, timeout=5.0)
                 conn.row_factory = sqlite3.Row
+                # Check if the 'responder' table exists (DB may be empty on first run)
+                tables = conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table' AND name='responder'"
+                ).fetchall()
+                if not tables:
+                    continue
                 cursor = conn.execute(
                     "SELECT timestamp, module, type, client, hostname, user, "
                     "cleartext, hash, fullhash FROM responder"
@@ -255,11 +366,17 @@ class ResponderServer(BaseMCPServer):
                     if row["cleartext"]:
                         entry["cleartext"] = row["cleartext"]
                     hashes.append(entry)
-                conn.close()
                 if hashes:
                     return hashes
-            except (sqlite3.Error, OSError):
+            except (sqlite3.Error, OSError) as e:
+                self.logger.warning(f"Failed to parse hashes from {db_path}: {e}")
                 continue
+            finally:
+                if conn:
+                    try:
+                        conn.close()
+                    except Exception:
+                        pass
         return hashes
 
     def _parse_hashes_from_files(self) -> List[Dict[str, Any]]:
@@ -492,16 +609,22 @@ class ResponderServer(BaseMCPServer):
         ttl: Optional[int] = None,
     ) -> ToolResult:
         """Full LLMNR/NBT-NS/MDNS poisoning with NTLMv2 hash capture."""
-        if duration < 5:
+        duration_err = self._validate_duration(duration)
+        if duration_err:
             return ToolResult(
                 success=False,
-                error="Duration must be at least 5 seconds.",
+                error=duration_err,
+                error_class="params",
             )
 
         try:
             iface = await self._resolve_interface(interface)
         except ValueError as e:
-            return ToolResult(success=False, error=str(e))
+            return ToolResult(
+                success=False,
+                error=str(e),
+                error_class="config",
+            )
 
         extra_flags = []
         if wpad:
@@ -546,20 +669,44 @@ class ResponderServer(BaseMCPServer):
 
             copied = self._copy_to_session()
 
+            # Detect port binding errors and include as warnings
+            failed_ports = self._detect_port_bind_errors(raw)
+
+            result_data = {
+                "method": "poison",
+                "interface_used": iface,
+                "duration_seconds": duration,
+                "captured_hashes": hashes,
+                "hash_count": len(hashes),
+                "copied_files": copied,
+            }
+            if failed_ports:
+                result_data["failed_ports"] = failed_ports
+
+            # Classify errors from output
+            error_class = None
+            retryable = False
+            suggestions: List[str] = []
+            if failed_ports:
+                error_class, retryable, suggestions = self._classify_responder_error(raw)
+
             return ToolResult(
                 success=True,
-                data={
-                    "method": "poison",
-                    "interface_used": iface,
-                    "duration_seconds": duration,
-                    "captured_hashes": hashes,
-                    "hash_count": len(hashes),
-                    "copied_files": copied,
-                },
+                data=result_data,
                 raw_output=sanitize_output(raw),
+                error_class=error_class,
+                retryable=retryable,
+                suggestions=suggestions,
             )
         except Exception as e:
-            return ToolResult(success=False, error=str(e))
+            error_class, retryable, suggestions = self._classify_responder_error("", str(e))
+            return ToolResult(
+                success=False,
+                error=str(e),
+                error_class=error_class,
+                retryable=retryable,
+                suggestions=suggestions,
+            )
 
     async def analyze(
         self,
@@ -568,16 +715,22 @@ class ResponderServer(BaseMCPServer):
         verbose: bool = True,
     ) -> ToolResult:
         """Passive analysis — observe broadcast protocols without poisoning."""
-        if duration < 5:
+        duration_err = self._validate_duration(duration)
+        if duration_err:
             return ToolResult(
                 success=False,
-                error="Duration must be at least 5 seconds.",
+                error=duration_err,
+                error_class="params",
             )
 
         try:
             iface = await self._resolve_interface(interface)
         except ValueError as e:
-            return ToolResult(success=False, error=str(e))
+            return ToolResult(
+                success=False,
+                error=str(e),
+                error_class="config",
+            )
 
         try:
             raw = await self._run_responder(
@@ -601,7 +754,14 @@ class ResponderServer(BaseMCPServer):
                 raw_output=sanitize_output(raw),
             )
         except Exception as e:
-            return ToolResult(success=False, error=str(e))
+            error_class, retryable, suggestions = self._classify_responder_error("", str(e))
+            return ToolResult(
+                success=False,
+                error=str(e),
+                error_class=error_class,
+                retryable=retryable,
+                suggestions=suggestions,
+            )
 
     async def capture_smb(
         self,
@@ -610,16 +770,25 @@ class ResponderServer(BaseMCPServer):
         verbose: bool = True,
     ) -> ToolResult:
         """SMB-only capture — no poisoning, for SSRF-triggered auth."""
-        if duration < 5:
+        duration_err = self._validate_duration(duration)
+        if duration_err:
             return ToolResult(
                 success=False,
-                error="Duration must be at least 5 seconds.",
+                error=duration_err,
+                error_class="params",
             )
 
         try:
             iface = await self._resolve_interface(interface)
         except ValueError as e:
-            return ToolResult(success=False, error=str(e))
+            return ToolResult(
+                success=False,
+                error=str(e),
+                error_class="config",
+            )
+
+        # Backup config before modifying
+        self._backup_config()
 
         # Rewrite config: disable poisoners and all servers except SMB
         self._write_smb_only_config()
@@ -638,21 +807,61 @@ class ResponderServer(BaseMCPServer):
 
             copied = self._copy_to_session()
 
+            # Critical: detect if SMB port 445 failed to bind.
+            # For capture_smb, SMB is the ONLY server — if it failed, the entire
+            # capture was useless.
+            failed_ports = self._detect_port_bind_errors(raw)
+            smb_failed = 445 in failed_ports
+
+            if smb_failed and not hashes:
+                error_class, retryable, suggestions = self._classify_responder_error(raw)
+                return ToolResult(
+                    success=False,
+                    error=(
+                        "SMB server failed to bind to port 445. "
+                        "No hashes could be captured. "
+                        "Check that --privileged and --network=host are set, "
+                        "and no other SMB service is running."
+                    ),
+                    error_class=error_class or "config",
+                    retryable=retryable,
+                    suggestions=suggestions or [
+                        "Ensure container runs with --privileged --network=host.",
+                        "Check for existing SMB services: netstat -tlnp | grep 445.",
+                        "Stop any conflicting SMB daemons (smbd, samba).",
+                    ],
+                    raw_output=sanitize_output(raw),
+                )
+
+            result_data = {
+                "method": "capture_smb",
+                "interface_used": iface,
+                "duration_seconds": duration,
+                "captured_hashes": hashes,
+                "hash_count": len(hashes),
+                "smb_only": True,
+                "copied_files": copied,
+            }
+            if failed_ports:
+                result_data["failed_ports"] = failed_ports
+
             return ToolResult(
                 success=True,
-                data={
-                    "method": "capture_smb",
-                    "interface_used": iface,
-                    "duration_seconds": duration,
-                    "captured_hashes": hashes,
-                    "hash_count": len(hashes),
-                    "smb_only": True,
-                    "copied_files": copied,
-                },
+                data=result_data,
                 raw_output=sanitize_output(raw),
             )
         except Exception as e:
-            return ToolResult(success=False, error=str(e))
+            error_class, retryable, suggestions = self._classify_responder_error("", str(e))
+            return ToolResult(
+                success=False,
+                error=str(e),
+                error_class=error_class,
+                retryable=retryable,
+                suggestions=suggestions,
+            )
+        finally:
+            # Always restore config after capture_smb
+            self._restore_config()
 
 
 if __name__ == "__main__":

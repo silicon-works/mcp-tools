@@ -37,7 +37,9 @@ RUN pip install --no-cache-dir /app/packages/mcp-common
 # gssapi enables Kerberos auth via pyspnego
 RUN pip install --no-cache-dir pypsrp gssapi
 
-# Copy MCP server
+# Copy MCP server and entrypoint
 COPY tools/evil-winrm/mcp-server.py /app/mcp-server.py
+COPY packages/mcp-common/entrypoint.sh /app/entrypoint.sh
+RUN chmod +x /app/entrypoint.sh
 
-CMD ["python3", "/app/mcp-server.py"]
+CMD ["/app/entrypoint.sh"]

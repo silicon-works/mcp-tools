@@ -15,6 +15,7 @@ Key features:
 
 import asyncio
 import base64
+import functools
 import io
 import os
 import re
@@ -95,7 +96,7 @@ class ShellSessionServer(BaseMCPServer):
         super().__init__(
             name="shell-session",
             description="Persistent shell session management for SSH and reverse shells",
-            version="1.1.0",
+            version="1.2.0",
         )
 
         # Session storage
@@ -206,26 +207,69 @@ class ShellSessionServer(BaseMCPServer):
             handler=self.upgrade_shell,
         )
 
-    def _classify_ssh_error(self, error: Exception) -> str:
-        """Classify SSH errors and provide helpful suggestions."""
+    def _classify_ssh_error(self, error: Exception) -> Tuple[str, str, bool, list]:
+        """Classify SSH errors with structured error information.
+
+        Returns (message, error_class, retryable, suggestions).
+        """
         error_str = str(error).lower()
 
         if "authentication failed" in error_str or "permission denied" in error_str:
-            return f"Authentication failed - Invalid credentials. Verify username and password/key. Details: {error}"
-        elif "connection refused" in error_str:
-            return f"Connection refused - SSH port is closed or firewall is blocking. Details: {error}"
+            return (
+                f"Authentication failed - Invalid credentials. Details: {error}",
+                "auth",
+                False,
+                ["Verify username and password/key are correct", "Check if the account is locked"],
+            )
+        elif "connection refused" in error_str or "unable to connect" in error_str:
+            return (
+                f"Connection refused - SSH port is closed or firewall is blocking. Details: {error}",
+                "network",
+                True,
+                ["Verify SSH service is running on target", "Check if a firewall is blocking the port"],
+            )
         elif "timed out" in error_str or "timeout" in error_str:
-            return f"Connection timed out - Host may be unreachable or SSH service not responding. Try increasing timeout. Details: {error}"
+            return (
+                f"Connection timed out - Host may be unreachable. Details: {error}",
+                "timeout",
+                True,
+                ["Try increasing timeout", "Verify target is reachable (ping)", "Check VPN connectivity"],
+            )
         elif "no route to host" in error_str:
-            return f"No route to host - Target is unreachable. Check network connectivity. Details: {error}"
+            return (
+                f"No route to host - Target is unreachable. Details: {error}",
+                "network",
+                False,
+                ["Check network connectivity", "Verify target IP address"],
+            )
         elif "network is unreachable" in error_str:
-            return f"Network unreachable - Check your network connection. Details: {error}"
+            return (
+                f"Network unreachable - Check your network connection. Details: {error}",
+                "network",
+                True,
+                ["Check VPN connectivity", "Verify network interface is up"],
+            )
         elif "host key" in error_str:
-            return f"Host key verification failed. Details: {error}"
+            return (
+                f"Host key verification failed. Details: {error}",
+                "config",
+                False,
+                ["Host key policy is set to AutoAdd, this should not occur"],
+            )
         elif "key" in error_str and ("invalid" in error_str or "format" in error_str):
-            return f"Invalid SSH key format. Ensure key is properly base64-encoded. Details: {error}"
+            return (
+                f"Invalid SSH key format. Details: {error}",
+                "config",
+                False,
+                ["Ensure key is properly base64-encoded", "Try RSA, Ed25519, or ECDSA key types"],
+            )
 
-        return f"SSH connection failed: {error}"
+        return (
+            f"SSH connection failed: {error}",
+            "unknown",
+            False,
+            [],
+        )
 
     def _is_retryable_error(self, error: Exception) -> bool:
         """Determine if an error is transient and worth retrying."""
@@ -248,6 +292,65 @@ class ShellSessionServer(BaseMCPServer):
         """Generate unique session ID."""
         return f"ses_{uuid.uuid4().hex[:12]}"
 
+    async def _run_in_thread(self, func, *args, **kwargs):
+        """Run a blocking function in a thread executor to avoid blocking the event loop."""
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(
+            None, functools.partial(func, *args, **kwargs)
+        )
+
+    def _ssh_connect_sync(
+        self,
+        host: str,
+        port: int,
+        username: str,
+        timeout: int,
+        password: Optional[str],
+        pkey: Optional[paramiko.PKey],
+    ) -> Tuple[paramiko.SSHClient, Optional[paramiko.SFTPClient], str]:
+        """Synchronous SSH connect — runs in thread executor.
+
+        Returns (client, sftp_or_None, banner).
+        """
+        client = paramiko.SSHClient()
+        client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+
+        connect_kwargs = {
+            "hostname": host,
+            "port": port,
+            "username": username,
+            "timeout": timeout,
+            "allow_agent": False,
+            "look_for_keys": False,
+            "banner_timeout": timeout,
+            "auth_timeout": timeout,
+        }
+
+        if pkey:
+            connect_kwargs["pkey"] = pkey
+        elif password:
+            connect_kwargs["password"] = password
+
+        client.connect(**connect_kwargs)
+
+        # Get banner
+        transport = client.get_transport()
+        banner = ""
+        if transport:
+            try:
+                banner = transport.get_banner().decode() if transport.get_banner() else ""
+            except:
+                pass
+
+        # Open SFTP if possible
+        sftp = None
+        try:
+            sftp = client.open_sftp()
+        except:
+            pass
+
+        return client, sftp, banner
+
     async def ssh_connect(
         self,
         host: str,
@@ -266,6 +369,7 @@ class ShellSessionServer(BaseMCPServer):
                 success=False,
                 data={"host": host, "username": username},
                 error="Either password or private_key is required",
+                error_class="params",
             )
 
         # Prepare key if provided
@@ -292,46 +396,26 @@ class ShellSessionServer(BaseMCPServer):
                     success=False,
                     data={"host": host, "username": username},
                     error=f"Invalid SSH key format: {e}",
+                    error_class="config",
+                    suggestions=["Ensure key is properly base64-encoded", "Try RSA, Ed25519, or ECDSA key types"],
                 )
 
         # Connection with retry logic
         last_error = None
         for attempt in range(self.MAX_RETRIES):
             try:
-                client = paramiko.SSHClient()
-                client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+                # Run blocking paramiko connect in thread executor with overall timeout
+                # This prevents the event loop from blocking on slow SSH handshakes
+                overall_timeout = timeout + 10  # extra buffer beyond paramiko's timeout
+                client, sftp, banner = await asyncio.wait_for(
+                    self._run_in_thread(
+                        self._ssh_connect_sync,
+                        host, port, username, timeout, password, pkey,
+                    ),
+                    timeout=overall_timeout,
+                )
 
-                connect_kwargs = {
-                    "hostname": host,
-                    "port": port,
-                    "username": username,
-                    "timeout": timeout,
-                    "allow_agent": False,
-                    "look_for_keys": False,
-                }
-
-                if pkey:
-                    connect_kwargs["pkey"] = pkey
-                elif password:
-                    connect_kwargs["password"] = password
-
-                # Connect
-                client.connect(**connect_kwargs)
-
-                # Get banner
-                transport = client.get_transport()
-                banner = ""
-                if transport:
-                    try:
-                        banner = transport.get_banner().decode() if transport.get_banner() else ""
-                    except:
-                        pass
-
-                # Open SFTP if possible
-                sftp = None
-                try:
-                    sftp = client.open_sftp()
-                except:
+                if sftp is None:
                     self.logger.warning("SFTP not available on this connection")
 
                 # Create session
@@ -366,12 +450,27 @@ class ShellSessionServer(BaseMCPServer):
                     raw_output=f"SSH session established: {session_id}",
                 )
 
+            except asyncio.TimeoutError:
+                last_error = TimeoutError(f"SSH connection timed out after {overall_timeout}s (paramiko hung during handshake)")
+                if attempt < self.MAX_RETRIES - 1:
+                    delay = self._calculate_retry_delay(attempt)
+                    self.logger.warning(
+                        f"SSH connection timed out (attempt {attempt + 1}/{self.MAX_RETRIES}), "
+                        f"retrying in {delay:.1f}s"
+                    )
+                    await asyncio.sleep(delay)
+                    continue
+                break
             except paramiko.AuthenticationException as e:
                 # Authentication errors are not retryable
+                msg, error_class, retryable, suggestions = self._classify_ssh_error(e)
                 return ToolResult(
                     success=False,
                     data={"host": host, "username": username},
-                    error=self._classify_ssh_error(e),
+                    error=msg,
+                    error_class=error_class,
+                    retryable=retryable,
+                    suggestions=suggestions,
                 )
             except (paramiko.SSHException, socket.timeout, socket.error, OSError) as e:
                 last_error = e
@@ -390,11 +489,41 @@ class ShellSessionServer(BaseMCPServer):
                 break
 
         # All retries exhausted
+        msg, error_class, retryable, suggestions = self._classify_ssh_error(last_error)
         return ToolResult(
             success=False,
             data={"host": host, "username": username, "attempts": self.MAX_RETRIES},
-            error=self._classify_ssh_error(last_error),
-            )
+            error=msg,
+            error_class=error_class,
+            retryable=retryable,
+            suggestions=suggestions,
+        )
+
+    def _exec_command_sync(
+        self,
+        session: SSHSession,
+        command: str,
+        timeout: int,
+        get_pty: bool,
+    ) -> Tuple[str, str, int]:
+        """Synchronous command execution — runs in thread executor.
+
+        Returns (stdout, stderr, exit_code).
+        """
+        stdin, stdout, stderr = session.client.exec_command(
+            command,
+            timeout=timeout,
+            get_pty=get_pty,
+        )
+
+        channel = stdout.channel
+        channel.settimeout(timeout)
+
+        stdout_data = stdout.read().decode("utf-8", errors="replace")
+        stderr_data = stderr.read().decode("utf-8", errors="replace")
+        exit_code = channel.recv_exit_status()
+
+        return stdout_data, stderr_data, exit_code
 
     async def exec_command(
         self,
@@ -410,37 +539,39 @@ class ShellSessionServer(BaseMCPServer):
             return ToolResult(
                 success=False,
                 data={"session_id": session_id},
-                error=f"Session not found: {session_id}",
+                error=f"Session not found: {session_id}. Use ssh_connect first or list_sessions to check active sessions.",
+                error_class="params",
+                suggestions=["Call ssh_connect to establish a session first", "Call list_sessions to see active sessions"],
             )
 
         if not session.is_connected():
             del self.ssh_sessions[session_id]
             return ToolResult(
                 success=False,
-                data={"session_id": session_id},
-                error="Session disconnected",
+                data={"session_id": session_id, "host": session.host},
+                error=f"Session disconnected (was connected to {session.username}@{session.host}:{session.port})",
+                error_class="network",
+                retryable=True,
+                suggestions=["Call ssh_connect to establish a new session"],
             )
 
         self.logger.info(f"Executing on {session_id}: {command[:50]}...")
 
         try:
-            # Execute command
-            stdin, stdout, stderr = session.client.exec_command(
-                command,
-                timeout=timeout,
-                get_pty=get_pty,
+            # Run blocking paramiko exec in thread executor with overall timeout
+            overall_timeout = timeout + 10
+            stdout_data, stderr_data, exit_code = await asyncio.wait_for(
+                self._run_in_thread(
+                    self._exec_command_sync,
+                    session, command, timeout, get_pty,
+                ),
+                timeout=overall_timeout,
             )
 
-            # Read output with timeout
-            channel = stdout.channel
-            channel.settimeout(timeout)
-
-            stdout_data = stdout.read().decode("utf-8", errors="replace")
-            stderr_data = stderr.read().decode("utf-8", errors="replace")
-            exit_code = channel.recv_exit_status()
-
+            # Non-zero exit code is NOT a tool error — the command executed successfully,
+            # it just returned a non-zero status. The agent decides what to do with it.
             return ToolResult(
-                success=exit_code == 0,
+                success=True,
                 data={
                     "session_id": session_id,
                     "command": command,
@@ -452,11 +583,23 @@ class ShellSessionServer(BaseMCPServer):
                 raw_output=stdout_data if stdout_data else stderr_data,
             )
 
+        except asyncio.TimeoutError:
+            return ToolResult(
+                success=False,
+                data={"session_id": session_id, "command": command, "timed_out": True},
+                error=f"Command timed out after {timeout} seconds",
+                error_class="timeout",
+                retryable=True,
+                suggestions=["Increase timeout for long-running commands", "Try running the command in the background with & or nohup"],
+            )
         except socket.timeout:
             return ToolResult(
                 success=False,
                 data={"session_id": session_id, "command": command, "timed_out": True},
                 error=f"Command timed out after {timeout} seconds",
+                error_class="timeout",
+                retryable=True,
+                suggestions=["Increase timeout for long-running commands", "Try running the command in the background with & or nohup"],
             )
         except Exception as e:
             return ToolResult(
@@ -480,14 +623,20 @@ class ShellSessionServer(BaseMCPServer):
             return ToolResult(
                 success=False,
                 data={"session_id": session_id},
-                error=f"Session not found: {session_id}",
+                error=f"Session not found: {session_id}. Use ssh_connect first.",
+                error_class="params",
+                suggestions=["Call ssh_connect to establish a session first"],
             )
 
         if not session.is_connected():
+            del self.ssh_sessions[session_id]
             return ToolResult(
                 success=False,
-                data={"session_id": session_id},
-                error="Session disconnected",
+                data={"session_id": session_id, "host": session.host},
+                error=f"Session disconnected (was connected to {session.username}@{session.host}:{session.port})",
+                error_class="network",
+                retryable=True,
+                suggestions=["Call ssh_connect to establish a new session"],
             )
 
         self.logger.info(f"Uploading to {remote_path} on {session_id}")
@@ -546,14 +695,20 @@ class ShellSessionServer(BaseMCPServer):
             return ToolResult(
                 success=False,
                 data={"session_id": session_id},
-                error=f"Session not found: {session_id}",
+                error=f"Session not found: {session_id}. Use ssh_connect first.",
+                error_class="params",
+                suggestions=["Call ssh_connect to establish a session first"],
             )
 
         if not session.is_connected():
+            del self.ssh_sessions[session_id]
             return ToolResult(
                 success=False,
-                data={"session_id": session_id},
-                error="Session disconnected",
+                data={"session_id": session_id, "host": session.host},
+                error=f"Session disconnected (was connected to {session.username}@{session.host}:{session.port})",
+                error_class="network",
+                retryable=True,
+                suggestions=["Call ssh_connect to establish a new session"],
             )
 
         self.logger.info(f"Downloading {remote_path} from {session_id}")
@@ -657,6 +812,9 @@ class ShellSessionServer(BaseMCPServer):
                     success=False,
                     data={"port": port},
                     error=f"No connection received within {timeout} seconds",
+                    error_class="timeout",
+                    retryable=True,
+                    suggestions=["Verify the target is sending a reverse shell to this port", "Increase timeout"],
                 )
             finally:
                 listener.close()
@@ -668,6 +826,8 @@ class ShellSessionServer(BaseMCPServer):
                     success=False,
                     data={"port": port},
                     error=f"Port {port} is already in use",
+                    error_class="config",
+                    suggestions=["Use a different port", "Close the existing listener with close()"],
                 )
             raise
 
@@ -689,33 +849,37 @@ class ShellSessionServer(BaseMCPServer):
 
         sock.setblocking(False)
 
-        while True:
-            # Check total timeout
-            if time.time() - start_time > timeout:
-                output += "\n[TIMEOUT]"
-                break
+        try:
+            while True:
+                # Check total timeout
+                if time.time() - start_time > timeout:
+                    output += "\n[TIMEOUT]"
+                    break
 
-            # Check stability
-            if time.time() - last_data_time > stability_window:
-                # Check for shell prompt
-                for prompt_pattern in self.shell_prompts:
-                    if re.search(prompt_pattern, output):
+                # Check stability — no new data for stability_window seconds
+                if time.time() - last_data_time > stability_window:
+                    # Also check if we see a shell prompt (early exit)
+                    prompt_found = any(
+                        re.search(pattern, output)
+                        for pattern in self.shell_prompts
+                    )
+                    if prompt_found or time.time() - last_data_time > stability_window:
                         break
-                break
 
-            try:
-                data = sock.recv(4096)
-                if data:
-                    output += data.decode("utf-8", errors="replace")
-                    last_data_time = time.time()
-                else:
-                    break  # Connection closed
-            except BlockingIOError:
-                await asyncio.sleep(0.1)
-            except Exception:
-                break
+                try:
+                    data = sock.recv(4096)
+                    if data:
+                        output += data.decode("utf-8", errors="replace")
+                        last_data_time = time.time()
+                    else:
+                        break  # Connection closed
+                except BlockingIOError:
+                    await asyncio.sleep(0.1)
+                except Exception:
+                    break
+        finally:
+            sock.setblocking(True)
 
-        sock.setblocking(True)
         return output
 
     async def shell_exec(
@@ -731,7 +895,9 @@ class ShellSessionServer(BaseMCPServer):
             return ToolResult(
                 success=False,
                 data={"session_id": session_id},
-                error=f"Session not found: {session_id}",
+                error=f"Session not found: {session_id}. Use listen to catch a reverse shell first.",
+                error_class="params",
+                suggestions=["Call listen to catch a reverse shell first", "Call list_sessions to see active sessions"],
             )
 
         if not session.is_connected():
@@ -739,7 +905,10 @@ class ShellSessionServer(BaseMCPServer):
             return ToolResult(
                 success=False,
                 data={"session_id": session_id},
-                error="Session disconnected",
+                error="Reverse shell session disconnected",
+                error_class="network",
+                retryable=True,
+                suggestions=["Trigger the reverse shell again and call listen to catch it"],
             )
 
         self.logger.info(f"Executing on shell {session_id}: {command[:50]}...")
@@ -853,6 +1022,8 @@ class ShellSessionServer(BaseMCPServer):
             success=False,
             data={"session_id": session_id},
             error=f"Session not found: {session_id}",
+            error_class="params",
+            suggestions=["Call list_sessions to see active sessions"],
         )
 
     async def upgrade_shell(self, session_id: str) -> ToolResult:
@@ -863,14 +1034,20 @@ class ShellSessionServer(BaseMCPServer):
             return ToolResult(
                 success=False,
                 data={"session_id": session_id},
-                error=f"Session not found: {session_id}",
+                error=f"Session not found: {session_id}. This method requires a reverse shell session from listen.",
+                error_class="params",
+                suggestions=["Call listen to catch a reverse shell first"],
             )
 
         if not session.is_connected():
+            del self.shell_sessions[session_id]
             return ToolResult(
                 success=False,
                 data={"session_id": session_id},
-                error="Session disconnected",
+                error="Reverse shell session disconnected",
+                error_class="network",
+                retryable=True,
+                suggestions=["Trigger the reverse shell again and call listen to catch it"],
             )
 
         self.logger.info(f"Upgrading shell {session_id}")

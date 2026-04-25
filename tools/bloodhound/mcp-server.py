@@ -14,7 +14,7 @@ import os
 import re
 import shutil
 import zipfile
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from mcp_common.base_server import BaseMCPServer, ToolResult
 from mcp_common.output_parsers import sanitize_output
@@ -285,14 +285,117 @@ class BloodhoundServer(BaseMCPServer):
             summaries.append(info)
         return summaries
 
+    # ── Error Classification ─────────────────────────────────
+
+    def _classify_bloodhound_error(self, output: str) -> Tuple[str, bool, List[str]]:
+        """Classify bloodhound-python errors from combined stdout+stderr.
+
+        Returns (error_class, retryable, suggestions).
+        """
+        if not output:
+            return ("unknown", False, [])
+
+        # --- DNS errors (network) ---
+        if "NoNameservers" in output or "All nameservers failed" in output:
+            return ("network", True, [
+                "Verify dc_ip is correct and reachable from this container",
+                "Ensure port 53 (DNS) is open on the target DC",
+                "If behind VPN, verify tun0 is up",
+            ])
+
+        if "LifetimeTimeout" in output or "DNS operation timed out" in output:
+            return ("network", True, [
+                "DNS query timed out — increase dns_timeout parameter",
+                "Verify dc_ip is reachable (try ping or nmap first)",
+                "If behind VPN, verify tun0 is up",
+            ])
+
+        # --- Kerberos clock skew ---
+        if "KRB_AP_ERR_SKEW" in output or "Clock skew too great" in output:
+            return ("config", True, [
+                "Clock skew between container and DC is too large (>5min)",
+                "Use clock_offset parameter to synchronize (e.g., clock_offset='+5h')",
+                "Or sync with: ntpdate <dc_ip>",
+            ])
+
+        # --- Kerberos auth failures ---
+        if "KDC_ERR_PREAUTH_FAILED" in output or "Pre-authentication information was invalid" in output:
+            return ("auth", False, [
+                "Kerberos pre-authentication failed — wrong password or hash",
+                "Verify credentials are valid for this domain",
+            ])
+
+        if "KDC_ERR_C_PRINCIPAL_UNKNOWN" in output:
+            return ("auth", False, [
+                "Kerberos principal not found — username may be wrong",
+                "Try format: username (not username@domain)",
+            ])
+
+        # --- LDAP auth failures ---
+        if "Could not authenticate to LDAP" in output:
+            return ("auth", False, [
+                "LDAP bind failed — check username and password",
+                "Try auth_method='ntlm' if Kerberos is failing",
+                "Verify the account is not locked or disabled",
+            ])
+
+        # --- Domain configuration errors ---
+        if "Could not find a domain controller" in output:
+            return ("config", True, [
+                "DNS at dc_ip could not locate a DC for this domain",
+                "Verify the domain name is correct (try nmap LDAP scripts to confirm)",
+                "Try specifying dc_host manually if DNS auto-discovery fails",
+            ])
+
+        if "Specified domain was not found in LDAP" in output:
+            # Extract the suggested domain from the error message
+            suggestions = [
+                "The domain name does not match what LDAP reports",
+                "Check the error output for the correct domain name",
+            ]
+            match = re.search(
+                r"LDAP server reports is domain as (\S+)", output
+            )
+            if match:
+                suggestions.append(f"Try using domain='{match.group(1)}' instead")
+            return ("config", False, suggestions)
+
+        if "Could not figure out the domain" in output:
+            return ("config", False, [
+                "Specify the domain manually with the domain parameter",
+            ])
+
+        # --- LDAP connection errors ---
+        if "LDAPSocketOpenError" in output or "Failed to resolve LDAP server IP" in output:
+            return ("network", True, [
+                "Cannot connect to LDAP — verify DC is reachable on port 389 (or 636 for LDAPS)",
+                "If using LDAPS, ensure use_ldaps=true",
+            ])
+
+        if "Connection to LDAP server lost" in output or "LDAPCommunicationError" in output:
+            return ("network", True, [
+                "LDAP connection dropped mid-collection — may be network instability",
+                "Try reducing workers count to decrease connection load",
+                "Partial data may have been collected — check output files",
+            ])
+
+        if "LDAPSocketReceiveError" in output or "LDAPSocketSendError" in output:
+            return ("network", True, [
+                "LDAP socket error — connection was interrupted",
+                "Retry the collection",
+            ])
+
+        return ("unknown", False, [])
+
     # ── Methods ────────────────────────────────────────────
 
-    async def collect(
+    async def _run_collection(
         self,
+        method_name: str,
         domain: str,
         username: str,
         dc_ip: str,
-        collection: str = "Default",
+        collection: str,
         password: Optional[str] = None,
         hashes: Optional[str] = None,
         kerberos: bool = False,
@@ -311,11 +414,12 @@ class BloodhoundServer(BaseMCPServer):
         computerfile: Optional[str] = None,
         timeout: int = 300,
     ) -> ToolResult:
-        """Collect AD data with configurable collection methods."""
+        """Shared collection logic for both collect and collect_stealth."""
         if not password and not hashes and not kerberos and not aes_key:
             return ToolResult(
                 success=False,
                 error="No credentials provided. Supply password, hashes, aes_key, or kerberos=true.",
+                error_class="params",
             )
 
         # Ensure output directory exists
@@ -342,7 +446,7 @@ class BloodhoundServer(BaseMCPServer):
                 auth_env["KRB5CCNAME"] = ccache_path
 
         try:
-            result = await self.run_command(cmd, timeout=timeout, env=auth_env)
+            result = await self.run_command_with_progress(cmd, env=auth_env)
             combined = result.stdout + result.stderr
 
             files = self._find_output_files()
@@ -355,10 +459,19 @@ class BloodhoundServer(BaseMCPServer):
                 if t and t not in ("unknown", "zip", "zip_error"):
                     collection_types.append(t)
 
+            # Classify errors when no output files were generated
+            error = None
+            error_class = None
+            retryable = False
+            suggestions: List[str] = []
+            if not files:
+                error_class, retryable, suggestions = self._classify_bloodhound_error(combined)
+                error = "No output files generated — check credentials and connectivity"
+
             return ToolResult(
                 success=len(files) > 0,
                 data={
-                    "method": "collect",
+                    "method": method_name,
                     "domain": domain,
                     "dc_ip": dc_ip,
                     "collection": collection,
@@ -367,10 +480,58 @@ class BloodhoundServer(BaseMCPServer):
                     "collection_types": collection_types,
                 },
                 raw_output=sanitize_output(combined),
-                error="No output files generated — check credentials and connectivity" if not files else None,
+                error=error,
+                error_class=error_class,
+                retryable=retryable,
+                suggestions=suggestions,
             )
         except Exception as e:
-            return ToolResult(success=False, error=str(e))
+            error_str = str(e)
+            error_class, retryable, suggestions = self._classify_bloodhound_error(error_str)
+            return ToolResult(
+                success=False,
+                error=error_str,
+                error_class=error_class,
+                retryable=retryable,
+                suggestions=suggestions,
+            )
+
+    async def collect(
+        self,
+        domain: str,
+        username: str,
+        dc_ip: str,
+        collection: str = "Default",
+        password: Optional[str] = None,
+        hashes: Optional[str] = None,
+        kerberos: bool = False,
+        aes_key: Optional[str] = None,
+        auth_method: str = "auto",
+        ccache_path: Optional[str] = None,
+        dc_host: Optional[str] = None,
+        gc_host: Optional[str] = None,
+        use_ldaps: bool = False,
+        ldap_channel_binding: bool = False,
+        dns_tcp: bool = True,
+        dns_timeout: int = 3,
+        workers: int = 10,
+        exclude_dcs: bool = False,
+        zip_output: bool = False,
+        computerfile: Optional[str] = None,
+        timeout: int = 300,
+    ) -> ToolResult:
+        """Collect AD data with configurable collection methods."""
+        return await self._run_collection(
+            method_name="collect",
+            domain=domain, username=username, dc_ip=dc_ip,
+            collection=collection, password=password, hashes=hashes,
+            kerberos=kerberos, aes_key=aes_key, auth_method=auth_method,
+            ccache_path=ccache_path, dc_host=dc_host, gc_host=gc_host,
+            use_ldaps=use_ldaps, ldap_channel_binding=ldap_channel_binding,
+            dns_tcp=dns_tcp, dns_timeout=dns_timeout, workers=workers,
+            exclude_dcs=exclude_dcs, zip_output=zip_output,
+            computerfile=computerfile, timeout=timeout,
+        )
 
     async def collect_stealth(
         self,
@@ -396,64 +557,17 @@ class BloodhoundServer(BaseMCPServer):
         timeout: int = 300,
     ) -> ToolResult:
         """Stealth collection — DCOnly method, LDAP-only, no host contact."""
-        if not password and not hashes and not kerberos and not aes_key:
-            return ToolResult(
-                success=False,
-                error="No credentials provided. Supply password, hashes, aes_key, or kerberos=true.",
-            )
-
-        os.makedirs(OUTPUT_DIR, exist_ok=True)
-
-        cmd = self._build_cmd(
+        return await self._run_collection(
+            method_name="collect_stealth",
             domain=domain, username=username, dc_ip=dc_ip,
-            collection="DCOnly",
-            password=password, hashes=hashes,
+            collection="DCOnly", password=password, hashes=hashes,
             kerberos=kerberos, aes_key=aes_key, auth_method=auth_method,
-            dc_host=dc_host, gc_host=gc_host, use_ldaps=use_ldaps,
-            ldap_channel_binding=ldap_channel_binding,
+            ccache_path=ccache_path, dc_host=dc_host, gc_host=gc_host,
+            use_ldaps=use_ldaps, ldap_channel_binding=ldap_channel_binding,
             dns_tcp=dns_tcp, dns_timeout=dns_timeout, workers=workers,
             exclude_dcs=exclude_dcs, zip_output=zip_output,
-            computerfile=computerfile,
+            computerfile=computerfile, timeout=timeout,
         )
-
-        # Kerberos env injection
-        auth_env = {}
-        if kerberos or auth_method == "kerberos":
-            shared_krb5 = os.path.join(CONFIG_DIR, "krb5.conf")
-            if os.path.exists(shared_krb5) and not os.path.exists("/etc/krb5.conf"):
-                shutil.copy(shared_krb5, "/etc/krb5.conf")
-            if ccache_path and os.path.exists(ccache_path):
-                auth_env["KRB5CCNAME"] = ccache_path
-
-        try:
-            result = await self.run_command(cmd, timeout=timeout, env=auth_env)
-            combined = result.stdout + result.stderr
-
-            files = self._find_output_files()
-            file_summaries = self._summarize_files(files)
-
-            collection_types = []
-            for s in file_summaries:
-                t = s.get("type", "")
-                if t and t not in ("unknown", "zip", "zip_error"):
-                    collection_types.append(t)
-
-            return ToolResult(
-                success=len(files) > 0,
-                data={
-                    "method": "collect_stealth",
-                    "domain": domain,
-                    "dc_ip": dc_ip,
-                    "collection": "DCOnly",
-                    "files": file_summaries,
-                    "file_count": len(files),
-                    "collection_types": collection_types,
-                },
-                raw_output=sanitize_output(combined),
-                error="No output files generated — check credentials and connectivity" if not files else None,
-            )
-        except Exception as e:
-            return ToolResult(success=False, error=str(e))
 
 
 if __name__ == "__main__":

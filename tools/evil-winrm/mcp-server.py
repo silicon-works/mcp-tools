@@ -9,6 +9,7 @@ for non-admin WinRM users.
 """
 
 import os
+import re
 import shutil
 from typing import Optional
 
@@ -139,12 +140,120 @@ class EvilWinRMServer(BaseMCPServer):
             )
         return client
 
+    def _classify_winrm_error(self, error_str: str) -> tuple:
+        """Classify WinRM errors into (error_class, retryable, suggestions).
+
+        Returns:
+            (error_class, retryable, suggestions) where error_class is one of:
+            auth, network, timeout, permission, config, params, unknown
+        """
+        err = str(error_str)
+
+        # --- Authentication failures ---
+        if "Failed to authenticate" in err:
+            suggestions = ["Verify credentials (password or NTLM hash)"]
+            if "ntlm" in err.lower():
+                suggestions.append("If NTLM is disabled, try auth='kerberos' with a ccache file")
+            return ("auth", False, suggestions)
+
+        if re.search(r"STATUS_LOGON_FAILURE|Logon failure", err, re.IGNORECASE):
+            return ("auth", False, [
+                "Verify username and password/hash are correct",
+                "Check if account is locked out",
+            ])
+
+        # --- Kerberos errors ---
+        if "KRB_AP_ERR_SKEW" in err or "Clock skew" in err:
+            return ("config", True, [
+                "Clock skew detected. Retry with clock_offset parameter to sync with DC time.",
+                "Example: clock_offset='+5h' or clock_offset='-30m'",
+            ])
+
+        if "KDC_ERR_PREAUTH_FAILED" in err:
+            return ("auth", False, [
+                "Kerberos pre-authentication failed. Password or hash is wrong.",
+            ])
+
+        if "KDC_ERR_C_PRINCIPAL_UNKNOWN" in err:
+            return ("auth", False, [
+                "Kerberos principal not found. Check username@REALM format.",
+            ])
+
+        # --- Network / connection errors ---
+        if re.search(r"ConnectTimeout|connect timeout|connection timed out", err, re.IGNORECASE):
+            return ("network", True, [
+                "WinRM connection timed out. Target may be down or port 5985/5986 filtered.",
+                "Verify target is reachable and WinRM service is running.",
+            ])
+
+        if re.search(r"Connection refused|ConnectionRefusedError", err, re.IGNORECASE):
+            return ("network", True, [
+                "Connection refused. WinRM service may not be running on target.",
+                "Check if port 5985 (HTTP) or 5986 (HTTPS) is open.",
+            ])
+
+        if re.search(r"No route to host|Network is unreachable", err, re.IGNORECASE):
+            return ("network", False, [
+                "Target is unreachable. Check VPN connection and routing.",
+            ])
+
+        # --- Permission / access denied ---
+        if re.search(r"WSManFault.*Code:\s*5|Access\s+(?:is|to the path is)\s+denied|E_ACCESSDENIED", err, re.IGNORECASE):
+            return ("permission", False, [
+                "Access denied. User may not be in 'Remote Management Users' group.",
+                "Try with a different account or use netexec winrm for credential validation.",
+            ])
+
+        if "ConstrainedLanguage" in err or "language mode" in err.lower():
+            return ("permission", False, [
+                "PowerShell Constrained Language Mode active. Use shell='cmd' for basic commands.",
+                "Or use simpler PowerShell that doesn't invoke restricted APIs.",
+            ])
+
+        # --- Elevation / privilege required ---
+        if re.search(r"requires elevation|requires other privileges|Cannot open Service Control Manager", err, re.IGNORECASE):
+            return ("permission", False, [
+                "Operation requires elevated privileges. The current user is not an administrator.",
+                "Try with an admin-level account or use a privilege escalation technique.",
+            ])
+
+        # --- Session / remoting failures ---
+        if re.search(r"logon session does not exist|specified logon session", err, re.IGNORECASE):
+            return ("auth", True, [
+                "WinRM session expired or Kerberos ticket invalidated.",
+                "Re-authenticate or obtain a fresh ticket.",
+            ])
+
+        if re.search(r"Connecting to remote server.*failed", err, re.IGNORECASE):
+            return ("network", True, [
+                "PowerShell remoting to a secondary host failed.",
+                "Verify the remote host is reachable from the WinRM target and PS remoting is enabled.",
+            ])
+
+        # --- HTTP / service layer errors ---
+        if re.search(r"Service Unavailable|HTTP Error 503", err, re.IGNORECASE):
+            return ("network", True, [
+                "WinRM HTTP service returned 503. Service may be restarting or overloaded.",
+                "Retry after a brief wait.",
+            ])
+
+        # --- Timeout (server-side command execution timeout) ---
+        if re.search(r"Operation timed out|timed out|TimeoutError", err, re.IGNORECASE):
+            return ("timeout", True, [
+                "Command execution timed out. Try a simpler/faster command.",
+            ])
+
+        return ("unknown", False, [])
+
     async def exec_cmd(self, target: str, username: str, command: str,
                        password: Optional[str] = None, hash: Optional[str] = None,
                        domain: Optional[str] = None, shell: str = "powershell",
                        ssl: bool = False, port: Optional[int] = None,
-                       auth: str = "ntlm", ccache_path: Optional[str] = None) -> ToolResult:
+                       auth: str = "ntlm", ccache_path: Optional[str] = None,
+                       **kwargs) -> ToolResult:
         """Execute a command via WinRM using PowerShell (PSRP) or CMD (WinRS)."""
+        if kwargs:
+            self.logger.debug(f"Ignoring unknown params: {list(kwargs.keys())}")
         shell_label = "CMD" if shell == "cmd" else "PowerShell"
         # Prepend domain to username for NTLM auth (skip for kerberos — use user@REALM)
         auth_user = f"{domain}\\{username}" if domain and auth != "kerberos" else username
@@ -161,6 +270,12 @@ class EvilWinRMServer(BaseMCPServer):
                 stderr = "\n".join(str(e) for e in streams.error) if streams.error else ""
                 rc = 1 if had_errors else 0
 
+            # Distinguish between command-level errors (PS errors) and auth/network errors
+            if rc != 0 and stderr:
+                error_class, retryable, suggestions = self._classify_winrm_error(stderr)
+            else:
+                error_class, retryable, suggestions = (None, False, [])
+
             return ToolResult(
                 success=rc == 0,
                 data={
@@ -171,25 +286,43 @@ class EvilWinRMServer(BaseMCPServer):
                 },
                 raw_output=stdout.strip() if stdout else "",
                 error=stderr.strip() if rc != 0 and stderr and stderr.strip() else None,
+                error_class=error_class,
+                retryable=retryable,
+                suggestions=suggestions,
             )
         except Exception as e:
+            error_str = str(e)
+            error_class, retryable, suggestions = self._classify_winrm_error(error_str)
             return ToolResult(
                 success=False,
-                error=f"WinRM connection failed: {str(e)}",
-                data={"error": str(e)},
+                error=f"WinRM connection failed: {error_str}",
+                data={"error": error_str},
+                error_class=error_class,
+                retryable=retryable,
+                suggestions=suggestions,
             )
 
     async def upload(self, target: str, username: str, local_path: str, remote_path: str,
                      password: Optional[str] = None, hash: Optional[str] = None,
                      domain: Optional[str] = None,
                      ssl: bool = False, port: Optional[int] = None,
-                     auth: str = "ntlm", ccache_path: Optional[str] = None) -> ToolResult:
+                     auth: str = "ntlm", ccache_path: Optional[str] = None,
+                     **kwargs) -> ToolResult:
         """Upload a file to the target via WinRM using native PSRP copy."""
+        if kwargs:
+            self.logger.debug(f"Ignoring unknown params: {list(kwargs.keys())}")
         auth_user = f"{domain}\\{username}" if domain and auth != "kerberos" else username
         self.logger.info(f"WinRM upload: {local_path} -> {remote_path} on {target}")
 
         if not os.path.isfile(local_path):
-            return ToolResult(success=False, error=f"Local file not found: {local_path}", data={})
+            return ToolResult(
+                success=False,
+                error=f"Local file not found: {local_path}",
+                data={},
+                error_class="params",
+                retryable=False,
+                suggestions=["Check the local_path exists. Files should be in /session/ directory."],
+            )
 
         try:
             client = self._get_client(target, auth_user, password, hash, None, ssl, port, auth, ccache_path)
@@ -207,14 +340,26 @@ class EvilWinRMServer(BaseMCPServer):
                 raw_output=f"Uploaded {file_size} bytes to {remote_path}",
             )
         except Exception as e:
-            return ToolResult(success=False, error=f"Upload failed: {str(e)}", data={})
+            error_str = str(e)
+            error_class, retryable, suggestions = self._classify_winrm_error(error_str)
+            return ToolResult(
+                success=False,
+                error=f"Upload failed: {error_str}",
+                data={},
+                error_class=error_class,
+                retryable=retryable,
+                suggestions=suggestions,
+            )
 
     async def download(self, target: str, username: str, remote_path: str,
                        password: Optional[str] = None, hash: Optional[str] = None,
                        domain: Optional[str] = None, local_path: Optional[str] = None,
                        ssl: bool = False, port: Optional[int] = None,
-                       auth: str = "ntlm", ccache_path: Optional[str] = None) -> ToolResult:
+                       auth: str = "ntlm", ccache_path: Optional[str] = None,
+                       **kwargs) -> ToolResult:
         """Download a file from the target via WinRM using native PSRP fetch."""
+        if kwargs:
+            self.logger.debug(f"Ignoring unknown params: {list(kwargs.keys())}")
         auth_user = f"{domain}\\{username}" if domain and auth != "kerberos" else username
         self.logger.info(f"WinRM download: {remote_path} from {target}")
 
@@ -241,7 +386,16 @@ class EvilWinRMServer(BaseMCPServer):
                 raw_output=f"Downloaded {file_size} bytes from {remote_path} to {local_path}",
             )
         except Exception as e:
-            return ToolResult(success=False, error=f"Download failed: {str(e)}", data={})
+            error_str = str(e)
+            error_class, retryable, suggestions = self._classify_winrm_error(error_str)
+            return ToolResult(
+                success=False,
+                error=f"Download failed: {error_str}",
+                data={},
+                error_class=error_class,
+                retryable=retryable,
+                suggestions=suggestions,
+            )
 
 
 if __name__ == "__main__":

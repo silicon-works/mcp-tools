@@ -77,6 +77,14 @@ class FfufServer(BaseMCPServer):
                     "type": "string",
                     "description": "Filter out responses of this size",
                 },
+                "filter_words": {
+                    "type": "string",
+                    "description": "Filter out responses with this word count (e.g., '42' or '10-50')",
+                },
+                "filter_lines": {
+                    "type": "string",
+                    "description": "Filter out responses with this line count (e.g., '0' or '5-20')",
+                },
                 "timeout": {
                     "type": "integer",
                     "default": 10,
@@ -140,6 +148,19 @@ class FfufServer(BaseMCPServer):
                     "type": "string",
                     "description": "Filter out responses of this size",
                 },
+                "filter_words": {
+                    "type": "string",
+                    "description": "Filter out responses with this word count (e.g., '42' or '10-50')",
+                },
+                "filter_lines": {
+                    "type": "string",
+                    "description": "Filter out responses with this line count (e.g., '0' or '5-20')",
+                },
+                "timeout": {
+                    "type": "integer",
+                    "default": 10,
+                    "description": "HTTP request timeout in seconds",
+                },
                 "headers": {
                     "type": "object",
                     "description": "Custom HTTP headers as key-value pairs",
@@ -193,21 +214,71 @@ class FfufServer(BaseMCPServer):
                     "type": "string",
                     "description": "Filter out responses of this size (use to filter default vhost)",
                 },
+                "filter_words": {
+                    "type": "string",
+                    "description": "Filter out responses with this word count (e.g., '42' or '10-50')",
+                },
+                "filter_lines": {
+                    "type": "string",
+                    "description": "Filter out responses with this line count (e.g., '0' or '5-20')",
+                },
+                "headers": {
+                    "type": "object",
+                    "description": "Custom HTTP headers as key-value pairs (in addition to Host header used for vhost fuzzing)",
+                },
+                "cookies": {
+                    "type": "string",
+                    "description": "Cookie header value for authenticated fuzzing",
+                },
             },
             handler=self.vhost_fuzz,
         )
 
     def _resolve_wordlist(self, wordlist: str) -> str:
-        """Resolve wordlist name to path."""
+        """Resolve wordlist name to path.
+
+        Returns (path, warning) where warning is set when a fallback occurred.
+        Callers should include the warning in results so the agent knows.
+        """
         if wordlist in self.WORDLISTS:
             path = self.WORDLISTS[wordlist]
             if os.path.exists(path):
                 return path
             # Fallback to common if specified list doesn't exist
-            self.logger.warning(f"Wordlist {path} not found, using common")
-            return self.WORDLISTS["common"]
+            common_path = self.WORDLISTS["common"]
+            if os.path.exists(common_path):
+                self.logger.warning(f"Wordlist '{wordlist}' ({path}) not found, falling back to common")
+                return common_path
+            # Neither requested nor common exists — return the requested path
+            # so ffuf itself will produce a clear "file not found" error
+            self.logger.error(f"Wordlist '{wordlist}' ({path}) and common fallback both missing")
+            return path
         # Assume it's a path
         return wordlist
+
+    def _estimate_timeout(self, wordlist_path: str, extensions: Optional[str] = None) -> int:
+        """Estimate a sane wall-clock timeout based on wordlist size and extensions.
+
+        Extensions multiply the total request count:
+          total_requests = line_count * (1 + num_extensions)
+
+        We assume ~100 requests/sec with default thread count (40), then add
+        a 30-second buffer.  Floor is 60 s; ceiling is 900 s (15 min) so a
+        single scan never blocks the agent for too long.
+        """
+        try:
+            with open(wordlist_path, "rb") as f:
+                line_count = sum(1 for _ in f)
+        except (OSError, IOError):
+            return 300  # safe default if we cannot read the wordlist
+
+        ext_count = 0
+        if extensions:
+            ext_count = len([e for e in extensions.split(",") if e.strip()])
+
+        total_requests = line_count * (1 + ext_count)
+        estimated = (total_requests // 100) + 30
+        return max(60, min(estimated, 900))
 
     def _parse_ffuf_json(self, json_output: str) -> Dict[str, Any]:
         """Parse ffuf JSON output."""
@@ -243,6 +314,11 @@ class FfufServer(BaseMCPServer):
     ) -> ToolResult:
         """
         Run ffuf with JSON output and parse results.
+
+        Uses run_command_with_progress to send heartbeat notifications,
+        preventing client-side idle timeouts on long-running scans.
+        ffuf runs in silent mode (-s) so there is no meaningful stdout to
+        parse for progress, but the heartbeat timer fires every 15 seconds.
         """
         # Create temp file for JSON output
         with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
@@ -254,8 +330,13 @@ class FfufServer(BaseMCPServer):
 
             self.logger.info(f"Running: {' '.join(cmd)}")
 
-            # Run ffuf
-            result = await self.run_command(cmd, timeout=timeout)
+            # Use run_command_with_progress for heartbeat support.
+            # ffuf -s produces no stdout, but the heartbeat timer keeps
+            # the MCP connection alive and prevents client idle timeout.
+            result = await self.run_command_with_progress(
+                cmd,
+                heartbeat_interval=15.0,
+            )
 
             # Read JSON output
             if os.path.exists(json_file) and os.path.getsize(json_file) > 0:
@@ -270,6 +351,20 @@ class FfufServer(BaseMCPServer):
                     raw_output=sanitize_output(result.stdout + result.stderr),
                 )
             else:
+                # Check stderr for connection errors that indicate target is down
+                stderr_lower = (result.stderr or "").lower()
+                if "connection refused" in stderr_lower:
+                    return ToolResult(
+                        success=False,
+                        data={},
+                        error="Target refused connections — is the service running?",
+                        error_class="network",
+                        retryable=True,
+                        suggestions=[
+                            "Verify the target URL and port are correct",
+                            "Check if the service is running with nmap",
+                        ],
+                    )
                 return ToolResult(
                     success=True,
                     data={"results": [], "total_results": 0, "message": "No results found"},
@@ -277,10 +372,34 @@ class FfufServer(BaseMCPServer):
                 )
 
         except ToolError as e:
+            error_msg = str(e)
+            error_class = "unknown"
+            retryable = False
+            suggestions = []
+
+            if "timed out" in error_msg.lower():
+                error_class = "timeout"
+                retryable = True
+                suggestions = [
+                    "Use a smaller wordlist (e.g., 'small' or 'common' instead of 'big')",
+                    "Reduce extensions to limit request count",
+                    "Increase threads or reduce HTTP timeout",
+                ]
+            elif "connection refused" in error_msg.lower():
+                error_class = "network"
+                retryable = True
+                suggestions = [
+                    "Verify the target URL and port are correct",
+                    "Check if the service is running with nmap",
+                ]
+
             return ToolResult(
                 success=False,
                 data={},
-                error=str(e),
+                error=error_msg,
+                error_class=error_class,
+                retryable=retryable,
+                suggestions=suggestions,
             )
         finally:
             # Cleanup temp file
@@ -297,6 +416,8 @@ class FfufServer(BaseMCPServer):
         filter_codes: Optional[str] = None,
         auto_calibrate: bool = False,
         filter_size: Optional[str] = None,
+        filter_words: Optional[str] = None,
+        filter_lines: Optional[str] = None,
         timeout: int = 10,
         headers: Optional[Dict[str, str]] = None,
         cookies: Optional[str] = None,
@@ -338,6 +459,12 @@ class FfufServer(BaseMCPServer):
         if filter_size:
             args.extend(["-fs", filter_size])
 
+        if filter_words:
+            args.extend(["-fw", filter_words])
+
+        if filter_lines:
+            args.extend(["-fl", filter_lines])
+
         # Add custom headers
         if headers:
             for key, value in headers.items():
@@ -347,15 +474,7 @@ class FfufServer(BaseMCPServer):
         if cookies:
             args.extend(["-b", cookies])
 
-        # Calculate timeout based on wordlist size
-        try:
-            with open(wordlist_path, "r") as f:
-                line_count = sum(1 for _ in f)
-            # Rough estimate: 100 requests per second with threads
-            estimated_time = max(60, (line_count // 100) + 30)
-        except:
-            estimated_time = 300
-
+        estimated_time = self._estimate_timeout(wordlist_path, extensions)
         result = await self._run_ffuf(args, timeout=estimated_time)
 
         # Add summary
@@ -380,6 +499,9 @@ class FfufServer(BaseMCPServer):
         filter_codes: Optional[str] = None,
         auto_calibrate: bool = False,
         filter_size: Optional[str] = None,
+        filter_words: Optional[str] = None,
+        filter_lines: Optional[str] = None,
+        timeout: int = 10,
         headers: Optional[Dict[str, str]] = None,
         cookies: Optional[str] = None,
     ) -> ToolResult:
@@ -388,6 +510,24 @@ class FfufServer(BaseMCPServer):
         """
         self.logger.info(f"Starting parameter fuzz on {url} ({method})")
 
+        # Validate FUZZ keyword exists in URL or POST data
+        has_fuzz = "FUZZ" in url
+        if data and "FUZZ" in data:
+            has_fuzz = True
+        if not has_fuzz:
+            return ToolResult(
+                success=False,
+                data={},
+                error="FUZZ keyword not found in url or data. Place FUZZ where you want to inject (e.g., url='http://target/page?FUZZ=test' or data='password=FUZZ')",
+                error_class="params",
+                retryable=False,
+                suggestions=[
+                    "For GET param discovery: url='http://target/page?FUZZ=test'",
+                    "For GET value fuzzing: url='http://target/page?id=FUZZ'",
+                    "For POST fuzzing: data='username=admin&password=FUZZ'",
+                ],
+            )
+
         wordlist_path = self._resolve_wordlist(wordlist)
 
         args = [
@@ -395,6 +535,7 @@ class FfufServer(BaseMCPServer):
             "-w", wordlist_path,
             "-t", str(threads),
             "-X", method,
+            "-timeout", str(timeout),
         ]
 
         if data:
@@ -412,6 +553,12 @@ class FfufServer(BaseMCPServer):
         if filter_size:
             args.extend(["-fs", filter_size])
 
+        if filter_words:
+            args.extend(["-fw", filter_words])
+
+        if filter_lines:
+            args.extend(["-fl", filter_lines])
+
         # Add custom headers
         if headers:
             for key, value in headers.items():
@@ -421,7 +568,8 @@ class FfufServer(BaseMCPServer):
         if cookies:
             args.extend(["-b", cookies])
 
-        result = await self._run_ffuf(args, timeout=300)
+        estimated_time = self._estimate_timeout(wordlist_path)
+        result = await self._run_ffuf(args, timeout=estimated_time)
 
         if result.success:
             result.data["summary"] = {
@@ -442,6 +590,10 @@ class FfufServer(BaseMCPServer):
         filter_codes: Optional[str] = None,
         auto_calibrate: bool = False,
         filter_size: Optional[str] = None,
+        filter_words: Optional[str] = None,
+        filter_lines: Optional[str] = None,
+        headers: Optional[Dict[str, str]] = None,
+        cookies: Optional[str] = None,
     ) -> ToolResult:
         """
         Fuzz virtual hosts on a web server.
@@ -470,10 +622,23 @@ class FfufServer(BaseMCPServer):
         if filter_size:
             args.extend(["-fs", filter_size])
 
-        # For vhosts, we typically want to filter by size to ignore default responses
-        # The user should first check the default response size
+        if filter_words:
+            args.extend(["-fw", filter_words])
 
-        result = await self._run_ffuf(args, timeout=300)
+        if filter_lines:
+            args.extend(["-fl", filter_lines])
+
+        # Add custom headers (in addition to the Host header used for vhost fuzzing)
+        if headers:
+            for key, value in headers.items():
+                args.extend(["-H", f"{key}: {value}"])
+
+        # Add cookies
+        if cookies:
+            args.extend(["-b", cookies])
+
+        estimated_time = self._estimate_timeout(wordlist_path)
+        result = await self._run_ffuf(args, timeout=estimated_time)
 
         if result.success:
             vhosts = [f"{r['input']}.{domain}" for r in result.data.get("results", [])]

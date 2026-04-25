@@ -1,39 +1,33 @@
-# OpenSploit MCP Server: sqlmap
-# Automatic SQL injection and database takeover tool
+# OpenSploit kind:cli image: sqlmap
+# Automatic SQL injection detection and exploitation. Plain CLI — no Python
+# wrapper, no MCP server. Plugin invokes `sqlmap` directly via cli_in_container()
+# with the full command constructed by the LLM.
 
-FROM kalilinux/kali-rolling
+FROM debian:bookworm-slim
 
 LABEL org.opencontainers.image.source="https://github.com/silicon-works/mcp-tools"
-LABEL org.opencontainers.image.description="sqlmap MCP server for OpenSploit"
+LABEL org.opencontainers.image.description="sqlmap (kind:cli) for OpenSploit"
 LABEL org.opencontainers.image.licenses="MIT"
 
-# Install sqlmap and Python
+# sqlmap is a Python tool. Debian's `sqlmap` package pulls a slightly older
+# stable build but is reproducible and self-contained. python3 is already
+# pulled in as a dependency.
+#
+# Optional libs we keep:
+#   - krb5-user / libgssapi-krb5-2 — for sqlmap's --auth-type=NTLM/Kerberos
+#   - libpsl5 / libidn2-0 — for IDN URL handling consistent with curl image
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
         sqlmap \
-        python3 \
-        python3-pip \
-        python3-venv && \
-    rm -rf /var/lib/apt/lists/* && \
-    apt-get clean
+        ca-certificates \
+        krb5-user \
+        libgssapi-krb5-2 \
+        libpsl5 \
+        libidn2-0 \
+    && rm -rf /var/lib/apt/lists/* \
+    && apt-get clean
 
-# Create app directory
-WORKDIR /app
+WORKDIR /session
 
-# Create virtual environment
-RUN python3 -m venv /app/venv
-ENV PATH="/app/venv/bin:$PATH"
-
-# Copy and install shared mcp-common package
-COPY packages/mcp-common /app/packages/mcp-common
-RUN pip install --no-cache-dir /app/packages/mcp-common
-
-# Install tool-specific dependencies
-COPY tools/sqlmap/requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
-
-# Copy MCP server code
-COPY tools/sqlmap/mcp-server.py .
-
-# MCP servers communicate via stdio
-CMD ["python3", "mcp-server.py"]
+# Plugin invokes via `docker run <image> sqlmap ...`. No CMD — cli_in_container
+# overrides per call.

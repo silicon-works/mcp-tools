@@ -481,26 +481,80 @@ class SSHServer(BaseMCPServer):
 
         return args
 
-    def _classify_ssh_error(self, returncode: int, stderr: str) -> str:
-        """Classify SSH errors and provide helpful suggestions."""
+    def _classify_ssh_error(self, returncode: int, stderr: str) -> tuple:
+        """Classify SSH errors into structured (message, error_class, retryable).
+
+        Returns:
+            (error_message, error_class, retryable) tuple.
+        """
         stderr_lower = stderr.lower()
 
         if "connection refused" in stderr_lower:
-            return "Connection refused - The SSH port is closed or a firewall is blocking the connection."
+            return (
+                "Connection refused - The SSH port is closed or a firewall is blocking the connection.",
+                "network",
+                True,
+            )
         elif "connection timed out" in stderr_lower:
-            return "Connection timed out - The host may be unreachable or the SSH service is not responding. Try increasing the timeout or check network connectivity."
+            return (
+                "Connection timed out - The host may be unreachable or the SSH service is not responding. Try increasing the timeout or check network connectivity.",
+                "timeout",
+                True,
+            )
         elif "no route to host" in stderr_lower:
-            return "No route to host - The target is not reachable. Check your network configuration and target IP."
+            return (
+                "No route to host - The target is not reachable. Check your network configuration and target IP.",
+                "network",
+                False,
+            )
         elif "permission denied" in stderr_lower:
-            return "Permission denied - Invalid credentials. Verify username and password/key."
+            return (
+                "Permission denied - Invalid credentials. Verify username and password/key.",
+                "auth",
+                False,
+            )
         elif "host key verification failed" in stderr_lower:
-            return "Host key verification failed - SSH host key mismatch."
+            return (
+                "Host key verification failed - SSH host key mismatch.",
+                "config",
+                False,
+            )
         elif "network is unreachable" in stderr_lower:
-            return "Network unreachable - Check your network connection."
+            return (
+                "Network unreachable - Check your network connection.",
+                "network",
+                True,
+            )
+        elif "connection reset" in stderr_lower:
+            return (
+                "Connection reset by peer - The SSH server dropped the connection. This may be due to rate limiting, firewall rules, or server overload.",
+                "network",
+                True,
+            )
+        elif "broken pipe" in stderr_lower:
+            return (
+                "Broken pipe - The SSH connection was interrupted. The server may have closed the session.",
+                "network",
+                True,
+            )
+        elif "connection closed" in stderr_lower:
+            return (
+                "Connection closed - The SSH/SCP connection was closed unexpectedly. The server may have rejected the transfer or hit a resource limit.",
+                "network",
+                True,
+            )
         elif returncode == 255:
-            return f"SSH connection failed (exit code 255). This usually indicates a connection or authentication problem. Details: {stderr.strip()}"
+            return (
+                f"SSH connection failed (exit code 255). This usually indicates a connection or authentication problem. Details: {stderr.strip()}",
+                "network",
+                True,
+            )
 
-        return f"SSH error (exit code {returncode}): {stderr.strip()}"
+        return (
+            f"SSH error (exit code {returncode}): {stderr.strip()}",
+            "unknown",
+            False,
+        )
 
     async def exec_command(
         self,
@@ -554,11 +608,12 @@ class SSHServer(BaseMCPServer):
                     output = stdout.decode("utf-8", errors="replace")
                     errors = stderr.decode("utf-8", errors="replace")
 
-                    # Filter out SSH warnings
+                    # Filter out SSH warnings (including OpenSSH 10.x post-quantum warnings)
                     errors_filtered = "\n".join(
                         line for line in errors.split("\n")
                         if not line.startswith("Warning:")
                         and "Permanently added" not in line
+                        and not line.startswith("** ")
                     )
 
                     # Check for transient failures that can be retried
@@ -576,7 +631,7 @@ class SSHServer(BaseMCPServer):
                             continue
 
                         # Non-transient failure or max retries reached
-                        classified_error = self._classify_ssh_error(proc.returncode, errors)
+                        error_msg, error_class, retryable = self._classify_ssh_error(proc.returncode, errors)
                         return ToolResult(
                             success=False,
                             data={
@@ -586,7 +641,9 @@ class SSHServer(BaseMCPServer):
                                 "exit_code": proc.returncode,
                                 "attempt": attempt,
                             },
-                            error=classified_error,
+                            error=error_msg,
+                            error_class=error_class,
+                            retryable=retryable,
                             raw_output=errors_filtered,
                         )
 
@@ -606,6 +663,10 @@ class SSHServer(BaseMCPServer):
 
                 except asyncio.TimeoutError:
                     proc.kill()
+                    try:
+                        await asyncio.wait_for(proc.wait(), timeout=5)
+                    except asyncio.TimeoutError:
+                        pass  # Process is truly stuck, but we've sent SIGKILL
                     last_error = f"Command timed out after {timeout} seconds"
                     if attempt <= retries:
                         self.logger.warning(f"SSH timeout (attempt {attempt}/{retries + 1}), retrying...")
@@ -615,6 +676,8 @@ class SSHServer(BaseMCPServer):
                         success=False,
                         data={"host": host, "username": username, "command": command, "attempt": attempt},
                         error=f"{last_error}. The SSH service may be slow or unreachable. Consider using shell-session for persistent connections.",
+                        error_class="timeout",
+                        retryable=True,
                     )
 
             # Should not reach here, but just in case
@@ -728,10 +791,15 @@ class SSHServer(BaseMCPServer):
                 )
 
                 if proc.returncode != 0:
+                    stderr_text = stderr.decode("utf-8", errors="replace")
+                    error_msg, error_class, retryable = self._classify_ssh_error(proc.returncode, stderr_text)
                     return ToolResult(
                         success=False,
                         data={"host": host, "remote_path": remote_path},
-                        error=stderr.decode("utf-8", errors="replace"),
+                        error=error_msg,
+                        error_class=error_class,
+                        retryable=retryable,
+                        raw_output=stderr_text,
                     )
 
                 # Read downloaded content
@@ -751,10 +819,16 @@ class SSHServer(BaseMCPServer):
 
             except asyncio.TimeoutError:
                 proc.kill()
+                try:
+                    await asyncio.wait_for(proc.wait(), timeout=5)
+                except asyncio.TimeoutError:
+                    pass
                 return ToolResult(
                     success=False,
                     data={"host": host, "remote_path": remote_path},
                     error=f"Transfer timed out after {timeout} seconds",
+                    error_class="timeout",
+                    retryable=True,
                 )
 
         except Exception as e:
@@ -837,10 +911,15 @@ class SSHServer(BaseMCPServer):
                 )
 
                 if proc.returncode != 0:
+                    stderr_text = stderr.decode("utf-8", errors="replace")
+                    error_msg, error_class, retryable = self._classify_ssh_error(proc.returncode, stderr_text)
                     return ToolResult(
                         success=False,
                         data={"host": host, "remote_path": remote_path},
-                        error=stderr.decode("utf-8", errors="replace"),
+                        error=error_msg,
+                        error_class=error_class,
+                        retryable=retryable,
+                        raw_output=stderr_text,
                     )
 
                 return ToolResult(
@@ -855,10 +934,16 @@ class SSHServer(BaseMCPServer):
 
             except asyncio.TimeoutError:
                 proc.kill()
+                try:
+                    await asyncio.wait_for(proc.wait(), timeout=5)
+                except asyncio.TimeoutError:
+                    pass
                 return ToolResult(
                     success=False,
                     data={"host": host, "remote_path": remote_path},
                     error=f"Transfer timed out after {timeout} seconds",
+                    error_class="timeout",
+                    retryable=True,
                 )
 
         except Exception as e:
@@ -872,7 +957,6 @@ class SSHServer(BaseMCPServer):
                 os.unlink(key_file)
             if local_file and os.path.exists(local_file):
                 os.unlink(local_file)
-
 
     async def upload_binary(
         self,

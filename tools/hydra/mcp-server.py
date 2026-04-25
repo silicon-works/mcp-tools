@@ -571,7 +571,7 @@ class HydraServer(BaseMCPServer):
             # SSH format: [22][ssh] host: 10.10.10.1   login: admin   password: admin123
             # HTTP form format: [80][http-post-form] host: httpbin.org   misc: /path:...   login: admin   password: admin123
             cred_match = re.search(
-                r"\[(\d+)\]\[([\w-]+)\]\s+host:\s+(\S+).*?\s+login:\s+(\S+)\s+password:\s+(.+)",
+                r"\[(\d+)\]\[([\w-]+)\]\s+host:\s+(\S+).*?\s+login:\s+(\S+)\s+password:\s*(.*)",
                 line
             )
             if cred_match:
@@ -621,6 +621,11 @@ class HydraServer(BaseMCPServer):
                 warnings.append(line.strip()[10:].strip())
                 continue
 
+            # Parse info lines (advisory, treated as warnings)
+            if line.strip().startswith("[INFO]"):
+                warnings.append(line.strip()[7:].strip())
+                continue
+
             # Parse errors
             if line.strip().startswith("[ERROR]"):
                 errors.append(line.strip()[8:].strip())
@@ -652,6 +657,56 @@ class HydraServer(BaseMCPServer):
             result["verbose_output"] = "\n".join(verbose_lines[-1000:])  # Last 1000 lines
 
         return result
+
+    def _classify_error(self, error_msg: str) -> str:
+        """Classify a hydra error message into an error category."""
+        lower = error_msg.lower()
+        if "could not connect" in lower or "connection refused" in lower:
+            return "network"
+        if "does not support password authentication" in lower:
+            return "auth"
+        if "max retries" in lower or "too many" in lower:
+            return "network"
+        if "invalid option" in lower or "unknown service" in lower:
+            return "params"
+        if "file for" in lower and "not found" in lower:
+            return "params"
+        if "optional parameter" in lower or "valid optional" in lower:
+            return "params"
+        if "permission" in lower or "access denied" in lower:
+            return "permission"
+        if "timeout" in lower:
+            return "timeout"
+        return "unknown"
+
+    def _error_suggestions(self, error_class: str, service: str) -> List[str]:
+        """Return suggestions based on error classification."""
+        suggestions = {
+            "network": [
+                f"Verify the target is reachable (nmap -p <port> <target>)",
+                f"Check that the {service} service is actually running",
+                "Try reducing thread count to avoid connection limits",
+            ],
+            "auth": [
+                f"The {service} service may not support password authentication",
+                "Check if key-based auth is required (use sshkey for SSH)",
+            ],
+            "timeout": [
+                "Use a smaller wordlist or reduce the number of usernames",
+                "Increase the timeout parameter",
+            ],
+            "params": [
+                "Check the service name and parameters",
+                "Run hydra -U <service> for module-specific help",
+                "Check that wordlist/combo file paths exist and are readable",
+                "For HTTP form attacks, ensure the form string uses the format '/path:body:F=fail_string'",
+            ],
+            "permission": [
+                "Check if the target has rate limiting or IP blocking",
+                "Try adding wait_time=1 to slow down attempts",
+            ],
+        }
+        return suggestions.get(error_class, [])
 
     async def bruteforce(
         self,
@@ -688,7 +743,7 @@ class HydraServer(BaseMCPServer):
             threads = self.SERVICE_THREADS.get(service, self.DEFAULT_THREADS)
 
         # Build command
-        args = ["hydra", "-t", str(threads)]
+        args = ["hydra", "-I", "-t", str(threads)]
 
         # Use -v (lowercase) for minimal progress info instead of -V (very verbose)
         args.append("-v")
@@ -749,13 +804,14 @@ class HydraServer(BaseMCPServer):
         args.append(target)
 
         # Handle HTTP services specially
+        # For HTTPS variants, hydra needs the actual https-* service name
         if service in ["http-get", "https-get"]:
             path = http_path or "/"
-            args.append("http-get")
+            args.append(service)
             args.append(path)
         elif service in ["http-post-form", "https-post-form"]:
             if http_form:
-                args.append("http-post-form")
+                args.append(service)
                 args.append(http_form)
             else:
                 return ToolResult(
@@ -765,7 +821,7 @@ class HydraServer(BaseMCPServer):
                 )
         elif service in ["http-get-form", "https-get-form"]:
             if http_form:
-                args.append("http-get-form")
+                args.append(service)
                 args.append(http_form)
             else:
                 return ToolResult(
@@ -776,7 +832,7 @@ class HydraServer(BaseMCPServer):
         elif service in ["http-post", "https-post"]:
             # Basic HTTP POST auth (not form-based)
             path = http_path or "/"
-            args.append("http-post")
+            args.append(service)
             args.append(path)
         else:
             args.append(service)
@@ -784,6 +840,21 @@ class HydraServer(BaseMCPServer):
         self.logger.info(f"Running: {' '.join(args)}")
 
         # Execute with timeout handling that captures partial output
+        # Heartbeat loop keeps the MCP connection alive during long brute-force runs
+        heartbeat_count = 0
+
+        async def _heartbeat_loop():
+            """Send periodic heartbeats to prevent MCP client timeout."""
+            nonlocal heartbeat_count
+            while True:
+                await asyncio.sleep(30)
+                heartbeat_count += 1
+                elapsed = int(time.time() - start_time)
+                await self.send_progress(
+                    f"Brute-force running ({elapsed}s elapsed)...",
+                    progress=float(heartbeat_count),
+                )
+
         try:
             proc = await asyncio.create_subprocess_exec(
                 *args,
@@ -791,6 +862,7 @@ class HydraServer(BaseMCPServer):
                 stderr=asyncio.subprocess.PIPE,
             )
 
+            heartbeat_task = asyncio.create_task(_heartbeat_loop())
             try:
                 stdout_bytes, stderr_bytes = await asyncio.wait_for(
                     proc.communicate(),
@@ -827,6 +899,12 @@ class HydraServer(BaseMCPServer):
                     stdout = ""
                     stderr = ""
                 timed_out = True
+            finally:
+                heartbeat_task.cancel()
+                try:
+                    await heartbeat_task
+                except asyncio.CancelledError:
+                    pass
 
             output = stdout + stderr
             duration_seconds = int(time.time() - start_time)
@@ -849,16 +927,39 @@ class HydraServer(BaseMCPServer):
                     data=parsed,
                     raw_output=sanitize_output(output),
                     error=f"Operation timed out after {timeout} seconds ({len(parsed['credentials'])} credentials found in partial results)",
+                    error_class="timeout",
+                    retryable=True,
+                    suggestions=[
+                        "Use a smaller wordlist (e.g., common-passwords instead of rockyou)",
+                        "Increase the timeout parameter",
+                        "Use stop_on_first=true to stop after finding one credential",
+                    ],
                 )
 
             # Check for hydra errors (connection failures, etc.)
+            # If credentials were found despite errors, treat as success with warnings
             if parsed.get("errors"):
-                return ToolResult(
-                    success=False,
-                    data=parsed,
-                    raw_output=sanitize_output(output),
-                    error=parsed["errors"][0] if parsed["errors"] else "Unknown hydra error",
-                )
+                if parsed["found"]:
+                    # Credentials found despite errors — promote errors to warnings
+                    if "warnings" not in parsed:
+                        parsed["warnings"] = []
+                    parsed["warnings"].extend(
+                        [f"[ERROR during scan] {e}" for e in parsed["errors"]]
+                    )
+                    del parsed["errors"]
+                else:
+                    error_msg = parsed["errors"][0] if parsed["errors"] else "Unknown hydra error"
+                    error_class = self._classify_error(error_msg)
+                    suggestions = self._error_suggestions(error_class, service)
+                    return ToolResult(
+                        success=False,
+                        data=parsed,
+                        raw_output=sanitize_output(output),
+                        error=error_msg,
+                        error_class=error_class,
+                        retryable=error_class in ("network", "timeout"),
+                        suggestions=suggestions,
+                    )
 
             return ToolResult(
                 success=True,
@@ -982,11 +1083,21 @@ class HydraServer(BaseMCPServer):
         """Brute-force web login form."""
         # Build the http_form string for hydra
         # Format: "/path:user=^USER^&pass=^PASS^:F=error_message"
-        form_parts = [f"{user_field}=^USER^", f"{pass_field}=^PASS^"]
-        if extra_params:
-            form_parts.append(extra_params)
+        # Hydra uses colons as delimiters; literal colons in values must be escaped as \:
+        def _escape_colon(s: str) -> str:
+            """Escape literal colons for hydra form strings."""
+            return s.replace("\\:", "\x00").replace(":", "\\:").replace("\x00", "\\:")
 
-        form_string = f"{path}:{'&'.join(form_parts)}:F={fail_string}"
+        escaped_path = _escape_colon(path)
+        escaped_user_field = _escape_colon(user_field)
+        escaped_pass_field = _escape_colon(pass_field)
+        escaped_fail_string = _escape_colon(fail_string)
+
+        form_parts = [f"{escaped_user_field}=^USER^", f"{escaped_pass_field}=^PASS^"]
+        if extra_params:
+            form_parts.append(_escape_colon(extra_params))
+
+        form_string = f"{escaped_path}:{'&'.join(form_parts)}:F={escaped_fail_string}"
 
         service = "https-post-form" if https else "http-post-form"
         default_port = 443 if https else 80

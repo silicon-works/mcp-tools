@@ -323,16 +323,27 @@ class CurlServer(BaseMCPServer):
         )
 
     def _parse_headers(self, header_output: str) -> Dict[str, str]:
-        """Parse curl header output into a dictionary."""
+        """Parse curl header output into a dictionary.
+
+        Duplicate headers (e.g., multiple Set-Cookie) are joined with ', '
+        following RFC 7230 section 3.2.2 semantics.
+        """
         headers = {}
         for line in header_output.split("\r\n"):
             if ": " in line:
                 key, value = line.split(": ", 1)
-                headers[key.lower()] = value
+                lkey = key.lower()
+                if lkey in headers:
+                    headers[lkey] = headers[lkey] + ", " + value
+                else:
+                    headers[lkey] = value
         return headers
 
     def _normalize_headers(self, headers: Any) -> Dict[str, str]:
-        """Accept both dict and array formats for headers."""
+        """Accept both dict and array formats for headers.
+
+        Array entries may use ``"Key: value"`` or ``"Key:value"`` (no space).
+        """
         if headers is None:
             return {}
         if isinstance(headers, dict):
@@ -340,8 +351,8 @@ class CurlServer(BaseMCPServer):
         if isinstance(headers, list):
             result = {}
             for h in headers:
-                if isinstance(h, str) and ": " in h:
-                    key, value = h.split(": ", 1)
+                if isinstance(h, str) and ":" in h:
+                    key, value = h.split(":", 1)
                     result[key.strip()] = value.strip()
             return result
         return {}
@@ -408,6 +419,25 @@ class CurlServer(BaseMCPServer):
         }
         return messages.get(error_type, messages["unknown"])
 
+    @staticmethod
+    def _classify_curl_error(error_type: str) -> tuple:
+        """Map a curl error type to (error_class, retryable, suggestions).
+
+        Returns values suitable for ToolResult fields.
+        """
+        mapping = {
+            "could_not_resolve_host": ("network", True, ["Check the hostname spelling", "Verify DNS resolution"]),
+            "connection_refused": ("network", True, ["Verify the target is up and port is open", "Check firewall rules"]),
+            "timeout": ("timeout", True, ["Increase timeout value", "Check if the target is reachable"]),
+            "ssl_error": ("network", False, ["Try with insecure=true to bypass SSL verification"]),
+            "too_many_redirects": ("config", False, ["Set follow_redirects=false to see redirect chain"]),
+            "empty_response": ("network", True, ["Server may be dropping connections", "Try again"]),
+            "receive_error": ("network", True, ["Connection may have been interrupted", "Try again"]),
+            "ssl_certificate_error": ("network", False, ["Try with insecure=true to bypass certificate check"]),
+        }
+        error_class, retryable, suggestions = mapping.get(error_type, ("unknown", False, []))
+        return error_class, retryable, suggestions
+
     def _parse_verbose_request_headers(self, stderr: str) -> Dict[str, str]:
         """Parse request headers from curl verbose output (> Header: value lines)."""
         headers = {}
@@ -459,10 +489,9 @@ class CurlServer(BaseMCPServer):
                 stdout = stdout_bytes.decode('utf-8', errors='replace')
                 stderr = stderr_bytes.decode('utf-8', errors='replace')
             else:
-                result = await self.run_command(args, timeout=timeout + 10)
+                result = await self.run_command_with_progress(args)
                 stdout = result.stdout
                 stderr = result.stderr if hasattr(result, 'stderr') else ""
-                returncode = 0  # run_command raises on non-zero
 
         except ToolError as e:
             # Extract exit code from error if available
@@ -479,6 +508,7 @@ class CurlServer(BaseMCPServer):
 
             error_type = CURL_ERROR_TYPES.get(exit_code, "unknown") if exit_code else "unknown"
             error_message = self._get_error_message(error_type, stderr)
+            error_class, retryable, suggestions = self._classify_curl_error(error_type)
 
             return ToolResult(
                 success=False,
@@ -498,6 +528,9 @@ class CurlServer(BaseMCPServer):
                     },
                 },
                 error=error_message,
+                error_class=error_class,
+                retryable=retryable,
+                suggestions=suggestions,
             )
         except asyncio.TimeoutError:
             return ToolResult(
@@ -518,6 +551,9 @@ class CurlServer(BaseMCPServer):
                     },
                 },
                 error=f"Request timed out after {timeout} seconds",
+                error_class="timeout",
+                retryable=True,
+                suggestions=["Increase timeout value", "Check if the target is reachable"],
             )
 
         # Parse timing from output
@@ -643,6 +679,7 @@ class CurlServer(BaseMCPServer):
                     error_type = "ssl_error"
 
             error_message = self._get_error_message(error_type, stderr)
+            error_class, retryable, suggestions = self._classify_curl_error(error_type)
 
             return ToolResult(
                 success=False,
@@ -662,6 +699,9 @@ class CurlServer(BaseMCPServer):
                     },
                 },
                 error=error_message,
+                error_class=error_class,
+                retryable=retryable,
+                suggestions=suggestions,
             )
 
         # Build response data
@@ -809,8 +849,13 @@ class CurlServer(BaseMCPServer):
             output = html.unescape(output)
             # Remove HTML tags
             output = re.sub(r"<[^>]+>", "", output)
-            # Normalize whitespace
-            output = re.sub(r"\s+", " ", output).strip()
+            # Normalize horizontal whitespace (spaces/tabs) on each line,
+            # but preserve newlines so multiline command output stays readable.
+            lines = output.split("\n")
+            lines = [re.sub(r"[^\S\n]+", " ", line).strip() for line in lines]
+            # Drop blank lines at start/end, collapse consecutive blank lines
+            output = "\n".join(lines).strip()
+            output = re.sub(r"\n{3,}", "\n\n", output)
 
         return output
 
@@ -1027,10 +1072,16 @@ class CurlServer(BaseMCPServer):
             )
 
             if proc.returncode != 0:
+                stderr_text = stderr.decode('utf-8', errors='replace')
+                error_type = CURL_ERROR_TYPES.get(proc.returncode, "unknown")
+                error_class, retryable, suggestions = self._classify_curl_error(error_type)
                 return ToolResult(
                     success=False,
                     data={"url": url},
-                    error=f"Download failed: {stderr.decode('utf-8', errors='replace')}",
+                    error=f"Download failed: {stderr_text}",
+                    error_class=error_class,
+                    retryable=retryable,
+                    suggestions=suggestions,
                 )
 
             # Encode as base64
@@ -1052,6 +1103,9 @@ class CurlServer(BaseMCPServer):
                 success=False,
                 data={"url": url},
                 error=f"Download timed out after {timeout} seconds",
+                error_class="timeout",
+                retryable=True,
+                suggestions=["Increase timeout value", "Check if the target is reachable"],
             )
         except Exception as e:
             return ToolResult(
@@ -1112,10 +1166,16 @@ class CurlServer(BaseMCPServer):
             )
 
             if proc.returncode != 0:
+                stderr_text = stderr.decode('utf-8', errors='replace')
+                error_type = CURL_ERROR_TYPES.get(proc.returncode, "unknown")
+                error_class, retryable, suggestions = self._classify_curl_error(error_type)
                 return ToolResult(
                     success=False,
                     data={"url": url, "output_path": output_path},
-                    error=f"Download failed: {stderr.decode('utf-8', errors='replace')}",
+                    error=f"Download failed: {stderr_text}",
+                    error_class=error_class,
+                    retryable=retryable,
+                    suggestions=suggestions,
                 )
 
             # Check file was created
@@ -1124,6 +1184,7 @@ class CurlServer(BaseMCPServer):
                     success=False,
                     data={"url": url, "output_path": output_path},
                     error="Download completed but file not found",
+                    error_class="unknown",
                 )
 
             file_size = os.path.getsize(temp_path)
@@ -1142,6 +1203,7 @@ class CurlServer(BaseMCPServer):
                         success=False,
                         data={"url": url, "output_path": output_path},
                         error=f"Decompression failed: {str(e)}",
+                        error_class="config",
                     )
 
             # Count lines for text files
@@ -1171,6 +1233,9 @@ class CurlServer(BaseMCPServer):
                 success=False,
                 data={"url": url, "output_path": output_path},
                 error=f"Download timed out after {timeout} seconds",
+                error_class="timeout",
+                retryable=True,
+                suggestions=["Increase timeout value", "Check if the target is reachable"],
             )
         except Exception as e:
             return ToolResult(

@@ -32,7 +32,11 @@ RUN pip install --no-cache-dir /app/packages/mcp-common
 # Create session output directory
 RUN mkdir -p /session
 
+# Copy entrypoint for dynamic libfaketime discovery
+COPY packages/mcp-common/entrypoint.sh /app/entrypoint.sh
+RUN chmod +x /app/entrypoint.sh
+
 # Copy MCP server code
 COPY tools/bloodhound/mcp-server.py .
 
-CMD ["python3", "mcp-server.py"]
+CMD ["/app/entrypoint.sh"]
