@@ -157,13 +157,17 @@ def embed_texts(
     # max_length=8192 caused OOM-kills on ubuntu-latest (7GB) once the index
     # grew past ~500 method rows: BGE-M3 pre-allocates per-layer activations
     # sized to (batch * max_length * hidden), so even short texts blow up the
-    # working set. Our search texts are <300 tokens in practice — 1024 leaves
-    # plenty of headroom while cutting peak memory ~8×. batch_size=8 (vs the
-    # FlagEmbedding default of 12) trims it further.
+    # working set (~9GB at default batch=12, max_length=8192).
+    #
+    # Sized for our actual content: longest measured search_text is ~1372 BPE
+    # tokens (trufflehog rows with full tool description + capabilities).
+    # max_length=2048 leaves comfortable headroom with no truncation; combined
+    # with batch_size=8, peak embed memory is ~2.5GB — well within the runner's
+    # 7GB. Same BGE-M3 model, same 1024-dim dense + sparse outputs.
     outputs = model.encode(
         texts,
         batch_size=8,
-        max_length=1024,
+        max_length=2048,
         return_dense=True,
         return_sparse=True,
         return_colbert_vecs=False,
