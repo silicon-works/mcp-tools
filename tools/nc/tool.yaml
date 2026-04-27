@@ -1,0 +1,544 @@
+name: nc
+kind: cli
+# binary: omitted intentionally — nc is a MULTI-BINARY toolkit. Each
+# usage_pattern below declares its own `binary:` field (nc / ncat /
+# socat / netcat-traditional) and tool_runner forwards the chosen
+# binary explicitly to cli_in_container. Mirror of the ssh / impacket /
+# forensics / smtp / snmp / ike-scan pattern.
+#
+#   nc           Debian's netcat-openbsd (the default `nc` symlink on
+#                 modern Kali rolling installs as the OpenBSD variant).
+#                 Smallest flag surface; canonical TCP port-check via
+#                 `nc -z`. Limited UDP support. No --send-only / --recv-only.
+#
+#   netcat-traditional
+#                 The historical Hobbit / GNU netcat. Distinct binary
+#                 (`nc.traditional`); some flags differ subtly from
+#                 OpenBSD nc. Kept for completeness; rarely needed when
+#                 ncat / socat are available.
+#
+#   ncat         Nmap's modern netcat. Richer flag set: --send-only,
+#                 --recv-only, --max-conns, --ssl, --proxy / --proxy-type,
+#                 --allow / --deny, etc. Best choice for banner grab
+#                 (--send-only with stdin) and TLS connect.
+#
+#   socat        Address-pair toolkit. Different argv shape:
+#                 `socat ADDR1 ADDR2` (no flags-then-host). The most
+#                 flexible of the four; can bridge TCP <-> UNIX sockets,
+#                 STDIN <-> SSL, etc. Out-of-scope ADDR types: anything
+#                 that creates a long-running listener (LISTEN, FORK,
+#                 EXEC) — those belong in the `netcat` (kind:mcp) tool.
+#
+# All operations are STATELESS one-shots. Listener state lives in the
+# SEPARATE `netcat` (kind:mcp) tool — see see_also for the boundary.
+
+version: "1.0"
+description: >
+  Stateless one-shot port operations: nc, ncat, socat, and
+  netcat-traditional for TCP / UDP probe, banner grab, bind-shell
+  connect, and small file transfer. Each invocation opens ONE
+  connection, performs the operation, and exits — no state persists
+  between calls.
+
+  Common forms:
+
+    nc -z -v -w 3 10.10.10.5 22                          # TCP open?
+    nc -z -v -w 3 10.10.10.5 22-1024                     # range scan
+    nc -u -w 1 10.10.10.5 53 < /session/dns-query.bin    # UDP send
+    ncat --send-only --recv-only -w 3 10.10.10.5 22      # banner grab
+    nc -w 5 10.10.10.5 4444                              # bind-shell connect (stdin → cmd)
+    socat - TCP:10.10.10.5:80                            # stdio <-> TCP
+
+  Out-of-scope (route to netcat kind:mcp instead):
+
+    nc -l -p 4444             ← reverse-shell listener (stateful)
+    nc -l -k -p 8080          ← keep-listening (stateful)
+    socat TCP-LISTEN:4444,fork EXEC:/bin/sh   ← bind-shell host (stateful)
+    HTTP server / UDP listener / captured-request inspection
+
+  These all need a long-running asyncio process that cli_in_container's
+  one-shot model cannot keep alive. The `netcat` (kind:mcp) tool owns
+  every "listener" / "server" / "captured packet inspection" verb — see
+  reject_flags for the per-binary trap list and see_also.netcat for
+  the routing reason.
+
+  Output is PURE TEXT on stdout: whatever the remote service emits,
+  plus (under `-v` / `-vv`) connection state messages on stderr.
+
+  This tool is BORN kind:cli — there are no legacy methods to
+  preserve. The complementary stateful operations remain in the
+  unchanged `netcat` (kind:mcp) tool.
+
+# NB: independent image — NOT shared with the netcat tool. Both images
+# install the same Debian package set (netcat-traditional / ncat / socat /
+# iproute2 / python3-full) so they stay byte-identical at the
+# system-binary level, but the Python entrypoint differs (nc has the
+# minimal kind:cli subclass; netcat has the 1567-LOC stateful server).
+# Keeping the images independent avoids inter-tool coupling at registry-
+# hash time.
+image: "ghcr.io/silicon-works/mcp-tools-nc:latest"
+image_size_mb: 150
+
+# Dual-clock model:
+#   idle_timeout_seconds — silence between MCP heartbeats. One-shot
+#     port operations rarely sit idle; 60 s is generous for a slow
+#     banner-grab over tun0 / VPN. If a call is silent past 60 s, the
+#     remote side is wedged or the network has dropped.
+#   max_runtime_seconds — hard wall-clock cap. 5 min covers worst-case
+#     `nc -z` of a wide port range (e.g., 1-65535) over a slow VPN. Most
+#     calls finish in <5 s.
+idle_timeout_seconds: 60
+max_runtime_seconds: 300
+timeout_seconds: 300
+allow_multi_target: false       # one host per call
+
+capabilities:
+  - port_check
+  - bind_shell_connect
+  - banner_grab
+  - udp_send
+  - file_transfer
+  - tcp_probe
+
+phases:
+  - reconnaissance
+  - exploitation
+
+requirements:
+  network: true
+  privileged: false
+
+resources:
+  memory_mb: 64
+  cpu: 0.25
+
+routing:
+  use_for:
+    - "quick TCP port-open check via nc -z (single port or small range)"
+    - "banner grab from a known service (ncat --send-only)"
+    - "send a single UDP datagram to a remote service (DNS / SNMP / syslog payload)"
+    - "connect to a BIND shell already planted by an earlier exploit"
+    - "small one-shot file transfer over a known-up TCP connection"
+    - "ad-hoc protocol probing (send a fixed string, capture the response, exit)"
+  never_use_for:
+    - "starting a TCP listener for a reverse shell (use netcat kind:mcp tool)"
+    - "starting an HTTP server to capture XSS / CSRF callbacks (use netcat kind:mcp tool)"
+    - "starting a UDP listener for DNS exfil capture (use netcat kind:mcp tool)"
+    - "multi-port / multi-host scanning at scale (use nmap — far more comprehensive)"
+    - "persistent reverse / bind shell sessions (use shell-session)"
+    - "complex HTTP requests with custom encoding (use curl)"
+  triggers:
+    - "nc -z"
+    - "port check"
+    - "banner grab"
+    - "udp send"
+    - "bind shell connect"
+    - "tcp probe"
+    - "ncat connect"
+    - "socat connect"
+    - "one-shot port"
+  prefer_over: []
+
+see_also:
+  - tool: netcat
+    reason: "Use netcat (kind:mcp) for STATEFUL operations: TCP listener (reverse-shell catch), HTTP server (XSS / CSRF / cookie capture), UDP listener (packet capture), captured-request inspection (http_requests, listener_read / listener_write). All flags / verbs that require a long-running listener live there. This nc tool is for ONE-SHOT port operations only — every invocation opens, talks, and closes within a single cli_in_container process. The `-l` / `-k` listener flags are REJECTED here via reject_flags."
+  - tool: nmap
+    reason: "Use nmap for any port scan beyond a handful of ports. nc -z is fine for 'is port 22 open right now?' single-shot checks; nmap is far more comprehensive for service detection (-sV), OS fingerprinting (-O), full-range sweeps (-p-), UDP scanning (-sU), and scripted discovery (-sC). If the agent is checking >20 ports or wants version info, prefer nmap."
+  - tool: shell-session
+    reason: "Use shell-session (kind:mcp) for PERSISTENT shells after a reverse-shell pop or SSH login. nc here can CONNECT to a bind shell (one-shot send + receive) but cannot drive a multi-command interactive session. If the agent needs sustained shell state (cd / env / set -x) over many follow-ups, pivot to shell-session."
+  - tool: curl
+    reason: "Use curl for HTTP requests with custom headers / encoding / auth / cookies. nc / ncat / socat can speak raw HTTP but lack curl's ergonomics and TLS handling. Use nc only for raw-TCP banner grabs against non-HTTP services (SSH, SMTP, FTP, IRC)."
+  - tool: ssh
+    reason: "Use ssh (kind:cli) for one-shot remote command exec when credentials are known. nc connects to an arbitrary TCP port; ssh handles auth + remote-exec semantics. If the target is an SSH service and you have creds, ssh is the right tool."
+
+# ── kind:cli specific sections ──────────────────────────────────────
+
+target_extraction:
+  # nc / ncat / netcat-traditional all take the host as the FIRST
+  # NON-FLAG positional argument, with the port as the SECOND. The
+  # value_flags below ensure flag values (-w timeout, -p source-port,
+  # -s source-IP, etc.) are NOT misread as the host.
+  #
+  # socat uses a different argv shape: `socat ADDR1 ADDR2` where each
+  # ADDR is `TYPE:host:port[,opts]` (e.g., TCP:10.10.10.5:80,
+  # UDP:10.10.10.5:53). The first positional is one of these address
+  # specifications, not a bare hostname — this regex DOES NOT cleanly
+  # extract the host from a socat ADDR. socat scope-validation is an
+  # OPEN QUESTION (see scenarios.md §5).
+  #
+  # Examples that should match:
+  #   nc -z -v -w 3 10.10.10.5 22                    → host = 10.10.10.5
+  #   nc -u -w 1 10.10.10.5 53                       → host = 10.10.10.5
+  #   ncat --send-only -w 3 target.htb 22            → host = target.htb
+  #   nc -s 10.0.0.5 -p 31337 10.10.10.5 4444        → host = 10.10.10.5
+  #                                                     (not 10.0.0.5;
+  #                                                      -s value is consumed)
+  #
+  # The regex captures the first non-flag positional as host. Group 1
+  # is the host token (no embedded `:` / `/` / `?` / `#` / whitespace).
+  # The trailing port (an integer or range like 22-1024) is the SECOND
+  # positional and is not captured here.
+  - rule: "first_non_flag_positional"
+    pattern: '^([^:/?#\s]+)$'
+    group: 1
+    parse_as: "raw"
+
+# Stateful flags that cannot work under cli_in_container (one-shot
+# model; no persistent nc / ncat / socat process to keep a listener
+# alive). Routed to the `netcat` kind:mcp tool instead.
+reject_flags:
+  - "-l"      # nc / ncat: LISTEN mode (reverse-shell catch)  — STATEFUL
+  - "-k"      # nc / ncat: KEEP-listening (multi-connection listener) — STATEFUL
+  - "-L"      # netcat-traditional: alternate listen flag — STATEFUL
+  - "--listen"        # ncat long-form listen
+  - "--keep-open"     # ncat long-form keep-listening
+  - "--exec"          # ncat: exec a command on connection (stateful + dangerous)
+  - "--sh-exec"       # ncat: shell-exec on connection (stateful + dangerous)
+  - "-c"              # netcat-traditional: command on connection (-c CMD) — STATEFUL
+  - "-e"              # netcat-traditional: -e CMD (exec on connect) — STATEFUL + DANGEROUS
+reject_flags_reason: >
+  Listener flags (`-l`, `-k`, `-L`, `--listen`, `--keep-open`) and
+  exec-on-connection flags (`-e`, `-c`, `--exec`, `--sh-exec`) create
+  PERSISTENT state: the nc / ncat process MUST stay running for the
+  duration of the listener / shell. cli_in_container is one-shot — the
+  process exits as soon as run_cli returns, killing the listener and
+  any spawned shell.
+
+  Use the `netcat` (kind:mcp) tool for ALL listener operations: TCP
+  reverse-shell catch (listen / listener_read / listener_write), HTTP
+  server (http_listen / http_requests), UDP listener (udp_listen /
+  udp_packets), captured-request inspection. The `netcat` tool stays
+  kind:mcp specifically because cli_in_container can't host long-lived
+  asyncio listeners.
+
+  Exec-on-connection flags (`-e`, `-c`) are ALSO rejected for safety —
+  they're a classic backdoor primitive (`nc -lvp 4444 -e /bin/sh`) and
+  even in the CONNECT direction they enable arbitrary local command
+  execution that bypasses cli_in_container's argv inspection.
+
+  socat's listener / fork modes (TCP-LISTEN, FORK, OPENSSL-LISTEN,
+  EXEC) are not in the reject_flags list because socat uses an
+  ADDRESS-PAIR syntax instead of `-l`-style flags. Reject those at
+  the address-string level — see gotchas. Practically: agents should
+  not emit a socat call whose first ADDR contains `LISTEN` or `EXEC`
+  here; route to the netcat kind:mcp tool instead.
+
+# Per-tool value-taking flags whose values must NOT be confused with
+# the positional host argument. Verified against:
+#   - `nc -h`            (Debian netcat-openbsd 1.226 on Kali rolling, 2026-04)
+#   - `nc.traditional -h` (netcat-traditional 1.10 on Kali rolling)
+#   - `ncat -h`          (Nmap ncat 7.94 on Kali rolling)
+#   - `socat -hh`        (socat 1.8.x on Kali rolling)
+value_flags:
+  # ── nc (netcat-openbsd) — value flags ──
+  - "-w"                  # nc / ncat: connect/recv timeout in seconds
+  - "-p"                  # nc / ncat: source port (NB: also netcat-traditional listener port; for -l flow, but -l is rejected — so under non-listener invocation -p is source port)
+  - "-s"                  # nc / ncat: source IP (bind address)
+  - "-i"                  # nc / ncat: line-feed interval
+  - "-q"                  # nc: quit after EOF + N seconds (value: integer)
+  - "-T"                  # nc: TOS / TLS keylog (overloaded — listed for safety)
+  - "-O"                  # nc: TCP_NODELAY size (value: int) (also overlap with telnet option negotiation in older builds)
+  - "-X"                  # nc / ncat: proxy protocol (4 / 5 / connect)
+  - "-x"                  # nc / ncat: proxy host:port
+  - "-V"                  # nc: routing table (value: int) — overloaded with --version on some builds; treat as value-taking for safety
+  - "-b"                  # nc: allow broadcast (boolean) — listed for safety
+  - "-D"                  # nc: SO_DEBUG (boolean) — listed for safety
+  - "-d"                  # nc: detach from stdin (boolean) — listed
+  - "-F"                  # nc: pass file descriptors (boolean) — listed for safety
+  - "-N"                  # nc: shutdown after EOF on stdin (boolean) — listed
+  - "-n"                  # nc: no DNS (boolean) — listed for safety
+  - "-r"                  # nc: randomize ports (boolean) — listed
+  - "-t"                  # nc: telnet negotiation (boolean) — listed (NB: ncat -t means SSL ALPN)
+  - "-u"                  # nc / ncat: UDP mode (boolean) — listed for safety
+  - "-v"                  # nc / ncat: verbose (boolean) — listed
+  - "-z"                  # nc: scan / port-check mode (boolean) — listed
+  - "-4"                  # nc / ncat: IPv4 only
+  - "-6"                  # nc / ncat: IPv6 only
+
+  # ── ncat (Nmap) — extra value flags ──
+  - "--source"            # ncat: source IP (long form of -s)
+  - "--source-port"       # ncat: source port (long form of -p)
+  - "--proxy"             # ncat: proxy host:port (long form of -x)
+  - "--proxy-type"        # ncat: 4 / 5 / connect (long form of -X)
+  - "--proxy-auth"        # ncat: user:pass for proxy
+  - "--proxy-dns"         # ncat: local / remote / both / none
+  - "--max-conns"         # ncat: max simultaneous connections (LISTENER-only — but listed; -l is rejected anyway)
+  - "--allow"             # ncat: allow IP (LISTENER-only — listed for safety)
+  - "--allowfile"         # ncat: allow IP file
+  - "--deny"              # ncat: deny IP
+  - "--denyfile"          # ncat: deny IP file
+  - "--ssl-cert"          # ncat: SSL cert path
+  - "--ssl-key"           # ncat: SSL key path
+  - "--ssl-trustfile"     # ncat: SSL CA bundle
+  - "--ssl-ciphers"       # ncat: cipher list
+  - "--ssl-alpn"          # ncat: ALPN protocols
+  - "--ssl-servername"    # ncat: SNI servername
+  - "--ssl-verify"        # ncat: SSL verify peer
+  - "-d"                  # ncat: delay between connect attempts (LONG-overlapped with nc detach-stdin)
+  - "-g"                  # ncat: source-route hop (value: IP)
+  - "-G"                  # ncat: source-route pointer (value: int)
+  - "-m"                  # ncat: max recv bytes
+  - "-o"                  # ncat: output hex dump file
+  - "-x"                  # ncat: output ascii dump file (NB: also -x is proxy host:port — same letter overloaded)
+  - "--lua-exec"          # ncat: lua script (REJECTED via reject_flags? Listed for safety)
+  - "--http-server"       # ncat: HTTP server mode (LISTENER — but listed)
+  # boolean ncat flags (listed so the parser doesn't misread the next argv as a value)
+  - "--send-only"         # ncat: half-close after stdin EOF (boolean)
+  - "--recv-only"         # ncat: half-close stdin (boolean)
+  - "--ssl"               # ncat: enable SSL (boolean)
+  - "--no-shutdown"       # ncat: don't shutdown after EOF (boolean)
+  - "--telnet"            # ncat: telnet option negotiation (boolean) — same as nc -t
+  - "--crlf"              # ncat: convert LF to CRLF (boolean)
+  - "--append-output"     # ncat: append to -o / -x file (boolean)
+  - "--vsock"             # ncat: VSOCK mode (boolean) — listed
+  - "-C"                  # ncat: --crlf short form (boolean) — listed
+
+  # ── socat — value flags ──
+  # socat's argv is `socat [OPTS] ADDR1 ADDR2` with global opts BEFORE
+  # the two address arguments. value_flags here cover socat's global
+  # opts. socat does NOT use the same flag conventions as nc / ncat;
+  # treat socat invocations as a separate parse path.
+  - "-d"                  # socat: increase debug verbosity (-d -d -d -d for max) (boolean — listed; same letter as nc -d / ncat -d)
+  - "-D"                  # socat: dump file descriptors (boolean — overlap with nc -D)
+  - "-l"                  # socat: log to file (-l<facility>) — NB: nc / ncat -l means LISTEN (rejected); socat -l is overloaded
+  - "-T"                  # socat: total inactivity timeout in seconds (overlap with nc -T)
+  - "-b"                  # socat: data block size (overlap with nc -b)
+  - "-V"                  # socat: print version (boolean — overlap with nc -V)
+  - "-u"                  # socat: unidirectional left-to-right (overlap with nc -u UDP — DIFFERENT MEANING)
+  - "-U"                  # socat: unidirectional right-to-left
+  - "-y"                  # socat: silent mode
+  - "-c"                  # socat: address pair from file (NB: nc -c is exec-on-connect — REJECTED there; socat -c is different)
+  - "-x"                  # socat: hex dump (overlap with nc -x proxy — DIFFERENT MEANING)
+  - "-S"                  # socat: signals to catch (value: int / sig list)
+  - "-t"                  # socat: write-after-close timeout (overlap with nc -t telnet — DIFFERENT MEANING)
+  - "-s"                  # socat: stay alive on errors (overlap with nc -s source — DIFFERENT MEANING)
+  # NB: socat's address-pair tokens (TCP:host:port, UDP:host:port,
+  # OPENSSL:host:port, STDIO, FILE:path, EXEC:cmd, SYSTEM:cmd, TCP-LISTEN,
+  # OPENSSL-LISTEN, FORK, ...) are NOT flags — they're positionals. The
+  # cli_in_container parser treats them as the first/second positional;
+  # target extraction from a socat ADDR is an OPEN QUESTION.
+
+usage_patterns:
+  # ── nc — port check ──
+  - name: "nc — single-port TCP open check"
+    binary: "nc"
+    command: "-z -v -w 3 {host} {port}"
+    when: "Canonical TCP port-open probe. -z = scan mode (no data sent, just connect-then-close). -v = print 'open' / 'refused' / 'timed out' to stderr. -w 3 = 3-second connect timeout (essential — without it, nc will hang on filtered ports until the kernel TCP timeout, often 75+ s). Exit code 0 = open, non-zero = closed/filtered. Use this for fast single-port checks during recon; for any sweep wider than ~20 ports, use nmap instead."
+
+  - name: "nc — small-range TCP sweep"
+    binary: "nc"
+    command: "-z -v -w 3 {host} {port_start}-{port_end}"
+    when: "nc -z accepts a port range (e.g., 22-1024). One TCP connect per port; output one line per port to stderr. Faster than nmap when you only need open/closed and have <100 ports to check, but lacks nmap's -sV service detection. For >100 ports, prefer nmap -p- -T4."
+
+  - name: "nc — UDP port check (best-effort)"
+    binary: "nc"
+    command: "-u -z -v -w 1 {host} {port}"
+    when: "UDP port-check is FUNDAMENTALLY UNRELIABLE. UDP is connectionless: the only way to confirm a port is OPEN is to receive a response, which most services don't do for empty datagrams. nc -uz typically reports OPEN regardless (because there's no RST to indicate CLOSED). Useful only for ports that respond to empty datagrams (DNS port 53, SNMP 161 sometimes). For real UDP scans, use nmap -sU."
+
+  # ── nc / ncat — banner grab ──
+  - name: "ncat — banner grab via send-only / recv-only"
+    binary: "ncat"
+    command: "-w 3 --send-only --recv-only {host} {port}"
+    when: "Open the port, immediately half-close stdin (--send-only — but combined with --recv-only effectively means 'just receive'), capture the banner the service sends on connect (SSH ident, SMTP greeting, FTP banner), then close. -w 3 = 3-s connect timeout. Cleaner than `nc -w 3 host port < /dev/null` because cli_in_container has no shell to do the redirect. Best for service identification when nmap -sV isn't available."
+
+  - name: "nc — banner grab via stdin pipe"
+    binary: "nc"
+    command: "-w 3 {host} {port}"
+    when: "If stdin is empty (cli_in_container can pipe stdin), nc connects, sends nothing, reads response, exits when peer closes. Equivalent to ncat --send-only --recv-only but with the openbsd nc binary. Verify cli_in_container's stdin support before relying on this; otherwise prefer the ncat pattern above."
+
+  # ── nc — UDP send ──
+  - name: "nc — send a UDP datagram"
+    binary: "nc"
+    command: "-u -w 1 {host} {port}"
+    when: "Send the contents of stdin as a single UDP datagram, then exit. -w 1 limits the wait for any response. Use for: sending a crafted DNS query (stdin = packed DNS bytes), SNMP get / trap, syslog message. The datagram payload comes from cli_in_container's stdin; for binary payloads, stage the bytes in /session/payload.bin and pipe via stdin."
+
+  # ── nc — connect to bind shell ──
+  - name: "nc — connect to bind shell"
+    binary: "nc"
+    command: "-w 5 {host} {port}"
+    when: "After an exploit pops a BIND shell on the target (the target listens, you connect — opposite of a reverse shell), nc -w 5 host port establishes the connection. Pipe commands via stdin (`whoami\\nid\\nexit\\n`) and capture stdout. ONE-SHOT only — the connection terminates when stdin reaches EOF or the remote shell exits. For SUSTAINED interactive shells, use the `shell-session` (kind:mcp) tool — there you can keep state across many sends."
+
+  # ── ncat — TLS banner / probe ──
+  - name: "ncat — TLS-wrapped banner grab"
+    binary: "ncat"
+    command: "--ssl --ssl-verify -w 5 {host} {port}"
+    when: "Connect over TLS (--ssl), with hostname / cert verification (--ssl-verify), and read whatever the service sends. Useful for HTTPS service banners, SMTPS / IMAPS greetings, or any TLS-fronted protocol. NB: --ssl-verify will FAIL on self-signed certs (use --ssl alone for self-signed). For modern HTTP semantics, prefer curl."
+
+  - name: "ncat — TLS connect through proxy"
+    binary: "ncat"
+    command: "--ssl --proxy {proxy_host}:{proxy_port} --proxy-type http -w 5 {host} {port}"
+    when: "Connect to {host}:{port} via an HTTP CONNECT proxy at {proxy_host}:{proxy_port}, with TLS layered on top. ncat handles the CONNECT handshake transparently. Useful for testing whether a proxy permits arbitrary CONNECT to internal hosts (a classic SSRF / proxy-misconfiguration check)."
+
+  # ── socat — flexible address-pair forms ──
+  - name: "socat — stdio <-> TCP (manual probe)"
+    binary: "socat"
+    command: "- TCP:{host}:{port}"
+    when: "Bidirectional pipe between cli_in_container's stdin/stdout and a TCP connection to {host}:{port}. The first ADDR `-` means STDIO; the second is the TCP target. Used when nc's behavior is too fragile (some servers expect specific connection-shutdown semantics that socat handles cleanly). NB: socat ADDR syntax is positional — the regex-based target_extraction MAY not cleanly capture the host from an ADDR string. See open questions."
+
+  - name: "socat — UDP one-shot send/receive"
+    binary: "socat"
+    command: "-T 3 - UDP:{host}:{port}"
+    when: "Same as the previous pattern but UDP. -T 3 sets a 3-second total inactivity timeout (different meaning from nc's -w). Useful for SNMP / DNS / one-off UDP probing where nc -u behavior is awkward."
+
+  # ── nc — small file transfer ──
+  - name: "nc — receive file from stdin via TCP"
+    binary: "nc"
+    command: "-w 30 {host} {port}"
+    when: "Stream a small file from cli_in_container's stdin to an already-running listener on {host}:{port} (the listener was started by the netcat kind:mcp tool earlier in the workflow). One-shot; nc closes the connection at stdin EOF. -w 30 sets a generous timeout for slow VPN. For larger transfers, prefer scp via the ssh tool."
+
+  # ── help / version (target=null) ──
+  - name: "nc — help"
+    binary: "nc"
+    command: "-h"
+    when: "Print nc's short flag list. NB: nc -h prints to stderr and exits non-zero on Debian's netcat-openbsd. target=null."
+
+  - name: "ncat — help"
+    binary: "ncat"
+    command: "-h"
+    when: "Print ncat's full flag list (much larger than nc's). target=null. Useful for confirming long-form options like --ssl / --proxy-type."
+
+  - name: "socat — help"
+    binary: "socat"
+    command: "-h"
+    when: "Print socat's option list. For the FULL address-type list, use `socat -hh`. target=null."
+
+  - name: "ncat — version"
+    binary: "ncat"
+    command: "--version"
+    when: "Print Nmap ncat version (e.g., 'Ncat: Version 7.94 ( https://nmap.org/ncat )'). target=null."
+
+output_formats:
+  - flag: ""
+    format: "text"
+    preferred: true
+    notes: "Default: nc / ncat / socat print the remote service's data on stdout (banner, response). nc / ncat -z connect-only checks print 'open'/'refused'/'timed out' to STDERR (not stdout)."
+  - flag: "-v / -vv"
+    format: "verbose_to_stderr"
+    preferred: false
+    notes: "nc / ncat -v / -vv: print connection state (DNS resolution, TCP connect, write/read events) to stderr. -vv adds more detail. Useful for diagnosing 'why won't this connect' but pollutes stderr."
+  - flag: "-d (socat)"
+    format: "socat_debug_text"
+    preferred: false
+    notes: "socat -d / -d -d / -d -d -d / -d -d -d -d: increasing debug verbosity. -d -d -d shows packet-level events. Stderr only."
+
+common_options:
+  targeting:
+    - "POSITIONAL host port: nc / ncat / netcat-traditional take `[OPTS] HOST PORT` (host before port). socat takes `[OPTS] ADDR1 ADDR2` where each ADDR is `TYPE:host:port[,opts]`."
+    - "Numeric host (IP) or DNS name accepted. -n disables DNS lookup (fast-fail on bad hostnames)."
+  connection:
+    - "-w SECONDS: connect AND recv timeout (nc / ncat). Critical to set; default behavior is to wait for the kernel TCP timeout (75+ s) on filtered ports."
+    - "-q SECONDS: nc — quit N seconds after EOF on stdin. Useful when the remote sends data after a brief delay."
+    - "-i INTERVAL: nc / ncat — line-feed interval (delay between writes from stdin). Useful for line-by-line protocol stepping."
+    - "-T SECONDS: socat — total inactivity timeout (DIFFERENT from nc -T which is TOS / TLS keylog)."
+  protocol:
+    - "-u: UDP mode (nc / ncat). NB: socat -u means unidirectional left-to-right (totally different)."
+    - "--ssl: ncat — wrap connection in TLS. socat uses OPENSSL:host:port ADDR instead."
+    - "-4 / -6: force IPv4 / IPv6."
+  output:
+    - "-v / -vv: verbose to stderr (nc / ncat). socat uses -d / -d -d / -d -d -d for debug."
+    - "-n: no DNS lookup (skip getaddrinfo on the host arg)."
+  proxy:
+    - "-X TYPE: nc / ncat — proxy type (4 / 5 / connect). Long form: --proxy-type."
+    - "-x HOST:PORT: nc / ncat — proxy address. Long form: --proxy."
+  source:
+    - "-s SOURCE_IP: nc / ncat — bind to specific local IP (rarely useful — kernel may rewrite)."
+    - "-p PORT: nc / ncat — source port (NB: when -l is rejected, -p is unambiguously SOURCE PORT here)."
+
+gotchas:
+  - "MULTI-BINARY toolkit. Pick the right binary per task: `nc` (smallest flag surface, canonical -z port check), `ncat` (richest flags — TLS, proxy, --send-only / --recv-only), `socat` (most flexible — address-pair syntax, can bridge any two endpoints), `netcat-traditional` (legacy nc, rarely needed). Each usage_pattern declares `binary:` explicitly. cli_in_container forwards the chosen binary; there is NO top-level `binary:` field."
+  - "LISTENER OPERATIONS ARE FORBIDDEN HERE. -l, -k, -L, --listen, --keep-open are in reject_flags. socat LISTEN-style ADDRs (TCP-LISTEN, OPENSSL-LISTEN, FORK) are NOT formally rejected because they're positionals (not flags), but they are OUT OF SCOPE — route to the `netcat` (kind:mcp) tool. Same for ncat's --http-server. The kind:cli model can't host long-running listeners; cli_in_container exits as soon as run_cli returns, killing any listener."
+  - "EXEC-ON-CONNECTION FLAGS REJECTED. -e (netcat-traditional), -c (netcat-traditional), --exec / --sh-exec (ncat) all spawn a local command on connection. Even on the CONNECT side this is a backdoor primitive that bypasses cli_in_container's argv inspection. Use scp / ssh for legitimate command execution; never use nc -e."
+  - "`nc -z` IS THE CANONICAL TCP PORT CHECK. -z = scan mode (no data sent — connect, then close). For UDP, -uz is fundamentally unreliable (UDP has no RST → port reports OPEN regardless of state). For real port scans, use nmap (single-shot) or nmap -p- -T4 (sweep)."
+  - "`-w SECONDS` IS CRITICAL. Without -w, nc waits for the kernel TCP timeout (75+ s) on filtered ports. Idle_timeout_seconds is 60 s — without -w 3 / -w 5, a single filtered-port probe will trip the wrapper timeout. Always pass -w on connect calls."
+  - "FLAG OVERLAPS ACROSS BINARIES. -d means three different things: nc -d = detach stdin, ncat -d = delay between connects, socat -d = increase debug verbosity. -u: nc / ncat = UDP mode; socat -u = unidirectional left-to-right. -t: nc -t = telnet negotiation; socat -t = write-after-close timeout. -l: nc / ncat -l = LISTEN (rejected); socat -l = log to file. The cli_in_container parser is BINARY-SCOPED — at parse time the binary is fixed, so the same letter resolves correctly within that scope. The HUMAN-side risk is the LLM mistakenly choosing the wrong binary for the flag intent."
+  - "`-p` IS SOURCE PORT here (when -l is rejected). On netcat-traditional and on ssh, -p has different meanings. Inside this nc tool, -l / -L are REJECTED so the only legitimate use of -p is SOURCE PORT (rarely needed). Don't confuse with sshpass -p (PASSWORD) or scp -P (port). The cli_in_container parser is binary-scoped."
+  - "STDIN HANDLING. Many usage patterns expect stdin (banner grab via /dev/null, UDP send via packed bytes, file send). cli_in_container's stdin support is required for these. If stdin isn't piped, nc may hang waiting for input — set -w to bound the wait, or stage the data in /session/payload.bin and rely on cli_in_container's stdin pipe."
+  - "BANNER GRAB BEST PRACTICE. ncat with `--send-only --recv-only -w 3 host port` is cleaner than `nc -w 3 host port < /dev/null` because cli_in_container has NO SHELL — there's no `< /dev/null` redirect available. The ncat flags do the half-close in-binary."
+  - "SOCAT ADDR SYNTAX IS DIFFERENT. socat takes `socat [OPTS] ADDR1 ADDR2` where each ADDR is `TYPE:host:port[,opts]` (e.g., TCP:10.10.10.5:80). The first POSITIONAL is one of these address tokens, NOT a bare hostname — target_extraction's regex-based positional walk MAY NOT cleanly extract the host from a socat ADDR. See open questions; deprioritize socat scope-validation for now."
+  - "NETCAT-TRADITIONAL VS NETCAT-OPENBSD. Debian / Kali ship BOTH. The default `nc` symlink points to netcat-openbsd; the legacy binary lives at `nc.traditional`. Their flag sets DIFFER: e.g., -e (exec) is netcat-traditional only (and rejected here for safety). usage_patterns target the openbsd flavor unless explicitly using nc.traditional."
+  - "UDP RELIABILITY. UDP is connectionless; nc -uz reports OPEN regardless of remote port state because there's no RST. Use nc -u for SENDING (where you control the payload and don't need a response confirmation), but for SCANNING UDP ports use nmap -sU (which sends protocol-specific probes and waits for ICMP unreachable replies)."
+  - "NUMBER FOR PORT vs IP. The first positional after all flags is the host (IP / DNS name); the second is the port (integer / range). target_extraction extracts the host (group 1). The port is NOT extracted as a target — that's a port number, not a network target. This matches the registry's host-vs-port distinction."
+  - "DON'T FORGET -n FOR FAST-FAIL. If the host is an IP, pass -n to skip DNS resolution. Saves a second on every call and avoids spurious 'Could not resolve hostname' errors when /etc/resolv.conf isn't reachable."
+
+failure_signatures:
+  # Layer-diverse signals (SKILL #11) — at least 6 distinct verifiable
+  # layers:
+  #   1. DNS                  (resolution failure before TCP)
+  #   2. TCP                  (connect refused / timed out / no route)
+  #   3. Permission           (raw socket / privileged port)
+  #   4. Argument / argparse  (unknown option, missing value)
+  #   5. Listener-rejection   (-l / -k / -e attempted despite reject_flags)
+  #   6. Source-port conflict (-p port already in use)
+  #
+  # Verified against:
+  #   - netcat-openbsd 1.226 on Kali rolling (2026-04)
+  #   - ncat 7.94 on Kali rolling
+  #   - socat 1.8.x on Kali rolling
+
+  # ── 1. DNS layer ──
+  - signal: "Name or service not known"
+    remediation: "DNS lookup failed. nc / ncat couldn't resolve the host. Check the spelling, verify /etc/hosts inside the container has the mapping (HTB targets often need a manual entry), or use the IP directly. Pass -n to skip DNS entirely if the host is an IP."
+  - signal: "Could not resolve hostname"
+    remediation: "Same DNS-resolution failure as above; phrasing variant. Same fix. ncat sometimes uses this phrasing where nc uses 'Name or service not known'."
+  - signal: "Temporary failure in name resolution"
+    remediation: "DNS server unreachable / timing out. Check network egress; on tun0 / VPN the DNS may be on the VPN side and require routing. Use the IP directly to bypass DNS."
+
+  # ── 2. TCP layer ──
+  - signal: "Connection refused"
+    remediation: "TCP RST on the target port. Service is not listening, OR firewall returns RST instead of dropping. Verify with `nmap -p PORT HOST` (nmap shows 'closed' for RST, 'filtered' for drop). nc -z reports this on stderr."
+  - signal: "Connection timed out"
+    remediation: "TCP connect timeout — packet dropped (firewall) or host unreachable. Increase -w if the network is just slow; most often this means the port is firewalled. Verify with nmap -p PORT (will report 'filtered'). NB: without -w, the kernel timeout is 75+ s — exceeds idle_timeout_seconds."
+  - signal: "No route to host"
+    remediation: "Local routing table has no path to the target IP. On HTB / VPN, this usually means tun0 is down or the engagement scope IP doesn't match the actual VPN range. Check `ip route` and the VPN connection. (iproute2 is installed in this image — `ip addr` works for diagnostics.)"
+  - signal: "Network is unreachable"
+    remediation: "Local interface for the destination's network is down. Often the same root cause as 'No route to host'."
+  - signal: "open"
+    remediation: "INFORMATIONAL (not a failure). nc -z -v reports 'open' on stderr when a port accepts a connection. Treat as success; check exit code (0 = open)."
+
+  # ── 3. Permission layer ──
+  - signal: "Permission denied"
+    remediation: "Privileged operation refused. Common causes: (a) binding to a low source port (-p <1024) without CAP_NET_BIND_SERVICE; (b) raw-socket operations. cli_in_container is non-privileged by default — pick a source port >1024, or skip -p entirely."
+  - signal: "Operation not permitted"
+    remediation: "Same root cause as 'Permission denied' — kernel refused a privileged operation. Don't pass low source ports unless cli_in_container is run privileged (it isn't, by default)."
+
+  # ── 4. Argument / argparse layer ──
+  - signal: "usage: nc"
+    remediation: "nc / ncat printed usage banner — argparse fail. Common: missing host or port positional, unknown flag (typo), -w without an integer value. Run `nc -h` to see the canonical flag list."
+  - signal: "usage: ncat"
+    remediation: "ncat printed usage. Same root cause as nc usage. ncat's flag set is much larger; check `ncat -h` and verify long-form options spelled correctly (--send-only, NOT --send_only)."
+  - signal: "unknown option"
+    remediation: "argparse rejected a flag. Check the spelling. NB: nc -e (exec) is netcat-traditional only; on netcat-openbsd it's an unknown option. Even on netcat-traditional, -e is in reject_flags — use a different approach."
+  - signal: "invalid argument"
+    remediation: "A flag value is malformed. -w 3.5 fails (must be integer). -p 99999 fails (port range 1-65535). -X 99 fails (proxy type must be 4 / 5 / connect)."
+  - signal: "missing argument"
+    remediation: "A value-taking flag was passed without its value. -w (no number), -i (no interval), -p (no port). Check usage banner; supply the missing value."
+  - signal: "socat"
+    remediation: "socat-prefixed errors come from socat. Common: 'socat[N] E address parameter required', 'socat[N] E address ... unknown', 'socat[N] E ... resolution: Name or service not known'. Run `socat -hh` for the canonical address-type list."
+
+  # ── 5. Listener / reject_flags layer ──
+  - signal: "Listen mode requires"
+    remediation: "An attempted listener invocation got past reject_flags somehow (this should NOT happen — reject_flags should reject -l / -k / -L / --listen at parse time). If you see this signal in live runs, file a bug — the parser missed a listener flag. Use the `netcat` (kind:mcp) tool for ALL listener operations."
+  - signal: "rejected"
+    remediation: "reject_flags fired (cli_in_container parser) — the call attempted a stateful flag (-l, -k, -L, --listen, --keep-open, -e, -c, --exec, --sh-exec). Use the `netcat` (kind:mcp) tool for listeners; pick a different approach for exec-on-connect (use scp / ssh for legitimate command execution)."
+
+  # ── 6. Source-port / address-in-use layer ──
+  - signal: "Address already in use"
+    remediation: "-p SOURCE_PORT chose a port that another local socket holds. Pick a different source port, or omit -p entirely (kernel auto-assigns a high port)."
+  - signal: "Cannot assign requested address"
+    remediation: "-s SOURCE_IP specified an IP not bound to any local interface. Run `ip addr` to see local IPs; pick one that exists, or omit -s entirely."
+
+help_commands:
+  - command: "nc -h"
+    purpose: "nc usage banner. Prints to stderr and exits non-zero on Debian's netcat-openbsd. Lists short flags only — for ncat's long flags, use `ncat -h`."
+  - command: "ncat -h"
+    purpose: "ncat full flag list — both short and long forms. Much larger than nc's help. Confirm option spelling here (--send-only, --proxy-type, etc.)."
+  - command: "ncat --version"
+    purpose: "Print Nmap ncat version (e.g., 'Ncat: Version 7.94 ( https://nmap.org/ncat )'). Useful for confirming the binary's version."
+  - command: "socat -h"
+    purpose: "socat option list (global flags only, NOT address types)."
+  - command: "socat -hh"
+    purpose: "socat FULL help including address types (TCP, UDP, OPENSSL, STDIO, FILE, EXEC, SYSTEM, ...). Long output — pipe to /session/socat-help.txt for inspection."
+  - command: "socat -V"
+    purpose: "socat version banner."
+  - command: "nc.traditional -h"
+    purpose: "netcat-traditional help. Smaller flag set than nc; some flags differ from netcat-openbsd. Rarely needed."

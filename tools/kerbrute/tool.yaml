@@ -1,14 +1,32 @@
 name: kerbrute
+kind: cli
+binary: kerbrute
 version: "1.0.3"
-description: "Kerberos username enumeration and password spraying tool — kerbrute v1.0.3 (ropnop/kerbrute, Go binary). Four methods: userenum, passwordspray, bruteforce, bruteuser. Discovers valid Active Directory usernames by sending AS-REQ packets to port 88 and analyzing KDC error codes — KDC_ERR_C_PRINCIPAL_UNKNOWN means the user does not exist, KDC_ERR_PREAUTH_REQUIRED means the user IS valid (pre-authentication needed), KDC_ERR_CLIENT_REVOKED means the account is locked or disabled. Does NOT require any credentials for username enumeration (unlike LDAP-based enumeration which needs a bind account). Supports multi-threaded operation (default 10 threads, configurable via --threads), rate-limiting via --delay, and --safe mode that aborts on first lockout detection. WARNING from kerbrute: failed Kerberos pre-auth counts as a failed login and WILL lock out accounts — use --safe and --delay in production environments. Operates entirely over Kerberos (port 88) — does not touch SMB (445), LDAP (389), or RPC (135). For Kerberoasting or AS-REP roasting after finding valid users, use impacket instead."
+description: "Kerberos username enumeration and password spraying tool — kerbrute v1.0.3 (ropnop/kerbrute, Go binary). Four sub-commands: userenum, passwordspray, bruteuser, bruteforce. Discovers valid Active Directory usernames by sending AS-REQ packets to port 88 and analyzing KDC error codes — KDC_ERR_C_PRINCIPAL_UNKNOWN means the user does not exist, KDC_ERR_PREAUTH_REQUIRED means the user IS valid (pre-authentication needed), KDC_ERR_CLIENT_REVOKED means the account is locked or disabled. Does NOT require any credentials for username enumeration (unlike LDAP-based enumeration which needs a bind account). Supports multi-threaded operation (default 10 threads, configurable via --threads/-t), rate-limiting via --delay (forces single-thread when set), and --safe mode that aborts on first lockout detection. WARNING from kerbrute itself: failed Kerberos pre-auth counts as a failed login and WILL lock out accounts — use --safe and --delay in production environments. Operates entirely over Kerberos (port 88) — does not touch SMB (445), LDAP (389), or RPC (135). For Kerberoasting / AS-REP roasting after finding valid users, use impacket-GetUserSPNs / impacket-GetNPUsers. Native CLI; the LLM constructs the full kerbrute invocation. The first argument MUST be one of {userenum, passwordspray, bruteuser, bruteforce, version, help}."
 image: "ghcr.io/silicon-works/mcp-tools-kerbrute:latest"
 image_size_mb: 194
-timeout_seconds: 300
+# Dual-clock model:
+#   idle_timeout_seconds — silence between MCP heartbeats. kerbrute prints
+#     `[+] VALID USERNAME:` / `[+] VALID LOGIN:` lines as it finds them and
+#     verbose `[!]` / `[-]` lines per attempt with -v. With --delay or large
+#     wordlists there can be silence between hits, but 5 min silent = stuck.
+#   max_runtime_seconds  — hard wall-clock cap; never resets on heartbeat.
+#     6 h covers worst-case full-list spray (10K usernames × --delay 1000ms
+#     = 10K seconds ≈ 2.7h) with margin.
+# Legacy `timeout_seconds` is used by older clients as the hard cap.
+idle_timeout_seconds: 300
+max_runtime_seconds: 21600
+timeout_seconds: 21600
 
 capabilities:
   - username_enumeration
   - password_spraying
   - kerberos_authentication
+  - credential_brute_force
+
+phases:
+  - enumeration
+  - exploitation
 
 routing:
   use_for:
@@ -24,13 +42,14 @@ routing:
     - "validate a list of potential usernames against a domain controller"
     - "try each username as its own password across the domain (user-as-pass spray)"
   never_use_for:
-    - "kerberoasting (use impacket.kerberoast — kerbrute does not request TGS tickets, it only does pre-auth)"
-    - "AS-REP roasting (use impacket.asreproast — kerbrute does not check for accounts with DONT_REQUIRE_PREAUTH)"
-    - "LDAP user enumeration (use impacket.get_ad_users or netexec — requires valid bind creds but returns richer data)"
+    - "kerberoasting (use impacket-GetUserSPNs — kerbrute does not request TGS tickets, it only does pre-auth)"
+    - "AS-REP roasting (use impacket-GetNPUsers — kerbrute does not check for accounts with DONT_REQUIRE_PREAUTH)"
+    - "LDAP user enumeration (use impacket-lookupsid or netexec — requires valid bind creds but returns richer data)"
     - "SMB brute-force (use hydra — kerbrute only speaks Kerberos on port 88)"
     - "online web login brute-force (use hydra)"
     - "hash cracking offline (use john or hashcat)"
     - "RDP brute-force (use hydra)"
+    - "non-AD Kerberos realms (kerbrute is designed around AD's Active Directory pre-auth semantics; MIT KDCs may return different errors)"
   triggers:
     - "kerbrute"
     - "kerberos enum"
@@ -42,9 +61,8 @@ routing:
     - "domain user discovery"
     - "bruteuser"
     - "user-as-pass"
-
-phases:
-  - enumeration
+    - "AS-REQ"
+    - "KDC_ERR_PREAUTH_REQUIRED"
 
 requirements:
   network: true
@@ -56,253 +74,220 @@ resources:
 
 see_also:
   - tool: impacket
-    reason: "After finding valid users with kerbrute, use impacket for kerberoasting (GetUserSPNs), AS-REP roasting (GetNPUsers), or secretsdump"
-  - tool: bloodhound
-    reason: "After confirming valid creds via password spray, collect AD relationships with bloodhound"
+    reason: "After finding valid users with kerbrute, use impacket-GetUserSPNs (kerberoast) or impacket-GetNPUsers (AS-REP roast). After confirming creds via passwordspray, use impacket-secretsdump for DCSync."
   - tool: netexec
-    reason: "Validate found credentials across multiple protocols (SMB, WinRM, LDAP, MSSQL)"
+    reason: "Validate found credentials across multiple protocols (SMB, WinRM, LDAP, MSSQL). netexec is also faster for in-domain auth checks once you have any creds."
   - tool: hydra
-    reason: "For non-Kerberos brute-force — SMB, RDP, SSH, HTTP, FTP, etc."
+    reason: "For non-Kerberos brute-force — SMB, RDP, SSH, HTTP, FTP, etc. kerbrute only handles Kerberos AS-REQ."
   - tool: enum4linux-ng
-    reason: "Use enum4linux-ng for SMB/RPC-based user enumeration when you have credentials or null sessions. Kerbrute discovers users without credentials via Kerberos."
+    reason: "SMB/RPC-based user enumeration when null-session or guest is allowed. Kerbrute discovers users WITHOUT credentials via Kerberos; enum4linux-ng works against SMB and complements it."
+  - tool: bloodhound
+    reason: "After confirming valid creds via password spray, collect AD relationships with bloodhound for attack-path planning."
+  - tool: hashcat
+    reason: "Crack any hashes obtained from impacket-GetUserSPNs / impacket-GetNPUsers (modes 13100, 18200) downstream of kerbrute discovery."
 
-methods:
-  userenum:
-    description: "Enumerate valid AD usernames by sending Kerberos AS-REQ packets to the domain controller on port 88. For each username, kerbrute sends a pre-authentication request and classifies the KDC response: KDC_ERR_C_PRINCIPAL_UNKNOWN means the user does not exist, KDC_ERR_PREAUTH_REQUIRED means the user IS valid (pre-auth needed), and KDC_ERR_CLIENT_REVOKED means the account is locked/disabled. No credentials required — this is unauthenticated enumeration. Internally: writes usernames to a temp file, runs `kerbrute userenum --dc <dc> -d <domain> -v -t <threads> [--delay <ms>] [--safe] <file>`, parses stdout for `[+] VALID USERNAME:` lines, cleans up temp file."
-    when_to_use: "(1) First step in AD enumeration when you have no credentials — test common usernames (administrator, guest, krbtgt, svc-*, admin) against the DC. (2) After discovering a domain name from DNS, SMB, or LDAP, validate a custom wordlist of potential users. (3) Before password spraying — enumerate valid users first to avoid wasting spray attempts on nonexistent accounts and triggering lockouts. (4) When LDAP anonymous bind is disabled and you cannot use impacket.get_ad_users or netexec --users. (5) Output valid_users list feeds directly into passwordspray or impacket.asreproast."
-    required_ports: [88]
-    params:
-      dc:
-        type: string
-        required: true
-        description: "IP address of the domain controller (must have port 88/Kerberos open). Use the DC IP from nmap service scan — look for 'kerberos-sec' on port 88. Examples: '10.10.10.100', '192.168.1.1'."
-      domain:
-        type: string
-        required: true
-        description: "Full AD domain name, used as the Kerberos realm (automatically uppercased internally). Case-insensitive. Examples: 'corp.local', 'megabank.local', 'htb.local'. Found via: nmap LDAP scripts, SMB null session, DNS SRV records, or ldapsearch."
-      usernames:
-        type: string
-        required: true
-        description: "Newline-separated list of usernames to test (bare names without @domain suffix). Common starter list: 'administrator\\nguest\\nkrbtgt\\nadmin\\nservice\\nsql_svc\\nweb_svc\\nbackup'. For larger enumeration, use SecLists xato-net-10-million-usernames or custom wordlists. Each username is tested individually via AS-REQ."
-      threads:
-        type: integer
-        default: 10
-        description: "Number of concurrent goroutines (kerbrute default: 10). Reduce to 1-2 for stealth or if lockout policies are aggressive. Ignored when delay is set (forces single-thread)."
-      delay:
-        type: integer
-        description: "Delay in milliseconds between each attempt. When set, forces single-threaded mode regardless of threads value. Use 500-1000ms to avoid detection by SIEM, or longer if lockout threshold is tight. Omit for maximum speed."
-      safe:
-        type: boolean
-        default: false
-        description: "Safe mode (--safe flag) — abort immediately if any account comes back as locked out. Prevents cascading lockouts across the domain. Recommended when lockout policy is unknown."
-      timeout:
-        type: integer
-        default: 120
-        description: "Maximum execution time in seconds. 120s handles ~10K usernames at default speed. Increase for large lists or when using delay."
-      extra_args:
-        type: string
-        description: "Additional kerbrute flags appended to the command. Use for flags not exposed as named parameters. Flags are split by whitespace and appended safely."
-    returns:
-      valid_users:
-        type: array
-        description: "Usernames confirmed valid by KDC (received KDC_ERR_PREAUTH_REQUIRED response). Each element is a bare username string without domain suffix (e.g., 'administrator', 'svc-sql'). Feed these into passwordspray or impacket.asreproast."
-      valid_count:
-        type: integer
-        description: "Number of valid usernames found"
-      invalid_users:
-        type: array
-        description: "Usernames confirmed invalid by KDC (received 'User does not exist' response). Useful for narrowing down wordlists."
-      locked_users:
-        type: array
-        description: "Accounts flagged as locked/disabled by KDC ('USER LOCKED OUT' response, possibly with 'safe mode on! Aborting...'). These accounts exist but should NOT be sprayed — they would trigger immediate lockout alerts."
-      locked_count:
-        type: integer
-        description: "Number of locked accounts detected"
-      total_tested:
-        type: integer
-        description: "Total usernames tested (parsed from kerbrute's 'Done! Tested N usernames' summary line, falls back to input line count)"
-      errors:
-        type: array
-        description: "Network or KDC errors encountered during enumeration. Null when no errors occurred. Common: 'Can\\'t talk to KDC' (DC unreachable), 'KDC ERROR - Wrong Realm' (wrong domain name), encoding errors (port 88 open but not Kerberos)."
+# ── kind:cli specific sections ──────────────────────────────────────
 
-  passwordspray:
-    description: "Test a single password against multiple usernames via Kerberos AS-REQ pre-authentication. Sends one authentication attempt per user, which is safer than brute-forcing a single account (avoids rapid-fire attempts that trigger lockout). The KDC response distinguishes: valid login (AS-REP with TGT), invalid password (KDC_ERR_PREAUTH_FAILED), and locked account (KDC_ERR_CLIENT_REVOKED). Supports --user-as-pass mode which also tries each username as its own password. Internally: writes usernames to temp file, runs `kerbrute passwordspray --dc <dc> -d <domain> -v [--user-as-pass] [--safe] <file> <password>`, parses `[+] VALID LOGIN:` lines."
-    when_to_use: "(1) After userenum returns valid_users — spray the most common passwords (Season+Year like 'Winter2025!', 'CompanyName1!', 'Password1') against all confirmed users. (2) When you suspect a default or shared password across the domain. (3) Safer than bruteforce/bruteuser for avoiding account lockout — one attempt per user per spray round. (4) Run multiple spray rounds with different passwords (wait between rounds to respect lockout policies — typically 30 min). (5) Use user_as_pass=true to check for trivially weak accounts. (6) Valid logins can be used immediately with impacket, evil-winrm, or bloodhound."
-    required_ports: [88]
-    params:
-      dc:
-        type: string
-        required: true
-        description: "Domain controller IP address (port 88 must be open)."
-      domain:
-        type: string
-        required: true
-        description: "Full AD domain name (e.g., 'corp.local')."
-      usernames:
-        type: string
-        required: true
-        description: "Newline-separated usernames to spray. Best practice: use the valid_users output from a prior userenum call to avoid testing nonexistent accounts and wasting lockout budget."
-      password:
-        type: string
-        description: "Single password to test against all users. Common spray candidates for HTB: 'Password1', 'Welcome1', '<Season><Year>!' (e.g., 'Spring2026!'), '<CompanyName>1!', 'Changeme1'. Only ONE password per spray call — run multiple calls for multiple passwords with appropriate delays. Can be empty string when user_as_pass is true."
-      user_as_pass:
-        type: boolean
-        default: false
-        description: "Try each username as its own password (kerbrute --user-as-pass flag). Catches accounts where password equals username (surprisingly common in enterprise). NOTE: when set, this replaces the password argument — kerbrute only tests username-as-password, not the specified password. To test both, make two separate calls."
-      threads:
-        type: integer
-        default: 10
-        description: "Concurrent threads. Reduce for stealth. Ignored when delay is set."
-      delay:
-        type: integer
-        description: "Delay in milliseconds between each attempt. Forces single-threaded. Use to space out attempts and avoid lockout."
-      safe:
-        type: boolean
-        default: false
-        description: "Abort immediately if any account is locked. Recommended for password spraying."
-      timeout:
-        type: integer
-        default: 120
-        description: "Maximum execution time in seconds."
-      extra_args:
-        type: string
-        description: "Additional kerbrute flags appended to the command. Use for flags not exposed as named parameters. Flags are split by whitespace and appended safely."
-    returns:
-      valid_logins:
-        type: array
-        description: "Successful authentications. Each entry: {username: 'user', password: 'pass'}. Empty array if no valid logins found. Feed valid creds to impacket, evil-winrm, or bloodhound."
-      valid_count:
-        type: integer
-        description: "Number of valid logins found"
-      failed_count:
-        type: integer
-        description: "Number of failed authentication attempts (verbose [-] lines)"
-      locked_users:
-        type: array
-        description: "Accounts that returned locked/disabled status during spray. Stop spraying these."
-      total_tested:
-        type: integer
-        description: "Total authentication attempts (parsed from 'Done! Tested N logins' line)"
-      password_tested:
-        type: string
-        description: "The password that was sprayed, or '(user-as-pass)' if only user_as_pass was used"
-      errors:
-        type: array
-        description: "Network/KDC errors. Null when no errors. 'Can\\'t talk to KDC' means DC unreachable."
+target_extraction:
+  # kerbrute's network target is the value of `--dc`. The first positional
+  # argument is always a sub-command (userenum / passwordspray / bruteuser /
+  # bruteforce / version / help), and subsequent positionals are LOCAL FILE
+  # PATHS (username/password/combo wordlists) plus optional inline strings
+  # (the password for passwordspray, the username for bruteuser).
+  #
+  # Therefore: extract target only from --dc.
+  #
+  # `--domain <REALM>` (also `-d <REALM>`) is the Kerberos REALM (e.g.,
+  # `hercules.htb`), NOT a hostname. It looks domain-shaped and would parse
+  # cleanly as a target — but it isn't one. The DSL must NOT extract it.
+  # Listed in value_flags so the next token is consumed as a flag value, and
+  # NO target_extraction rule references it.
+  #
+  # If `--dc` is absent kerbrute auto-discovers the KDC via DNS SRV records
+  # for the realm. In that case the target is unpredictable from argv alone;
+  # plugin's TargetValidation should treat target=null as "scope unknowable"
+  # for kerbrute and refuse the call (recommended) — see Open Question 1.
+  - rule: "flag_value"
+    flag: "--dc"
+    parse_as: "raw"
 
-  bruteforce:
-    description: "Test specific username:password combinations via Kerberos AS-REQ. Unlike passwordspray (one password across many users), bruteforce accepts explicit user:pass pairs — each line in the combo list is an independent authentication attempt. Useful when you have credential dumps, leaked passwords, or targeted guesses for specific accounts. WARNING: multiple attempts against the same user WILL count toward lockout. Internally: writes combos to temp file, runs `kerbrute bruteforce --dc <dc> -d <domain> -v [--safe] <file>`, parses `[+] VALID LOGIN:` lines."
-    when_to_use: "(1) When you have specific username:password guesses from OSINT, credential dumps, or password reuse patterns. (2) Testing credentials found in config files, scripts, or documentation against AD. (3) When you need to verify multiple different passwords for different users simultaneously. (4) After finding passwords in a database dump — test them against AD accounts for password reuse."
-    required_ports: [88]
-    params:
-      dc:
-        type: string
-        required: true
-        description: "Domain controller IP address (port 88)."
-      domain:
-        type: string
-        required: true
-        description: "Full AD domain name."
-      combos:
-        type: string
-        required: true
-        description: "Newline-separated username:password pairs. Format: 'user1:pass1\\nuser2:pass2\\nadmin:Password1'. Each line is one authentication attempt. WARNING: if same username appears multiple times, each counts toward that account's lockout threshold."
-      threads:
-        type: integer
-        default: 10
-        description: "Concurrent threads. Reduce for stealth."
-      delay:
-        type: integer
-        description: "Delay in ms between attempts. Forces single-threaded."
-      safe:
-        type: boolean
-        default: false
-        description: "Abort on first lockout detection."
-      timeout:
-        type: integer
-        default: 120
-        description: "Maximum execution time in seconds."
-      extra_args:
-        type: string
-        description: "Additional kerbrute flags appended to the command. Use for flags not exposed as named parameters. Flags are split by whitespace and appended safely."
-    returns:
-      valid_logins:
-        type: array
-        description: "Successful pairs. Each entry: {username: 'user', password: 'pass'}."
-      valid_count:
-        type: integer
-        description: "Number of valid logins found"
-      failed_count:
-        type: integer
-        description: "Number of failed attempts"
-      locked_users:
-        type: array
-        description: "Accounts that returned locked/disabled status"
-      total_tested:
-        type: integer
-        description: "Total combinations tested"
-      errors:
-        type: array
-        description: "Network/KDC errors. Null when none."
+# Flags whose presence makes target scope un-validatable. None for kerbrute:
+# the target is always a single `--dc` value (no `--dc-file` or list-flag).
+# Wordlist positionals (users.txt / passwords.txt / combos.txt) are LOCAL
+# files inside /session/ and contain usernames/passwords, NOT network targets,
+# so they don't need rejection.
+reject_flags: []
+reject_flags_reason: "kerbrute does not accept a target list, target file, or random-target generator. The single network target is `--dc <ip-or-hostname>`. Positional arguments after the sub-command are LOCAL wordlist file paths (username list, password list, combo list) — they live inside /session/ and are not network endpoints."
 
-  bruteuser:
-    description: "Brute-force a single user's password from a wordlist via Kerberos pre-authentication. Tests every password in the list against one specific account. WARNING from kerbrute: 'only run this if there\\'s no lockout policy!' — each failed attempt counts toward that account's lockout threshold. Internally: writes passwords to temp file, runs `kerbrute bruteuser --dc <dc> -d <domain> -v [--safe] <file> <username>`, parses `[+] VALID LOGIN:` lines."
-    when_to_use: "(1) When you have a known high-value username (e.g., 'administrator', 'svc-sql') and want to try a wordlist against it. (2) When lockout policy is confirmed as disabled or very lenient (e.g., 100+ attempts). (3) After userenum found valid users and password spray failed — escalate to targeted brute-force. (4) DANGEROUS: use --safe and --delay to minimize lockout risk. Prefer passwordspray (one password, many users) when lockout policy is in effect."
-    required_ports: [88]
-    params:
-      dc:
-        type: string
-        required: true
-        description: "Domain controller IP address (port 88)."
-      domain:
-        type: string
-        required: true
-        description: "Full AD domain name."
-      username:
-        type: string
-        required: true
-        description: "Single username to brute-force (without @domain). Example: 'administrator', 'svc-sql'."
-      passwords:
-        type: string
-        required: true
-        description: "Newline-separated list of passwords to try against the user. Common wordlists: rockyou top-1000, common enterprise passwords. Example: 'Password1\\nWelcome1\\nAdmin123\\nChangeme1'."
-      threads:
-        type: integer
-        default: 10
-        description: "Concurrent threads. Reduce to 1 with delay for safety."
-      delay:
-        type: integer
-        description: "Delay in ms between attempts. Highly recommended for bruteuser to avoid lockout."
-      safe:
-        type: boolean
-        default: false
-        description: "Abort if account becomes locked. STRONGLY recommended for bruteuser."
-      timeout:
-        type: integer
-        default: 120
-        description: "Maximum execution time in seconds."
-      extra_args:
-        type: string
-        description: "Additional kerbrute flags appended to the command. Use for flags not exposed as named parameters. Flags are split by whitespace and appended safely."
-    returns:
-      valid_logins:
-        type: array
-        description: "Successful login if found. Entry: {username: '<target>', password: '<found_pass>'}. Empty if no password worked."
-      valid_count:
-        type: integer
-        description: "1 if password found, 0 if not"
-      failed_count:
-        type: integer
-        description: "Number of failed password attempts"
-      locked_users:
-        type: array
-        description: "Contains the target username if it became locked during brute-force"
-      total_tested:
-        type: integer
-        description: "Total passwords tested"
-      target_user:
-        type: string
-        description: "The username that was brute-forced"
-      errors:
-        type: array
-        description: "Network/KDC errors. Null when none."
+# Per-tool value-taking flags whose values must NOT be confused with the target
+# or with operand wordlist paths. Verified against `kerbrute --help` and each
+# sub-command's `--help` (kerbrute v1.0.3).
+value_flags:
+  # Targeting (the canonical target value-taking flag)
+  - "--dc"
+  # Realm — looks target-shaped (domain.tld) but is the Kerberos realm, NOT a
+  # network address. Critical: must be in value_flags so the DSL skips its
+  # value when scanning argv, AND must NOT appear in target_extraction rules.
+  - "--domain"
+  - "-d"
+  # Threading & rate control
+  - "--threads"
+  - "-t"
+  - "--delay"
+  # Output / logging — file paths, must NOT match as targets or be confused
+  # with operand wordlists.
+  - "--output"
+  - "-o"
+  # Help — boolean but listed for parser safety (some Cobra apps accept
+  # `-h <value>` patterns; kerbrute does not, but cheap to list).
+  # NOTE: --help / --safe / --verbose / -v / -h are all booleans per Cobra's
+  # `string` vs `bool` flag types; we list only the value-taking flags here.
+
+usage_patterns:
+  - name: "userenum — enumerate valid AD usernames against a DC"
+    command: "kerbrute userenum --dc 10.129.242.196 --domain hercules.htb -v -t 10 /session/users.txt -o /session/kerbrute-userenum.txt"
+    when: "First step in AD enumeration when you have NO credentials. -v is recommended so we capture failure lines (`[!] user@domain - User does not exist`) for parsing. Output `[+] VALID USERNAME: user@realm` lines indicate accounts that returned KDC_ERR_PREAUTH_REQUIRED. Pin -o to /session/ so the log file survives the container exit; stdout is also captured. Feed valid_users into a passwordspray call. Common starter list: administrator, guest, krbtgt, admin, service, sql_svc, web_svc, backup."
+
+  - name: "passwordspray — single password vs many users (lockout-safe)"
+    command: "kerbrute passwordspray --dc 10.129.242.196 --domain hercules.htb --safe --delay 250 -v /session/users.txt 'Spring2026!' -o /session/kerbrute-spray.txt"
+    when: "Spray ONE password against many users. Designed to be safer than bruteuser because each user gets ONE attempt per spray round. --safe aborts on first lockout detection (recommended). --delay 250 keeps rate sane; for tighter lockout policies bump to --delay 1000+. Output `[+] VALID LOGIN: user@realm:password` indicates a hit. Run separate calls for each spray password (Spring2026!, Welcome1, Password1, CompanyName1!, etc.) with cooling-off between rounds."
+
+  - name: "bruteuser — many passwords vs ONE user (LOCKOUT RISK)"
+    command: "kerbrute bruteuser --dc 10.129.242.196 --domain hercules.htb --safe --delay 500 -v /session/passwords.txt natalie.a -o /session/kerbrute-brute.txt"
+    when: "Brute-force a single high-value account when lockout policy is known to be DISABLED or VERY LENIENT. Each password attempt counts toward that one account's lockout threshold — DANGER. --safe + --delay are STRONGLY recommended. Note the argument order per `kerbrute bruteuser --help`: PASSWORD list FIRST, then USERNAME (NOT username then list). Use only after passwordspray has failed and lockout policy is confirmed safe."
+
+  - name: "bruteforce — username:password combo file"
+    command: "kerbrute bruteforce --dc 10.129.242.196 --domain hercules.htb --safe -v /session/combos.txt -o /session/kerbrute-combo.txt"
+    when: "Test specific user:pass pairs from credential dumps, OSINT, or password-reuse guesses. Each line is `username:password`. Different from passwordspray (one password, many users) and bruteuser (many passwords, one user) — bruteforce is mixed. WARNING: same username appearing multiple times in the combo file will count toward that account's lockout."
+
+  - name: "userenum with delay (stealth / lockout policy unknown)"
+    command: "kerbrute userenum --dc 10.129.242.196 --domain hercules.htb -v --delay 500 /session/users.txt"
+    when: "Enumerate valid usernames slowly when SIEM detection or rate-based lockouts are a concern. --delay forces single-threaded mode regardless of -t (per kerbrute help). Useful in production engagements where stealth matters; HTB labs can usually skip --delay for speed."
+
+  - name: "user-as-pass spray (catch trivial credential reuse)"
+    command: "kerbrute passwordspray --dc 10.129.242.196 --domain hercules.htb --safe -v /session/users.txt --user-as-pass -o /session/kerbrute-uap.txt"
+    when: "Try each username as its own password (kerbrute's --user-as-pass flag). Catches accounts where the password literally equals the username — surprisingly common for service accounts or temporary staging accounts. NOTE: when --user-as-pass is set, the trailing positional <password> is OMITTED — kerbrute only tests username-as-password. To test BOTH a real password AND user-as-pass, make TWO calls."
+
+  - name: "passwordspray with --user-as-pass plus a real password (TWO calls)"
+    command: "kerbrute passwordspray --dc 10.129.242.196 --domain hercules.htb --safe -v /session/users.txt 'Welcome1' -o /session/kerbrute-spray-pwd.txt"
+    when: "Companion to the user-as-pass scenario above. After user-as-pass spray, run a normal spray with a season+year or company-name candidate. Two calls are required because kerbrute's --user-as-pass replaces (not augments) the password argument."
+
+  - name: "version / help"
+    command: "kerbrute version"
+    when: "Print kerbrute version and quit. Useful to confirm container build (expect v1.0.3 (9dad6e1) per the current image). `kerbrute --help` and `kerbrute <subcommand> --help` print flag references."
+
+output_formats:
+  # kerbrute has NO JSON / XML / SARIF / structured output. Its only
+  # machine-friendly output is `--output`/`-o` which writes the same
+  # `[+]/[-]/[!]` prose lines as stdout. Parsing relies on regex extraction
+  # of `[+] VALID USERNAME:` and `[+] VALID LOGIN:` lines.
+  - flag: "--output {path}"
+    format: "text_log"
+    preferred: true
+  - flag: "-o {path}"
+    format: "text_log"
+    preferred: false  # short alias; same content
+
+common_options:
+  targeting:
+    - "--dc <ip|hostname>: Domain Controller / KDC address. Hostname or IP (NO port — kerbrute always uses 88). If omitted, kerbrute does a DNS SRV lookup for `_kerberos._tcp.<realm>` — recommend ALWAYS passing --dc explicitly."
+    - "--domain <realm> / -d <realm>: full AD domain name (e.g., hercules.htb, corp.local). Capitalised internally as the Kerberos realm. Required."
+  threading:
+    - "--threads <int> / -t <int>: concurrent goroutines (default 10). Reduce to 1-2 for stealth or aggressive lockout policies."
+    - "--delay <ms>: ms between attempts. WHEN SET, forces single-threaded mode regardless of -t."
+  safety:
+    - "--safe: abort immediately if any account returns USER LOCKED OUT. Strongly recommended for passwordspray / bruteuser / bruteforce."
+  output:
+    - "--output <file> / -o <file>: write the same `[+]/[-]/[!]` log lines to a file (in addition to stdout)."
+    - "-v / --verbose: log failures and errors. Always set for tool_runner runs so `User does not exist` / KDC errors land in stdout for parsing."
+  help:
+    - "--help / -h: per-subcommand help (e.g., `kerbrute userenum --help`)."
+    - "version: print version (sub-command, NOT a flag)."
+
+gotchas:
+  - "kerbrute SUB-COMMAND MUST BE THE FIRST ARGUMENT after the binary (one of: userenum, passwordspray, bruteuser, bruteforce, version, help). The DSL extracts `--dc` regardless of position, but kerbrute itself is Cobra-based and parses the sub-command first; flags and positional wordlists come after."
+  - "`--domain <REALM>` / `-d <REALM>` is the KERBEROS REALM (e.g., `hercules.htb`, `corp.local`), NOT a hostname. It LOOKS domain-shaped and would naively pattern-match as a target — but it isn't a network address. target_extraction rules MUST NOT extract it. The DSL handles this by listing `--domain`/`-d` in value_flags AND not declaring any target rule that references them."
+  - "passwordspray is the SAFE mode — sprays one password across many users, designed to avoid lockouts. bruteuser is the OPPOSITE — many passwords against ONE user with high LOCKOUT RISK. Always prefer passwordspray when lockout policy is unknown. Recommend --safe + --delay for any of {passwordspray, bruteuser, bruteforce}."
+  - "Sub-command argument ORDER per `kerbrute <subcommand> --help`: userenum takes `<username_wordlist>`; passwordspray takes `<username_wordlist> <password>`; bruteuser takes `<password_list> username` (PASSWORD LIST FIRST, then USERNAME — easy to invert); bruteforce takes `<user_pw_file>` (combo file, format `username:password` per line)."
+  - "kerbrute pre-auths against the KDC (TCP/UDP 88). It uses port 88 ALWAYS — there is no `--port` flag. If the KDC runs on a non-standard port, kerbrute cannot target it; use a port-forward or a different tool."
+  - "Userenum returns `[+] VALID USERNAME: user@realm` for found users; `[!] user@realm - User does not exist` for invalid (only with -v); `[!] user@realm - USER LOCKED OUT` for locked accounts. passwordspray/bruteuser/bruteforce return `[+] VALID LOGIN: user@realm:password` for hits; `[-] user@realm:password - <error>` for failures with -v."
+  - "kerbrute exits 0 even on error (e.g., DNS failure or unreachable DC). Pattern-match output lines for `Can't talk to KDC`, `lookup .* no such host`, `Failed: ...`, etc. Do NOT trust exit code as success indicator."
+  - "Realm case is auto-uppercased internally — passing `hercules.htb` is identical to passing `HERCULES.HTB`. Don't worry about case."
+  - "If `--dc` is omitted, kerbrute does a DNS SRV lookup for `_kerberos._tcp.<realm>`. The resolved KDC is unpredictable from argv alone, which means scope-validation cannot reach it. tool_runner should refuse calls without `--dc` (Open Question 1) — pass `--dc` explicitly."
+  - "Wordlist files (users.txt / passwords.txt / combos.txt) MUST be inside the container — typically /session/ from the engagement mount. The mcp-server.py legacy methods used to write tempfiles automatically; the kind:cli path requires the LLM/agent to drop the wordlist via the `write` tool first."
+  - "kerbrute is a Go binary — `clock_offset` / `FAKETIME` / `LD_PRELOAD libfaketime` do NOT affect it. Go uses vDSO clock_gettime which bypasses libc. If the container has clock skew vs the DC, Kerberos KRB_AP_ERR_SKEW errors WILL fire on spray/brute (userenum is clock-resilient because it doesn't include a preauth timestamp). Workarounds: sync host clock, or use ntpdate inside the container with --cap-add SYS_TIME."
+  - "Empty lines in wordlist files cause `[!] Bad username: blank` errors; the legacy mcp-server.py filtered these. With kind:cli the LLM is responsible for clean wordlists — no blank lines, no trailing whitespace."
+  - "kerbrute panics or behaves erratically on `--threads 0` or negative values. Always pass `-t` / `--threads` as a positive integer (default 10). The legacy mcp-server.py clamped `threads < 1` back to 10; the kind:cli path does not — invalid thread counts hit kerbrute directly."
+  - "kerbrute outputs `[!] KDC ERROR - Wrong Realm` (human-readable), NOT the raw `KDC_ERR_WRONG_REALM` Kerberos error code, when the realm is wrong. Match against `Wrong Realm` to detect this case."
+  - "kerbrute output contains ANSI colour escape codes by default (red `[!]` / `[-]`, green `[+]`). The legacy mcp-server.py stripped ANSI in its parser (regex `\\x1B(?:[@-Z\\\\-_]|\\[[0-?]*[ -/]*[@-~])`). With kind:cli the agent sees raw bytes — when matching against `valid_users` etc., either strip ANSI first or match on the literal markers (`[+] VALID USERNAME:` substring is still present, ANSI just wraps it)."
+  - "Garbled / partial KDC responses surface as `Encoding_Error` or `failed to unmarshal` in kerbrute output. Cause: wrong --dc IP that responds on port 88 with non-Kerberos data, or partial network failure. Treat as retryable network-class error; verify the DC with `nmap -p 88 --script krb5-enum-users <dc>` first."
+  - "Final summary line is `Done! Tested N usernames (M valid) in T seconds` (userenum) or `Done! Tested N logins (M successes) in T seconds` (passwordspray/bruteuser/bruteforce). Use this line to confirm kerbrute completed the full input list rather than aborting mid-run (e.g., due to --safe lockout abort, in which case the summary will not appear)."
+
+failure_signatures:
+  # Layer-diverse signals (SKILL #11):
+  #   - DNS layer (hostname resolution)
+  #   - TCP layer (connection refused / unreachable)
+  #   - Kerberos layer (KDC errors, realm errors, clock skew)
+  #   - File I/O layer (wordlist not found, output file not writable)
+  #   - Realm / config layer (wrong realm, unknown KDC)
+  #   - Lockout / auth-policy layer (USER LOCKED OUT)
+  - signal: "lookup .* no such host"
+    remediation: "DNS resolution failed for the --dc value. Pass an IP address directly (most reliable for HTB / labs), or verify /etc/resolv.conf inside the container, or check that VPN routing forwards DNS for the lab domain."
+  - signal: "no such host"
+    remediation: "Generic Go net package DNS-failure variant — same root cause as `lookup .* no such host`. Fix: pass --dc as an IP, or verify DNS is reachable inside the container."
+  - signal: "connection refused"
+    remediation: "TCP connection to the DC was refused on port 88. Either kerbrute is hitting the wrong host (IP typo) OR the DC is not actually a KDC. Verify with `nmap -p 88 <dc>` first; expect `kerberos-sec` service."
+  - signal: "i/o timeout"
+    remediation: "DC didn't respond within the connect timeout — typically firewalled. Verify route/VPN, or try a different DC IP. kerbrute has no --timeout flag; the Go net default applies."
+  - signal: "Can't talk to KDC"
+    remediation: "kerbrute could not establish a usable Kerberos exchange with the DC. Common causes: wrong --dc (IP not actually a KDC), port 88 firewalled, DC down. Verify with `nmap -p 88 <dc>`."
+  - signal: "Wrong Realm"
+    remediation: "The --domain / -d value doesn't match the KDC's realm. Discover the real realm via SMB (`smbclient -L //<dc>`), LDAP (`ldapsearch -x -h <dc>` for defaultNamingContext), DNS SRV records, or nmap (`-p 88 --script krb5-enum-users`)."
+  - signal: "KDC_ERR_WRONG_REALM"
+    remediation: "Same as `Wrong Realm` — kerbrute usually prints the human-readable form, but the raw Kerberos error code can also surface."
+  - signal: "KDC_ERR_C_PRINCIPAL_UNKNOWN"
+    remediation: "The username doesn't exist in the realm. For userenum this is the EXPECTED `User does not exist` path. For passwordspray/bruteuser surfacing this means the username is invalid — re-run userenum to confirm valid users first."
+  - signal: "KDC_ERR_PREAUTH_FAILED"
+    remediation: "The username exists but the password is wrong (passwordspray / bruteuser / bruteforce). For userenum this should not appear (userenum doesn't send a real cred). EXPECTED for failed login attempts; the spray summary line shows the count."
+  - signal: "KDC_ERR_CLIENT_REVOKED"
+    remediation: "Account is locked or disabled. Stop spraying that user. Re-check with --safe to abort future calls automatically."
+  - signal: "KRB_AP_ERR_SKEW"
+    remediation: "Clock skew between the kerbrute container and the DC exceeds Kerberos' tolerance (default 5 min). kerbrute is a Go binary so clock_offset / FAKETIME / LD_PRELOAD libfaketime DO NOT WORK. Workarounds: sync host clock; run container with --cap-add SYS_TIME + ntpdate; switch to userenum (clock-resilient — no preauth timestamp) until skew is fixed."
+  - signal: "Clock skew too great"
+    remediation: "Same root cause as KRB_AP_ERR_SKEW — the DC rejects the AS-REQ because timestamps disagree. See KRB_AP_ERR_SKEW remediation."
+  - signal: "USER LOCKED OUT"
+    remediation: "The named account is currently locked by the AD lockout policy. STOP spraying it. Use --safe to make kerbrute abort on first detection. Check AD policy via `net accounts /domain` from a domain-joined host or via Group Policy enumeration."
+  - signal: "no such file or directory"
+    remediation: "The positional wordlist path doesn't exist inside the container. Verify /session/ is mounted and that you wrote the wordlist there with the `write` tool BEFORE invoking kerbrute. Run `ls /session/` to confirm."
+  - signal: "open .* no such file"
+    remediation: "Same family as `no such file or directory` — Go's os.Open formatted variant. Verify the wordlist path."
+  - signal: "open .* permission denied"
+    remediation: "Container can read the directory but not the file. /session/ should be world-writable from the host mount; if a sub-path was created with restrictive perms, recreate it with the `write` tool."
+  - signal: "Bad username: blank"
+    remediation: "Wordlist contains an empty line (kerbrute treats it as an invalid username). Filter blank lines from /session/users.txt — `grep -v '^$' users.txt > clean.txt`. The legacy mcp-server.py path filtered these automatically; the kind:cli path requires clean input."
+  - signal: "unknown flag"
+    remediation: "Invalid flag passed to kerbrute. Per `kerbrute --help`, valid global flags are: --dc, --delay, -d/--domain, -h/--help, -o/--output, --safe, -t/--threads, -v/--verbose. passwordspray adds --user-as-pass. There is no --port, --proxy, --hash-file, --realm, or -r flag."
+  - signal: "unknown command"
+    remediation: "First positional must be a sub-command: userenum, passwordspray, bruteuser, bruteforce, version, or help. Common mistakes: `bruteforce` vs `bruteuser` (different semantics), `userenum` (NOT `userenumeration`)."
+  - signal: "Failed: KDC has no support for encryption type"
+    remediation: "DC doesn't support the encryption type kerbrute requested. Some hardened DCs disable RC4-HMAC; kerbrute v1.0.3 negotiates AES first so this is rare. If it fires, the realm may not be AD at all (MIT KDC). Verify with `nmap -p 88 --script krb5-enum-users <dc>`."
+  - signal: "Encoding_Error"
+    remediation: "KDC responded with garbled / non-Kerberos data on port 88. Typical cause: --dc IP is wrong (e.g., pointed at a non-DC that happens to listen on 88), or partially failed connection. Verify the DC with `nmap -p 88 --script krb5-enum-users <dc>` first. Retryable after fixing the target."
+  - signal: "failed to unmarshal"
+    remediation: "Same family as `Encoding_Error` — the AS-REP from the DC could not be parsed. Verify --dc points at a real KDC."
+
+help_commands:
+  - command: "kerbrute --help"
+    purpose: "Top-level help: lists sub-commands (userenum, passwordspray, bruteuser, bruteforce, version, help) and global flags (--dc, --delay, -d/--domain, -h, -o/--output, --safe, -t/--threads, -v)."
+  - command: "kerbrute -h"
+    purpose: "Short alias for --help (Cobra default)."
+  - command: "kerbrute userenum --help"
+    purpose: "Sub-command help for userenum. Same global flags plus the positional <username_wordlist>."
+  - command: "kerbrute passwordspray --help"
+    purpose: "Sub-command help for passwordspray. Adds --user-as-pass; positional <username_wordlist> <password>."
+  - command: "kerbrute bruteuser --help"
+    purpose: "Sub-command help for bruteuser. Positional <password_list> username (PASSWORD LIST FIRST, then USERNAME — easy to invert)."
+  - command: "kerbrute bruteforce --help"
+    purpose: "Sub-command help for bruteforce. Positional <user_pw_file> (combo file, format `username:password` per line)."
+  - command: "kerbrute version"
+    purpose: "Print version and quit. Expect `Version: v1.0.3 (9dad6e1)` for the current image build."

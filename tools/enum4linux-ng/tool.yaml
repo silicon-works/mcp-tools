@@ -1,15 +1,88 @@
 name: enum4linux-ng
-version: "1.3.7"
-description: "Next-generation SMB/Windows/Samba enumeration tool (enum4linux-ng v1.3.7, Python rewrite of enum4linux.pl). Wraps Samba tools (nmblookup, net, rpcclient, smbclient) for automated enumeration of: SMB shares with access checks, users via RPC and RID cycling, groups with member lists, password policy, OS information, services, printers, NetBIOS names, and LDAP domain info (for DCs). Smart enumeration — checks SMB/LDAP accessibility first, skips inapplicable checks. Supports anonymous (null session), username/password, Kerberos ticket, and NTLM hash authentication. JSON/YAML output for structured parsing."
+kind: cli
+binary: enum4linux-ng
+version: "1.3.4"
+description: >
+  Next-generation SMB/Windows/Samba enumeration tool (enum4linux-ng v1.3.4,
+  Python rewrite of Mark Lowe's enum4linux.pl). Single binary
+  (`enum4linux-ng`) wrapping the Samba client tools `nmblookup`, `net`,
+  `rpcclient`, and `smbclient` for AUTOMATED enumeration of: SMB shares with
+  access checks, users via RPC and RID cycling, groups (with optional
+  member lists via `-Gm`), services, password policy, OS information,
+  printers, NetBIOS names, and LDAP domain info (DCs only). The tool does
+  a 'smart' enumeration: checks SMB/LDAP accessibility FIRST and skips
+  inapplicable modules. Authentication: null session (default — `-u ''
+  -p ''`), username + password (`-u`/`-p`), Kerberos ticket (`-K
+  TICKET_FILE`), or NTLM hash (`-H NTHASH`). Local SAM auth via
+  `--local-auth`. Workgroup/domain override via `-w DOMAIN`. Output formats:
+  text (default), JSON (`-oJ <prefix>`, appends `.json`), YAML (`-oY
+  <prefix>`, appends `.yaml`), or both via `-oA <prefix>`.
+
+  Argv form is binary-canonical:
+
+    enum4linux-ng
+        [-A | -As]                          # all simple enum (-A includes nmblookup)
+        [-U] [-G] [-Gm] [-S] [-C] [-P]      # individual modules
+        [-O] [-L] [-I] [-N]
+        [-R [BULK_SIZE]]                    # RID cycling — BULK_SIZE optional
+        [-r RANGES]                         # explicit RID ranges (e.g., 500-1100,5000-5100)
+        [-w DOMAIN]                         # workgroup/domain override
+        [-u USER]                           # username (default '')
+        [-p PW | -K TICKET_FILE | -H NTHASH] # mutually-exclusive auth
+        [--local-auth]                      # local SAM auth
+        [-d]                                # detailed enum (applies to -U/-G/-R)
+        [-k USERS]                          # csv user list for sid lookup
+        [-s SHARES_FILE]                    # share-name brute-force file (REJECTED)
+        [-t TIMEOUT]                        # connection timeout (seconds, default 5)
+        [-v]                                # verbose
+        [--keep]                            # don't delete temp samba config
+        [-oJ OUT_JSON_FILE | -oY OUT_YAML_FILE | -oA OUT_FILE]
+        host
+
+  The TARGET is the SINGLE positional `host` (LAST after all flags). It
+  appears after every flag value has been consumed. There is no list-form
+  (no `-iL`, no comma-separated, no CIDR) — one host per call.
+
+  Default port is 445 (SMB) / 139 (NetBIOS) — note: enum4linux-ng v1.3.4
+  has NO `--smb-port` flag (a feature requested by users that hasn't
+  landed; the SMB port is auto-discovered from the host).
+
+  Tool exits 0 on transport failure (connection refused, NTLM disablement)
+  too — pattern-match output for "Server doesn't allow connection",
+  "Aborting remainder of tests", "STATUS_*", and "Connection error".
+  Bash-style `$?` is unreliable.
+
+  Feature 28 dynamic recipes are RETIRED for the kind:cli path — the LLM
+  writes argv directly. Recipes still load for legacy method calls
+  (enumerate, enum_users, enum_shares, enum_groups, enum_policy) if
+  /session/tool_recipes/enum4linux-ng/ exists, but they're a dead branch
+  under run_cli (REQ-TR-016).
+
 image: "ghcr.io/silicon-works/mcp-tools-enum4linux-ng:latest"
 image_size_mb: 150
-timeout_seconds: 300
+
+# Dual-clock model — null-session enum is sub-minute on healthy targets,
+# but a full -A on a slow domain controller (LDAP enum + RPC walks +
+# share probes + RID cycle) can run to many minutes. RID brute over a
+# large range (`-r 500-100000`) is the worst case. idle_timeout covers
+# the longest reasonable silence (smbclient hung on share probe);
+# max_runtime is the hard wall.
+idle_timeout_seconds: 300       # 5 min silence == wedged (smbclient stuck on a share)
+max_runtime_seconds: 3600       # 1 h hard cap — full enum on slow target / wide RID range
+timeout_seconds: 3600
+allow_multi_target: false       # single-host positional only — no list / CIDR support
 
 capabilities:
   - smb_enumeration
   - user_enumeration
   - share_enumeration
   - group_enumeration
+  - rid_cycling
+  - password_policy_enumeration
+  - os_info_extraction
+  - ldap_domain_enumeration
+  - netbios_enumeration
+  - null_session_enumeration
 
 phases:
   - enumeration
@@ -22,7 +95,6 @@ resources:
   memory_mb: 256
   cpu: 0.5
 
-# Routing hints for tool selection
 routing:
   use_for:
     - "enumerate SMB shares users and groups on Windows or Samba targets"
@@ -32,14 +104,23 @@ routing:
     - "get OS version and domain information from SMB service"
     - "enumerate Active Directory users and groups via SMB"
     - "find anonymous accessible SMB shares on port 445"
-    - "enumerate Windows domain groups and their members"
+    - "enumerate Windows domain groups and their members (-Gm)"
+    - "perform NetBIOS name lookup similar to nbtstat"
+    - "enumerate LDAP domain info on a domain controller"
+    - "enumerate Windows services and printers via RPC"
+    - "authenticate with NTLM hash via -H for pass-the-hash enum"
+    - "authenticate with Kerberos ticket via -K for enum"
   never_use_for:
     - "SMB exploitation like EternalBlue (use metasploit or exploit-runner)"
     - "port scanning (use nmap)"
-    - "SMB password brute-force (use hydra)"
+    - "SMB password brute-force (use hydra or netexec)"
+    - "Kerberos username enumeration without creds (use kerbrute)"
+    - "credential validation across many hosts (use netexec for spraying)"
+    - "BloodHound data collection (use bloodhound)"
   triggers:
     - "SMB"
     - "enum4linux"
+    - "enum4linux-ng"
     - "Windows enumeration"
     - "shares"
     - "RID cycling"
@@ -48,158 +129,392 @@ routing:
     - "port 139"
     - "null session"
     - "domain users"
+    - "rpcclient"
+    - "smbclient"
+    - "nmblookup"
+    - "password policy"
+    - "STATUS_LOGON_FAILURE"
+    - "STATUS_ACCESS_DENIED"
   prefer_over:
-    - nmap  # For detailed SMB enumeration
+    - nmap  # for detailed SMB enumeration after nmap discovers port 445/139
 
-methods:
-  enumerate:
-    description: "Comprehensive SMB enumeration combining shares (-S), users via RID cycling (-U), and groups (-G) into a single scan. Uses enum4linux-ng with JSON output (-oJ). Smart enumeration checks SMB accessibility first and skips inapplicable checks. If no specific modules are selected, defaults to -A (all simple enumeration). Returns parsed JSON with OS info, share list (name, type, comment), user list (username, RID), and group list (name, RID). Full raw JSON is also included for detailed analysis."
-    when_to_use: "The first tool to run after nmap discovers SMB on port 445 or 139. Start with this comprehensive scan to get an overview: what shares exist, what users are on the system, and what groups they belong to. Try anonymous (null session) first by omitting username/password — many SMB servers leak information without authentication. If null session fails, try with discovered credentials. The results feed into: (1) shares → look for readable/writable shares with sensitive files, (2) users → target for password brute-force with hydra, (3) groups → identify admin group members for privilege escalation."
-    params:
-      target:
-        type: string
-        required: true
-        description: "Target IP or hostname with SMB running (port 445 or 139)."
-      username:
-        type: string
-        description: "Username for authenticated enumeration. Omit for null session (anonymous). Use '' (empty string) explicitly for guest access."
-      password:
-        type: string
-        description: "Password for authenticated enumeration. Omit for null session."
-      shares:
-        type: boolean
-        default: true
-        description: "Enumerate SMB shares (-S). Shows share name, type (Disk/IPC$/Printer), and comment."
-      users:
-        type: boolean
-        default: true
-        description: "Enumerate users via RPC/RID cycling (-U). Discovers domain/local user accounts."
-      groups:
-        type: boolean
-        default: true
-        description: "Enumerate groups (-G). Shows group names and RIDs. Use enum_groups for member lists."
-      timeout:
-        type: integer
-        default: 300
-        description: "Timeout in seconds. 300s is usually sufficient. Increase for slow networks or large domains."
-    returns:
-      shares:
-        type: array
-        description: "Discovered SMB shares, each with: name, type (Disk/IPC$/Printer), comment."
-      users:
-        type: array
-        description: "Discovered user accounts, each with: username, RID (Relative Identifier)."
-      groups:
-        type: array
-        description: "Discovered groups, each with: name, RID."
-      os_info:
-        type: object
-        description: "OS information from SMB: OS version, server type, domain/workgroup name."
+see_also:
+  - tool: netexec
+    reason: "netexec (formerly CrackMapExec) is the modern AD-spraying tool — use for CIDR-wide credential validation, --shares, --users, --pass-pol across a /24, and Kerberos-aware ops. enum4linux-ng is single-host but goes deeper per host (RID cycling, LDAP DC info, password-policy detail). Run enum4linux-ng first for the deep dive on a known SMB host; netexec second for breadth across the subnet."
+  - tool: kerbrute
+    reason: "When NTLM is disabled and SMB enum fails, use kerbrute for Kerberos-only username discovery (port 88). enum4linux-ng can use Kerberos via -K TICKET_FILE if you've already obtained a ccache (impacket-getTGT)."
+  - tool: impacket
+    reason: "impacket-lookupsid does pure RID-cycling enumeration over RPC (faster than enum4linux-ng's bundled cycle). impacket-rpcdump shows registered RPC interfaces. impacket-secretsdump for post-exploitation NTDS dump (out of scope for enum4linux-ng)."
+  - tool: hydra
+    reason: "Once enum4linux-ng surfaces a user list, feed into hydra smb / ldap / rdp for password attacks. Check enum4linux-ng's password policy output FIRST (-P) to know the lockout threshold."
+  - tool: nmap
+    reason: "Run nmap with --script smb-enum-* before enum4linux-ng to confirm SMB version (NT1 / SMB2 / SMB3) and signing requirements. Some enum4linux-ng modules require SMB1 (NT1) which Windows Server 2019+ disables by default."
 
-  enum_users:
-    description: "Enumerate user accounts via RID cycling (-U -R) on an SMB/Windows target. RID cycling iterates through Relative Identifiers to discover valid user accounts — even through null sessions where user listing via RPC may be blocked. Default range covers well-known RIDs (500=Administrator, 501=Guest, 502=krbtgt) and typical user RIDs (1000+). Uses JSON output for structured results. Each user includes username, RID, and domain."
-    when_to_use: "When you need a comprehensive user list from an SMB target, especially when the enumerate method didn't find users (some servers block RPC user listing but allow RID lookups). The discovered usernames are essential for: (1) Password brute-force with hydra smb or hydra ssh, (2) Kerberoasting in Active Directory, (3) Password spraying. Well-known RIDs to look for: 500=Administrator (always exists), 501=Guest, 502=krbtgt (AD only). Expand rid_range to '500-550,1000-5000' for large domains with many users."
-    params:
-      target:
-        type: string
-        required: true
-        description: "Target IP or hostname with SMB running."
-      username:
-        type: string
-        description: "Username for authenticated enumeration. Omit for null session."
-      password:
-        type: string
-        description: "Password for authenticated enumeration."
-      rid_range:
-        type: string
-        default: "500-550,1000-1200"
-        description: "RID range(s) to enumerate, comma-separated. Default '500-550,1000-1200' covers admin RIDs and first 200 user accounts. Well-known: 500=Administrator, 501=Guest, 502=krbtgt. Expand to '500-550,1000-5000' for large domains."
-      timeout:
-        type: integer
-        default: 300
-        description: "Timeout in seconds."
-    returns:
-      users:
-        type: array
-        description: "Discovered users, each with: username, rid (numeric RID), domain."
-      count:
-        type: integer
-        description: "Number of users found."
+# ── kind:cli specific sections ──────────────────────────────────────
 
-  enum_shares:
-    description: "Enumerate SMB shares and check access permissions (-S). Lists all shared resources (disk shares, IPC$, printers) with share name, type, comment, and access mapping (readable/writable). Uses rpcclient and smbclient to enumerate and test access. Returns structured share data with access level information."
-    when_to_use: "After confirming SMB is running, to find accessible file shares. Key things to look for: (1) Non-default shares (anything besides ADMIN$, C$, IPC$, print$) — these often contain sensitive files. (2) Readable shares — may contain config files, credentials, backups. (3) Writable shares — can be used to plant web shells, backdoors, or exploit DLL hijacking. Common high-value shares: 'Users', 'Documents', 'Backups', 'IT', 'Scripts'. After finding readable shares, use impacket's smbclient to browse and download files."
-    params:
-      target:
-        type: string
-        required: true
-        description: "Target IP or hostname with SMB running."
-      username:
-        type: string
-        description: "Username for authenticated enumeration. Omit for null session. Authenticated enumeration reveals more shares and access details."
-      password:
-        type: string
-        description: "Password for authenticated enumeration."
-      timeout:
-        type: integer
-        default: 300
-        description: "Timeout in seconds."
-    returns:
-      shares:
-        type: array
-        description: "Discovered shares, each with: name, type (Disk/IPC$/Printer), comment (description), access (mapping/read/write permissions)."
-      count:
-        type: integer
-        description: "Number of shares found."
+target_extraction:
+  # enum4linux-ng's invocation form: `enum4linux-ng [flags] <host>`
+  #
+  # The TARGET is the SINGLE positional argument that comes LAST, after
+  # ALL flag values have been consumed. enum4linux-ng accepts ONE host per
+  # call — there is no list-form (no -iL, no CIDR, no comma-separated).
+  # `allow_multi_target: false` is set accordingly.
+  #
+  # Trap values that must NOT be confused with the target:
+  #   - `-u USER`          (e.g., `-u admin@corp.local` — looks FQDN-shape)
+  #   - `-p PW`            (passwords often contain @ / : / shell-metachars)
+  #   - `-K TICKET_FILE`   (file path)
+  #   - `-H NTHASH`        (32-hex string — would not regex-match anyway)
+  #   - `-w DOMAIN`        (e.g., `corp.local` — looks FQDN-shape)
+  #   - `-r RANGES`        (e.g., `500-1100,5000-5100` — would not match,
+  #                         but value_flag list defends regardless)
+  #   - `-R [BULK_SIZE]`   (BULK_SIZE is optional integer — ambiguous!)
+  #   - `-k USERS`         (CSV user list, e.g., `admin,guest`)
+  #   - `-s SHARES_FILE`   (file path — REJECTED via reject_flags)
+  #   - `-t TIMEOUT`       (integer)
+  #   - `-oJ`/`-oY`/`-oA`  (output prefix file paths)
+  #
+  # Of these, `-u` / `-w` are the dangerous shape-matchers (FQDN-shape
+  # passwords / usernames also conceivable). All are listed in value_flags
+  # so the DSL consumes the next token as a flag-value, not a positional.
+  #
+  # Critical: `-R [BULK_SIZE]` — `-R` accepts an OPTIONAL integer. If
+  # value_flags treats `-R` as value-taking, the DSL will consume the NEXT
+  # token (which might be the host!). If it treats `-R` as boolean, an
+  # explicit BULK_SIZE will be misinterpreted as the host. The pragmatic
+  # choice (and what we encode): keep `-R` OUT of value_flags so it's
+  # treated as boolean — then a BULK_SIZE integer must NOT shape-match the
+  # target regex, which it doesn't (e.g., `1000` is just digits, no dots).
+  # The host is the LAST positional, so `enum4linux-ng -R 1000 10.10.10.5`
+  # extracts `10.10.10.5` correctly via last_non_flag_positional. See Open
+  # Question 4 below for the edge case `enum4linux-ng -R 10.10.10.5` (no
+  # BULK_SIZE) — host is still LAST positional, parses correctly.
+  #
+  # Precedence (first match wins):
+  #   1. last_non_flag_positional — captures the host even when flag values
+  #      are interleaved with the positional. Mirror of ike-scan.
+  #   2. positional_match — fallback shape-match for IPv4 / IPv4 CIDR / FQDN
+  #      / bracketed IPv6, in case the LLM places host first (rare; per the
+  #      help text, host comes last).
+  - rule: "last_non_flag_positional"
+    parse_as: "raw"
+  - rule: "positional_match"
+    pattern: '^\[?([^\]:/?#\s]+|[0-9a-fA-F:]+)\]?(?::\d+)?$'
+    group: 1
+    parse_as: "raw"
 
-  enum_groups:
-    description: "Enumerate groups and their members via RPC (-G). Lists local and domain groups with RID and member usernames. Shows group membership hierarchy — critical for identifying who has administrative access. Uses rpcclient group enumeration."
-    when_to_use: "After user enumeration, to understand privilege levels. Key groups to look for: (1) 'Domain Admins' or 'Administrators' — members have full control, (2) 'Remote Desktop Users' — can RDP in, (3) 'Backup Operators' — can read any file, (4) 'Account Operators' — can create/modify accounts. Group membership reveals privilege escalation paths: if a compromised user is in a privileged group, you already have elevated access."
-    params:
-      target:
-        type: string
-        required: true
-        description: "Target IP or hostname with SMB running."
-      username:
-        type: string
-        description: "Username for authenticated enumeration. Authenticated sessions reveal more groups and membership details."
-      password:
-        type: string
-        description: "Password for authenticated enumeration."
-      timeout:
-        type: integer
-        default: 300
-        description: "Timeout in seconds."
-    returns:
-      groups:
-        type: array
-        description: "Discovered groups, each with: name, rid, members (list of member usernames/SIDs)."
-      count:
-        type: integer
-        description: "Number of groups found."
+# Flags whose presence makes target scope un-validatable. The plugin's
+# cli_in_container rejects the call before docker spawn when any of these
+# appear, with the reason below.
+reject_flags:
+  - "-s"              # SHARES_FILE — share-name wordlist for brute-force.
+                      #   File path with share names (NOT hosts), but the
+                      #   ingestion is off-argv (the file's contents are
+                      #   what enum4linux-ng acts on for share-name brute).
+                      #   Reject conservatively: the contents could be huge
+                      #   and we want to surface the call shape to the user.
+reject_flags_reason: >
+  enum4linux-ng's `-s SHARES_FILE` reads a share-name wordlist from disk
+  for brute-force share enumeration. The contents (share names like
+  C$/ADMIN$/Backup) live OFF argv where the call signature can't reach.
+  Use the standard share enum (`-S`) instead — it queries the server's
+  share list directly via RPC and doesn't need a wordlist. If you must
+  brute-force share names (rare — usually only when RPC share enum is
+  blocked), iterate via the read tool + per-name calls.
 
-  enum_policy:
-    description: "Enumerate password policy and domain/OS information via RPC (-P -I). Returns password policy settings (min length, complexity, lockout threshold, lockout duration, max password age) and OS/domain info (OS version, domain name, server type). Uses rpcclient policyquery and srvinfo commands."
-    when_to_use: "Before password brute-force attacks, to understand what passwords are valid and avoid lockouts. Key policy fields: (1) 'Minimum password length' — determines minimum wordlist entry length, (2) 'Account lockout threshold' — how many failed attempts before lockout (0=no lockout), (3) 'Account lockout duration' — how long lockout lasts. If lockout threshold is 0 or very high, aggressive brute-force is safe. If low (3-5 attempts), use careful password spraying instead. Password complexity requirements inform wordlist selection."
-    params:
-      target:
-        type: string
-        required: true
-        description: "Target IP or hostname with SMB running."
-      username:
-        type: string
-        description: "Username for authenticated enumeration. Some targets only reveal policy to authenticated users."
-      password:
-        type: string
-        description: "Password for authenticated enumeration."
-      timeout:
-        type: integer
-        default: 300
-        description: "Timeout in seconds."
-    returns:
-      password_policy:
-        type: object
-        description: "Password policy: min_length, complexity_required, lockout_threshold, lockout_duration_minutes, max_password_age_days, password_history_length."
-      domain_info:
-        type: object
-        description: "Domain/OS info: OS version string, domain name, server type, DNS hostname."
+  NB: enum4linux-ng has NO `-iL` / `--target-file` / `--input-file` flag —
+  the host is always a single positional, so the bulk-target-file rejection
+  pattern doesn't apply to the host argument.
+
+# Per-tool value-taking flags whose values must NOT be confused with the
+# host positional. Verified against `enum4linux-ng -h` (v1.3.4 on Kali
+# rolling 2026-04).
+value_flags:
+  # ── auth (mutually-exclusive: -p / -K / -H) ──
+  - "-u"              # username (default '')
+  - "-p"              # password (default '')
+  - "-K"              # Kerberos ticket file (.ccache)
+  - "-H"              # NTLM hash (32 hex / LM:NT)
+  # ── domain / workgroup ──
+  - "-w"              # workgroup or domain — FQDN-shape; MUST be in value_flags
+  # ── enum tuning ──
+  - "-d"              # NB: `-d` is BOOLEAN per `enum4linux-ng -h` (detailed enum,
+                      #   applies to -U/-G/-R) — but listed here defensively in
+                      #   case future versions add a value form. The DSL skips
+                      #   `-d <value>` harmlessly if the next token doesn't shape-
+                      #   match the host, but our last_non_flag_positional rule
+                      #   would be tricked if `-d 10.10.10.5` were valid. Per
+                      #   v1.3.4 it's NOT — `-d` is pure boolean.
+                      #   See Open Question 5 below.
+  - "-k"              # CSV user list (default 'administrator,guest,krbtgt,...')
+  - "-r"              # RID range(s) — e.g., `500-1100,5000-5100` (NOT a target)
+  - "-t"              # connection timeout in seconds (integer)
+  - "-s"              # SHARES_FILE — REJECTED above; listed here belt-and-braces
+  # ── output (-oJ / -oY / -oA take a file PREFIX, not a target) ──
+  - "-oJ"             # JSON output prefix (`.json` auto-appended)
+  - "-oY"             # YAML output prefix (`.yaml` auto-appended)
+  - "-oA"             # writes BOTH .json and .yaml with this prefix
+  # ── boolean / no-value flags listed for safety (DSL skips harmlessly) ──
+  # NB: -R takes an OPTIONAL value (BULK_SIZE int). We treat it as BOOLEAN
+  # because (a) BULK_SIZE is a small integer that doesn't shape-match a
+  # target, (b) treating it as value-taking would make `enum4linux-ng -R
+  # 10.10.10.5` consume the host as BULK_SIZE. See target_extraction note
+  # and Open Question 4.
+  - "-A"              # all simple enum — boolean
+  - "-As"             # all simple short — boolean
+  - "-U"              # users via RPC — boolean
+  - "-G"              # groups via RPC — boolean
+  - "-Gm"             # groups + members — boolean
+  - "-S"              # shares via RPC — boolean
+  - "-C"              # services via RPC — boolean
+  - "-P"              # password policy — boolean
+  - "-O"              # OS info — boolean
+  - "-L"              # LDAP domain info — boolean
+  - "-I"              # printer info — boolean
+  - "-N"              # NetBIOS names lookup — boolean
+  - "--local-auth"    # boolean — local SAM auth
+  - "--keep"          # boolean — preserve temp samba config
+  - "-v"              # verbose — boolean
+  - "-h"              # help — boolean
+  - "--help"
+
+usage_patterns:
+  # ── null-session and authenticated full enum ────────────────────────
+  - name: "Null-session full enum (most common first call)"
+    command: "enum4linux-ng -A -oY /session/enum4linux-null {host}"
+    when: "First-pass SMB enumeration on a target with no known credentials. `-A` runs the safe simple-enum bundle (-U -G -S -P -O -N -I -L) — does NOT include `-R` (RID cycling) or `-Gm` (group members) by default. Null session (`-u ''` is implicit default) — many SMB servers leak share/user/policy info without auth. Output to YAML for structured parsing. If the target has NTLM disabled (hardened AD), expect 'Server doesn't allow connection' — re-run with `-K /session/<user>.ccache` (Kerberos)."
+
+  - name: "Authenticated full enum (with valid creds)"
+    command: "enum4linux-ng -A -u {user} -p '{password}' -oY /session/enum4linux-auth {host}"
+    when: "Authenticated enum reveals more shares, more user attributes, and full group membership. Use after `-A` null-session has exhausted what's possible without auth. Common credential sources: SMB password spray (hydra / netexec), credential dumps, OSINT. Empty password (`-p ''`) is valid — some accounts have blank passwords. Workgroup auto-detected; use `-w DOMAIN` to override if auto-detection fails."
+
+  - name: "RID brute (when null session is restricted)"
+    command: "enum4linux-ng -R -r 500-2000 -u guest -p '' -oY /session/enum4linux-rid {host}"
+    when: "RID brute (`-R`) iterates Relative Identifiers via RPC `lookupsids` to discover users without `-U` (which requires SAMR-OPEN-USER). On hardened SMB targets where `-U` returns empty (RPC user enum blocked), RID brute often still works because lookupsids uses different RPC. `-r 500-2000` covers admin RIDs (500=Administrator, 501=Guest, 502=krbtgt) and the first 1500 user RIDs. Bump to `-r 500-100000` for large enterprises (slow). NB: `-R` accepts an optional BULK_SIZE — omit it; default (200/cycle) is sane."
+
+  - name: "Custom RID range (multi-range pattern)"
+    command: "enum4linux-ng -R -r 500-1100,5000-6000,10000-11000 -u {user} -p '{password}' -oY /session/enum4linux-rid-multi {host}"
+    when: "Multi-range RID cycling — comma-separated. Useful when reconnaissance suggests user RIDs in non-standard ranges (some companies start service accounts at 5000, regular users at 10000). The default range when `-R` is used WITHOUT `-r` is 500-550,1000-1050 — narrow; `-r` extends. Each comma-separated range is exclusive endpoints. NB: `-r` value contains hyphens AND commas — must NOT be misparsed as the host (value_flag defends)."
+
+  - name: "Specific operations only (avoid RID overhead)"
+    command: "enum4linux-ng -S -G -P -u {user} -p '{password}' -oY /session/enum4linux-sgp {host}"
+    when: "Selective enum when `-A` is overkill or has run already. Combine individual flags (-S shares, -G groups, -P policy) for the exact data you need. Skipping `-U` / `-R` is much faster on slow targets — RID cycling is the slowest module. Use this after a full `-A` to refresh just one dimension of the enum (e.g., re-check shares after credentials change)."
+
+  - name: "Group members enumeration (-Gm — not in -A)"
+    command: "enum4linux-ng -Gm -u {user} -p '{password}' -oY /session/enum4linux-gm {host}"
+    when: "`-Gm` is groups-WITH-members. `-G` is groups-ONLY (just names + RIDs). `-A` includes `-G` but NOT `-Gm` (member resolution is expensive — one RPC call per group). Use `-Gm` after `-G` shows interesting group names. Critical for finding 'Domain Admins' / 'Enterprise Admins' / 'Backup Operators' members — privilege escalation candidates. Enumerated via `rpcclient queryaliasmem`."
+
+  # ── auth variants ───────────────────────────────────────────────────
+  - name: "Pass-the-hash enum (NTLM hash via -H)"
+    command: "enum4linux-ng -A -u {user} -H {ntlm_hash} -oY /session/enum4linux-pth {host}"
+    when: "PtH-style enumeration with an NTLM hash instead of password. Format: bare NT (32 hex, e.g., `31d6cfe0d16ae931b73c59d7e0c089c0`) or LM:NT colon-separated. enum4linux-ng v1.3.4 supports `-H` mutually-exclusively with `-p` and `-K`. Useful after NTDS / SAM / LSA dump from netexec. Does NOT need plaintext password."
+
+  - name: "Kerberos ticket auth (-K via ccache)"
+    command: "enum4linux-ng -A -u {user} -K /session/{user}.ccache -oY /session/enum4linux-krb {host}"
+    when: "Kerberos auth via existing ccache file (typically from impacket-getTGT). Use when NTLM is disabled domain-wide. Set `KRB5CCNAME=/session/{user}.ccache` env first if `-K` doesn't auto-pick up the path. Requires correct DNS for KDC SPN resolution — if the host is a bare IP, the realm/SPN lookup may fail; pre-resolve via /etc/hosts inside the container."
+
+  - name: "Local SAM auth (--local-auth for non-domain hosts)"
+    command: "enum4linux-ng -A -u {local_admin} -p '{password}' --local-auth -oY /session/enum4linux-local {host}"
+    when: "Local SAM authentication — bypasses domain auth. Use on standalone Workgroup hosts (non-domain Windows servers). Equivalent to netexec's `--local-auth`. Mutually exclusive with `-w DOMAIN` (which forces domain auth)."
+
+  # ── workgroup / domain override ─────────────────────────────────────
+  - name: "Workgroup/domain override (-w when auto-detect fails)"
+    command: "enum4linux-ng -A -u {user} -p '{password}' -w {DOMAIN} -oY /session/enum4linux-wd {host}"
+    when: "Workgroup auto-detection (via nmblookup / SMB session-setup response) sometimes returns the wrong value, especially on misconfigured Samba or proxied SMB. `-w` forces the workgroup/domain. Common values: `WORKGROUP` (default Windows workgroup), the AD domain name (e.g., `HERCULES.HTB`), or the NetBIOS short name. CRITICAL: `-w` value is FQDN-shape and would otherwise look like a target — value_flag defends."
+
+  # ── single-module probes (lighter-weight) ───────────────────────────
+  - name: "Users only (-U) — fastest user-list probe"
+    command: "enum4linux-ng -U -u '' -p '' -oY /session/enum4linux-users {host}"
+    when: "Just users via SAMR RPC. Faster than `-A` when you already have shares/policy from a previous run. NB: `-U` uses SAMR-OPEN-USER which is often blocked; if it returns empty, fall back to `-R` (RID brute via lookupsids)."
+
+  - name: "Shares only (-S) — fast share probe"
+    command: "enum4linux-ng -S -u {user} -p '{password}' -oY /session/enum4linux-shares {host}"
+    when: "Just shares. Useful after credentials change to refresh share visibility. Note: enum4linux-ng's `-S` queries via RPC AND attempts smbclient access checks for each share (READ/WRITE detection). Authentication reveals more shares than null session."
+
+  - name: "Password policy only (-P) — pre-spray check"
+    command: "enum4linux-ng -P -u {user} -p '{password}' -oY /session/enum4linux-policy {host}"
+    when: "Pull password policy BEFORE running hydra / netexec password spray. Output reveals: minimum password length, complexity required, lockout threshold (CRITICAL — if 0, no lockout; if 3-5, careful spraying), lockout duration, max password age. If the lockout threshold is low, switch to kerbrute --safe instead of bulk spray."
+
+  - name: "OS info only (-O) — quick fingerprint"
+    command: "enum4linux-ng -O {host}"
+    when: "Just OS / server type / domain info. Fastest probe — null session, no auth needed. Output: 'OS' field (e.g., 'Windows Server 2019 Datacenter'), 'Server type' bitfield (DC / fileserver / printserver), 'Workgroup' / 'Domain' / 'DNS hostname'. Useful first call to confirm the target is Windows / Samba / unknown."
+
+  - name: "LDAP domain info (-L) — DC enumeration"
+    command: "enum4linux-ng -L -u '' -p '' -oY /session/enum4linux-ldap {host}"
+    when: "LDAP domain info — only meaningful on Domain Controllers. Probes 389/636 for: rootDSE attributes, defaultNamingContext, naming contexts. Often allows anonymous on Win2008+ DCs. If the target is NOT a DC, this returns 'LDAP not running' / 'Could not connect to LDAP'. Use to confirm DC role and capture domain DN for follow-up impacket-ldapsearch."
+
+  - name: "NetBIOS names (-N) — nbtstat-equivalent"
+    command: "enum4linux-ng -N {host}"
+    when: "NetBIOS name service lookup (port 137 UDP). Returns the NetBIOS name table — workgroup / computer name / messenger / file-server / domain-master-browser flags. Useful for confirming workgroup name when SMB session-setup auto-detection lies. Faster than `-A`."
+
+  # ── verbose debug ───────────────────────────────────────────────────
+  - name: "Verbose mode (-v) — debug a hung enum"
+    command: "enum4linux-ng -A -v -u {user} -p '{password}' --keep -oY /session/enum4linux-debug {host}"
+    when: "When `-A` produces empty / garbled output, re-run with `-v` to see the actual `nmblookup` / `net` / `rpcclient` / `smbclient` invocations being run. `--keep` preserves the temp samba config (`/tmp/.smb.conf.<pid>`) for post-run inspection. Useful for diagnosing which Samba sub-tool is failing."
+
+  # ── help / version ──────────────────────────────────────────────────
+  - name: "enum4linux-ng help"
+    command: "enum4linux-ng --help"
+    when: "Print the full flag reference. Useful to verify a flag's exact spelling or value type. NB: enum4linux-ng v1.3.4 has NO `--smb-port`, NO `--rid-ranges`, NO `--users-from-file`, NO `-M` machine-list — flags from the original enum4linux.pl that don't exist in the rewrite. The single-letter flags listed here are the canonical reference."
+
+output_formats:
+  # enum4linux-ng's text output is hard to parse at scale. The structured
+  # output (-oY YAML / -oJ JSON) is the recommended format for tool_runner.
+  # `-oA <prefix>` writes BOTH (`<prefix>.yaml` AND `<prefix>.json`).
+  - flag: "-oY {prefix}"
+    format: "yaml"
+    preferred: true
+    notes: >
+      YAML output — file at `{prefix}.yaml` (extension auto-appended).
+      Structured: top-level keys `target`, `target_info`, `domain_info`,
+      `os_info`, `users`, `groups`, `shares`, `password_policy`,
+      `services`, `printers`, `errors`. EASIEST TO PARSE — recommended for
+      programmatic ingestion.
+  - flag: "-oJ {prefix}"
+    format: "json"
+    preferred: true
+    notes: >
+      JSON output — file at `{prefix}.json` (extension auto-appended).
+      Same structure as YAML; equivalent semantics. Choose JSON for
+      pipelines that already consume JSON (jq, bash filters); YAML for
+      human review.
+  - flag: "-oA {prefix}"
+    format: "json_and_yaml"
+    preferred: false
+    notes: >
+      Writes BOTH `{prefix}.yaml` AND `{prefix}.json` from a single run.
+      Useful when downstream consumers need both forms; uses ~2x disk for
+      no extra runtime cost (enum4linux-ng builds both from the same
+      in-memory state at the end of the run).
+  - flag: ""
+    format: "text"
+    preferred: false
+    notes: >
+      Default — colourful section-banner text with ANSI escape codes
+      (e.g., `[92m...[0m`). Hard to parse beyond a regex grep. Use ONLY
+      when -oY/-oJ/-oA aren't needed (interactive debugging).
+
+common_options:
+  targeting:
+    - "<host>: target — SINGLE positional, comes LAST after all flags. IP / hostname / FQDN / bracketed IPv6. NO list / CIDR / file form."
+    - "NB: enum4linux-ng v1.3.4 has NO `--smb-port` flag. SMB port is auto-discovered (445 first, then 139)."
+  authentication:
+    - "-u <user>: username (default '' for null session)."
+    - "-p <pw>: password (default '' for null session). Mutually exclusive with -K and -H."
+    - "-K <ticket_file>: Kerberos ccache file path (typically /session/<user>.ccache from impacket-getTGT). Mutually exclusive with -p and -H."
+    - "-H <nthash>: NTLM hash for pass-the-hash. Format: bare NT (32 hex) or LM:NT. Mutually exclusive with -p and -K."
+    - "--local-auth: authenticate against local SAM (Workgroup / non-domain) — mutually exclusive with -w DOMAIN."
+    - "-w <domain>: workgroup or domain override (auto-detected by default). FQDN-shape value."
+  enumeration:
+    - "-A: all simple enum (-U -G -S -P -O -N -I -L). DOES NOT include -R (RID cycle) or -Gm (group members)."
+    - "-As: all simple SHORT — same as -A but NO -N (skips NetBIOS lookup). Faster on stricter firewalls."
+    - "-U: users via RPC SAMR-OPEN-USER."
+    - "-G: groups via RPC (names + RIDs only)."
+    - "-Gm: groups WITH members (slower; one RPC call per group)."
+    - "-S: shares via RPC + smbclient access checks."
+    - "-C: services via RPC."
+    - "-P: password policy via RPC."
+    - "-O: OS info via RPC."
+    - "-L: LDAP domain info — DCs only."
+    - "-I: printer info via RPC."
+    - "-N: NetBIOS name lookup (nbtstat-equivalent, port 137 UDP)."
+  rid_brute:
+    - "-R [BULK_SIZE]: enable RID cycling. Optional integer BULK_SIZE (default 200 per request)."
+    - "-r <ranges>: explicit RID ranges, comma-separated (e.g., `500-1100,5000-5100`). Default `500-550,1000-1050` if -R is set without -r."
+  detail_and_helpers:
+    - "-d: detailed mode for -U / -G / -R (slower, more attribute fetching)."
+    - "-k <users>: csv user list to lookup-sid for. Default: 'administrator,guest,krbtgt,domain admins,root,bin,none'."
+    - "-t <seconds>: connection timeout (default 5)."
+    - "-v: verbose — show samba sub-tool commands."
+    - "--keep: preserve the temp samba config file (debug aid)."
+  output:
+    - "-oY <prefix>: YAML output — file at `{prefix}.yaml` (extension auto-appended). PREFERRED."
+    - "-oJ <prefix>: JSON output — file at `{prefix}.json` (extension auto-appended). PREFERRED."
+    - "-oA <prefix>: writes BOTH `{prefix}.yaml` AND `{prefix}.json`."
+
+gotchas:
+  - "TARGET IS THE LAST POSITIONAL — `enum4linux-ng -A -oY /session/out 10.10.10.5`. The host appears AFTER all flag values. The DSL's `last_non_flag_positional` rule extracts it correctly. Flag values like `-r 500-1100,5000-5100` and `-w corp.local` and `-oY /session/out` are CONSUMED by their flags and must NOT be confused with the host."
+  - "`-A` IS NOT 'all options' — it runs the SAFE simple-enum bundle (-U -G -S -P -O -N -I -L). It DOES NOT include `-R` (RID cycling) or `-Gm` (group members with member lists). For full coverage including those, add the flags explicitly: `-A -R -Gm`."
+  - "NULL SESSION FIRST — try `-u '' -p ''` (the implicit default if no -u/-p given) BEFORE authenticated enum. Many misconfigured SMB targets leak shares/users/policy without credentials. Only escalate to creds when null session is rejected with 'Server doesn't allow connection' or STATUS_ACCESS_DENIED."
+  - "RID BRUTE (`-R`) BEATS BLOCKED USER ENUM — when `-U` returns empty (target blocked SAMR user enum via RPC restrictions), `-R` often still works because `lookupsids` uses different RPC. Pair with `-r 500-100000` for wide coverage on large enterprises. The default `-r` (when not specified) is `500-550,1000-1050` — narrow; extend explicitly for production engagements."
+  - "RID-RANGE FLAG IS `-r` (lowercase), NOT `-R` — `-R` is the BOOLEAN to enable cycling; `-r` takes the COMMA-SEPARATED RANGE STRING. The original enum4linux.pl had different semantics. Mixing them up is the #1 user error per the upstream issue tracker. Reading help: `-R [BULK_SIZE]` (cap-R, optional int) vs `-r RANGES` (small-r, ranges)."
+  - "STRUCTURED OUTPUT IS A SUFFIX-STRIPPED PREFIX — `-oY /session/out` writes to `/session/out.yaml` (the `.yaml` is auto-appended). DO NOT include the extension in the prefix or you get `/session/out.yaml.yaml`. Same for `-oJ` (.json) and `-oA` (writes BOTH .json AND .yaml)."
+  - "AUTHENTICATION FLAGS ARE MUTUALLY EXCLUSIVE — `-p`, `-K`, `-H` form a `argparse mutually_exclusive_group`. Passing two will produce `argument -K: not allowed with argument -p`. Pick ONE."
+  - "EXIT CODE IS UNRELIABLE — enum4linux-ng exits 0 on transport failure (connection refused), auth failure, AND success. ALWAYS pattern-match the output for `Aborting remainder of tests`, `Server doesn't allow connection`, `STATUS_LOGON_FAILURE`, `STATUS_ACCESS_DENIED`, `Could not resolve`. Bash `$?` doesn't help."
+  - "NO `--smb-port` FLAG — enum4linux-ng v1.3.4 does NOT support a custom SMB port. The Samba sub-tools auto-discover (try 445, fall back to 139). For non-standard SMB ports, use impacket-smbclient or netexec --port instead."
+  - "NO `-M` MACHINE-LIST FLAG — enum4linux-ng v1.3.4 has NO machine-list operation (the original enum4linux.pl had a `-m` for it). For machine accounts, use `-r 1000-2000` plus a netexec `--computers` cross-check."
+  - "NO `--rid-ranges` LONG-FORM — the flag is `-r` (short only). `--rid-ranges`, `--users-from-file`, `--share-list`, `--smb-port` from various tutorials DO NOT exist in v1.3.4."
+  - "`-w DOMAIN` LOOKS LIKE A TARGET — workgroup/domain values (e.g., `corp.local`, `HERCULES.HTB`) are FQDN-shape and would otherwise extract as a target. `-w` is in value_flags so the next token is consumed as the workgroup, not the host."
+  - "`-s SHARES_FILE` IS REJECTED — share-name brute-force wordlist file is OFF argv. Use `-S` (RPC share enum) instead — it queries the server's share list directly and doesn't need a wordlist. `-s` is in reject_flags."
+  - "LDAP ENUM (`-L`) ONLY WORKS ON DCs — on a regular file server, `-L` returns 'LDAP not running'. Use to CONFIRM DC role; if -L produces output, the host is a DC. Anonymous LDAP is often allowed on Win2008+ DCs."
+  - "VERBOSE MODE EMITS RAW SAMBA COMMANDS — `-v` shows every `nmblookup` / `net rpc` / `rpcclient` / `smbclient` invocation. Useful for debugging but VERY noisy. Combine with `--keep` to preserve the temp samba config (`/tmp/.smb.conf.<pid>`) for inspection."
+  - "Feature 28 dynamic recipes are RETIRED for the kind:cli path — the LLM writes argv directly. Recipes still load for legacy method calls (enumerate, enum_users, enum_shares, enum_groups, enum_policy) if /session/tool_recipes/enum4linux-ng/ exists, but they're a dead branch under run_cli (REQ-TR-016)."
+  - "ANSI ESCAPE CODES IN OUTPUT — enum4linux-ng default text output is colourful (e.g., `\\x1b[92m...\\x1b[0m` around section banners). Pattern-matching for STATUS_*, `Aborting remainder of tests`, `Server doesn't allow connection` MUST strip ANSI first (regex `\\x1b\\[[0-9;]*m`) or use `-oY`/`-oJ` (structured output is ANSI-free). Legacy mcp-server.py applies this strip in `_classify_enum_error` and `_is_abort_output`."
+  - "FAILURE SIGNAL ORDERING MATTERS — when output contains BOTH `Aborting remainder of tests` AND auth signals (`STATUS_LOGON_FAILURE` / `Could not establish session`), classify as auth, NOT network. Partial connection refusals on one port are normal during auth-fail scenarios; checking auth signals BEFORE the abort-keyword pattern avoids misclassifying credential failures as transport failures. The legacy classifier checks STATUS_LOGON_FAILURE first; `Aborting...` second. Apply the same precedence when reading raw text output."
+  - "`-P` ALONE OMITS DOMAIN/OS INFO — for password policy + domain/server info in one call, use `-P -I` together (policy AND printer info, but `-I` also surfaces domain srvinfo). The legacy `enum_policy` method runs `-P -I`, not `-P` alone. To get just policy, `-P` is fine; to mirror the legacy structured-data return, add `-I`."
+  - "`sessions_possible` JSON KEY IS THE SUCCESS PROBE — when consuming `-oJ`/`-oY` output, check `sessions_possible: true` to confirm enum4linux-ng established at least one usable session. If `Aborting remainder of tests` appears in raw output AND `sessions_possible` is missing/false, the run failed end-to-end. The legacy methods gate success on `(not abort) OR sessions_possible`."
+  - "OUTPUT FILE CLEANUP IS THE CALLER'S JOB — under kind:cli the LLM writes `-oY /session/<name>` and the file persists at `/session/<name>.yaml` for follow-up reads. Legacy methods auto-cleaned via `_cleanup_json_files`; kind:cli does NOT. Do not collide prefixes across calls — overwriting clobbers prior structured output."
+
+failure_signatures:
+  # Layer-diverse signals (SKILL #11) — at least 6 distinct verifiable layers:
+  #   1. DNS  2. TCP  3. SMB / NTLM  4. RPC  5. argparse  6. Kerberos
+  #
+  # Verified against:
+  #   - enum4linux-ng v1.3.4 source (rfilipo/enum4linux-ng)
+  #   - real-world responses against HTB Hercules (NTLM disabled DC) and
+  #     a stock Win2019 file server.
+  - signal: "Could not resolve"
+    remediation: "DNS resolution failed for the host. Verify hostname spelling, try an IP literal, check container DNS (/etc/resolv.conf). On HTB / lab, ensure VPN tun0 is up. The Samba sub-tools (nmblookup / net) emit this verbatim; enum4linux-ng surfaces it in 'Aborting remainder of tests'."
+  - signal: "Name or service not known"
+    remediation: "Linux libc DNS error from getaddrinfo. Same root cause as 'Could not resolve'. Use IP literal or fix DNS."
+  - signal: "Connection refused"
+    remediation: "TCP connection refused — port 445 (SMB) AND 139 (NetBIOS) both closed. Confirm with nmap (-p 139,445). The host is reachable but SMB is not running or filtered."
+  - signal: "Connection timed out"
+    remediation: "TCP timeout — target slow or filtered. Verify port 445 / 139 with nmap; check VPN routing. Raise -t (default 5s) for slow links."
+  - signal: "do_connect: Connection"
+    remediation: "smbclient internal connection error — typically port 139/445 closed or SMB1 disabled (Samba sub-tools default to NT1). Confirm with `smbclient -L //{host} -U guest`. On Win2019+ targets where SMB1 is disabled, enum4linux-ng's NetBIOS-based modules (-N) fail; use SMB2-only path (-As)."
+  - signal: "STATUS_ACCESS_DENIED"
+    remediation: "Auth succeeded (or null session was accepted) but the SPECIFIC RPC operation requires more privileges. Common: `-U` returns ACCESS_DENIED on hardened DCs that allow null-session connect but block SAMR-OPEN-USER. Switch to `-R -r 500-2000` (RID cycle via lookupsids — different RPC, often unblocked)."
+  - signal: "STATUS_LOGON_FAILURE"
+    remediation: "Wrong username / wrong password / wrong domain. Verify -u / -p; check -w (workgroup/domain). For NTLM hash auth, ensure -H format is correct (32 hex bare NT, OR LM:NT). For Kerberos, verify the ccache file is fresh (klist /session/{user}.ccache)."
+  - signal: "STATUS_BAD_NETWORK_NAME"
+    remediation: "The share name doesn't exist on the target — only fires when -s SHARES_FILE was used (REJECTED via reject_flags) OR if smbclient sub-call hits a non-existent share. Use `-S` to discover existing shares first."
+  - signal: "STATUS_NOT_SUPPORTED"
+    remediation: "NTLM is disabled domain-wide (hardened AD like HTB Hercules). enum4linux-ng's password / hash auth fails with this status. Switch to Kerberos: 1) impacket-getTGT to write a ccache, 2) `-K /session/{user}.ccache` (and set KRB5CCNAME if needed)."
+  - signal: "Server doesn't allow connection"
+    remediation: "Generic null-session rejection. Either the server requires authentication (re-run with -u/-p), or NTLM is disabled (re-run with -K Kerberos ccache), or the target is heavily firewalled. Check enumeration output for transport-level errors first."
+  - signal: "Aborting remainder of tests"
+    remediation: "enum4linux-ng's catch-all abort — the smart-enum check (SMB / LDAP accessibility) failed, so subsequent modules are skipped. Read the LINE BEFORE this for the actual cause: 'Could not resolve' (DNS), 'Connection refused' (TCP), 'STATUS_ACCESS_DENIED' (auth/perm), 'Connection error' (transport)."
+  - signal: "Could not establish session"
+    remediation: "Same root as STATUS_LOGON_FAILURE — auth failed. Verify creds and -w/-d/--local-auth selection."
+  - signal: "Connection error"
+    remediation: "Generic transport error from smbclient / rpcclient. Read surrounding output for specifics. Common: TCP RST during session setup (firewall mid-session), or SMB protocol negotiation failure (server only speaks SMB2/3 and Samba client tried NT1)."
+  - signal: "RPC_S_ACCESS_DENIED"
+    remediation: "RPC-level access denied — usually the RPC interface is registered but the session token lacks rights. Common when null session is allowed but specific RPC (samr / lsarpc / netlogon) is restricted. Try authenticated re-run."
+  - signal: "RPC_S_NO_INTERFACES_REGISTERED"
+    remediation: "The RPC interface enum4linux-ng requested is not registered on the target. Less common; usually means the target is a Samba server with limited RPC service set, or a hardened Windows server with RPC interface filtering."
+  - signal: "RPC_NT_ACCESS_DENIED"
+    remediation: "Win32 NT-flavoured RPC access denied. Same root as RPC_S_ACCESS_DENIED. Verify creds; try local-auth (`--local-auth`) on Workgroup hosts."
+  - signal: "RPC_NT_LOGON_FAILURE"
+    remediation: "RPC-level logon failure — same as STATUS_LOGON_FAILURE. Wrong creds."
+  - signal: "BIND request rejected"
+    remediation: "RPC bind rejected — usually NTLM disablement at the bind layer. Switch to Kerberos auth (-K)."
+  - signal: "error: argument"
+    remediation: "argparse argument error — unrecognised flag, missing required value, or mutually-exclusive flag conflict (e.g., `-p` and `-K` both passed). Run `enum4linux-ng -h` to verify spelling."
+  - signal: "error: the following arguments are required"
+    remediation: "Missing the host positional. Argument MUST be the LAST positional, after all flag values. enum4linux-ng requires exactly one host."
+  - signal: "not allowed with argument"
+    remediation: "Mutually-exclusive auth flags. -p / -K / -H are an exclusive group — passing two produces this error. Pick ONE."
+  - signal: "KDC_ERR_PREAUTH_FAILED"
+    remediation: "Kerberos pre-auth failed — used with `-K` ccache. The ccache is invalid or expired. Re-run impacket-getTGT to refresh."
+  - signal: "KRB_AP_ERR_SKEW"
+    remediation: "Clock skew >5 min between attacker and KDC. Sync clock; on the kind:cli image with libfaketime, the entrypoint sets FAKETIME from clock_offset detection. Re-run after fix."
+  - signal: "KDC_ERR_S_PRINCIPAL_UNKNOWN"
+    remediation: "Kerberos service principal not found. When -K is used with a bare IP target, the SPN (cifs/{host}) cannot be resolved. Use FQDN target, or pre-populate /etc/hosts inside the container."
+
+help_commands:
+  - command: "enum4linux-ng --help"
+    purpose: "Full flag reference (~30 flags). Long form."
+  - command: "enum4linux-ng -h"
+    purpose: "Same — short form."
+

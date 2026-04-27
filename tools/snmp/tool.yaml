@@ -1,15 +1,88 @@
 name: snmp
+kind: cli
+# binary: omitted intentionally — this tool wraps a MULTI-binary toolkit:
+#
+#   net-snmp 5.9 family (Debian/Kali `snmp` package):
+#     - snmpwalk      — walk an OID subtree (GETNEXT loop)
+#     - snmpget       — get a single OID value
+#     - snmpgetnext   — get the lexically-next OID
+#     - snmpset       — write a value to an OID (requires write community)
+#     - snmpbulkget   — bulk GETBULK (SNMPv2c+)
+#     - snmpbulkwalk  — bulk walk via GETBULK (SNMPv2c+, faster than snmpwalk)
+#     - snmptable     — render a tabular OID as a table
+#     - snmpdf        — show storage devices via HOST-RESOURCES-MIB
+#     - snmpnetstat   — net-snmp's netstat-over-SNMP
+#     - snmptranslate — OID <-> name translation (no network)
+#
+#   onesixtyone 0.3.3 — fast UDP community-string brute-forcer (different
+#   author, same use case; co-installed in the image as the standard SNMP
+#   "what community works?" tool).
+#
+# Each usage_pattern below declares its own `binary:` field, mirror of the
+# impacket / smtp / forensics multi-sub-binary pattern. cli_in_container
+# forwards the chosen binary explicitly; there is NO top-level binary.
+#
+# The legacy method handlers (walk, get, bulk_walk, brute_community)
+# auto-inherit run_cli from BaseMCPServer (mcp-common 0.3.0); kind:cli is the
+# new default. The four legacy methods are preserved as the rollback path
+# per SKILL #21.
 version: "5.9"
-description: "SNMP enumeration via net-snmp 5.9 (snmpwalk, snmpbulkwalk, snmpget) and community string brute-force via onesixtyone 0.3.3. 4 methods: walk (enumerate OID subtree with v1/v2c/v3 support and named OID shortcuts for system/processes/interfaces/software), get (query specific OID), bulk_walk (high-performance v2c walk for large trees), brute_community (brute-force community strings with onesixtyone). Supports SNMPv3 authentication and encryption. MIB translation enabled. For port scanning to find SNMP use nmap UDP scan. For password brute-force use hydra."
+description: >
+  SNMP enumeration toolkit wrapping net-snmp 5.9 (`snmpwalk`, `snmpget`,
+  `snmpgetnext`, `snmpset`, `snmpbulkget`, `snmpbulkwalk`, `snmptable`,
+  `snmpdf`, `snmpnetstat`, `snmptranslate`) and onesixtyone 0.3.3 (community
+  brute-force).
+
+  Argv form is binary-canonical for each:
+
+    snmp{walk,get,getnext,bulkwalk,bulkget,table,df,netstat}
+        -v {1|2c|3} [-c <community>]
+        [-l {noAuthNoPriv|authNoPriv|authPriv} -u <user>
+         -a {MD5|SHA|SHA-256|SHA-512} -A <authpass>
+         -x {DES|AES|AES-192|AES-256} -X <privpass>]
+        [-t <timeout>] [-r <retries>]
+        [-O <fmt>] [-m <module>] [-M <mibdir>]
+        <host[:port]> [<oid> ...]
+
+    snmpset same shape with extra <oid> <type> <value> triples after host.
+    snmptranslate operates entirely offline (no host arg).
+
+    onesixtyone <host> -c <community-wordlist> [-w <ms>] [-p <port>]
+                [-q] [-d] [-i <hostfile>]   # -i is REJECTED (multi-target file)
+
+  Default port is UDP/161 (SNMPv1/v2c/v3). Net-snmp accepts the convenient
+  `host:port` shorthand as a single positional. Onesixtyone is a separate
+  binary with its OWN flag set — `-c` means "community wordlist FILE" (NOT a
+  community string and NOT a target file).
+
+  Output is line-oriented text — net-snmp emits one `OID = TYPE: VALUE` line
+  per entry (formattable via `-O*` flags); onesixtyone emits
+  `<host> [<community>] <sysDescr>` per successful guess.
+
+  Feature 28 dynamic recipes are RETIRED for the kind:cli path — the LLM
+  writes argv directly. Recipes still load for legacy method calls (walk,
+  get, bulk_walk, brute_community) if /session/tool_recipes/snmp/ exists,
+  but they're a dead branch under run_cli (REQ-TR-016).
+
 image: "ghcr.io/silicon-works/mcp-tools-snmp:latest"
 image_size_mb: 250
-timeout_seconds: 300
+
+# Dual-clock model — single OID gets are sub-second, but a full MIB walk on
+# a slow Cisco router can run for many minutes. snmpbulkwalk is faster but
+# can still be long. onesixtyone is fast (UDP burst) — a 1k-entry community
+# list takes ~10 s with -w 100, but seconds with default -w 10.
+idle_timeout_seconds: 300       # 5 min silence == wedged (target dropped UDP, retries hung)
+max_runtime_seconds: 3600       # 1 h hard cap — covers worst-case full tree walk
+timeout_seconds: 3600
+allow_multi_target: false       # one host per call — onesixtyone's -i is rejected
 
 capabilities:
   - snmp_enumeration
   - community_bruteforce
   - oid_walking
   - system_info_extraction
+  - mib_translation
+  - snmp_v3_authentication
 
 phases:
   - enumeration
@@ -24,177 +97,536 @@ resources:
 
 routing:
   use_for:
-    - "SNMP enumeration with community strings (v1/v2c/v3)"
-    - "walk OID trees to discover system info, running processes, interfaces, installed software"
-    - "brute-force SNMP community strings when port 161/UDP is open"
-    - "extract credentials from running process command lines via HOST-RESOURCES-MIB"
-    - "enumerate network interfaces and IP addresses via SNMP"
-    - "discover installed software versions for vulnerability research"
-    - "query specific SNMP OIDs for targeted information extraction"
+    - "SNMP enumeration with community strings (v1/v2c/v3) — system info, processes, interfaces, software inventory"
+    - "Walk OID trees to discover system info (1.3.6.1.2.1.1), running processes (1.3.6.1.2.1.25.4), installed software (1.3.6.1.2.1.25.6.3)"
+    - "Brute-force SNMP community strings when port 161/UDP is open but `public` doesn't work"
+    - "Extract credentials from running process command lines via HOST-RESOURCES-MIB (very common Windows/Linux misconfiguration)"
+    - "Enumerate network interfaces (1.3.6.1.2.1.2) and ARP/route tables (1.3.6.1.2.1.4.21) via SNMP"
+    - "Discover installed software versions for vulnerability research (1.3.6.1.2.1.25.6.3)"
+    - "Query specific OIDs for targeted information extraction (sysDescr, sysName, sysContact)"
+    - "SNMPv3 authPriv enumeration with discovered creds (engine-ID-aware)"
+    - "Write OID values via snmpset (post-exploitation pivot — change sysContact, disable interfaces, alter configs)"
+    - "Translate symbolic OIDs to numeric (snmptranslate, offline) for use in custom scripts"
   never_use_for:
-    - "port scanning (use nmap with -sU for UDP to find SNMP on port 161 first)"
-    - "password brute-force for non-SNMP services (use hydra)"
-    - "SNMP trap handling or monitoring"
+    - "Port scanning (use nmap with -sU --top-ports 200 to find SNMP on UDP/161 first)"
+    - "Password brute-force for non-SNMP services (use hydra)"
+    - "SNMP trap handling or monitoring (use snmptrapd, out of scope)"
+    - "Bulk wordlist credential spraying across many hosts (onesixtyone is single-host; iterate via DSL or use netexec snmp)"
   triggers:
-    - snmp
-    - snmpwalk
-    - snmpbulkwalk
-    - community string
-    - OID
-    - SNMP enumeration
-    - port 161
-    - onesixtyone
-    - MIB
+    - "snmp"
+    - "snmpwalk"
+    - "snmpbulkwalk"
+    - "snmpget"
+    - "snmpset"
+    - "snmpbulkget"
+    - "snmpgetnext"
+    - "snmptable"
+    - "snmptranslate"
+    - "onesixtyone"
+    - "community string"
+    - "OID"
+    - "MIB"
+    - "SNMP enumeration"
+    - "port 161"
+    - "UDP 161"
+    - "v1"
+    - "v2c"
+    - "v3"
+    - "authPriv"
+    - "authNoPriv"
+    - "noAuthNoPriv"
+    - "HOST-RESOURCES-MIB"
+    - "sysDescr"
+    - "ifTable"
   prefer_over: []
 
 see_also:
   - tool: nmap
-    reason: Use nmap UDP scan (-sU --top-ports 200) to discover SNMP on port 161 before using snmp tool.
+    reason: "Use `nmap -sU --top-ports 200 <host>` (or `-p 161` specifically) to discover SNMP BEFORE invoking snmp. nmap's NSE has `snmp-brute`, `snmp-info`, `snmp-sysdescr`, `snmp-processes`, `snmp-win32-software` scripts that auto-walk common OIDs after a public-string hit. Feed the discovered port + community into the snmp tool for deeper queries."
   - tool: hydra
-    reason: Use hydra for credential brute-force on other protocols. Use snmp brute_community specifically for SNMP community strings.
+    reason: "Use `hydra -P passwords.txt snmp://<host>` for v3 password brute-force (different from community brute). For v1/v2c COMMUNITY brute, prefer the snmp tool's onesixtyone path — purpose-built and orders of magnitude faster than hydra's snmp module."
+  - tool: netexec
+    reason: "netexec has an SNMP protocol module (`netexec snmp <hosts> -c public`) for fast multi-host community spraying. Use it when you have a CIDR range to sweep; use the snmp tool for single-host depth (full walks, snmpset writes, v3 authPriv)."
+  - tool: nuclei
+    reason: "nuclei snmp-* templates check default community strings against known-vulnerable device fingerprints. Complementary to manual snmp tool walks — nuclei automates known signatures; snmp lets you walk arbitrary OIDs."
 
-methods:
-  walk:
-    description: "Perform an SNMP walk to enumerate an OID subtree. Supports v1/v2c/v3, named OID shortcuts (system, processes, interfaces, installed_software, storage, users), and full tree walks. Returns parsed OID/type/value triples."
-    when_to_use: "After discovering SNMP on port 161 — first try with 'public' community string. Walk 'system' for OS info and hostname, 'processes' for running processes (often leaks credentials in command-line arguments), 'interfaces' for network config, 'installed_software' for version enumeration. Try discovered community strings from brute_community."
-    params:
-      target:
-        type: string
-        required: true
-        description: "Target hostname or IP address."
-      community:
-        type: string
-        default: "public"
-        description: "SNMP community string. Try 'public' first, then results from brute_community."
-      version:
-        type: string
-        default: "2c"
-        description: "SNMP version: 1, 2c, or 3."
-      oid:
-        type: string
-        description: "OID subtree to walk (e.g., '1.3.6.1.2.1.25.4' for processes). Omit for full walk."
-      oid_name:
-        type: string
-        description: "Named OID shortcut: system, interfaces, ip_addresses, routes, processes, installed_software, storage, users."
-      port:
-        type: integer
-        default: 161
-        description: "SNMP port."
-      timeout:
-        type: integer
-        default: 30
-        description: "Timeout per request in seconds."
-    returns:
-      entries:
-        type: array
-        description: "Parsed SNMP entries, each with: oid, type, value."
-      entry_count:
-        type: integer
-        description: "Number of entries returned."
+# ── kind:cli specific sections ──────────────────────────────────────
 
-  get:
-    description: "Get a specific SNMP OID value. Returns the type and value for a single OID."
-    when_to_use: "When you know the exact OID to query — for targeted information extraction. Common OIDs: 1.3.6.1.2.1.1.1.0 (sysDescr), 1.3.6.1.2.1.1.5.0 (sysName), 1.3.6.1.2.1.1.3.0 (sysUpTime)."
-    params:
-      target:
-        type: string
-        required: true
-        description: "Target hostname or IP address."
-      oid:
-        type: string
-        required: true
-        description: "OID to query (e.g., '1.3.6.1.2.1.1.1.0' for sysDescr)."
-      community:
-        type: string
-        default: "public"
-        description: "SNMP community string."
-      version:
-        type: string
-        default: "2c"
-        description: "SNMP version."
-      port:
-        type: integer
-        default: 161
-        description: "SNMP port."
-      timeout:
-        type: integer
-        default: 10
-        description: "Timeout in seconds."
-    returns:
-      oid:
-        type: string
-        description: "The queried OID."
-      type:
-        type: string
-        description: "SNMP data type (STRING, INTEGER, Counter32, etc.)."
-      value:
-        type: string
-        description: "The OID value."
+target_extraction:
+  # Two binary families with different target conventions:
+  #
+  #   net-snmp (snmpwalk/snmpget/snmpset/snmpbulkwalk/snmptable/snmpdf/...):
+  #     The TARGET is the FIRST non-flag positional. Net-snmp ALSO accepts
+  #     the `host:port` shorthand in that single positional (e.g.,
+  #     `10.10.10.5:1161`). The OID(s) follow as additional positionals
+  #     and must NOT be confused with the target.
+  #
+  #     Critical: an OID like `1.3.6.1.2.1.1` looks like an IPv4 address
+  #     to a naive parser (four-dot-separated). The DSL must take ONLY
+  #     the first non-flag positional. Subsequent positionals are OID(s)
+  #     for snmpwalk/get/getnext/bulkwalk; for snmpset they're triples
+  #     (oid, type, value).
+  #
+  #   onesixtyone (community brute):
+  #     The target is the FIRST positional argument. Wordlist is via -c FILE.
+  #     -i FILE is REJECTED (target list from disk — outside argv).
+  #
+  # Precedence (first match wins):
+  #   1. positional_match — first non-flag positional, strip optional :port
+  #
+  # The host_port form needs care: net-snmp's `host:port` is one argv token,
+  # not a flag. The regex below captures everything before the first colon
+  # for IPv4 / hostname; bracketed IPv6 form `[2001:db8::1]:161` is matched
+  # via the bracket alternative.
+  - rule: "first_non_flag_positional"
+    parse_as: "raw"
+  - rule: "positional_match"
+    pattern: '^\[?([^\]:/?#\s]+|[0-9a-fA-F:]+)\]?(?::\d+)?$'
+    group: 1
+    parse_as: "raw"
 
-  bulk_walk:
-    description: "High-performance SNMP bulk walk using GETBULK requests (v2c/v3 only). Faster than walk for large OID trees."
-    when_to_use: "When walk is too slow for large SNMP trees — bulk_walk retrieves multiple OIDs per request. Use for full tree enumeration or large subtrees like installed_software. Only works with SNMPv2c or v3."
-    params:
-      target:
-        type: string
-        required: true
-        description: "Target hostname or IP address."
-      community:
-        type: string
-        default: "public"
-        description: "SNMP community string."
-      oid:
-        type: string
-        description: "OID subtree to walk. Omit for full walk."
-      oid_name:
-        type: string
-        description: "Named OID shortcut."
-      port:
-        type: integer
-        default: 161
-        description: "SNMP port."
-      timeout:
-        type: integer
-        default: 30
-        description: "Timeout in seconds."
-      max_repetitions:
-        type: integer
-        default: 25
-        description: "Max OIDs per GETBULK request (higher = faster, more memory)."
-    returns:
-      entries:
-        type: array
-        description: "Parsed SNMP entries, each with: oid, type, value."
-      entry_count:
-        type: integer
-        description: "Number of entries returned."
+# Flags whose presence makes target scope un-validatable. The plugin's
+# cli_in_container rejects the call before docker spawn when any of these
+# appear, with the reason below.
+reject_flags:
+  - "-i"          # onesixtyone: target host file — multi-target, off-argv
+reject_flags_reason: >
+  onesixtyone's `-i <hostfile>` reads the target list from disk, putting the
+  hosts outside argv where scope validation cannot reach. Iterate yourself
+  via the read tool + a per-host call with the target as positional. None
+  of the net-snmp binaries take a host-list file (they're single-target by
+  design), so the net-snmp path is unaffected.
 
-  brute_community:
-    description: "Brute-force SNMP community strings using onesixtyone. Sends SNMP requests with different community strings and reports which ones get a valid response. Fast — tests hundreds of strings in seconds."
-    when_to_use: "When nmap discovers SNMP on port 161/UDP but the community string is unknown. Always try this before giving up on SNMP — many devices use non-default strings like 'internal', 'private', 'monitor', or company-specific strings. Results feed directly into walk/get/bulk_walk."
-    params:
-      target:
-        type: string
-        required: true
-        description: "Target hostname or IP address."
-      wordlist:
-        type: array
-        description: "Custom community strings to try. If omitted, uses built-in list (public, private, community, manager, admin, internal, etc.)."
-      port:
-        type: integer
-        default: 161
-        description: "SNMP port."
-      wait:
-        type: integer
-        default: 10
-        description: "Milliseconds between packets (lower = faster but may miss responses)."
-    returns:
-      found:
-        type: array
-        description: "Valid community strings found, each with: host, community, sysDescr."
-      found_count:
-        type: integer
-        description: "Number of valid community strings discovered."
-      communities:
-        type: array
-        description: "Just the community string names (for easy use in walk/get calls)."
+# Per-tool value-taking flags whose values must NOT be confused with targets.
+# Verified against `snmpwalk -h`, `snmpget -h`, `snmpset -h`,
+# `snmpbulkwalk -h`, `onesixtyone -h` on Kali rolling 2026-04.
+value_flags:
+  # ── net-snmp: SNMP version + community ──
+  - "-v"                # 1 | 2c | 3
+  - "-c"                # community string (v1/v2c) — also onesixtyone's wordlist FILE
+  # ── net-snmp: SNMPv3 auth ──
+  - "-u"                # secName (v3 username)
+  - "-l"                # secLevel: noAuthNoPriv | authNoPriv | authPriv
+  - "-a"                # authProtocol: MD5 | SHA | SHA-224 | SHA-256 | SHA-384 | SHA-512
+  - "-A"                # authPassphrase (8+ chars)
+  - "-x"                # privProtocol: DES | AES | AES-128 | AES-192 | AES-256
+  - "-X"                # privPassphrase (8+ chars)
+  - "-e"                # securityEngineID (hex)
+  - "-E"                # contextEngineID (hex)
+  - "-n"                # contextName
+  - "-Z"                # boots,time (replay-window pair)
+  # ── net-snmp: timing / retries ──
+  - "-t"                # timeout (seconds, default 5)
+  - "-r"                # retries (default 5)
+  # ── net-snmp: output formatting ──
+  - "-O"                # output options bundle (a | b | e | E | f | n | q | Q | s | S | t | T | u | U | v | x | X)
+  - "-On"               # numeric OIDs (alias / shorthand form)
+  - "-Oe"               # enums as values
+  - "-OE"               # enums quoted
+  - "-Oa"               # ASCII rendering
+  - "-Ob"               # break OID indices
+  - "-Of"               # full OID names
+  - "-OQ"               # no equals (just space)
+  - "-Os"               # short OID names
+  - "-OS"               # MIB::short
+  - "-Ot"               # timeticks as numbers
+  - "-OT"               # timeticks as text
+  - "-Ou"               # UCD-style
+  - "-OU"               # UCD numeric
+  - "-Ov"               # value-only (no OID)
+  - "-Ox"               # hex-string
+  - "-OX"               # hex-string with formatting
+  # ── net-snmp: MIB module loading ──
+  - "-m"                # MIB module list (e.g., ALL, +HOST-RESOURCES-MIB)
+  - "-M"                # MIB directory list (colon-separated)
+  - "-P"                # MIB parser flags (mibAllowUnderline, etc.)
+  - "-D"                # debug tokens (e.g., -Dverbose)
+  - "-L"                # log destination (LE, LO, LF FILE)
+  # ── net-snmp: Cr / Cp / Cc — bulk-walk and behavior tweaks ──
+  - "-Cr"               # snmpbulkwalk: max-repetitions value
+  - "-Cn"               # snmpbulkwalk: non-repeaters
+  - "-Cc"               # snmpwalk: don't check for OID-increase (prevents loop)
+  - "-Cp"               # snmptable: print check
+  - "-CB"               # snmpwalk: GETBULK only (no GETNEXT fallback)
+  - "-CE"               # snmpwalk: end-of-walk OID limit
+  - "-CI"               # snmpwalk: ignore index part
+  # ── net-snmp: agent flags (less common but valued) ──
+  - "-Ci"               # show contextless-agent
+  - "-Cf"               # full output format
+  # ── snmpset specific ──
+  - "-s"                # NOT used by snmpset — listed only because some forks alias
+  # ── onesixtyone ──
+  # NOTE: onesixtyone's -c is COMMUNITY-WORDLIST-FILE, NOT a community string
+  # and NOT a target file. The same flag letter as net-snmp's -c (community
+  # string) is BINARY-DEPENDENT — DSL only invokes one binary per call (chosen
+  # by usage_pattern's binary: field), so there's no cross-binary collision.
+  - "-w"                # onesixtyone: wait between packets (ms, default 10)
+  - "-o"                # onesixtyone: output file
+  - "-i"                # onesixtyone: target HOST FILE — REJECTED above
+  - "-p"                # onesixtyone: SNMP port (default 161)
+  # ── boolean / no-value flags listed for safety (DSL skips them harmlessly) ──
+  - "-q"                # onesixtyone quiet — boolean
+  - "-d"                # onesixtyone debug — boolean
+  - "-h"                # universal help — boolean
+  - "-V"                # net-snmp version — boolean
+  - "-H"                # net-snmp config-file help — boolean
+
+usage_patterns:
+  # ── snmpwalk: subtree walks (the bread-and-butter operation) ──
+  - name: "Walk system MIB (sysDescr / sysName / sysContact / sysLocation / sysUpTime)"
+    binary: "snmpwalk"
+    command: "-v 2c -c {community} {host} 1.3.6.1.2.1.1"
+    when: "First-contact SNMP enum after nmap finds UDP/161 open. Walk the system OID subtree (1.3.6.1.2.1.1) for the lowest-noise, highest-signal info: sysDescr (full OS string with kernel version), sysName (hostname), sysContact (often a real admin email), sysLocation (datacenter / room), sysUpTime. Try `public` first, then `private`, then onesixtyone results. ~5-10 entries typically."
+
+  - name: "Walk system MIB with named OID (no numeric required)"
+    binary: "snmpwalk"
+    command: "-v 2c -c {community} {host} system"
+    when: "Same as above but using the symbolic name `system` (resolved via SNMPv2-MIB). Easier to read; works when MIBs are loaded (default for net-snmp). For maximum portability across stripped images, use the numeric form `1.3.6.1.2.1.1`."
+
+  - name: "Walk full MIB-2 tree (all standard MIBs)"
+    binary: "snmpwalk"
+    command: "-v 2c -c {community} {host} 1.3.6.1.2.1"
+    when: "Comprehensive single-call enumeration — walks the entire mib-2 subtree (system + interfaces + IP + TCP/UDP + SNMP + RMON). Slow on busy devices (1000s of entries). Prefer snmpbulkwalk for the same scope. Use when you want EVERYTHING and don't care about runtime."
+
+  - name: "Walk running processes (HOST-RESOURCES-MIB hrSWRunTable)"
+    binary: "snmpwalk"
+    command: "-v 2c -c {community} -m HOST-RESOURCES-MIB {host} 1.3.6.1.2.1.25.4.2"
+    when: "Enumerate every process running on the target via HOST-RESOURCES-MIB. ~25.4.2.1.4 = process name, ~25.4.2.1.5 = process path, ~25.4.2.1.4 = process parameters (THIS LEAKS COMMAND-LINE ARGS — frequently includes plaintext passwords passed via cmdline like `mysql -uroot -pPassword1!`). High-value reconnaissance hit."
+
+  - name: "Walk installed software (HOST-RESOURCES-MIB hrSWInstalledTable)"
+    binary: "snmpwalk"
+    command: "-v 2c -c {community} -m HOST-RESOURCES-MIB {host} 1.3.6.1.2.1.25.6.3"
+    when: "List installed packages with versions. Drop the result into a CVE search (cve-lookup tool, or feed to nuclei). For Windows targets this often includes service-pack-level detail. For Linux, mirrors `dpkg -l` / `rpm -qa`. The version column is at .25.6.3.1.2."
+
+  - name: "Walk network interfaces (ifTable + ipAddrTable)"
+    binary: "snmpwalk"
+    command: "-v 2c -c {community} {host} 1.3.6.1.2.1.2.2.1"
+    when: "Enumerate interfaces — name (.2), MAC (.6), MTU (.4), speed (.5), admin/oper status (.7/.8), in/out octets (.10/.16). Pair with `1.3.6.1.2.1.4.20` (ipAddrTable) to map interfaces to IPs. Reveals VLAN tags, internal subnets, and unannounced management interfaces."
+
+  - name: "Walk full tree (no OID — DANGEROUS, may take hours)"
+    binary: "snmpwalk"
+    command: "-v 2c -c {community} {host}"
+    when: "No OID arg — walks the ENTIRE accessible tree. On a busy router with full BGP/RMON tables this can be GIGABYTES and run for hours. Almost always wrong choice; prefer scoped walks (system, interfaces, processes) or snmpbulkwalk. Use only when you've ruled out everything else and the target is small."
+
+  - name: "Walk with output options — numeric OIDs, value-only, no equals"
+    binary: "snmpwalk"
+    command: "-v 2c -c {community} -OnvQ {host} 1.3.6.1.2.1.1"
+    when: "Output formatting bundle: `-On` (numeric OIDs only — no MIB symbol resolution), `-v` (value only — strip the OID/type), `-Q` (no equals sign separator). Useful when piping to scripts that parse just the values. Multiple `-O` options can be merged into a single arg: `-OnvQ`."
+
+  - name: "Walk with all MIBs loaded (ALL keyword)"
+    binary: "snmpwalk"
+    command: "-v 2c -c {community} -m ALL {host} system"
+    when: "Load every MIB available in /usr/share/snmp/mibs (after `snmp-mibs-downloader` populates it — done in the Dockerfile). Resolves vendor-specific OID names (CISCO-PROCESS-MIB, NET-SNMP-EXTEND-MIB, etc.). Without `-m ALL`, only built-in MIBs resolve, leaving most enterprise OIDs as numeric."
+
+  # ── snmpget: single OID query ──
+  - name: "Get single OID — sysDescr"
+    binary: "snmpget"
+    command: "-v 2c -c {community} {host} 1.3.6.1.2.1.1.1.0"
+    when: "Targeted single-OID query when you know exactly what you want. .0 suffix is required for SCALAR values (no .0 = the OID exists but has no leaf). Common scalars: sysDescr (.1.0), sysObjectID (.2.0), sysUpTime (.3.0), sysContact (.4.0), sysName (.5.0), sysLocation (.6.0). Faster than walk for one value."
+
+  - name: "Get with named OID (using SNMPv2-MIB resolution)"
+    binary: "snmpget"
+    command: "-v 2c -c {community} {host} sysDescr.0"
+    when: "Symbolic form — `sysDescr.0` resolves via SNMPv2-MIB. The `.0` is the scalar instance suffix. snmpget without it returns `No Such Instance` because non-zero indices are for table rows. Symbolic form is human-readable; numeric form is portable across MIB sets."
+
+  # ── snmpgetnext: lexical traversal ──
+  - name: "Get NEXT OID after a given point"
+    binary: "snmpgetnext"
+    command: "-v 2c -c {community} {host} 1.3.6.1.2.1.1"
+    when: "Returns the lexically-next OID after the argument. Used to verify what the agent serves next without committing to a full walk. Mostly used by tooling; humans usually want walk."
+
+  # ── snmpbulkwalk: high-perf walk (v2c+) ──
+  - name: "Bulk walk — high-performance MIB-2 enumeration"
+    binary: "snmpbulkwalk"
+    command: "-v 2c -c {community} {host} 1.3.6.1.2.1"
+    when: "GETBULK-based walk — gets up to `-Cr` (default 25) rows per request instead of one. ~10x faster than snmpwalk for large trees. v2c or v3 only (v1 doesn't have GETBULK). Default for ANY non-trivial tree. Tune `-Cr` (max-repetitions) up to 50-100 on fast LANs; lower on lossy links."
+
+  - name: "Bulk walk with tuned max-repetitions"
+    binary: "snmpbulkwalk"
+    command: "-v 2c -c {community} -Cr 50 {host} 1.3.6.1.2.1.25"
+    when: "Override the default max-repetitions (25). Higher = fewer round-trips but larger UDP packets (risk of fragmentation/drop). 50 is a good middle for LAN; 100 for switch fabrics; 10 if you see retransmits in `-Dverbose`."
+
+  # ── snmpbulkget: single-shot bulk get ──
+  - name: "Bulk get — multiple OIDs in one request"
+    binary: "snmpbulkget"
+    command: "-v 2c -c {community} -Cn 0 -Cr 10 {host} 1.3.6.1.2.1.1.1 1.3.6.1.2.1.1.5"
+    when: "GETBULK for multiple OIDs in one packet. `-Cn 0` (non-repeaters) + `-Cr 10` (max-repetitions). When you want, e.g., the first 10 entries each of sysDescr-tree AND sysName-tree without doing a full walk. Niche; usually walk or scoped get is enough."
+
+  # ── snmpv3: authPriv (the secure / production path) ──
+  - name: "v3 authPriv walk — discovered creds, full encryption"
+    binary: "snmpwalk"
+    command: "-v 3 -l authPriv -u {user} -a SHA -A '{auth_pass}' -x AES -X '{priv_pass}' {host} 1.3.6.1.2.1.1"
+    when: "SNMPv3 with auth + priv — the secure mode. -l authPriv requires ALL of -u (username), -a (auth proto: MD5/SHA/SHA-256/SHA-512), -A (auth passphrase, 8+ chars), -x (priv proto: DES/AES/AES-192/AES-256), -X (priv passphrase). Quote passphrases with shell-special chars. Common after credential recovery from config dumps or password spraying. Production networks use this exclusively."
+
+  - name: "v3 authNoPriv walk — auth but no encryption"
+    binary: "snmpwalk"
+    command: "-v 3 -l authNoPriv -u {user} -a SHA -A '{auth_pass}' {host} 1.3.6.1.2.1.1"
+    when: "Auth without privacy. Less common but seen in legacy enterprise deploys where decryption load was a concern. Slightly less argv (no -x/-X). All packets auth'd but readable on the wire — catchable by tcpdump."
+
+  - name: "v3 noAuthNoPriv — username only (rare but tested)"
+    binary: "snmpwalk"
+    command: "-v 3 -l noAuthNoPriv -u {user} {host} 1.3.6.1.2.1.1"
+    when: "Anonymous v3 — no auth, no priv. Devices configured for transition or guest access sometimes allow this. ANY v3 username is accepted; auth happens implicitly via context. Rare but worth trying if v1/v2c is blocked."
+
+  # ── snmpset: write operations (post-exploitation) ──
+  - name: "Set sysContact — proof of write access"
+    binary: "snmpset"
+    command: "-v 2c -c {write_community} {host} sysContact.0 s 'pwn@target.local'"
+    when: "Demonstrates write access — set sysContact to a marker. snmpset triple form: `<oid> <type> <value>`. Types: `s`=string, `i`=int, `u`=unsigned, `t`=timeticks, `a`=ip-addr, `o`=OID, `x`=hex-string, `b`=bits, `D`=decimal-string, `U`=unsigned64, `I`=signed64, `F`=float, `d`=double, `n`=null. Write community is usually DIFFERENT from read community — try `private`, `manager`, `admin`."
+
+  - name: "Set with multiple OIDs in one call (atomic update)"
+    binary: "snmpset"
+    command: "-v 2c -c {write_community} {host} sysContact.0 s 'admin@target' sysLocation.0 s 'Datacenter A'"
+    when: "snmpset can take MULTIPLE oid/type/value triples in one PDU — applied atomically (all succeed or all fail). Useful for coordinated config changes. Each triple is three argv tokens; the DSL passes them through verbatim."
+
+  # ── snmptable: tabular OIDs as a table ──
+  - name: "Render ifTable as a table"
+    binary: "snmptable"
+    command: "-v 2c -c {community} -Cb {host} 1.3.6.1.2.1.2.2"
+    when: "snmptable formats a tabular OID (like ifTable) as columns. -Cb = brief column headers; without it the headers are FULLY-qualified names. More readable than snmpwalk for table data. Same MIB resolution rules apply (-m ALL for vendor MIBs)."
+
+  # ── snmptranslate: offline OID resolution ──
+  - name: "Translate symbolic OID to numeric (offline)"
+    binary: "snmptranslate"
+    command: "-On sysDescr.0"
+    when: "OFFLINE — no network. Resolves a symbolic OID to its numeric form (or vice-versa with -Of). Useful when scripting SNMP from another tool that needs numeric OIDs only. -On = numeric output, -Of = full symbolic, -Os = short symbolic. No host argument."
+
+  - name: "Translate numeric OID to fully-qualified name"
+    binary: "snmptranslate"
+    command: "-Of 1.3.6.1.2.1.1.1.0"
+    when: "OFFLINE inverse — numeric to symbolic. Helpful when reading raw walk output (e.g., from another tool that emitted numeric OIDs). Resolves to e.g., `.iso.org.dod.internet.mgmt.mib-2.system.sysDescr.0`."
+
+  # ── snmpdf: storage devices via HOST-RESOURCES-MIB ──
+  - name: "Show storage devices (snmpdf — disk usage via SNMP)"
+    binary: "snmpdf"
+    command: "-v 2c -c {community} {host}"
+    when: "Walks HOST-RESOURCES-MIB hrStorageTable and prints a `df`-like view of every storage device on the target. Quick way to see disk layout, fixed vs removable, available space. Useful for sizing data exfil, finding /tmp space, identifying hidden mounts."
+
+  # ── onesixtyone: community brute ──
+  - name: "Community brute with built-in wordlist"
+    binary: "onesixtyone"
+    command: "{host} -c /usr/share/seclists/Discovery/SNMP/common-snmp-community-strings.txt"
+    when: "FAST UDP burst against a single host with a community-string wordlist FILE. NOTE: target is FIRST positional, then `-c` is the WORDLIST FILE (NOT a community string and NOT a target file — burned-by-this-once trap). Default seclists list has ~40 strings — covers public, private, internal, manager, admin, security, snmpd, monitor, etc."
+
+  - name: "Community brute with rate-limit (slower, less DoS risk)"
+    binary: "onesixtyone"
+    command: "{host} -c /usr/share/seclists/Discovery/SNMP/common-snmp-community-strings.txt -w 100"
+    when: "Add `-w 100` (100ms wait between packets) to slow the burst. Default `-w 10` (10ms) can DoS small embedded devices (printers, IoT, network controllers). For lab work `-w 10` is fine; for client engagements with fragile assets, ALWAYS use `-w 100` or higher."
+
+  - name: "Community brute with custom wordlist"
+    binary: "onesixtyone"
+    command: "{host} -c /session/{custom_communities}"
+    when: "Custom wordlist (write to /session via the `write` tool first). Each line is one community string. Use targeted lists when the engagement context suggests specific strings — e.g., company name, project codename, default vendor strings (cisco, juniper-public, hpinternal)."
+
+  - name: "Community brute on non-standard port"
+    binary: "onesixtyone"
+    command: "{host} -c /usr/share/seclists/Discovery/SNMP/common-snmp-community-strings.txt -p 1161"
+    when: "Some hardened devices move SNMP off 161 (1161, 16100, 8161 are common). nmap UDP scan reveals the port; pass via `-p`."
+
+  # ── help & version (target=null is OK) ──
+  - name: "snmpwalk help — full flag reference"
+    binary: "snmpwalk"
+    command: "-h"
+    when: "Print snmpwalk's full flag set (~100 flags across versioning, auth, output, MIB, debug). Useful when an agent isn't sure of a less-common flag. NOTE: prints to stdout NOT stderr; pipe to less for interactive."
+
+  - name: "snmpset help"
+    binary: "snmpset"
+    command: "-h"
+    when: "snmpset has the type-letter table (s/i/u/t/a/o/x/b/D/U/I/F/d/n) which is the most-forgotten part of the snmpset interface. The help output explains each."
+
+  - name: "onesixtyone help"
+    binary: "onesixtyone"
+    command: "-h"
+    when: "Print onesixtyone usage. Tiny tool — ~6 flags. Useful to confirm the version (0.3.3 or 0.3.4 — they differ in -d output format)."
+
+output_formats:
+  # net-snmp's `-O*` family is the canonical output-formatting set. All
+  # output is text; there is no JSON option. onesixtyone has no structured
+  # output at all — one line per match.
+  - flag: ""
+    format: "text"
+    preferred: false
+    notes: "Default — net-snmp emits `<OID> = <TYPE>: <VALUE>` per entry. Onesixtyone emits `<host> [<community>] <sysDescr>` per match."
+  - flag: "-On"
+    format: "text_numeric"
+    preferred: false
+    notes: "Numeric OIDs only (no MIB-symbol resolution). Compact, portable across systems with different MIB sets loaded."
+  - flag: "-Oe"
+    format: "text_enums"
+    preferred: false
+    notes: "Render INTEGER values that have ENUM clauses as their symbolic names (e.g., `up(1)` instead of `1`)."
+  - flag: "-OQ"
+    format: "text_no_equals"
+    preferred: false
+    notes: "Drop the `= TYPE: ` separator — just `<OID> <VALUE>`. Easier to parse with awk."
+  - flag: "-Ov"
+    format: "text_value_only"
+    preferred: false
+    notes: "Print VALUE only (no OID, no TYPE). Used when you know the OID a-priori and just want the value."
+  - flag: "-OnvQ"
+    format: "text_compact"
+    preferred: false
+    notes: "Bundle: numeric + value-only + no-equals. Most parser-friendly form."
+  - flag: "-m ALL"
+    format: "text_all_mibs"
+    preferred: false
+    notes: "Load every MIB in /usr/share/snmp/mibs. Resolves vendor-specific names. Modifies the OID/symbol resolution, not the line format."
+
+common_options:
+  version_and_community:
+    - "-v 1|2c|3: SNMP version. v1 = legacy (no GETBULK), v2c = community-string, v3 = user-based with auth/priv."
+    - "-c <string>: community string for v1/v2c. Default 'public'. Try 'private' for write. Brute via onesixtyone."
+  v3_auth:
+    - "-l noAuthNoPriv|authNoPriv|authPriv: SNMPv3 security level. -l determines which OTHER flags are required."
+    - "-u <secName>: v3 username."
+    - "-a MD5|SHA|SHA-256|SHA-512: v3 authentication protocol."
+    - "-A <pass>: v3 authentication passphrase (8+ chars). QUOTE if shell-special chars."
+    - "-x DES|AES|AES-192|AES-256: v3 privacy protocol. AES preferred over DES."
+    - "-X <pass>: v3 privacy passphrase. QUOTE if shell-special."
+    - "-e <hex>: securityEngineID (rare; usually auto-discovered)."
+    - "-Z <boots>,<time>: replay-window pair (rare)."
+  output_formatting:
+    - "-O<opt>: output options. Combinable: -OnvQ = numeric + value-only + no-equals."
+    - "-On: numeric OIDs only."
+    - "-Oe: ENUM values as symbolic names."
+    - "-Ov: value only."
+    - "-OQ: no equals sign."
+    - "-OS: MIB::short OID names."
+  mib_loading:
+    - "-m <list>: MIB modules. ALL loads everything in /usr/share/snmp/mibs. +<MIB> appends; -<MIB> removes."
+    - "-M <dirs>: MIB directories (colon-separated). Default /usr/share/snmp/mibs."
+    - "-P<flag>: MIB parser flags (e.g., -PR for replacements)."
+  performance:
+    - "-t <sec>: timeout per request (default 5)."
+    - "-r <int>: retries per request (default 5). High retry x timeout = looong."
+    - "-Cr <int>: snmpbulkwalk max-repetitions (default 25). Higher = fewer round-trips."
+    - "-Cn <int>: snmpbulkwalk non-repeaters (default 0)."
+    - "-Cc: snmpwalk — don't check OID-increase (avoid loops on broken agents)."
+  onesixtyone:
+    - "<host>: target — FIRST positional argument (NOT a flag value)."
+    - "-c <file>: COMMUNITY-WORDLIST FILE (NOT a community string and NOT a target file)."
+    - "-w <ms>: wait between packets in milliseconds. Default 10. Use 100+ for fragile devices."
+    - "-p <port>: SNMP port (default 161)."
+    - "-i <file>: REJECTED — multi-host file, off-argv."
+    - "-q / -d: boolean — quiet / debug."
+    - "-o <file>: write output to file."
+
+gotchas:
+  - "MULTI-BINARY toolkit — choose the right binary per operation. snmpwalk/get/getnext/set/bulkwalk/bulkget/table/df/translate (net-snmp) AND onesixtyone (community brute). Each usage_pattern declares `binary:` explicitly. cli_in_container forwards the chosen binary (mirror of impacket's pattern)."
+  - "TARGET IS POSITIONAL — net-snmp takes the host as the FIRST non-flag positional, OID(s) follow. The DSL extracts ONLY the first positional. An OID like `1.3.6.1.2.1.1` LOOKS like an IP-address regex match — but it's the SECOND positional and must NOT be confused with the target. The target_extraction rule's first_non_flag_positional fires before any IP-shape regex."
+  - "host:port SHORTHAND — net-snmp accepts `host:port` as a single positional (e.g., `10.10.10.5:1161`). The target_extraction `positional_match` regex strips the `:port` suffix. For onesixtyone, port is via `-p` (not `:port`)."
+  - "ONESIXTYONE'S `-c` IS A WORDLIST FILE — NOT a community string and NOT a target file. The same flag letter as net-snmp's `-c <community-string>` is BINARY-DEPENDENT. `onesixtyone <host> -c /path/to/communities.txt` brutes communities. Easy to misread when pattern-matching from net-snmp examples."
+  - "ONESIXTYONE'S `-i` IS REJECTED — `-i <hostfile>` reads target hosts from disk, putting them outside argv where scope validation cannot reach. Iterate via per-host calls instead. net-snmp has no equivalent multi-target flag."
+  - "v1/v2c COMMUNITY STRING IS ON THE CMDLINE — visible in `ps`/audit logs of the attacker container AND on the wire as plaintext. Avoid v1/v2c in production engagements; use v3 authPriv. For lab/HTB it's fine. For client engagements treat the community string as a credential and don't paste it in chat / commit history."
+  - "v3 authPriv requires SIX flags in canonical order: `-v 3 -l authPriv -u <user> -a <authProto> -A '<authPass>' -x <privProto> -X '<privPass>'`. Misordering or missing any flag for the chosen security level returns confusing errors (`authenticationFailure` or `Unknown user name`). The -l value PRESCRIBES which other flags are required: noAuthNoPriv → just -u; authNoPriv → -u/-a/-A; authPriv → all six."
+  - "PASSPHRASES NEED 8+ CHARS — net-snmp enforces this minimum. Shorter passphrases cause `Error generating a key for authentication pass phrase`. Quote passphrases with shell-special chars (`$`, `!`, `'`, backtick) — argv passes verbatim through cli_in_container."
+  - "`-O` FLAGS ARE COMBINABLE — `-OnvQ` = numeric + value-only + no-equals. The single `-O` arg can hold multiple option letters. value_flags lists common bundles (`-On`, `-Oe`, `-OQ`, `-Ov`) but the DSL must also pass arbitrary `-O*` cleanly."
+  - "OID SCALAR vs TABLE — scalars (sysDescr, sysName, ...) need the `.0` suffix when used with snmpget. snmpwalk doesn't need it (it walks). `snmpget sysDescr` returns `No Such Instance`; `snmpget sysDescr.0` returns the value. snmpset always needs the full instance OID."
+  - "snmpset TYPE LETTER REQUIRED — the triple form is `<oid> <type> <value>`. type is one letter: s/i/u/t/a/o/x/b/D/U/I/F/d/n. Forgetting it is the #1 snmpset error (`bad type letter`). The most common types: `s` (string), `i` (integer), `a` (IPAddress), `t` (TimeTicks), `o` (OID), `x` (hex)."
+  - "WRITE COMMUNITY != READ COMMUNITY — most devices ship with `public` for read and `private` for write. Some change `private` to a real password. Onesixtyone-bruting JUST `private` (or `private`-prefixed strings) for the write community is a common second pass after read access is established."
+  - "MIB LOADING DEFAULT IS LIMITED — Debian/Kali ship with `mibs :` commented out in /etc/snmp/snmp.conf (the Dockerfile uncomments it via sed). Without MIBs loaded, OIDs render as numeric only. `-m ALL` forces full MIB load; vendor MIBs need snmp-mibs-downloader to populate /usr/share/snmp/mibs/."
+  - "onesixtyone DEFAULT WAIT = 10ms — fast, but can DoS embedded devices (printers, IoT controllers, old switches). For client engagements with fragile assets, ALWAYS use `-w 100` or higher. The tool burst-sends UDP without ACK; a slow target can lose every packet."
+  - "PORT IS UDP — SNMP is UDP/161 by default. `nmap -sU -p 161` (NOT `-sS` / `-sT`) is required to discover. UDP scans are slow and lossy; nmap's --top-ports 200 -sU is the practical scope. Many firewalls drop SNMP from external; SNMP exposure is usually internal-network."
+  - "SNMP TIMEOUT/RETRIES MULTIPLY — `-t 5 -r 5` (defaults) means up to 30 seconds per OID before giving up (5s × 5 retries × 1 initial). Walks of 1000s of OIDs against a slow target can take HOURS with defaults. Tune `-t 1 -r 0` for fast probes, `-t 10 -r 3` for cautious."
+  - "Feature 28 dynamic recipes are RETIRED for the kind:cli path — the LLM writes argv directly. Recipes still load for legacy method calls (walk, get, bulk_walk, brute_community) if /session/tool_recipes/snmp/ exists, but they're a dead branch under run_cli (REQ-TR-016)."
+  - "BUILT-IN WORDLIST PATH — the image ships `/app/community-strings.txt` (~17 strings: public, private, community, manager, admin, monitor, internal, etc.) baked in by the legacy mcp-server.py defaults. It is the no-arg fallback when no `/session/<wordlist>` is provided AND seclists isn't desired. Prefer `/usr/share/seclists/Discovery/SNMP/common-snmp-community-strings.txt` (~40 strings) for breadth; use `/app/community-strings.txt` for fast smoke-tests."
+  - "COMMON OID SUBTREE SHORTCUTS (legacy COMMON_OIDS dict, useful as memorisation pegs) — system=1.3.6.1.2.1.1, interfaces=1.3.6.1.2.1.2, ip_addresses=1.3.6.1.2.1.4.20, routes=1.3.6.1.2.1.4.21, tcp_connections=1.3.6.1.2.1.6.13, udp_listeners=1.3.6.1.2.1.7.5, processes=1.3.6.1.2.1.25.4, installed_software=1.3.6.1.2.1.25.6.3, storage=1.3.6.1.2.1.25.2, users=1.3.6.1.4.1.77.1.2.25 (Windows LanMan UserTable — high-value on legacy Windows). Use these directly as the OID positional."
+  - "snmpwalk/snmpbulkwalk EFFECTIVE TIMEOUT IS A PRODUCT — the legacy handler computes container-budget = (per-request timeout) × 10 + 30s for walks. A `-t 30` walk on a 1000-OID tree can wall-clock at minutes; the tool's `timeout_seconds: 3600` cap accommodates this. For fast feedback prefer scoped walks with `-t 1 -r 0` rather than full-tree with defaults."
+  - "noSuchObject / noSuchInstance ARE NOT FAILURES AT EXIT CODE LEVEL — snmpget exits 0 even when the OID doesn't exist; the SNMP layer returned `noSuchObject` / `noSuchInstance` as a valid response. The legacy handler scans STDOUT for the human-readable phrasing `No Such Object` / `No Such Instance` (capital case) to classify as error. failure_signatures match both casings."
+  - "RAW OUTPUT CAP IS 50000 CHARS — legacy `sanitize_output(stdout, max_length=50000)` truncated walk dumps. kind:cli's run_cli inherits this cap. Walks producing >50KB get truncated; for full bulk dumps redirect to `/session/<file>.txt` via shell-style redirect (NOT supported in argv — write a wrapper recipe or split the walk by subtree)."
+
+failure_signatures:
+  # Layer-diverse signals (SKILL #11) — at least 6 distinct verifiable layers:
+  #   1. DNS  2. UDP / network  3. SNMP-protocol-error
+  #   4. Auth (v1/v2c community + v3 auth/priv)  5. MIB / argument
+  #   6. Tool-internal (onesixtyone)
+  #
+  # Verified against:
+  #   - net-snmp 5.9 source / man pages
+  #   - onesixtyone 0.3.3 source
+  #   - reference responses from postfix-style hardened agents
+  - signal: "Cannot resolve"
+    remediation: "DNS resolution failed for the host. Verify hostname spelling, try an IP literal, check container DNS (`/etc/resolv.conf`). On HTB / lab, ensure VPN tun0 is up."
+  - signal: "Name or service not known"
+    remediation: "getaddrinfo failed — Linux libc DNS error. Same root cause as 'Cannot resolve'. Use IP, or fix DNS."
+  - signal: "Unknown host"
+    remediation: "net-snmp's older DNS-failure phrasing. Same root cause as 'Cannot resolve'."
+  - signal: "Timeout: No Response from"
+    remediation: "Net-snmp's classic timeout — UDP packet sent but no SNMP reply. Causes: (a) wrong community string (server silently drops), (b) port 161 closed/filtered, (c) target down, (d) SNMPv3 required but v1/v2c attempted. Verify port: `nmap -sU -p 161 <host>`. Try other community strings via onesixtyone."
+  - signal: "No Response from"
+    remediation: "Variant of 'Timeout: No Response' — same diagnosis. Net-snmp's exact wording varies by version."
+  - signal: "Connection refused"
+    remediation: "TCP refused — but SNMP is UDP, so this typically means the agent is listening on a different protocol (TCP-wrapped) or the user mistakenly used `-Tt` / TCP transport. Default is UDP; verify transport flag."
+  - signal: "Connection timed out"
+    remediation: "TCP/connection-level timeout — uncommon for SNMP (which is UDP) unless `-T t` (TCP transport) was used. For UDP, see 'Timeout: No Response from'."
+  - signal: "No route to host"
+    remediation: "Network unreachable from the container. VPN tun0 likely down or the lab subnet isn't routed. Check `ip route` inside container; verify host's tun0 status."
+  - signal: "authenticationFailure"
+    remediation: "SNMPv3 authentication failed. Wrong -u, -A, -a, or stale engine ID. Verify creds; try `-Z 0,0` to force engine-discovery; ensure -a protocol matches what the device requires (SHA vs MD5 vs SHA-256)."
+  - signal: "Authentication failure (incorrect password, community or key)"
+    remediation: "Net-snmp's full auth-failure phrasing. For v1/v2c this means wrong community string — try other candidates from onesixtyone results. For v3 this means wrong -A passphrase, wrong -u username, or wrong -a auth protocol."
+  - signal: "Wrong digest"
+    remediation: "v3 auth digest mismatch — usually wrong -a (auth protocol) or wrong -A (passphrase). The digest is computed from passphrase+protocol; either being wrong gives this. Try MD5 if SHA fails (legacy devices)."
+  - signal: "Unknown user name"
+    remediation: "v3 -u username not registered on the agent. Either typo'd or the user genuinely doesn't exist. Some devices require case-sensitive match (admin != Admin)."
+  - signal: "usmStatsUnknownUserNames"
+    remediation: "Same as 'Unknown user name' but the SNMP stats counter form. v3 username unknown."
+  - signal: "usmStatsWrongDigests"
+    remediation: "Same as 'Wrong digest' — counter form. v3 auth digest mismatch."
+  - signal: "Error generating a key for authentication pass phrase"
+    remediation: "Passphrase is too short — net-snmp requires 8+ chars for both -A and -X. Lengthen the passphrase or pad to 8 chars."
+  - signal: "Error in packet"
+    remediation: "Generic SNMP-layer error. The line that follows usually has detail (`Reason: noSuchName`, `Reason: noAccess`, `Reason: tooBig`, `Reason: genErr`). Read the next line for the actual cause."
+  - signal: "noSuchName"
+    remediation: "v1 error — OID doesn't exist on the agent. v2c/v3 use `noSuchObject` / `noSuchInstance` for the same case. Verify the OID is correct (try snmptranslate); some MIBs are vendor-specific and need `-m`."
+  - signal: "noSuchObject"
+    remediation: "v2c+ — the OID's parent is unknown (the MIB module isn't implemented on the agent). Different from `noSuchInstance` (which is 'OID exists, just no value at this index')."
+  - signal: "noSuchInstance"
+    remediation: "v2c+ — OID base is known but the requested instance doesn't exist (e.g., asking for sysDescr.1 when only .0 is valid). Add the correct .0 / .<index> suffix."
+  - signal: "No Such Object"
+    remediation: "Human-readable form (capital-case) of `noSuchObject` — net-snmp prints this in stdout for snmpget. Same diagnosis: the OID's parent isn't implemented. The legacy handler matched THIS exact casing; failure_signatures lists both forms because they coexist depending on net-snmp version."
+  - signal: "No Such Instance"
+    remediation: "Human-readable form (capital-case) of `noSuchInstance` — net-snmp prints this in stdout for snmpget. Same diagnosis: scalar needs `.0` suffix or table needs the right index. Both casings listed because they coexist."
+  - signal: "No SNMP response"
+    remediation: "Net-snmp's `No SNMP response received before timeout` — combination of UDP timeout AND no SNMP-layer reply (often returncode 2). Same root-cause cluster as `Timeout: No Response from`. The legacy handler treated this as a separate stderr signal; in practice the agent should try a different community string, verify port 161/UDP open, or switch SNMP version."
+  - signal: "noAccess"
+    remediation: "v3 view denied. The user's view doesn't include this OID. Try a different user or escalate via creds with broader views."
+  - signal: "tooBig"
+    remediation: "Response would exceed PDU size. snmpbulkwalk's -Cr is too high — lower it (e.g., -Cr 10) or switch to snmpwalk."
+  - signal: "Unknown Object Identifier"
+    remediation: "snmptranslate / net-snmp couldn't resolve a symbolic OID. Either the MIB isn't loaded (try -m ALL) or the OID name is misspelled. Use numeric form to bypass MIB resolution."
+  - signal: "Sub-identifier"
+    remediation: "OID parse error — usually 'Sub-identifier not found in MIB' or 'Sub-identifier too large'. Numeric OID has invalid component (e.g., negative or > 2^32-1). Verify OID syntax."
+  - signal: "Bad operator"
+    remediation: "snmpset type-letter wrong or missing. Type letters: s/i/u/t/a/o/x/b/D/U/I/F/d/n. Common typo: writing `int` instead of `i`, or `string` instead of `s`."
+  - signal: "Bad object type"
+    remediation: "snmpset value doesn't match the type letter (e.g., `i 'hello'` — integer type with string value). Coerce to the correct type."
+  - signal: "Was that intended"
+    remediation: "snmpwalk's loop-detection trip. The agent returned an OID lower than the requested one, suggesting a broken agent. Add `-Cc` to disable the check, but verify the agent is sane."
+  - signal: "OID not increasing"
+    remediation: "Same as 'Was that intended' — broken/non-conforming agent. Use `-Cc` to bypass, but record this as a finding (broken SNMP impl)."
+  - signal: "Permission denied"
+    remediation: "File-level error — usually `-c <wordlist>` (onesixtyone) or `-U <userlist>` (impossible here, listed for completeness) pointing at unreadable file. Verify permissions on the file in /session."
+  - signal: "Cannot open"
+    remediation: "File-not-found — onesixtyone's -c wordlist path doesn't exist. Verify path inside container (typically /session/<file>); check the file was created via the `write` tool BEFORE invoking the binary."
+  - signal: "Bad value notation"
+    remediation: "snmpset value couldn't be parsed for the declared type (e.g., `a` IPAddress with value `not.an.ip`)."
+  - signal: "Invalid argument"
+    remediation: "Generic argv parse error. Run `<binary> -h` to verify flag spelling. Common: `--version` instead of `-v` or `-V` (net-snmp uses single-dash); `--help` works only on some net-snmp versions, `-h` is universal."
+
+help_commands:
+  - command: "snmpwalk -h"
+    purpose: "snmpwalk full flag reference (~100 flags). The canonical net-snmp option list."
+  - command: "snmpget -h"
+    purpose: "snmpget options. Same flag set as snmpwalk minus walk-specific (-Cc, -CB, -CE, -CI)."
+  - command: "snmpset -h"
+    purpose: "snmpset options + the type-letter table (s/i/u/t/a/o/x/b/D/U/I/F/d/n) which is the most-forgotten part of the snmpset interface."
+  - command: "snmpbulkwalk -h"
+    purpose: "snmpbulkwalk options including -Cr (max-repetitions) and -Cn (non-repeaters)."
+  - command: "snmptranslate -h"
+    purpose: "snmptranslate options for offline OID <-> symbol resolution."
+  - command: "onesixtyone -h"
+    purpose: "onesixtyone usage. Tiny tool — ~6 flags. NB: -c is COMMUNITY-WORDLIST-FILE."
+  - command: "snmpwalk -V"
+    purpose: "net-snmp version. Output e.g., `NET-SNMP version: 5.9.4`. Useful to verify the image's net-snmp build supports a flag the agent wants to use."
+

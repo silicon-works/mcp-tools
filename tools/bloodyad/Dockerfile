@@ -7,16 +7,19 @@ LABEL org.opencontainers.image.source="https://github.com/silicon-works/mcp-tool
 LABEL org.opencontainers.image.description="bloodyAD MCP server for OpenSploit"
 LABEL org.opencontainers.image.licenses="MIT"
 
-# Install bloodyAD from Kali repos + Kerberos dependencies
+# Install bloodyAD from Kali repos + Kerberos dependencies. Use python3-full not
+# separate python3-pip/python3-venv — Kali rolling occasionally has stale repo
+# indexes that 404 on the discrete packages but resolve python3-full cleanly.
+# Same fix as impacket / ffuf / nuclei / nikto / netexec / certipy Dockerfiles.
+# libfaketime retained — bloodyAD goes through Kerberos auth on -k path; clock
+# skew >5 minutes between container and DC produces KRB_AP_ERR_SKEW.
 RUN apt-get update && \
     DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
         bloodyad \
         krb5-user \
         libkrb5-dev \
         libfaketime \
-        python3 \
-        python3-pip \
-        python3-venv \
+        python3-full \
     && rm -rf /var/lib/apt/lists/* \
     && apt-get clean
 

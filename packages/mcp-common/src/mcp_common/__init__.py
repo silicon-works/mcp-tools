@@ -12,10 +12,12 @@ from .output_parsers import (
     parse_table_output,
     sanitize_output,
 )
+from .run_cli_server import RunCliServer
 
-__version__ = "0.2.7"
+__version__ = "0.4.0"
 __all__ = [
     "BaseMCPServer",
+    "RunCliServer",
     "ToolResult",
     "ToolError",
     "parse_nmap_xml",

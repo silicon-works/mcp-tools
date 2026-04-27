@@ -1,9 +1,131 @@
 name: wpscan
+kind: cli
+binary: wpscan
+# WPScan v3.8.x — single-binary WordPress security scanner (Ruby gem). The
+# upstream binary is `wpscan` (lowercase). It is NOT a sub-command tool;
+# every invocation is a single argv with flags.
+#
+# Argv form:
+#
+#   wpscan
+#       --url <url>                          # REQUIRED — target WP install
+#       -e | --enumerate <opts>              # u,vp,vt,ap,at,p,t,tt,cb,dbe,m
+#       -P | --passwords <file>              # password list for brute
+#       -U | --usernames <user|file>         # usernames for brute (CSV or file)
+#       --api-token <token>                  # WPScan API for vulnerability data
+#       --plugins-detection <mode>           # passive | aggressive | mixed
+#       --themes-detection <mode>            # passive | aggressive | mixed
+#       --detection-mode <mode>              # passive | aggressive | mixed
+#       -t | --threads <int>                 # default 5
+#       --max-threads <int>
+#       --throttle <ms>                      # delay between requests
+#       --request-timeout <int>
+#       --connect-timeout <int>
+#       --proxy <url>                        # proxy URL (http://host:port)
+#       --proxy-auth <user:pass>
+#       --user-agent <ua>
+#       --random-user-agent
+#       --cookie-string <cookies>            # 'k1=v1; k2=v2'
+#       --cookie-jar <file>
+#       --http-auth <user:pass>
+#       --ssl-cert <file>                    # client cert for mutual TLS
+#       --scope <regex>                      # restrict scan to a regex of URLs
+#       --exclude-content-based <regex>      # filter false positives
+#       --main-theme-name <slug>             # override main theme detection
+#       --ignore-main-redirect
+#       -o | --output <file>                 # write to file
+#       -f | --format <fmt>                  # cli | cli-no-colour | json
+#       --cache-dir <dir>
+#       --cache-ttl <int>
+#       --cache-max-age <int>
+#       --clear-cache
+#       --no-banner | --banner
+#       --update | --no-update
+#       --force                              # scan even if not WordPress
+#       --stealthy                           # passive + random UA
+#       --no-color
+#       --api-token-file <file>
+#       -h | --help
+#       --version
+#
+# Output: when `-o <file>` + `-f json` are passed, wpscan writes a single
+# structured JSON document. Without `-o`, output goes to stdout. The
+# mcp-server.py legacy methods consume the JSON form.
+#
+# Single-binary tool. Source code path: tools/wpscan/mcp-server.py — the
+# legacy method handlers (scan, bruteforce, enumerate_users,
+# enumerate_plugins, enumerate_themes) auto-inherit run_cli from
+# BaseMCPServer (mcp-common 0.3.0); kind:cli is the new default. The five
+# legacy methods are preserved as the rollback path per SKILL #21.
 version: "3.8.28"
-description: "WordPress security scanner (WPScan v3.8.28, Ruby-based) for comprehensive WordPress enumeration and vulnerability assessment. Detects WordPress version, enumerates plugins (vulnerable/all/popular), themes (vulnerable/all/popular), users (with configurable ID range), timthumbs, config backups (wp-config.php~, wp-config.bak, etc.), and database exports. Three detection modes: passive (minimal requests), aggressive (brute-force file detection), and mixed (default). JSON output with structured parsing of plugins, themes, users, and vulnerabilities. Supports WPVulnDB API token (25 free lookups/day via WPSCAN_API_TOKEN env var or --api-token) for mapping detected plugins/themes to known CVEs. Password brute-force via wp-login, XML-RPC, or XML-RPC multicall (500 passwords/request, WP < 4.4 only). Built-in --stealthy mode (passive detection + random user agent)."
+description: >
+  WordPress security scanner via WPScan v3.8.28 (Ruby gem) — comprehensive
+  WordPress enumeration and vulnerability assessment. Detects WordPress core
+  version, enumerates plugins (vulnerable / all / popular), themes (vulnerable
+  / all / popular), users (configurable ID range), timthumbs (file-upload
+  vuln), config backups (`wp-config.php~`, `.bak`, `.old`), and database
+  exports.
+
+  Argv form is binary-canonical:
+
+    wpscan
+        --url <url>                              # target (REQUIRED)
+        [-e <enum-opts>]                         # u,vp,vt,ap,at,cb,dbe,m,...
+        [--plugins-detection passive|aggressive|mixed]
+        [--api-token <token>]                    # WPScan vuln database
+        [-U <users>] [-P <wordlist>]             # brute-force
+        [-f json -o <file>]                      # structured output
+        [--proxy <url>]
+        [--cookie-string '<cookies>']
+        [--http-auth <user:pass>]
+        [--user-agent <ua> | --random-user-agent]
+
+  Three detection modes: passive (only checks page-source references —
+  fast, stealthy, may miss plugins), aggressive (brute-forces directory
+  paths from the WPScan plugin/theme database — slow, noisy, comprehensive),
+  mixed (passive first, then aggressive for version detection — default).
+
+  Enumeration codes (`-e` / `--enumerate`, comma-concatenated):
+    vp = vulnerable plugins
+    ap = all plugins
+    p  = popular plugins
+    vt = vulnerable themes
+    at = all themes
+    t  = popular themes
+    u  = users (default range 1-10, customisable as u1-50)
+    tt = timthumbs (file-upload vuln library)
+    cb = config backups (wp-config.php~, .bak, .old, .swp, .save)
+    dbe = database exports (.sql, .gz)
+    m  = media IDs
+
+  WPScan API (https://wpscan.com/profile, 25 free lookups/day) is REQUIRED
+  for vulnerability data — without an API token, scans only report version
+  information, not CVEs. Token can be set via `--api-token <token>`,
+  `--api-token-file <file>`, or `WPSCAN_API_TOKEN` env var.
+
+  Output: `-f json -o <file>` produces a single structured JSON document
+  (the preferred form for tooling). `-f cli` is human-readable but harder
+  to parse. The mcp-server.py legacy methods consume the JSON form.
+
+  Feature 28 dynamic recipes are RETIRED for the kind:cli path — the LLM
+  writes argv directly. Recipes still load for legacy method calls (scan,
+  bruteforce, enumerate_users, enumerate_plugins, enumerate_themes) if
+  /session/tool_recipes/wpscan/ exists, but they're a dead branch under
+  run_cli (REQ-TR-016).
+
 image: "ghcr.io/silicon-works/mcp-tools-wpscan:latest"
 image_size_mb: 300
-timeout_seconds: 300
+
+# Dual-clock model — comprehensive WordPress scans (`-e ap,at,u,cb,dbe`
+# with `--plugins-detection aggressive`) brute-force thousands of plugin /
+# theme paths and can take 20-60 minutes on a slow target. Brute-force
+# attacks against XML-RPC multicall can iterate millions of passwords; the
+# 6-hour hard cap covers extremely long brute-force runs. Idle timeout
+# covers the longest reasonable silence between HTTP requests (large
+# wordlist + per-request rate limit + rate-limited target).
+idle_timeout_seconds: 600       # 10 min silence == wedged HTTP / WAF block
+max_runtime_seconds: 21600      # 6 h hard cap — long brute-force runs
+timeout_seconds: 21600
 
 capabilities:
   - wordpress_scanning
@@ -11,10 +133,42 @@ capabilities:
   - theme_detection
   - user_enumeration
   - password_bruteforce
+  - vulnerability_lookup
 
 phases:
   - enumeration
   - exploitation
+
+routing:
+  use_for:
+    - "scan a WordPress site for vulnerable plugins themes and outdated versions"
+    - "enumerate WordPress plugins and check for known CVEs"
+    - "enumerate WordPress users for brute-force targeting"
+    - "brute-force WordPress login passwords via wp-login or XML-RPC"
+    - "detect WordPress core version and version-specific vulnerabilities"
+    - "find WordPress config backups and database exports"
+    - "detect outdated WordPress plugins with known exploits"
+    - "test for weak WordPress admin passwords"
+    - "WordPress timthumb vulnerability discovery"
+  never_use_for:
+    - "non-WordPress sites (use nikto or nuclei)"
+    - "general vulnerability scanning (use nuclei)"
+    - "port scanning (use nmap)"
+    - "subdomain enumeration (use amass / theharvester)"
+    - "SQL injection testing (use sqlmap)"
+    - "non-WordPress CMS scanning (Joomla / Drupal — use cmsmap or nuclei)"
+  triggers:
+    - "WordPress"
+    - "wordpress"
+    - "wpscan"
+    - "wp-content"
+    - "wp-admin"
+    - "wp-login"
+    - "wp plugin"
+    - "wp theme"
+    - "xmlrpc"
+  prefer_over:
+    - nuclei  # For WordPress-specific scanning
 
 requirements:
   network: true
@@ -24,209 +178,304 @@ resources:
   memory_mb: 512
   cpu: 0.5
 
-# Routing hints for tool selection
-routing:
-  use_for:
-    - "scan a WordPress site for vulnerable plugins themes and outdated versions"
-    - "enumerate WordPress plugins and check for known CVEs"
-    - "enumerate WordPress users for brute-force targeting"
-    - "brute-force WordPress login passwords via wp-login or XML-RPC"
-    - "detect WordPress version and check for version-specific vulnerabilities"
-    - "find WordPress config backups and database exports"
-    - "detect outdated WordPress plugins with known exploits"
-    - "test for weak WordPress admin passwords"
-  never_use_for:
-    - "non-WordPress sites (use nikto or nuclei)"
-    - "general vulnerability scanning (use nuclei)"
-    - "port scanning (use nmap)"
-  triggers:
-    - "WordPress"
-    - "wpscan"
-    - "wp-content"
-    - "wp-admin"
-    - "wp plugin"
-    - "wp theme"
-  prefer_over:
-    - nuclei  # For WordPress-specific scanning
-
 environment:
   WPSCAN_API_TOKEN:
-    description: "WPVulnDB API token for vulnerability data lookups. 25 free requests/day at https://wpscan.com/profile. Without this, scan results will NOT include vulnerability data for detected plugins/themes — only version detection."
+    description: "WPScan vulnerability-database API token (25 free requests/day at https://wpscan.com/profile). Without this, scan results will NOT include vulnerability data for detected plugins/themes — only version detection. Can be overridden per-call with --api-token <token>."
     required: false
 
-methods:
-  scan:
-    description: "Comprehensive WordPress scan combining version detection, plugin/theme enumeration, user enumeration, and vulnerability mapping into a single operation. Runs wpscan with --format json and --random-user-agent. Parses JSON output into structured results: WordPress core version, main theme (name + version), plugins (name + version + vulnerability count), users (username + ID), and all vulnerabilities found across plugins/themes. Enumeration scope is controlled by the enumerate parameter (comma-separated flags). Uses WPVulnDB API to map detected plugin/theme versions to known CVEs — requires an API token for vulnerability data. Without a token, only version detection works (no CVE matching)."
-    when_to_use: "The first tool to run after web-fingerprint or manual inspection confirms a WordPress installation. Signs of WordPress: '/wp-content/' or '/wp-includes/' in page source, 'wp-login.php' login page, 'X-Powered-By: WordPress' header, '/xmlrpc.php' endpoint. The default enumerate='vp,vt,u' is a good starting point — finds vulnerable plugins, vulnerable themes, and users. If the default finds nothing, try enumerate='ap,at,u' to scan all plugins/themes (not just known-vulnerable ones). For thorough scans, use enumerate='ap,at,u,cb,dbe' to also check for config backups and database exports. An API token is strongly recommended — without it, the scan cannot report known CVEs for detected plugins."
-    params:
-      url:
-        type: string
-        required: true
-        description: "Target WordPress URL including protocol. Examples: 'http://target.com', 'https://blog.target.com', 'http://target.com/wordpress/'. WPScan auto-detects wp-content and wp-plugins directories. If the site returns 403 or doesn't look like WordPress, use force=true."
-      enumerate:
-        type: string
-        default: "vp,vt,u"
-        description: "Comma-separated enumeration flags. vp=vulnerable plugins (fast, needs API token), ap=all plugins (slower, ~100 threshold), p=popular plugins. vt=vulnerable themes, at=all themes, t=popular themes. u=users (default range 1-10, customizable as u1-50). tt=timthumbs (file upload vuln). cb=config backups (wp-config.php~, .bak, .old, etc.). dbe=database exports. m=media IDs. Incompatible groups: only one of vp/ap/p and one of vt/at/t. Recommended combos: 'vp,vt,u' (quick), 'ap,at,u,cb,dbe' (thorough)."
-      plugins_detection:
-        type: enum
-        values: [passive, aggressive, mixed]
-        default: mixed
-        description: "Plugin detection mode. passive=checks only known locations in page source (fast, stealthy, may miss plugins). aggressive=brute-forces plugin directory paths from the database (slow, noisy, finds more plugins). mixed=passive first, then aggressive for version detection. Use passive for stealth, aggressive when you need comprehensive results."
-      api_token:
-        type: string
-        description: "WPVulnDB API token from https://wpscan.com/profile (25 free lookups/day). One API request per WordPress version check, per plugin, per theme. Required for vulnerability data — without it, scan only reports versions, not CVEs. Can also be set via WPSCAN_API_TOKEN environment variable."
-      stealthy:
-        type: boolean
-        default: false
-        description: "Stealthy mode — passive detection + random user agent. Equivalent to WPScan's --stealthy flag (alias for --random-user-agent --detection-mode passive --plugins-version-detection passive). Use when avoiding detection is more important than thoroughness."
-      force:
-        type: boolean
-        default: false
-        description: "Force scan even if the site doesn't appear to be WordPress or returns 403. Useful when WordPress is at a non-standard path, behind a WAF, or the homepage redirects."
-      cookie_string:
-        type: string
-        description: "Cookie string for authenticated scanning. Format: 'cookie1=value1; cookie2=value2'. Useful for scanning behind WAFs that require cookies, or for authenticated-only WordPress installs."
-      timeout:
-        type: integer
-        default: 300
-        description: "Scan timeout in seconds. 300s (5 min) is usually sufficient for 'vp,vt,u'. For 'ap,at' (all plugins/themes), increase to 600-900s as aggressive detection checks hundreds of paths."
-    returns:
-      wordpress_version:
-        type: string
-        description: "Detected WordPress core version (e.g., '6.4.3'). Null if version detection failed."
-      plugins:
-        type: array
-        description: "Detected plugins, each with: name (slug), version, vulnerability count. Only vulnerable plugins shown with 'vp', all with 'ap'."
-      themes:
-        type: array
-        description: "Detected themes including main theme, each with: name (slug), version."
-      users:
-        type: array
-        description: "Enumerated users with: username, WordPress user ID. Use these usernames for bruteforce method."
-      vulnerabilities:
-        type: array
-        description: "All vulnerabilities found across plugins/themes, each with: plugin/theme name, title, vuln_type, reference URLs. Only populated when API token is provided."
+see_also:
+  - tool: nuclei
+    reason: "After wpscan identifies WordPress version + plugin versions, use nuclei with WordPress-tagged templates (`-tags wordpress` or `-id <CVE>`) for additional CVE-pattern matching, or for non-WordPress paths on the same host."
+  - tool: nikto
+    reason: "Nikto covers general web-server misconfigurations (server-info, robots, default files) outside the WordPress-specific scope. Run nikto in parallel for broader web-server findings."
+  - tool: ffuf
+    reason: "When wpscan finds a vulnerable plugin or theme, use ffuf to fuzz path parameters or hidden endpoints under /wp-content/plugins/<plugin>/ for further exploitation."
+  - tool: sqlmap
+    reason: "If wpscan detects a plugin with a known SQLi CVE, use sqlmap with the plugin's vulnerable endpoint to confirm and dump."
+  - tool: hydra
+    reason: "For WordPress brute-force, hydra has the http-form-post module which is more flexible than wpscan's built-in attack — use when wpscan's built-in attack is rate-limited by a WAF or security plugin (Wordfence, Sucuri)."
+  - tool: cve-lookup
+    reason: "For each CVE that wpscan reports against a detected plugin, use cve-lookup to fetch full NVD details, CVSS scores, and links to public exploits / Metasploit modules."
+  - tool: web-fingerprint
+    reason: "Run web-fingerprint FIRST to confirm the site is WordPress (look for `/wp-content/`, `wp-login.php`, `X-Powered-By: WordPress` header) before invoking wpscan. wpscan's --force can override but burns time on non-WordPress targets."
 
-  bruteforce:
-    description: "Brute-force WordPress login using wpscan's built-in password attack. Runs wpscan with --passwords and --usernames flags. WPScan auto-detects the best attack method: wp-login (POST to /wp-login.php, 1 password/request), xmlrpc (POST to /xmlrpc.php, faster), or xmlrpc-multicall (batches up to 500 passwords per request via XML-RPC system.multicall — only works on WP < 4.4). Attack mode can be overridden with the attack_mode parameter. Uses --random-user-agent. Parses JSON output for cracked credentials. Wordlist must be provided — download to /session/wordlists/ first using curl.download_to_file."
-    when_to_use: "After enumerate_users discovers valid WordPress usernames, especially 'admin' or 'administrator'. The typical WordPress brute-force workflow: (1) enumerate_users to find usernames, (2) bruteforce with a common password list against each user. Try the admin user first — it's the most valuable target (full WordPress admin access). For CTFs, common passwords like 'admin', 'password', 'wordpress' should be tried first. For real engagements, use a targeted wordlist. Note: WordPress has no default lockout mechanism, but security plugins (Wordfence, Sucuri, etc.) may block after failed attempts. XML-RPC multicall bypasses per-request rate limiting on WP < 4.4."
-    params:
-      url:
-        type: string
-        required: true
-        description: "Target WordPress URL (same as scan)."
-      username:
-        type: string
-        required: true
-        description: "Username to brute-force. Use a username discovered by enumerate_users. Can also be a comma-separated list ('admin,editor,john') or a file path ('/tmp/users.txt')."
-      wordlist:
-        type: string
-        required: true
-        description: "Path to password wordlist file. Download to /session/wordlists/ first using curl.download_to_file (e.g., '/session/wordlists/rockyou.txt'). For faster targeted attempts, create a custom wordlist with the Write tool."
-      attack_mode:
-        type: enum
-        values: [auto, wp-login, xmlrpc, xmlrpc-multicall]
-        default: "auto"
-        description: "Password attack method. auto=WPScan picks the best method. wp-login=POST to /wp-login.php (1 password/request, always works). xmlrpc=via XML-RPC wp.getUsersBlogs (faster). xmlrpc-multicall=batches up to 500 passwords per request via system.multicall (fastest, only works on WP < 4.4). Use wp-login when XML-RPC is disabled. Use xmlrpc-multicall for old WordPress installs."
-      timeout:
-        type: integer
-        default: 600
-        description: "Timeout in seconds. 600s (10 min) for small wordlists. For rockyou.txt (14M passwords), this will timeout long before completing — use a smaller targeted wordlist instead."
-    returns:
-      password_found:
-        type: object
-        description: "Object with username and password if a valid credential was found. Null if no password matched. On success, these credentials can be used to log into /wp-admin/ for further exploitation (theme editor RCE, plugin upload, etc.)."
+# ── kind:cli specific sections ──────────────────────────────────────
 
-  enumerate_users:
-    description: "Enumerate WordPress users by probing user ID endpoints. WPScan checks: /?author=N (redirects reveal usernames), /wp-json/wp/v2/users (REST API, often publicly accessible), and login error messages (reveals whether username exists). Default range is user IDs 1-10. Returns username, WordPress user ID, and slug for each discovered user. Uses --random-user-agent."
-    when_to_use: "Early in WordPress enumeration, before brute-force attempts. Even if the scan method already includes 'u' in its enumerate flags, this dedicated method provides cleaner output focused only on users. The discovered usernames feed directly into the bruteforce method. Key usernames to look for: 'admin' (default WordPress admin, often not renamed), 'administrator', and any names that suggest elevated privileges. Also useful for social engineering — author names are often real names."
-    params:
-      url:
-        type: string
-        required: true
-        description: "Target WordPress URL."
-      api_token:
-        type: string
-        description: "WPVulnDB API token. Not strictly needed for user enumeration (no vulnerability lookup), but wpscan may still use it if provided."
-      timeout:
-        type: integer
-        default: 300
-        description: "Timeout in seconds. User enumeration is fast — 300s is more than sufficient for the default 1-10 ID range."
-    returns:
-      users:
-        type: array
-        description: "Discovered users, each with: username (login name), id (WordPress user ID), slug (URL-safe username). The username field is what you pass to bruteforce."
-      count:
-        type: integer
-        description: "Number of users discovered."
+target_extraction:
+  # wpscan takes a target URL via `--url <url>`. There are no positional
+  # targets and no sub-commands. The DSL captures via flag_value with
+  # url_host parsing.
+  #
+  # Trap values that must NOT be confused with the target:
+  #   - `--proxy <url>` — proxy URL (e.g., http://127.0.0.1:8080). Host
+  #     part is the LOCAL proxy, NOT the engagement target. In value_flags.
+  #   - `--user-agent <ua>` — UA string may contain URL-shape content
+  #     (e.g., 'Mozilla/5.0 (compatible; bot; +https://bot.example/info)').
+  #     In value_flags so the value is consumed.
+  #   - `--cookie-string <cookies>` — 'k1=v1; k2=v2' may contain URLs in
+  #     cookie values. In value_flags.
+  #   - `-P <wordlist>`, `-U <users>` / `--passwords`, `--usernames` — file
+  #     paths or CSV usernames, not URLs. In value_flags.
+  #   - `--http-auth user:pass`, `--proxy-auth user:pass` — credential
+  #     strings, contain `:` but are NOT URLs. In value_flags.
+  #   - `-o <file>`, `--output <file>` — output file path. In value_flags.
+  #   - `--ssl-cert <file>`, `--cookie-jar <file>`, `--cache-dir <dir>` —
+  #     file/directory paths, not targets. In value_flags.
+  #   - `--scope <regex>` — restriction regex on URLs to follow. In
+  #     value_flags. (Regex string, contains URL-shaped fragments.)
+  #
+  # `--url` is REQUIRED for any actual scan. A call without `--url` either
+  # prints help (no flags) or fails with `Url is invalid` / a missing-arg
+  # error. Plugin's empty-target handling surfaces this as `target=null`.
+  - rule: "flag_value"
+    flag: "--url"
+    parse_as: "url_host"
 
-  enumerate_plugins:
-    description: "Enumerate WordPress plugins and map them to known vulnerabilities via WPVulnDB. Uses wpscan with --enumerate vp (vulnerable plugins only) or ap (all plugins) and --format json. Plugin detection works by checking known plugin paths under /wp-content/plugins/ — passive mode checks page source references, aggressive mode brute-forces directory names from the WPScan database. For each plugin found, returns the slug, detected version, outdated status, and vulnerability count. Vulnerabilities include title, type (SQLi, XSS, RCE, LFI, etc.), CVE IDs, and reference URLs. An API token is essential — without it, only plugin names and versions are returned, not vulnerability data."
-    when_to_use: "The highest-value WordPress enumeration step. WordPress sites average 22 installed plugins, and plugins are the #1 source of WordPress vulnerabilities. Run this after confirming WordPress to find exploitable plugins. Use aggressive detection mode for thorough results — passive mode often misses plugins that aren't referenced in the page source. If 'vp' (vulnerable-only) returns nothing, switch to all_plugins=true ('ap') to see all installed plugins, then manually research their versions. The API token is critical here — without it, you can't tell which plugins have known CVEs."
-    params:
-      url:
-        type: string
-        required: true
-        description: "Target WordPress URL."
-      detection_mode:
-        type: enum
-        values: [passive, aggressive, mixed]
-        default: "aggressive"
-        description: "Plugin detection mode. aggressive=brute-forces known plugin directory names (slower, finds more — recommended). passive=only checks page source for plugin references (fast, misses many). mixed=passive detection with aggressive version checking. Default 'aggressive' is correct for most use cases."
-      all_plugins:
-        type: boolean
-        default: false
-        description: "false (default) = enumerate only plugins with known vulnerabilities (--enumerate vp). true = enumerate all detected plugins (--enumerate ap) regardless of vulnerability status. Use true when vp returns no results — the plugin may be vulnerable but not in WPVulnDB, or you may lack an API token."
-      api_token:
-        type: string
-        description: "WPVulnDB API token (25 free/day). Each detected plugin consumes one API request. Essential for vulnerability mapping — without it, only plugin names/versions are returned."
-      timeout:
-        type: integer
-        default: 300
-        description: "Timeout in seconds. aggressive mode with all_plugins=true can take 2-5 minutes. Increase to 600s if scanning large sites."
-    returns:
-      plugins:
-        type: array
-        description: "Detected plugins, each with: name (slug like 'contact-form-7'), version (detected or null), outdated (boolean), vulnerability_count."
-      vulnerabilities:
-        type: array
-        description: "Plugin vulnerabilities, each with: plugin name, title (vulnerability description), type (vuln_type: SQLi, XSS, RCE, etc.), cve (list of CVE IDs), references (URLs to advisories/exploits). Use CVE IDs with cve-lookup for full details."
-      plugin_count:
-        type: integer
-        description: "Total plugins detected."
-      vulnerability_count:
-        type: integer
-        description: "Total vulnerabilities found across all plugins."
+# Flags that put the target outside the command line where scope validation
+# can't reach. wpscan has no batch / file-list intake mode upstream — the
+# `-U <file>` / `--usernames <file>` and `-P <file>` / `--passwords <file>`
+# options consume WORDLISTS, not target lists. So reject_flags is empty.
+reject_flags: []
+reject_flags_reason: ""
 
-  enumerate_themes:
-    description: "Enumerate WordPress themes and map them to known vulnerabilities via WPVulnDB. Detects the active (main) theme and any additional installed themes. Uses wpscan with --enumerate vt (vulnerable themes only) or at (all themes) and --format json. The main theme is always identified (from page source CSS/JS references). Additional themes are found by brute-forcing theme directory names under /wp-content/themes/. Returns theme slug, version, main_theme flag, and vulnerability data with CVE IDs."
-    when_to_use: "After plugin enumeration, check themes for vulnerabilities. Themes are less commonly vulnerable than plugins, but theme vulnerabilities (especially in theme framework components like timthumbs) can provide file upload, LFI, or RCE. The main theme is always detected — if it's outdated or has known CVEs, it's an immediate finding. Use all_themes=true only if vulnerable-theme enumeration returns nothing and you want to manually research installed themes."
-    params:
-      url:
-        type: string
-        required: true
-        description: "Target WordPress URL."
-      all_themes:
-        type: boolean
-        default: false
-        description: "false (default) = enumerate only themes with known vulnerabilities (--enumerate vt). true = enumerate all detected themes (--enumerate at). The main/active theme is always detected regardless of this setting."
-      api_token:
-        type: string
-        description: "WPVulnDB API token. Each detected theme consumes one API request. Needed for CVE mapping."
-      timeout:
-        type: integer
-        default: 300
-        description: "Timeout in seconds. Theme enumeration is generally faster than plugin enumeration — 300s is sufficient."
-    returns:
-      themes:
-        type: array
-        description: "Detected themes, each with: name (slug), version, is_main_theme (boolean — true for the active theme), vulnerability_count."
-      vulnerabilities:
-        type: array
-        description: "Theme vulnerabilities, each with: theme name, title, type, cve (list of CVE IDs), references (URLs). Less common than plugin vulns but can be high-impact."
-      theme_count:
-        type: integer
-        description: "Total themes detected."
-      vulnerability_count:
-        type: integer
-        description: "Total vulnerabilities found across all themes."
+# Per-tool value-taking flags whose values must NOT be confused with targets.
+# Verified against `wpscan --help` on v3.8.28.
+value_flags:
+  # ── targeting ──
+  - "--url"
+  # ── enumeration ──
+  - "-e"
+  - "--enumerate"
+  # ── credentials / brute-force ──
+  - "-P"
+  - "--passwords"
+  - "-U"
+  - "--usernames"
+  - "--password-attack"
+  # ── API ──
+  - "--api-token"
+  - "--api-token-file"
+  # ── threading / rate-limit / timing ──
+  - "-r"             # rate-limit (requests/sec) — value flag
+  - "-t"
+  - "--threads"
+  - "--max-threads"
+  - "--throttle"
+  - "--request-timeout"
+  - "--connect-timeout"
+  # ── HTTP ──
+  - "--proxy"
+  - "--proxy-auth"
+  - "--user-agent"
+  - "--cookie-string"
+  - "--cookie-jar"
+  - "--http-auth"
+  - "--ssl-cert"
+  # ── detection / scope ──
+  - "--detection-mode"
+  - "--plugins-detection"
+  - "--themes-detection"
+  - "--scope"
+  - "--exclude-content-based"
+  - "--main-theme-name"
+  # ── output ──
+  - "-o"
+  - "--output"
+  - "-f"
+  - "--format"
+  # ── cache ──
+  - "--cache-dir"
+  - "--cache-ttl"
+  - "--cache-max-age"
+  # ── boolean / no-arg flags listed for parser correctness (DSL skips harmlessly) ──
+  - "--random-user-agent"
+  - "--ignore-main-redirect"
+  - "--force"
+  - "--stealthy"
+  - "--banner"
+  - "--no-banner"
+  - "--no-color"
+  - "--clear-cache"
+  - "--update"
+  - "--no-update"
+  - "-h"
+  - "--help"
+  - "--version"
+
+usage_patterns:
+  # ── default / opening probes ──────────────────────────────────────
+  - name: "Basic enumeration (vulnerable plugins + themes + users)"
+    command: "--url http://target/wp -e u,vp,vt --random-user-agent -f json -o /session/wpscan.json"
+    when: "First-pass WordPress scan once a target is confirmed to be WordPress (look for /wp-content/, wp-login.php, X-Powered-By: WordPress). The default enumerate combo `u,vp,vt` finds vulnerable plugins, vulnerable themes, and users without taking long. Add `--api-token` if available — without it, vulnerability mapping is skipped. Output goes to /session/wpscan.json (structured)."
+
+  - name: "Aggressive plugin discovery (all plugins, brute-forced paths)"
+    command: "--url http://target/wp --plugins-detection aggressive -e ap --random-user-agent -f json -o /session/wpscan-plugins.json"
+    when: "When the basic `vp` enum returns nothing useful — the target may have non-vulnerable but unusual plugins, OR a missing API token suppresses the vp output. `--plugins-detection aggressive` brute-forces plugin directory names from the WPScan database (~10,000 known plugins) — slow, noisy, but finds plugins that aren't referenced in page source. Use `-e ap` to enumerate all plugins regardless of known-vulnerability status."
+
+  - name: "Brute-force WordPress login (small targeted wordlist)"
+    command: "--url http://target/wp -U /session/users.txt -P /session/passwords.txt -t 4 --random-user-agent -f json -o /session/wpscan-brute.json"
+    when: "After enumerating users, brute-force passwords. Use a SMALL targeted wordlist — wpscan iterates one password per HTTP request (or 500 per request via XML-RPC multicall on WP < 4.4). Threads default to 5; lower to 2-4 to avoid Wordfence / security-plugin lockout. Use `--password-attack xmlrpc` if XML-RPC is available (faster) or `wp-login` if XML-RPC is disabled."
+
+  - name: "Comprehensive scan with WPScan API token (CVE mapping)"
+    command: "--url http://target/wp -e u,vp,vt,cb,dbe --api-token {token} --random-user-agent -f json -o /session/wpscan-api.json"
+    when: "Production-style scan with vulnerability data. The `--api-token` enables CVE lookups for every detected plugin / theme / WordPress core version (one API request each — 25 free / day at https://wpscan.com/profile). `cb` and `dbe` add config-backup + database-export discovery. Token can also come from WPSCAN_API_TOKEN env var."
+
+  - name: "Through HTTP proxy (Burp / inspection)"
+    command: "--url http://target/wp -e u --proxy http://127.0.0.1:8080 --random-user-agent -f json -o /session/wpscan-proxy.json"
+    when: "Route all wpscan HTTP traffic through a local proxy for inspection / replay / WAF testing. The proxy URL is the LOCAL inspection point, NOT the target. Useful for: confirming what wpscan actually sends, capturing requests for replay with curl, debugging WAF blocks. `--proxy-auth user:pass` if the proxy requires auth."
+
+  # ── stealth / detection-evasion ──────────────────────────────────────
+  - name: "Stealthy mode (passive detection + random UA)"
+    command: "--url http://target/wp --stealthy -e u --random-user-agent -f json -o /session/wpscan-stealth.json"
+    when: "When detection avoidance is more important than thoroughness. `--stealthy` is the alias for `--random-user-agent --detection-mode passive --plugins-version-detection passive`. Trade-off: misses plugins not referenced in page source. Useful against WAF-protected targets or when the engagement explicitly forbids brute-forcing paths."
+
+  - name: "Throttled scan (avoid rate-limit / WAF block)"
+    command: "--url http://target/wp -e u,vp -t 2 --throttle 500 --random-user-agent -f json -o /session/wpscan-throttle.json"
+    when: "When the target has a WAF (Cloudflare, Sucuri, Wordfence) that triggers on rapid requests. `-t 2` reduces threads from default 5 to 2; `--throttle 500` adds 500ms delay between requests. Slows the scan dramatically but avoids 429 / 403 blocks. Combine with `--proxy` to route through a known-good IP."
+
+  # ── auth-required scans ──────────────────────────────────────
+  - name: "Authenticated scan (cookie-string)"
+    command: "--url http://target/wp --cookie-string 'wordpress_logged_in_<hash>=<value>; wp-settings-1=...' -e u,vp,vt --random-user-agent -f json -o /session/wpscan-auth.json"
+    when: "When WordPress requires authentication (private blog, paywall, restricted dev environment). Capture the `wordpress_logged_in_*` cookie from a logged-in browser session and pass via `--cookie-string`. Format: 'k1=v1; k2=v2'. Same cookie format as curl. Useful for scanning admin-only plugins or restricted areas."
+
+  - name: "Site behind HTTP basic auth"
+    command: "--url http://target/wp --http-auth user:password -e u,vp --random-user-agent -f json -o /session/wpscan-htauth.json"
+    when: "When the site is wrapped in HTTP basic auth (common for staging environments). `--http-auth user:pass` adds the Authorization header. The user:pass string contains a colon but is NOT a URL — won't be misextracted as target."
+
+  # ── help / version ──────────────────────────────────────
+  - name: "Help / version check"
+    command: "--help"
+    when: "Verify a less-common flag's exact spelling, check enumeration codes, or inspect the WPScan version. Quick way to confirm `--api-token` vs `--api-token-file`, the `-e` vs `--enumerate` aliases, etc."
+
+output_formats:
+  - flag: "-f json -o {file}"
+    format: "json"
+    preferred: true
+    notes: "Structured JSON document — single object with keys for `target_url`, `effective_url`, `interesting_findings`, `version`, `main_theme`, `plugins`, `themes`, `users`, `password_attack`. PREFERRED for tooling. Without `-o`, JSON goes to stdout."
+  - flag: "-f cli -o {file}"
+    format: "text"
+    preferred: false
+    notes: "Human-readable colour-coded output. Easy to read, hard to parse. Useful for engagement reports."
+  - flag: "-f cli-no-colour -o {file}"
+    format: "text"
+    preferred: false
+    notes: "Same as cli but without ANSI escape codes. Useful when piping to a file for inclusion in plaintext reports."
+
+common_options:
+  targeting:
+    - "--url URL: target WordPress install root URL (REQUIRED). Examples: --url http://target.htb/wp, --url https://blog.example.com/, --url http://10.10.10.5/wordpress/. URL should point at the WordPress install root — NOT the homepage if WordPress is at /wp/ or /blog/."
+  enumeration:
+    - "-e CODES / --enumerate CODES: comma-concatenated enumeration codes. Single-letter (u,p,t,m) or double-letter (vp,ap,vt,at,tt,cb,dbe). Example: -e u,vp,vt = users + vulnerable plugins + vulnerable themes."
+    - "--plugins-detection MODE: passive (only check page source — fast), aggressive (brute-force plugin paths — slow but comprehensive), mixed (passive first, aggressive for version detection)."
+    - "--themes-detection MODE: same modes as --plugins-detection. Themes are usually in page source already."
+    - "--detection-mode MODE: overall detection mode. Passes through to plugin/theme detection unless overridden."
+  brute_force:
+    - "-U USERS / --usernames USERS: usernames for brute-force. Single user, comma-separated list, or @file for a wordlist."
+    - "-P FILE / --passwords FILE: password wordlist file. wpscan iterates the file."
+    - "--password-attack METHOD: wp-login | xmlrpc | xmlrpc-multicall. xmlrpc-multicall batches 500 passwords/request via system.multicall (only works on WP < 4.4)."
+    - "-t INT / --threads INT: parallel threads (default 5). Lower for stealth or to avoid WAF lockout."
+  output:
+    - "-o FILE / --output FILE: write to file. Combined with -f for format selection."
+    - "-f FORMAT / --format FORMAT: cli | cli-no-colour | json. JSON is preferred for tooling."
+  http:
+    - "--proxy URL: proxy URL (http://host:port). All HTTP traffic routed through the proxy. host part is the LOCAL proxy, NOT the engagement target."
+    - "--user-agent UA: custom User-Agent header. The UA value may contain URL-shape content but is NOT a target."
+    - "--random-user-agent: randomise UA per request — basic stealth."
+    - "--cookie-string COOKIES: 'k1=v1; k2=v2' — pre-set cookies for authenticated scans."
+    - "--http-auth USER:PASS: HTTP basic auth credentials."
+  api:
+    - "--api-token TOKEN: WPScan API token for vulnerability data lookups. 25 free requests/day. Without it, vuln data is skipped."
+    - "--api-token-file FILE: read API token from a file (avoids token in argv)."
+  perf:
+    - "--throttle MS: delay between requests in milliseconds. Increase to avoid WAF / rate-limit blocks."
+    - "--connect-timeout INT: TCP connect timeout (seconds)."
+    - "--request-timeout INT: HTTP request timeout (seconds)."
+
+gotchas:
+  - "URL MUST POINT AT THE WORDPRESS INSTALL ROOT — `--url http://target/wp` is correct if WordPress lives at /wp/. Bare `--url http://target/` only works if WordPress is at the document root. Mismatched paths cause `The remote website is up, but does not seem to be running WordPress` and require `--force` to override."
+  - "`-e` ENUMERATION CODES ARE SINGLE/DOUBLE-LETTER, COMMA-CONCATENATED — `-e u,vp,vt` = users + vulnerable plugins + vulnerable themes. NOT a space-separated list. Combinations are bounded: only one of vp/ap/p (plugins) and one of vt/at/t (themes) at a time."
+  - "WPSCAN API TOKEN IS REQUIRED FOR VULNERABILITY DATA — without `--api-token` (or WPSCAN_API_TOKEN env var), wpscan still detects plugin / theme / version, but the `vulnerabilities` field is empty. Token is FREE at https://wpscan.com/profile (25 lookups/day). Without a token, you can identify outdated plugins but cannot map them to CVEs."
+  - "`--plugins-detection aggressive` BRUTE-FORCES `/wp-content/plugins/<name>/` PATHS — finds plugins not referenced in page source but is loud (~10,000 HTTP requests, default ~5 threads). Most WAFs catch this. Use `passive` or `--stealthy` when avoiding detection. Run aggressive scans through a proxy if engagement scope allows."
+  - "`-f json` PRODUCES STRUCTURED OUTPUT, `-f cli` IS HUMAN-READABLE — for any agent / tool consumption, ALWAYS use `-f json -o /session/wpscan.json`. The cli format has ANSI colour codes that break parsing; cli-no-colour is plaintext but still unstructured."
+  - "EXIT CODE 0 ON CLEAN SCANS AND ON SOME FAILURES — wpscan exits 0 even when the scan was aborted (e.g., `Scan Aborted: The remote website is up, but does not seem to be running WordPress`). Pattern-match output for `[ERROR]`, `Scan Aborted`, `Url is invalid` regardless of exit code."
+  - "`--random-user-agent` IS RECOMMENDED FOR ANY SCAN — wpscan's default UA is `WPScan v3.8.X (https://wpscan.com)` which immediately fingerprints the scanner. Use `--random-user-agent` for basic stealth or `--user-agent '<custom>'` for a specific one. The legacy mcp-server.py auto-injected `--random-user-agent` into every method (scan/bruteforce/enumerate_*); under kind:cli the LLM is responsible — treat it as a near-mandatory default unless the engagement explicitly requires a fixed UA."
+  - "`-f json` MAY BE PRECEDED BY BANNER / UPDATE WARNING LINES ON STDOUT — wpscan can print an update notification or banner before the JSON document starts, especially on a cold container or when its DB is stale. The legacy `json.loads(stdout)` would fail on prefixed text. Under kind:cli, prefer `-o /session/wpscan-<n>.json` (writes pure JSON to file, leaving stdout for human-readable status) and read the file rather than parsing stdout. If parsing stdout, locate the first `{` and slice from there. `--no-banner` plus `--no-update` further reduces noise."
+  - "BRUTE-FORCE IS RATE-LIMITED BY DEFAULT (5 THREADS) — for serious password attacks, lower threads (-t 2) to avoid Wordfence / security-plugin lockout, OR use `--password-attack xmlrpc-multicall` to batch 500 passwords per request (only works on WP < 4.4). Both wp-login and xmlrpc paths exist; the multicall path is fastest but vanishingly rare in modern installs."
+  - "WORDLISTS GO TO `-P` (passwords) AND `-U` (users) — these are LOCAL FILES, not targets. The plugin's reject_flags is empty because wordlists are not target lists. Examples: `-P /session/passwords.txt -U admin` or `-P /usr/share/wordlists/rockyou.txt -U /session/users.txt`."
+  - "rockyou.txt IS TOO LARGE FOR HTTP BRUTE-FORCE — 14M passwords × 1 request each = 14M HTTP requests. Will time out the 6-hour cap and burn through any rate limit. Use a curated wordlist (top-100, top-1000, or domain-specific) for HTTP brute-force."
+  - "`--proxy-auth user:pass` AND `--http-auth user:pass` BOTH USE COLON SEPARATOR — these are credential strings, NOT URLs. value_flags catches them so they're never misextracted as targets."
+  - "`--cookie-string 'k1=v1; k2=v2'` IS A SINGLE FLAG VALUE — quote the entire cookie string. Cookies inside (e.g., `redirect_to=http://target.com/wp-admin/`) may contain URL-shaped content but the entire string is a single value, not a target."
+  - "`--scope <regex>` RESTRICTS WHICH URLS WPSCAN FOLLOWS — useful when WordPress redirects to other domains (CDN, staging). The regex is a value, not a target — value_flags catches it. Example: --scope '^https?://target\\.com'."
+  - "`--update` AT FIRST RUN PULLS WPSCAN'S DATABASE — slow (~30s) on cold containers. Disable with `--no-update` for reproducible runs; the container ships with a pre-fetched database. Subsequent runs reuse the cached database under ~/.wpscan/db/."
+  - "`--force` IS A LAST RESORT — when wpscan refuses to scan because the URL doesn't look like WordPress, --force tells it to scan anyway. Useful against sites where WordPress is at a non-standard path, behind a CDN, or aggressively WAF-protected. Most positive findings still come from URLs that DO look like WordPress."
+  - "Feature 28 dynamic recipes are RETIRED for the kind:cli path — the LLM writes argv directly. Recipes still load for legacy method calls (scan, bruteforce, enumerate_users, enumerate_plugins, enumerate_themes) if /session/tool_recipes/wpscan/ exists, but they're a dead branch under run_cli (REQ-TR-016)."
+
+failure_signatures:
+  # Layer-diverse signals (SKILL #11) — at least 5 distinct verifiable layers:
+  #   1. DNS (host resolution)
+  #   2. TCP (connection refused / timeout)
+  #   3. TLS (cert / handshake)
+  #   4. WordPress detection (semantic — not WP, scan aborted)
+  #   5. Auth (HTTP 401 / 403)
+  #   6. Argument-validation (unrecognised flag / option)
+  #   7. Rate-limit / API (429 / quota exceeded)
+  #   8. Empty-result (no plugins / users found)
+  - signal: "Could not resolve host"
+    remediation: "DNS: hostname did not resolve. Verify the URL with `dig <host> @8.8.8.8` from inside the container, check /etc/resolv.conf, and confirm the engagement target's DNS configuration. If using an internal name, ensure the resolver knows the engagement domain."
+  - signal: "Name or service not known"
+    remediation: "DNS: alternate phrasing for resolution failure (libc getaddrinfo). Same root cause as `Could not resolve host`."
+  - signal: "Failed to open TCP connection"
+    remediation: "Network: TCP-level error. Ruby net/http phrasing — usually accompanied by a more specific signal (`connection refused` or `timed out`). Check whether the URL points at the right port / protocol (http vs https)."
+  - signal: "connection refused"
+    remediation: "TCP: target port is not listening (no web server on port 80/443) or filtered by a firewall. Confirm with `nc -vz <host> 80` from inside the container, or run nmap to find the actual web port."
+  - signal: "Connection timed out"
+    remediation: "TCP: TCP connection attempt timed out. Indicates a stateful firewall dropping packets or a host that's down. Try `--connect-timeout 30` to give a slow handshake more room, or verify the host is up via icmp/nmap."
+  - signal: "Operation timed out"
+    remediation: "Network: read timeout — TCP connected but the server didn't respond within the request-timeout window. Increase `--request-timeout 60`, or the server is overwhelmed / behind a slow WAF."
+  - signal: "OpenSSL::SSL::SSLError"
+    remediation: "TLS: SSL/TLS handshake failure. Common causes: invalid / self-signed cert, protocol mismatch (server only supports old TLS), SNI mismatch. Try `--disable-tls-checks` (if available) or switch to http://. Confirm with `openssl s_client -connect <host>:443`."
+  - signal: "SSL_connect"
+    remediation: "TLS: alternative SSL phrasing. Same remediation as `OpenSSL::SSL::SSLError`."
+  - signal: "certificate verify failed"
+    remediation: "TLS: cert validation failed (untrusted CA, expired, hostname mismatch). For lab targets, this is often a self-signed cert. Switch to http:// if available, or import the cert into the container's trust store."
+  - signal: "The remote website is up, but does not seem to be running WordPress"
+    remediation: "WP-detection: target responded but doesn't look like WordPress. Confirm with curl: look for `/wp-content/`, `/wp-includes/`, `wp-login.php`, `X-Powered-By: WordPress`. If WordPress is at /wp/ or /blog/, append the path to --url. If certain WordPress is there (e.g., aggressive WAF stripping fingerprints), use `--force`."
+  - signal: "Scan Aborted"
+    remediation: "WP-detection: wpscan refused to continue — usually paired with the `does not seem to be running WordPress` message. Use `--force` to override the check, or correct the URL to point at the actual WordPress install root."
+  - signal: "Url is invalid"
+    remediation: "Argument: the value passed to `--url` is malformed (missing scheme, bad characters). Confirm format: `--url http://host[:port]/path`. Quote the URL if it contains shell-special characters."
+  - signal: "WordPress requires HTTP authentication"
+    remediation: "Auth: target sits behind HTTP basic / digest auth. Add `--http-auth user:pass` with valid credentials. Test the credentials with curl first: `curl -u user:pass http://target/wp/`."
+  - signal: "401"
+    remediation: "Auth: HTTP 401 Unauthorized. Server requires authentication. Add `--http-auth user:pass`, `--cookie-string`, or both. May also indicate WAF-injected auth challenge."
+  - signal: "Forbidden"
+    remediation: "HTTP: 403 from target. Often means a WAF (Cloudflare, Sucuri, Wordfence) is blocking the scanner. Try `--random-user-agent`, `--throttle 1000`, lower threads (`-t 1`), or `--proxy` through a clean IP. `--force` may bypass wpscan's refusal but won't bypass a server-side WAF."
+  - signal: "Too many requests"
+    remediation: "Rate-limit: HTTP 429 from the target. Throttle the scan: `--throttle 1000 -t 2`. WordPress sites with Wordfence / Sucuri are aggressive about rate-limiting wpscan. Consider proxying through a clean IP pool."
+  - signal: "429"
+    remediation: "Rate-limit: HTTP 429 numeric form. Same remediation as `Too many requests`."
+  - signal: "API limit reached"
+    remediation: "API: WPScan API token quota exhausted (25 free / day). Wait until reset (UTC midnight) or upgrade to a paid plan at https://wpscan.com/profile. Without further API calls, vuln data won't update for this scan."
+  - signal: "Your API token is invalid"
+    remediation: "Auth: WPScan API token is malformed or revoked. Verify at https://wpscan.com/profile that the token matches what's in WPSCAN_API_TOKEN / `--api-token`. Tokens are case-sensitive, no surrounding whitespace."
+  - signal: "Unrecognised option"
+    remediation: "Argument: wpscan's optparse rejected an unknown flag. Run `wpscan --help` for the current flag set. Common errors: typos in `--enumerate` codes, deprecated flags from WPScan v2.x."
+  - signal: "Missing argument"
+    remediation: "Argument: a flag that takes a value was passed without one. Run `wpscan --help` and check the value-flag list. Most common: `-e` / `--enumerate` requires comma-concatenated codes, `--api-token` requires the token string."
+  - signal: "Invalid choice"
+    remediation: "Argument: enum-style flag got a value not in the allowed set — most often `--plugins-detection` got something other than passive/aggressive/mixed. Run `wpscan --help` to see allowed values."
+  - signal: "No plugins found"
+    remediation: "Empty-result: wpscan completed cleanly but no plugins were detected. Try `--plugins-detection aggressive -e ap` (brute-force all plugin names) — passive detection misses plugins not referenced in page source. If still nothing, the site may genuinely have no plugins, or aggressive WAF stripping hides them."
+  - signal: "No users found"
+    remediation: "Empty-result: user enumeration returned zero. Default range is 1-10 — extend with `-e u1-100`. Some sites disable author archives + REST API, blocking discovery. Try alternate enumeration via XML-RPC if available."
+  - signal: "No vulnerabilities found"
+    remediation: "Empty-result: scan succeeded but no CVEs matched. Either the install is up to date, OR the API token is missing (vuln data not loaded). Verify --api-token / WPSCAN_API_TOKEN, and confirm with `--update` that the WPScan database is current."
+
+help_commands:
+  - command: "--help"
+    purpose: "wpscan full flag reference + enumeration codes."
+  - command: "-h"
+    purpose: "Short-form alias for --help."
+  - command: "--version"
+    purpose: "Print the installed wpscan version (e.g., '3.8.28')."
+

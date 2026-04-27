@@ -6,7 +6,11 @@ kind: cli
 # top-level binary). 47 sub-binaries on PATH inside the image.
 image: "ghcr.io/silicon-works/mcp-tools-impacket:latest"
 image_size_mb: 300
-timeout_seconds: 600
+# Dual-clock model — impacket sub-binaries do single Kerberos/SMB/RPC ops.
+# Each op should be quick; long silences mean stuck.
+idle_timeout_seconds: 120       # 2 min — most impacket ops emit progress steadily
+max_runtime_seconds: 1800       # 30 min — even slow domain enum should finish here
+timeout_seconds: 1800
 version: "0.12.x"
 description: "Active Directory and SMB attack toolkit (47 Python sub-binaries: secretsdump, psexec, wmiexec, smbexec, GetUserSPNs, GetNPUsers, getTGT, getST, smbclient, lookupsid, mssqlclient, addcomputer, findDelegation, rbcd, changepasswd, dacledit, owneredit, ticketer, ...). Covers DCSync, lateral movement (psexec/wmiexec/smbexec/dcomexec/atexec), Kerberos (kerberoast, AS-REP roast, ticket forging, S4U2Self/Proxy, golden/silver tickets), SMB/RPC enumeration (smbclient, samrdump, lookupsid, rpcdump), MSSQL (mssqlclient, mssqlinstance), AD ACL/attribute editing (dacledit, owneredit, addcomputer, addspn, rbcd), and credential dumping (LAPS, GPP passwords, DPAPI backup keys). Each sub-binary has its own CLI surface; the LLM constructs the full invocation."
 capabilities:
@@ -382,6 +386,15 @@ gotchas:
   - "secretsdump output format: stdout shows hashes inline; the -outputfile flag writes hashes.txt (one user:rid:lmhash:nthash::: per line) and ntds.json (structured). Parse the .txt for cracking, the .json for structured queries."
   - "ticketer for golden tickets: -domain-sid required (get from lookupsid or Get-DomainSID), -nthash krbtgt_hash required, omit -spn for golden (-spn set = silver). User name is positional. ccache lands in CWD."
   - "DACL/ACL editing (dacledit/owneredit/rbcd) writes to AD; check msDS-AllowedToActOnBehalfOfOtherIdentity / nTSecurityDescriptor changes via -action read first to verify."
+  - "impacket-getPac does NOT accept -dc-ip (legacy mcp-server.py filtered it out). Pass the DC as the connection target via positional @dc instead. Other binaries do accept -dc-ip."
+  - "impacket-smbclient / impacket-smbexec are INTERACTIVE — they read commands from stdin until 'exit'. Under run_cli, pass commands via stdin_data as 'shares\\nexit\\n' (smbclient) or '<cmd>\\nexit\\n' (smbexec). Without 'exit', the binary waits forever and the heartbeat keeps the session alive past sane timeouts."
+  - "smbclient file ops need stdin choreography: 'use SHARE\\ncd \\\\dir\\nget file\\nexit\\n'. Paths use Windows backslashes (replace '/' with '\\\\'). The downloaded file lands in the binary's CWD."
+  - "Some sub-binaries take a SUBCOMMAND positional: 'impacket-dpapi backupkeys -t <host>' (dpapi uses -t, not @host); 'impacket-exchanger <user:pass@host> nspi' (subcommand AFTER identity). For services/reg/net/tstool/wmipersist, the action keyword (list/start/stop/query/install/...) is positional AFTER the identity string."
+  - "PsExec output 'is not writable' on every share = no admin rights. Classify as permission failure even if exit==0; switch to wmiexec or smbexec or escalate. Other Kerberos error codes worth catching: KDC_ERR_CLIENT_REVOKED (account locked/disabled), KDC_ERR_KEY_EXPIRED (password expired - use changepasswd), KDC_ERR_ETYPE_NOSUPP (DC etype mismatch). SMB additions: STATUS_PASSWORD_MUST_CHANGE, STATUS_SHARING_VIOLATION (file locked, retry), STATUS_BAD_NETWORK_NAME (share not found)."
+  - "krb5.conf: legacy mcp-server.py auto-generated /etc/krb5.conf with [libdefaults]/[realms]/[domain_realm] on first Kerberos call. The kind:cli image relies on whatever is baked into the image, OR a krb5.conf the LLM writes via the bash tool to /session/config/krb5.conf and copies into /etc/. If KDC_ERR_*/'realm not local' errors appear with valid creds and DC connectivity, missing krb5.conf is the usual cause."
+  - "ccache auto-promotion (RETIRED in kind:cli): legacy mcp-server.py parsed 'Saving ticket in <path>.ccache' from getTGT/getST stdout and copied to /session/credentials/<safe_principal>.ccache. Under run_cli the binary writes to its CWD; the agent must -outputfile-equivalent or move the file explicitly to /session/. Set CWD via 'cd /session && impacket-getTGT ...' or rely on container default CWD if it is /session."
+  - "impacket-rbcd / impacket-changepasswd / impacket-addspn (krbrelayx): legacy implementations called scripts under /opt/impacket-scripts/ and /opt/krbrelayx/ rather than impacket-* CLIs. The kind:cli image SHOULD have impacket-rbcd / impacket-changepasswd / impacket-addspn on PATH; if 'command not found' appears, fall back to 'python3 /opt/impacket-scripts/<name>.py' or 'python3 /opt/krbrelayx/addspn.py'. addspn flag style is non-standard: -u DOMAIN\\\\user -p pass -t target -s spn [-r] <dc_host>."
+  - "Feature 28 dynamic recipes (RECIPE_DIR=/session/recipes/impacket — note: NOT /session/tool_recipes/impacket like other tools) are RETIRED for the kind:cli path; the LLM writes argv directly. Recipes still load if directory exists for legacy method calls but are a dead branch under run_cli (REQ-TR-016)."
 
 failure_signatures:
   # All signals are impacket's own stderr or socket-error pass-throughs.
@@ -433,6 +446,20 @@ failure_signatures:
     remediation: "lookupsid / samrdump cannot bind to SAMR. Some hardened targets block SAMR over SMB to non-admin users. Try with admin creds."
   - signal: "raise NoMechanismFoundError"
     remediation: "Kerberos library failed to find a valid auth mechanism. Usually means -k was specified without a valid ccache. Run getTGT first."
+  - signal: "KDC_ERR_CLIENT_REVOKED"
+    remediation: "Account is locked or disabled at the KDC. Try a different account; cannot retry until admin unlocks/enables."
+  - signal: "KDC_ERR_KEY_EXPIRED"
+    remediation: "Password has expired. Use impacket-changepasswd to set a new one before further auth."
+  - signal: "KDC_ERR_ETYPE_NOSUPP"
+    remediation: "Encryption type not supported by the DC. Try -aesKey instead of -hashes (or vice versa); some DCs reject RC4 or only allow AES."
+  - signal: "STATUS_PASSWORD_MUST_CHANGE"
+    remediation: "Password must be changed before next logon. Use impacket-changepasswd before retrying."
+  - signal: "STATUS_SHARING_VIOLATION"
+    remediation: "File is locked by another process. Retryable — wait and re-run."
+  - signal: "STATUS_BAD_NETWORK_NAME"
+    remediation: "Share name not found. Run impacket-smbclient 'shares' to enumerate available shares."
+  - signal: "is not writable"
+    remediation: "PsExec found NO writable share — the user lacks local-admin rights on the target. Switch to wmiexec/dcomexec (no share write needed) or escalate first."
 
 help_commands:
   - command: "impacket-secretsdump --help"

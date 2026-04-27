@@ -64,21 +64,58 @@ def load_tool_yamls() -> dict:
 
 
 def validate_tool(tool_name: str, tool: dict) -> list[str]:
-    """Validate a single tool entry against required schema."""
+    """Validate a single tool entry against required schema.
+
+    Two shapes after Feature 35:
+      kind: cli  → must declare ``usage_patterns`` (argv templates the agent
+                   picks via the registry RAG); ``methods`` is forbidden — the
+                   container exposes only the auto-registered ``run_cli``.
+      kind: mcp  → must declare ``methods`` (per-method JSON-schema params);
+                   ``usage_patterns`` is ignored if present.
+    ``kind`` defaults to ``mcp`` when unset (back-compat).
+    """
     errors = []
     prefix = f"tools/{tool_name}/tool.yaml"
 
-    required_fields = ["name", "description", "image", "capabilities", "phases", "methods"]
-    for field in required_fields:
+    base_required = ["name", "description", "image", "capabilities", "phases"]
+    for field in base_required:
         if field not in tool:
             errors.append(f"{prefix}: missing required field '{field}'")
 
-    # Validate methods have descriptions and params
-    for method_name, method in tool.get("methods", {}).items():
-        if "description" not in method:
-            errors.append(f"{prefix}: methods.{method_name} missing 'description'")
-        if "params" not in method:
-            errors.append(f"{prefix}: methods.{method_name} missing 'params'")
+    kind = tool.get("kind", "mcp")
+    if kind == "cli":
+        # kind:cli must declare usage_patterns (the registry RAG matches
+        # against pattern names + when: text); methods are not used.
+        patterns = tool.get("usage_patterns")
+        if not patterns:
+            errors.append(f"{prefix}: kind:cli missing required field 'usage_patterns'")
+        elif not isinstance(patterns, list):
+            errors.append(f"{prefix}: 'usage_patterns' must be a list")
+        else:
+            for i, p in enumerate(patterns):
+                if not isinstance(p, dict):
+                    errors.append(f"{prefix}: usage_patterns[{i}] must be a mapping")
+                    continue
+                for required_key in ("name", "command", "when"):
+                    if required_key not in p:
+                        errors.append(
+                            f"{prefix}: usage_patterns[{i}] missing '{required_key}'"
+                        )
+        if "methods" in tool:
+            errors.append(
+                f"{prefix}: kind:cli must not declare 'methods' "
+                f"(post-Feature-35 the container exposes only run_cli; "
+                f"use usage_patterns instead)"
+            )
+    else:
+        # kind:mcp (default) must declare methods with description + params each.
+        if "methods" not in tool:
+            errors.append(f"{prefix}: kind:mcp missing required field 'methods'")
+        for method_name, method in tool.get("methods", {}).items():
+            if "description" not in method:
+                errors.append(f"{prefix}: methods.{method_name} missing 'description'")
+            if "params" not in method:
+                errors.append(f"{prefix}: methods.{method_name} missing 'params'")
 
     return errors
 

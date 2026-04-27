@@ -7,20 +7,24 @@ LABEL org.opencontainers.image.source="https://github.com/silicon-works/mcp-tool
 LABEL org.opencontainers.image.description="phpggc MCP server for OpenSploit"
 LABEL org.opencontainers.image.licenses="MIT"
 
-# Install PHP CLI, git, and Python
+# Install PHP CLI, git, and Python (python3-full replaces the split
+# python3 / python3-pip / python3-venv triad on current Kali).
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
         php-cli \
         git \
         ca-certificates \
-        python3 \
-        python3-pip \
-        python3-venv && \
+        python3-full && \
     rm -rf /var/lib/apt/lists/* && \
     apt-get clean
 
 # Clone phpggc
 RUN git clone --depth 1 https://github.com/ambionics/phpggc.git /opt/phpggc
+
+# Symlink phpggc onto PATH so the kind:cli binary resolves to `phpggc`
+# (matches tool.yaml's `binary: phpggc`). The phpggc script has a
+# `#!/usr/bin/env php` shebang and runs directly.
+RUN ln -s /opt/phpggc/phpggc /usr/local/bin/phpggc
 
 # Create app directory
 WORKDIR /app
@@ -32,10 +36,6 @@ ENV PATH="/app/venv/bin:$PATH"
 # Copy and install shared mcp-common package
 COPY packages/mcp-common /app/packages/mcp-common
 RUN pip install --no-cache-dir /app/packages/mcp-common
-
-# Install tool-specific dependencies
-COPY tools/phpggc/requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy MCP server code
 COPY tools/phpggc/mcp-server.py .

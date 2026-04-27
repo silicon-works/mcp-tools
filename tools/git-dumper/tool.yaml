@@ -1,9 +1,16 @@
 name: git-dumper
+kind: cli
+binary: git-dumper
 version: "1.0"
-description: "Extract git repositories from exposed .git directories on web servers via git-dumper. 2 methods: dump (download .git objects/packs/refs and reconstruct full repository with commit history), analyze (show git log with diffs, list branches, search history for secrets/credentials, find interesting config files). Reconstructed repos often contain hardcoded credentials, API keys, and application source code not visible on the live site. For web directory fuzzing to find .git use ffuf. For web content inspection use curl."
+description: "Extract git repositories from web servers that expose their .git/ directory. git-dumper (arthaud/git-dumper) downloads .git objects, packs, and refs over HTTP, then runs git checkout to reconstruct the working tree. Recovered repos frequently contain hardcoded credentials, API keys, database connection strings, and application source code that reveal vulnerabilities. Native CLI; the LLM constructs the full git-dumper invocation. Single-target tool — takes ONE URL via the first positional, ONE output directory via the second positional. Bulk URL ingest is not supported (no --load-urls / --input-file). Use ffuf to discover whether /.git/ is exposed before running git-dumper; use curl to confirm /.git/HEAD is reachable as a smoke test. After dumping, run `git log --all`, `git checkout <branch>`, and `git stash list` against the recovered tree to recover content; trufflehog scan_git is the recommended automated secret scanner over the dump."
 image: "ghcr.io/silicon-works/mcp-tools-git-dumper:latest"
 image_size_mb: 250
-timeout_seconds: 300
+# Dual-clock model — typical .git dumps are quick (seconds-to-minutes), but
+# large repos with deep history and many packs can take longer. Idle catches
+# a wedged container; max_runtime is the hard cap.
+idle_timeout_seconds: 300       # 5 min silence between progress lines == wedged
+max_runtime_seconds: 3600       # 1 h hard cap — typical dumps complete well under this
+timeout_seconds: 3600
 
 capabilities:
   - git_extraction
@@ -24,117 +31,205 @@ resources:
 
 routing:
   use_for:
-    - "extract source code from exposed .git directory on a web server"
-    - "reconstruct git repository with full commit history from a web-accessible .git"
-    - "find credentials, API keys, and secrets in git commit history"
+    - "extract source code from an exposed .git/ directory on a web server"
+    - "reconstruct a full git repository (objects, packs, refs, working tree) from a web-accessible .git"
     - "recover application source code for vulnerability analysis"
-    - "analyze git log and diffs for information leakage"
+    - "harvest credentials, API keys, and secrets from .git history (paired with trufflehog or `git log -p` post-dump)"
+    - "preserve the recovered tree under /session/<dirname>/ for later analysis or upload"
+    - "drive the dump through a Burp / SOCKS proxy for inspection"
+    - "dump behind an authenticated session (cookie or bearer token) via -H / -c"
   never_use_for:
-    - "directory brute-forcing to find .git (use ffuf with common.txt wordlist)"
-    - "cloning git repos you have credentials for (use git clone via bash)"
+    - "directory brute-forcing to find .git (use ffuf with common.txt or raft-medium-directories.txt)"
+    - "cloning git repos when you already have credentials (use `git clone` via bash)"
+    - "static analysis of recovered code (use the dumped tree directly with grep / semgrep / trufflehog)"
+    - "secret scanning of the dumped repo — git-dumper is the dumper, NOT the scanner. Pair with trufflehog scan_git"
     - "web content inspection (use curl)"
-    - "source code static analysis (use the recovered files directly)"
+    - "fuzzing parameters in the recovered application (use ffuf / sqlmap / ssti against live endpoints)"
   triggers:
-    - .git
-    - git directory
-    - git-dumper
-    - exposed git
-    - git repository
-    - source code recovery
-    - git dump
+    - ".git"
+    - "git directory"
+    - "git-dumper"
+    - "exposed git"
+    - "git repository"
+    - "source code recovery"
+    - "git dump"
+    - "/.git/HEAD"
+    - "/.git/config"
+    - ".git/ exposed"
   prefer_over: []
 
 see_also:
   - tool: ffuf
-    reason: Use ffuf to discover if .git is exposed (fuzz with common.txt, look for 200/301 on /.git/HEAD). Then use git-dumper to extract the repo.
+    reason: "Use ffuf to discover whether .git/ is exposed (fuzz with common.txt; look for 200/301/403 on /.git/HEAD or /.git/config). Then use git-dumper to extract the repo."
   - tool: curl
-    reason: Use curl to quickly check if /.git/HEAD is accessible before running git-dumper. A response containing 'ref:' confirms an exposed .git.
+    reason: "Use curl to quickly confirm /.git/HEAD is accessible before running git-dumper — a response containing 'ref:' confirms an exposed .git directory. Same trick for /.git/config."
   - tool: trufflehog
-    reason: After dumping with git-dumper, use trufflehog scan_git on the recovered repo for automated secret detection (800+ credential types).
+    reason: "After dumping with git-dumper, run trufflehog scan_git on the recovered repo for automated secret detection (800+ credential types). git-dumper is the extractor; trufflehog is the scanner."
+  - tool: web-fingerprint
+    reason: "Web-fingerprint identifies the framework (Flask/Laravel/Express) — common deployment misconfigurations expose .git on these stacks."
+  - tool: web-session
+    reason: "Capture an authenticated cookie before passing -H 'Cookie: ...' or -c to git-dumper when /.git/ is behind a login wall."
 
-methods:
-  dump:
-    description: "Dump an exposed .git directory from a URL and reconstruct the full git repository. Downloads objects, packs, refs, and other .git internals, then runs git checkout to recover working tree files. Returns the repo path, file list, branch names, and commit count."
-    when_to_use: "After discovering an exposed .git directory (typically found via ffuf directory fuzzing or by checking /.git/HEAD manually with curl). Common finding on PHP, Python, and Node.js web applications where the deployment process left the .git directory accessible. The recovered source code often contains hardcoded credentials, API keys, database connection strings, and application logic that reveals vulnerabilities."
-    params:
-      url:
-        type: string
-        required: true
-        description: "Base URL of the website (e.g., 'http://10.10.10.5/' or 'http://target.htb/.git/'). The /.git/ suffix is handled automatically."
-      jobs:
-        type: integer
-        default: 10
-        description: "Number of simultaneous download requests. Higher = faster but noisier."
-      retry:
-        type: integer
-        default: 3
-        description: "Number of retry attempts per failed request."
-      timeout:
-        type: integer
-        default: 30
-        description: "Timeout per request in seconds."
-      user_agent:
-        type: string
-        description: "Custom User-Agent header to avoid detection."
-      headers:
-        type: array
-        description: "Additional HTTP headers as 'NAME=VALUE' strings (e.g., 'Cookie=session=abc123')."
-      proxy:
-        type: string
-        description: "HTTP proxy (e.g., 'http://127.0.0.1:8080' for Burp Suite)."
-    returns:
-      repo_path:
-        type: string
-        description: "Path to the reconstructed repository (use this in analyze method)."
-      files:
-        type: array
-        description: "List of recovered files (up to 100)."
-      file_count:
-        type: integer
-        description: "Total number of files recovered."
-      branches:
-        type: array
-        description: "Git branches found."
-      commit_count:
-        type: integer
-        description: "Number of commits in history."
+# ── kind:cli specific sections ──────────────────────────────────────
 
-  analyze:
-    description: "Analyze a previously dumped git repository. Shows commit log with diffs, searches history for leaked secrets (passwords, API keys, tokens, private keys), and lists interesting configuration files."
-    when_to_use: "After dump succeeds — analyze the recovered repo for secrets and vulnerabilities. The commit history often reveals credentials that were committed then 'removed' (but remain in git history). Also reveals how the application works, which endpoints exist, and where to look for vulnerabilities."
-    params:
-      repo_path:
-        type: string
-        required: true
-        description: "Path to the dumped repository (from dump method's repo_path return value)."
-      log_count:
-        type: integer
-        default: 20
-        description: "Number of recent commits to show in the log."
-      show_diff:
-        type: boolean
-        default: true
-        description: "Include diffs in commit log (shows exactly what changed — essential for finding removed secrets)."
-      grep_secrets:
-        type: boolean
-        default: true
-        description: "Search commit history and files for potential secrets (passwords, keys, tokens, connection strings)."
-    returns:
-      log:
-        type: string
-        description: "Git log output (with diffs if show_diff=true)."
-      commits:
-        type: array
-        description: "Parsed commits (hash, author, email, message, date) — only when show_diff=false."
-      secrets_in_history:
-        type: string
-        description: "Commits that added/removed password-related content."
-      secrets_in_files:
-        type: array
-        description: "Lines in current files matching secret patterns."
-      secrets_count:
-        type: integer
-        description: "Number of potential secrets found in files."
-      interesting_files:
-        type: array
-        description: "Files with interesting names (.env, config, credentials, .key, .pem, etc.)."
+target_extraction:
+  # git-dumper takes the URL as the FIRST POSITIONAL argument (NOT a -u flag).
+  # Output directory is the SECOND POSITIONAL. We anchor extraction on the URL
+  # form via positional_match — capture group 2 is the host. Fallback to the
+  # first non-flag positional in case the regex misses an unusual scheme.
+  - rule: "positional_match"
+    pattern: "^(https?)://([^:/?#]+)"
+    group: 2
+    parse_as: "url_host"
+  - rule: "first_non_flag_positional"
+    parse_as: "url_host"
+
+# git-dumper is a single-target tool. There is NO --load-urls, --input-file,
+# --batch, or stdin-list mode. No reject_flags needed for bulk-target loaders.
+# Interactive prompting also does not happen (the tool runs to completion or
+# errors out without user input). Empty list documents the intent.
+reject_flags: []
+reject_flags_reason: "git-dumper has no bulk-target ingest path and no interactive shell — every flag is safe to forward."
+
+# Per-tool value-taking flags. The DSL merges these with built-in defaults.
+# Any flag whose value could leak as a positional URL or hostname must appear
+# here, otherwise the flag-walker would treat the value as the target.
+value_flags:
+  - "-i"               # ignore glob (e.g., '*.png')
+  - "--ignore"
+  - "-j"               # parallel jobs (default 10)
+  - "--jobs"
+  - "-r"               # retry count
+  - "--retry"
+  - "-t"               # HTTP timeout (seconds per request)
+  - "--timeout"
+  - "-u"               # custom User-Agent string
+  - "--user-agent"
+  - "-H"               # custom HTTP header (stackable, 'Name: value' form)
+  - "--header"
+  - "-c"               # cookie value (raw cookie header content)
+  - "--cookie"
+  - "--proxy"          # http(s)://proxy:port
+
+usage_patterns:
+  - name: "Default dump — straight URL with /.git/ suffix"
+    command: "git-dumper {url_with_git_slash} {output_dir}"
+    when: "Target's /.git/ directory is reachable and unauthenticated. {url_with_git_slash} MUST end with /.git/ (trailing slash matters for git-dumper's URL parsing). {output_dir} is canonical at /session/<dirname> so the dumped tree survives container recycle. Default -j 10 parallel workers — fast on responsive targets."
+
+  - name: "Dump behind an auth header (bearer token / session cookie)"
+    command: "git-dumper {url_with_git_slash} {output_dir} -H {auth_header}"
+    when: "Target requires authentication. Pass the full header line via -H 'Authorization: Bearer xxx' or -H 'Cookie: PHPSESSID=...'. -H is stackable — repeat for multiple headers. Capture tokens via web-session first when the auth flow is non-trivial."
+
+  - name: "Slow / fragile target — throttle workers and timeouts"
+    command: "git-dumper {url_with_git_slash} {output_dir} -j 2 -t 60 -r 3"
+    when: "Target is rate-limiting, behind a slow link, or returning intermittent 5xx. Drop -j to 2 (default 10 is aggressive), raise per-request timeout to 60s with -t, allow 3 retries with -r. Fewer hammered requests reduces tarpit / WAF / IDS-trigger risk."
+
+  - name: "Through a proxy (Burp / SOCKS)"
+    command: "git-dumper {url_with_git_slash} {output_dir} --proxy {proxy_url}"
+    when: "Route every request through Burp Suite or another inspector for live HTTP review. Common values: 'http://127.0.0.1:8080' for Burp, 'socks5://127.0.0.1:9050' for Tor. Useful for debugging dump failures (404s on individual objects) or for handling non-standard auth flows."
+
+  - name: "TLS-skip on self-signed / mismatched certs"
+    command: "git-dumper {url_with_git_slash} {output_dir} --insecure"
+    when: "Target is HTTPS with a self-signed or mismatched certificate (HTB lab boxes, internal CAs). --insecure disables TLS verification — only use against authorized targets. Without it, git-dumper aborts with SSL: CERTIFICATE_VERIFY_FAILED."
+
+  - name: "Custom User-Agent (avoid default fingerprinting)"
+    command: "git-dumper {url_with_git_slash} {output_dir} -u {user_agent_string}"
+    when: "Default User-Agent is the python-requests / git-dumper string — frequently fingerprinted by WAFs. Pass a real browser UA via -u 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 ...' to blend in."
+
+  - name: "Pass a cookie via -c (compact form)"
+    command: "git-dumper {url_with_git_slash} {output_dir} -c {cookie_string}"
+    when: "Authenticated dump where -H 'Cookie: ...' would be verbose. -c takes the raw cookie header content (e.g., 'session=abc; user=admin'). Equivalent to -H 'Cookie: ...' but shorter."
+
+  - name: "Ignore noisy paths (skip media / binaries)"
+    command: "git-dumper {url_with_git_slash} {output_dir} -i {glob_pattern}"
+    when: "Repos with large binary blobs (images, PDFs, archives) waste bandwidth and time. -i takes a glob (e.g., '*.png', 'static/*'); skip what you don't need. Multiple ignores via repeated -i."
+
+output_formats:
+  # git-dumper has NO structured output flag — there is no JSON / XML / CSV /
+  # output-file option. Success is observable on disk: the {output_dir}
+  # contains the dumped repo (objects under .git/, plus the checked-out tree).
+  # tool_runner verifies success by inspecting the directory; raw stdout is
+  # informational prose. The agent may want to ls the output dir or run
+  # `git log --all -C {dir}` after the dump to confirm content.
+  - flag: ""
+    format: "directory_tree"
+    preferred: true
+
+common_options:
+  targeting:
+    - "FIRST POSITIONAL: full URL ending in /.git/ (e.g., 'http://target.htb/.git/'). The trailing slash matters for git-dumper's URL parsing"
+    - "SECOND POSITIONAL: output directory (must be writable). Canonical: /session/<dirname>/ — survives container recycle"
+    - "git-dumper takes ONLY one URL per invocation — no batch / list / stdin"
+  http:
+    - "-H 'Name: Value' / --header ...: extra HTTP header (stackable — repeat for multiple)"
+    - "-c 'cookie' / --cookie 'cookie': raw Cookie header content (shortcut for -H 'Cookie: ...')"
+    - "-u 'UA' / --user-agent 'UA': custom User-Agent (default is python-requests / git-dumper signature — frequently fingerprinted)"
+    - "--insecure: skip TLS certificate verification (use against self-signed labs)"
+    - "--proxy URL: route through HTTP / SOCKS proxy (Burp Suite at 127.0.0.1:8080)"
+  performance:
+    - "-j N / --jobs N: parallel download workers (default 10 — aggressive; drop to 2 for slow / fragile targets)"
+    - "-r N / --retry N: retry count per failed request"
+    - "-t SECONDS / --timeout SECONDS: HTTP timeout per request"
+    - "-i GLOB / --ignore GLOB: skip paths matching glob (e.g., '*.png' to skip images)"
+  output:
+    - "git-dumper has no --output / --output-format flag. Output is the directory tree at {output_dir} (the second positional)"
+    - "Success = {output_dir}/.git/ exists and `git log` works inside it. Failure = empty or partial tree, possibly no .git/ directory at all"
+
+gotchas:
+  - "URL MUST end with /.git/ — git-dumper expects to find /.git/HEAD, /.git/config, /.git/index, etc. relative to the URL. http://target/ (without /.git/) WILL NOT work; http://target/.git (without trailing slash) is also incorrect. Legacy mcp-server.py auto-normalized this by `rstrip('/')` then stripping a trailing `/.git` and re-appending — under kind:cli the LLM owns this normalization. If you only know the base URL, append `/.git/` literally before invoking; do NOT pass `/.git` (no slash) or `/` (bare host)"
+  - "Output directory positional must be writable. Canonical: /session/<dirname>/ — survives container recycle. /tmp/<dirname>/ works but is wiped on container restart"
+  - "If the target's /.git/ has NO directory listing AND git-dumper cannot enumerate via /.git/index, the dump may be empty or partial. Smoke-test FIRST with curl: `curl http://target/.git/HEAD` should return content like 'ref: refs/heads/main' — that confirms /.git/HEAD is reachable. /.git/config and /.git/index are also good probes"
+  - "Default -j 10 is aggressive for slow or rate-limited targets — drop to -j 2 (or even -j 1) for HTB/lab boxes that drop connections under load. Watch for 5xx and 'Connection reset by peer' in stdout"
+  - "Authentication uses -H 'Authorization: Bearer ...' or -H 'Cookie: ...' (or the -c shortcut). There is NO --basic-auth or --bearer flag — construct the header manually"
+  - "-H is STACKABLE — pass multiple `-H 'Name: value'` to add multiple headers. NOT comma-separated, NOT semicolon-separated"
+  - "After dump, recover content with `git -C {output_dir} log --all`, `git -C {output_dir} checkout <branch>`, `git -C {output_dir} stash list`, `git -C {output_dir} reflog`. The dumped working tree may be on a different branch / commit than what you expected; --all surfaces them all"
+  - "Some apps expose /.git/ but block /.git/objects/ pack files — dump appears to succeed (downloads HEAD, refs, config) but `git log` returns 'fatal: bad object'. In that case the dump is INCOMPLETE; treat as failure and look for alternative leaks (.git.zip, .git.tar.gz, /.git/HEAD via path-traversal)"
+  - "git-dumper has no --output-file / --json / --xml flag. Tool success is observed on disk — the {output_dir} contains the dumped tree. raw_output is human prose"
+  - "The MCP server's legacy `dump` method (from kind:mcp) auto-creates output_dir under /session/git-dump-<sanitized_host>. With kind:cli, the LLM picks the directory name explicitly — pin it to /session/<descriptive_name> for clarity (e.g., /session/git-dump-doctor)"
+  - "git-dumper supports HTTP and HTTPS only. FTP / file:// / git:// schemes are NOT supported — use `git clone` via bash for those"
+  - "The tool can hang in pathological cases (server returns 200 + slow stream) — idle_timeout_seconds (300s) catches that; max_runtime_seconds (3600s) is the hard cap"
+  - "Legacy mcp-server.py used a derived wall-clock timeout of `(-t value) * 10 + 60` seconds for the entire dump (e.g., -t 30 → 360s). Under kind:cli, max_runtime_seconds (3600s) is the only wall cap. If you raise -t to 60 for slow targets, also expect the dump itself to potentially run several minutes — idle_timeout_seconds (300s silence) is what catches a wedged dump, not -t"
+
+failure_signatures:
+  # Layer diversity (SKILL #11) — at least 6 distinct verifiable layers:
+  #   1. DNS  2. TCP  3. HTTP  4. TLS  5. Empty-dump (application)  6. Filesystem (output dir)
+  # IMPORTANT: git-dumper exits 0 even when /.git/HEAD is 404 in some builds —
+  # tool_runner pattern-matches signals regardless of exit code.
+  - signal: "Could not resolve"
+    remediation: "DNS lookup failed for the URL host. Verify spelling, /etc/hosts inside the container, or pass an IP literal in the URL. git-dumper surfaces the underlying requests/urllib3 error verbatim."
+  - signal: "Name or service not known"
+    remediation: "Same as 'Could not resolve' — DNS failure. Use IP if DNS is unreliable in the test environment."
+  - signal: "Connection refused"
+    remediation: "TCP connection refused — the web port is closed. Confirm with `nmap -p 80,443 <host>` or `curl -I http://host` before re-running."
+  - signal: "Failed to establish a new connection"
+    remediation: "TCP connection failed (refused / closed / filtered / route problem). Check VPN connectivity and firewall rules; confirm the target is up."
+  - signal: "Connection reset by peer"
+    remediation: "Server closed the TCP connection mid-request — IDS / WAF / rate-limiter bite. Retry with `-j 2` to slow probes; consider --proxy through Burp for inspection."
+  - signal: "Read timed out"
+    remediation: "HTTP response timeout — target slow. Raise -t to 60 seconds; reduce -j parallel workers."
+  - signal: "404"
+    remediation: "Target returned 404 — most often /.git/HEAD doesn't exist (URL missing /.git/ trailing slash, or /.git/ is genuinely not exposed). Smoke-test with `curl http://target/.git/HEAD` first; verify the URL ends in /.git/ (trailing slash mandatory)."
+  - signal: "not found"
+    remediation: "Generic 'not found' surface — same diagnosis as 404. Smoke-test the URL with curl before re-running git-dumper."
+  - signal: "Empty repository"
+    remediation: "git-dumper downloaded /.git/HEAD and refs but no objects came through — the target has /.git/ exposed but is blocking /.git/objects/ pack downloads (common nginx misconfig). Treat as INCOMPLETE dump; look for .git.zip / .git.tar.gz backups or path-traversal alternatives."
+  - signal: "0 files downloaded"
+    remediation: "Same outcome as 'Empty repository' — nothing came across. Smoke-test /.git/HEAD via curl; if that returns 'ref:', the /.git/objects/ blacklist is the culprit."
+  - signal: "SSL: CERTIFICATE_VERIFY_FAILED"
+    remediation: "TLS cert validation failed — pass --insecure to skip verification (HTB lab targets, internal CAs). Without --insecure, git-dumper aborts on cert errors."
+  - signal: "certificate verify failed"
+    remediation: "Same outcome as 'SSL: CERTIFICATE_VERIFY_FAILED' — pass --insecure or fix the cert chain."
+  - signal: "Permission denied"
+    remediation: "Filesystem write failed — the output directory is read-only or owned by another UID. Pin output to /session/<dirname>/ which is writable in the container; verify with `ls -la /session/`."
+  - signal: "fatal: bad object"
+    remediation: "Post-dump `git log` failed — the .git/objects directory is incomplete. The dump succeeded partially but pack files are missing. Re-dump with -j 1 -t 60 to maximize completion; or seek alternative leaks (.git.zip backup, path traversal)."
+  - signal: "is not a git repository"
+    remediation: "The /.git/ at the URL is malformed or the dump was so incomplete that git refuses to recognize it. Verify with curl that /.git/HEAD, /.git/config, /.git/index all return content."
+  - signal: "Traceback (most recent call last)"
+    remediation: "Python exception leaked through — likely a build / dependency mismatch or unhandled response. Capture full stderr; consider rebuilding the image (mcp-common 0.3.0 + fresh git-dumper install)."
+
+help_commands:
+  - command: "git-dumper --help"
+    purpose: "Concise flag listing"
+  - command: "git-dumper -h"
+    purpose: "Same as --help"

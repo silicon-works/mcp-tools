@@ -1,44 +1,66 @@
 name: ffuf
+kind: cli
+binary: ffuf
 version: "2.1.0"
-description: "Fast web fuzzer (ffuf v2.1.0, Go-based) for directory/file discovery, GET/POST parameter fuzzing, and virtual host enumeration. Uses FUZZ keyword placeholder in URLs, headers, or POST data. Includes 7 built-in wordlists: common (4,614 entries), big (20,469), small (959), dirbuster-small (87,650), dirbuster-medium (220,546), raft-small, raft-medium from SecLists. Supports response filtering by status code, size, lines, words, regex, and response time. Default 40 concurrent threads. JSON output with structured result parsing. Auto-calibration (-ac) for intelligent response filtering. Includes dirb and SecLists wordlists."
+description: "Fast Go-based web fuzzer for directory/file discovery, GET/POST parameter fuzzing, virtual-host enumeration, and arbitrary header/body fuzzing. Uses the FUZZ keyword (or custom keyword via -w wordlist:KEYWORD) as a placeholder injected into URL, header, or POST data. Multi-position fuzzing via clusterbomb / pitchfork modes. Rich filtering by status code (-fc), size (-fs), word count (-fw), line count (-fl), regexp (-fr), and response time (-ft). Symmetrical matchers (-mc/-ms/-mw/-ml/-mr/-mt). Auto-calibration (-ac/-acc) profiles default/error responses to suppress them automatically. Native CLI; LLM constructs the full ffuf invocation. Use curl for one-shot probes, web-session for stateful login flows, nuclei for templated CVE scans."
 image: "ghcr.io/silicon-works/mcp-tools-ffuf:latest"
 image_size_mb: 200
-timeout_seconds: 600
+# Dual-clock model:
+#   idle_timeout_seconds — silence between MCP heartbeats. ffuf prints
+#     progress lines steadily; 5 min silent = stuck or wedged.
+#   max_runtime_seconds  — hard wall-clock cap; never resets on heartbeat.
+#     6 h covers very large wordlists (rockyou-style) on slow targets.
+# Legacy `timeout_seconds` is used by older clients as the hard cap.
+idle_timeout_seconds: 300
+max_runtime_seconds: 21600
+timeout_seconds: 21600
 
 capabilities:
   - directory_bruteforce
   - parameter_fuzzing
   - vhost_discovery
-
-# Routing hints for tool selection
-routing:
-  use_for:
-    - "directory brute-forcing"
-    - "directory enumeration"
-    - "find hidden files"
-    - "find hidden directories"
-    - "parameter fuzzing"
-    - "vhost discovery"
-    - "subdomain enumeration"
-  never_use_for:
-    - "SQL injection"
-    - "port scanning"
-    - "password cracking"
-  triggers:
-    - "ffuf"
-    - "directory brute"
-    - "fuzz"
-    - "dirbuster"
-    - "hidden files"
-    - "hidden directories"
-    - "vhost"
-    - "wordlist"
-  prefer_over:
-    - "gobuster"  # ffuf is faster and more flexible
-    - "dirbuster"  # ffuf is CLI-based and faster
+  - subdomain_enumeration
+  - header_fuzzing
+  - post_body_fuzzing
 
 phases:
   - enumeration
+
+routing:
+  use_for:
+    - "directory and file brute-forcing on a web server"
+    - "find hidden directories, admin panels, backup files"
+    - "GET parameter discovery (find unknown query-string params)"
+    - "POST parameter and value fuzzing"
+    - "virtual-host (vhost) enumeration via Host header"
+    - "subdomain discovery against a wildcard DNS / shared-hosting target"
+    - "fuzz header values (Authorization, X-Forwarded-For, Referer)"
+    - "multi-position fuzzing with clusterbomb/pitchfork mode"
+  never_use_for:
+    - "single one-shot HTTP request — use curl"
+    - "JavaScript-rendered pages — use playwright"
+    - "stateful authenticated multi-step flows — use web-session"
+    - "SQL injection — use sqlmap"
+    - "automated CVE / template scanning — use nuclei"
+    - "port scanning — use nmap"
+    - "password brute-force on auth forms — use hydra"
+  triggers:
+    - "ffuf"
+    - "directory brute"
+    - "directory enumeration"
+    - "fuzz"
+    - "dirbuster"
+    - "gobuster"
+    - "hidden files"
+    - "hidden directories"
+    - "vhost"
+    - "subdomain enumeration"
+    - "parameter discovery"
+    - "wordlist"
+  prefer_over:
+    - "gobuster"   # ffuf is faster and more flexible
+    - "dirbuster"  # ffuf is CLI-based and faster
+    - "wfuzz"      # ffuf is the modern successor
 
 requirements:
   network: true
@@ -48,170 +70,325 @@ resources:
   memory_mb: 512
   cpu: 1.0
 
-methods:
-  dir_fuzz:
-    description: "Fuzz directories and files on a web server using wordlist-based brute-forcing. Appends FUZZ keyword to URL if not present. Runs ffuf with JSON output, auto-calibration, and configurable thread count (default 40). Supports file extension fuzzing (e.g., .php,.html,.txt), custom headers, cookies for authenticated fuzzing, and response size filtering. Returns discovered paths with HTTP status code, content length, word count, and line count."
-    when_to_use: "The standard web enumeration step after discovering an HTTP/HTTPS service. Run this to find hidden directories, admin panels, backup files, and API endpoints. Start with wordlist='common' (fast, 4.6K entries), then try 'big' (20K) or 'dirbuster-medium' (220K) if initial results are sparse. Add extensions='php,html,txt,bak,old' for the target's technology stack. For PHP sites: extensions='php,php.bak,inc'. For Java: extensions='jsp,do,action'. Filter out false positives with filter_size (e.g., '0' for empty responses). Use cookies param for post-authentication fuzzing."
-    params:
-      url:
-        type: string
-        required: true
-        description: "Target URL (FUZZ keyword added automatically if missing)"
-      wordlist:
-        type: string
-        default: "common"
-        description: "Wordlist name (common, big, dirbuster-small, dirbuster-medium) or path"
-      extensions:
-        type: string
-        description: "File extensions to append (e.g., 'php,html,txt')"
-      threads:
-        type: integer
-        default: 40
-        description: "Number of concurrent threads"
-      match_status:
-        type: string
-        description: "Match ONLY these status codes (default: 200,204,301,302,307,401,403,405)"
-      filter_codes:
-        type: string
-        description: "Filter OUT these status codes (e.g., '403,404,429'). Results with these codes are hidden."
-      auto_calibrate:
-        type: boolean
-        default: false
-        description: "Auto-calibrate response filtering. Automatically determines and filters default/error responses. Recommended for most scans."
-      filter_size:
-        type: string
-        description: "Filter out responses of this size"
-      filter_words:
-        type: string
-        description: "Filter out responses with this word count (e.g., '42' or '10-50')"
-      filter_lines:
-        type: string
-        description: "Filter out responses with this line count (e.g., '0' or '5-20')"
-      timeout:
-        type: integer
-        default: 10
-        description: "HTTP request timeout in seconds"
-      headers:
-        type: object
-        description: "Custom HTTP headers as key-value pairs (e.g., {\"Host\": \"target.htb\"})"
-      cookies:
-        type: string
-        description: "Cookie header value for authenticated fuzzing"
-    returns:
-      results:
-        type: array
-        description: "Discovered paths with status codes and sizes"
-      summary:
-        type: object
-        description: "Summary with target, wordlist, and found paths"
+see_also:
+  - tool: curl
+    reason: "For one-shot probes — curl baseline-fetches the default response so ffuf knows what -fs to set"
+  - tool: web-session
+    reason: "Use to obtain an authenticated cookie before passing -b to ffuf for post-login fuzzing"
+  - tool: playwright
+    reason: "For JavaScript-rendered pages or DOM interaction — ffuf only sees the HTTP response"
+  - tool: nuclei
+    reason: "For automated CVE / misconfiguration template scans"
+  - tool: sqlmap
+    reason: "Once ffuf finds a parameter, feed the URL to sqlmap for SQLi testing"
 
-  param_fuzz:
-    description: "Fuzz GET or POST parameters on a web endpoint. The FUZZ keyword must be placed in the URL query string (GET) or POST data body. Supports JSON POST bodies. Uses same wordlist resolution and filtering as dir_fuzz. Useful for discovering hidden GET parameters, valid parameter values, or testing for different responses that indicate injection points."
-    when_to_use: "Two main scenarios: (1) Discover hidden GET parameters — place FUZZ as the parameter name: url='http://target.com/page?FUZZ=test'. (2) Fuzz parameter values for valid inputs — place FUZZ as the value: url='http://target.com/api?id=FUZZ'. For POST parameter fuzzing, set method='POST' and data='username=admin&password=FUZZ'. Filter by response size to find responses that differ from the default (which indicates a valid parameter or value). Also useful for IDOR testing by fuzzing numeric IDs."
-    params:
-      url:
-        type: string
-        required: true
-        description: "Target URL with FUZZ keyword in parameter"
-      wordlist:
-        type: string
-        default: "common"
-        description: "Wordlist name or path"
-      method:
-        type: enum
-        default: GET
-        values: [GET, POST]
-        description: "HTTP method"
-      data:
-        type: string
-        description: "POST data with FUZZ keyword (e.g., 'username=admin&password=FUZZ')"
-      threads:
-        type: integer
-        default: 40
-        description: "Number of concurrent threads"
-      match_status:
-        type: string
-        description: "Match ONLY these status codes"
-      filter_codes:
-        type: string
-        description: "Filter OUT these status codes (e.g., '403,404,429'). Results with these codes are hidden."
-      auto_calibrate:
-        type: boolean
-        default: false
-        description: "Auto-calibrate response filtering. Automatically determines and filters default/error responses."
-      filter_size:
-        type: string
-        description: "Filter out responses of this size"
-      filter_words:
-        type: string
-        description: "Filter out responses with this word count (e.g., '42' or '10-50')"
-      filter_lines:
-        type: string
-        description: "Filter out responses with this line count (e.g., '0' or '5-20')"
-      timeout:
-        type: integer
-        default: 10
-        description: "HTTP request timeout in seconds"
-      headers:
-        type: object
-        description: "Custom HTTP headers as key-value pairs"
-      cookies:
-        type: string
-        description: "Cookie header value for authenticated fuzzing"
-    returns:
-      results:
-        type: array
-        description: "Matching parameter values with responses"
+# ── kind:cli specific sections ──────────────────────────────────────
 
-  vhost_fuzz:
-    description: "Fuzz virtual hosts by sending requests with different Host headers. Sets Host header to 'FUZZ.domain' and filters by response size to identify valid vhosts that return different content than the default. Critical for HTB/CTF targets where the IP hosts multiple sites under different subdomains."
-    when_to_use: "When you have a target IP that serves different content based on the Host header — common in CTFs (Hack The Box) and shared hosting. The workflow: (1) Access the IP directly, note the default response size, (2) vhost_fuzz with filter_size set to the default size to filter it out. This reveals subdomains like 'dev.target.htb', 'api.target.htb', 'internal.target.htb' that serve different applications. Add discovered vhosts to /etc/hosts. Use after nmap finds HTTP and you've already done dir_fuzz on the main site."
-    params:
-      url:
-        type: string
-        required: true
-        description: "Target URL (IP address or hostname)"
-      domain:
-        type: string
-        required: true
-        description: "Base domain for vhost fuzzing (e.g., 'target.htb')"
-      wordlist:
-        type: string
-        default: "common"
-        description: "Wordlist for subdomain prefixes"
-      threads:
-        type: integer
-        default: 40
-        description: "Number of concurrent threads"
-      match_status:
-        type: string
-        description: "Match ONLY these status codes"
-      filter_codes:
-        type: string
-        description: "Filter OUT these status codes (e.g., '403,404,429'). Results with these codes are hidden."
-      auto_calibrate:
-        type: boolean
-        default: false
-        description: "Auto-calibrate response filtering. Automatically determines and filters default/error responses."
-      filter_size:
-        type: string
-        description: "Filter out default response size"
-      filter_words:
-        type: string
-        description: "Filter out responses with this word count (e.g., '42' or '10-50')"
-      filter_lines:
-        type: string
-        description: "Filter out responses with this line count (e.g., '0' or '5-20')"
-      headers:
-        type: object
-        description: "Custom HTTP headers as key-value pairs (in addition to Host header used for vhost fuzzing)"
-      cookies:
-        type: string
-        description: "Cookie header value for authenticated fuzzing"
-    returns:
-      vhosts:
-        type: array
-        description: "Discovered virtual hosts"
-      summary:
-        type: object
-        description: "Summary with target domain and found vhosts"
+target_extraction:
+  # ffuf target URL is supplied via -u (mandatory in normal usage).
+  # The URL contains the FUZZ keyword (or a custom keyword) as a placeholder;
+  # the host portion is what scope-validation cares about.
+  # Note: -w (wordlist) loads INPUT DATA, not targets. Wordlists are local
+  # /session/ files we control. -w is a value_flag, not extracted.
+  # The -request flag (raw HTTP request file) IS rejected — see reject_flags.
+  - rule: "flag_value"
+    flag: "-u"
+    parse_as: "url_host"
+
+# Flags that put the target outside the command line where scope validation
+# can't reach it. Plugin's cli_in_container rejects the call before container
+# spawn when any of these appear.
+reject_flags:
+  - "-request"   # load raw HTTP request from file (target inside file body)
+reject_flags_reason: "Raw-request-file ingestion (-request) puts the target URL inside the file body, outside the command line where scope validation can reach. Extract the target URL into -u with FUZZ markers explicitly."
+
+# Per-tool value-taking flags whose values must NOT be confused with positional
+# targets. ffuf uses single-dash long flags (e.g., -recursion-depth, NOT
+# --recursion-depth) — verified against `ffuf -h`. The DSL merges these with
+# its built-in defaults.
+value_flags:
+  # HTTP options
+  - "-u"               # target URL (the one we extract)
+  - "-w"               # wordlist file path (and optional :KEYWORD)
+  - "-H"               # custom header (repeatable)
+  - "-b"               # cookie data
+  - "-X"               # HTTP method
+  - "-d"               # POST body data
+  - "-x"               # HTTP proxy URL — NOT the target
+  - "-replay-proxy"    # proxy URL for replaying matches — NOT the target
+  - "-recursion-depth" # max recursion depth (integer)
+  - "-recursion-strategy" # default | greedy
+  - "-timeout"         # HTTP request timeout (seconds)
+  # Input options
+  - "-mode"            # clusterbomb | pitchfork
+  - "-input-cmd"       # command producing input (overrides -w)
+  - "-input-num"       # number of inputs to test
+  - "-input-shell"     # shell to use for -input-cmd
+  - "-e"               # extension list (e.g., 'php,html,txt')
+  - "-request"         # rejected, but list for parser correctness
+  - "-request-proto"   # http | https for raw request
+  - "-config"          # config file path
+  # Performance / runtime
+  - "-t"               # thread count
+  - "-rate"            # request rate cap (req/sec)
+  - "-p"               # delay between requests (seconds or range)
+  - "-maxtime"         # max running time (seconds, total)
+  - "-maxtime-job"     # max running time per recursion job
+  # Matchers
+  - "-mc"              # match status codes
+  - "-ml"              # match line count
+  - "-mr"              # match regexp
+  - "-ms"              # match response size
+  - "-mt"              # match response time
+  - "-mw"              # match word count
+  # Filters
+  - "-fc"              # filter status codes
+  - "-fl"              # filter line count
+  - "-fr"              # filter regexp
+  - "-fs"              # filter response size
+  - "-ft"              # filter response time
+  - "-fw"              # filter word count
+  - "-fmode"           # filter mode: and | or (default 'or')
+  # Auto-calibration
+  - "-ac"              # boolean — listed for completeness, no value
+  - "-acc"             # custom auto-calibration string (repeatable)
+  - "-ach"             # auto-calibration on every host
+  - "-ack"             # auto-calibration keyword (default FUZZ)
+  # Output
+  - "-o"               # output file path
+  - "-of"              # output format (json | csv | html | md | ejson | ecsv | all)
+  - "-or"              # only write output when results found
+  - "-od"              # directory for matched-result responses
+  - "-debug-log"       # debug log file path
+  # Auth / TLS
+  - "-cc"              # client cert path
+  - "-ck"              # client key path
+  # Stop conditions (booleans, no value — listed for explicitness)
+  - "-sf"              # boolean — stop on >95% 403
+  - "-sa"              # boolean — stop on all errors
+  - "-se"              # boolean — stop on spurious errors
+
+usage_patterns:
+  - name: "Directory enum (common wordlist)"
+    command: "ffuf -u {url}/FUZZ -w /usr/share/seclists/Discovery/Web-Content/common.txt -t 40 -fc 404 -of json -o /session/ffuf-dir.json"
+    when: "Standard first-pass directory/file discovery on a web server. Filter 404s. Use 'common.txt' (~4.6K entries) for fast initial sweep; switch to 'directory-list-2.3-medium.txt' (~220K) if results sparse."
+
+  - name: "Directory enum with file-extension fuzzing"
+    command: "ffuf -u {url}/FUZZ -w /usr/share/seclists/Discovery/Web-Content/raft-medium-words.txt -e .php,.html,.txt,.bak -t 40 -fc 404 -of json -o /session/ffuf-ext.json"
+    when: "Target is PHP/static-content app. Extends each wordlist entry with file extensions. Multiplies request count by (1 + ext-count) — keep wordlist smaller."
+
+  - name: "Subdomain enumeration via FUZZ in hostname"
+    command: "ffuf -u https://FUZZ.{domain}/ -w /usr/share/seclists/Discovery/DNS/subdomains-top1million-5000.txt -fc 404 -of json -o /session/ffuf-subs.json"
+    when: "Target uses wildcard DNS or you have a base domain. FUZZ in hostname triggers DNS resolution per request — slower than path fuzzing but discovers real subdomains."
+
+  - name: "Virtual-host enumeration via Host header"
+    command: "ffuf -u {url} -H 'Host: FUZZ.{domain}' -w /usr/share/seclists/Discovery/DNS/subdomains-top1million-5000.txt -fs {baseline_size} -of json -o /session/ffuf-vhost.json"
+    when: "IP serves multiple sites by Host header (CTF/HTB shared hosting). First curl the IP to get baseline response size; pass it to -fs to filter the default vhost. Discoveries are vhosts that return DIFFERENT content."
+
+  - name: "GET parameter discovery"
+    command: "ffuf -u '{url}?FUZZ=test' -w /usr/share/seclists/Discovery/Web-Content/burp-parameter-names.txt -fs {baseline_size} -of json -o /session/ffuf-params.json"
+    when: "Find hidden GET parameters by varying the param NAME (FUZZ=test). Filter by baseline response size — discoveries return different size = parameter is recognized."
+
+  - name: "GET parameter VALUE fuzzing (e.g., IDOR)"
+    command: "ffuf -u '{url}?id=FUZZ' -w /usr/share/seclists/Fuzzing/numeric.txt -fc 404 -of json -o /session/ffuf-idor.json"
+    when: "Iterate values of a known parameter — IDOR testing, ID enumeration. FUZZ is the value, parameter name is fixed."
+
+  - name: "POST body parameter fuzzing"
+    command: "ffuf -u {url} -X POST -d 'username=admin&password=FUZZ' -H 'Content-Type: application/x-www-form-urlencoded' -w /usr/share/seclists/Passwords/Common-Credentials/10-million-password-list-top-1000.txt -t 10 -rate 100 -fc 401 -of json -o /session/ffuf-post.json"
+    when: "Fuzz a POST body field. Throttle (-t 10 -rate 100) on auth endpoints to avoid lockouts. Filter expected 401 to surface only successful auth (or different size)."
+
+  - name: "Recursive directory enum"
+    command: "ffuf -u {url}/FUZZ -w /usr/share/seclists/Discovery/Web-Content/raft-small-words.txt -recursion -recursion-depth 2 -fc 404 -of json -o /session/ffuf-rec.json"
+    when: "After initial enum finds directories, run recursive scan with depth 2. Wordlist must be a path-segment list, not a full-path list. URL MUST end in FUZZ."
+
+  - name: "Auto-calibrated scan (chatty target)"
+    command: "ffuf -u {url}/FUZZ -w /usr/share/seclists/Discovery/Web-Content/common.txt -ac -of json -o /session/ffuf-ac.json"
+    when: "Target returns 200 for everything (default soft-404 behaviour). -ac auto-baselines a few random paths and filters their signature, surfacing only genuine matches."
+
+  - name: "Authenticated post-login fuzzing"
+    command: "ffuf -u {url}/FUZZ -w /usr/share/seclists/Discovery/Web-Content/common.txt -b 'PHPSESSID={session_cookie}' -fc 404 -of json -o /session/ffuf-auth.json"
+    when: "Find admin / authenticated-only endpoints. Get the session cookie from web-session or from a manual login first."
+
+  - name: "Multi-FUZZ clusterbomb (param + value)"
+    command: "ffuf -u '{url}?PARAM=VAL' -w /usr/share/seclists/Discovery/Web-Content/burp-parameter-names.txt:PARAM -w /usr/share/seclists/Fuzzing/SQLi/Generic-SQLi.txt:VAL -mode clusterbomb -mr 'error|sql' -of json -o /session/ffuf-multi.json"
+    when: "Multi-position fuzzing — every PARAM × every VAL combination (clusterbomb). For paired position matching, use -mode pitchfork (each PARAM with corresponding VAL by index)."
+
+  - name: "Header fuzzing (X-Forwarded-For bypass)"
+    command: "ffuf -u {url} -H 'X-Forwarded-For: FUZZ' -w /usr/share/seclists/Fuzzing/IPv4-Addresses-MostCommon.txt -fc 401,403 -mr '200|admin' -of json -o /session/ffuf-xff.json"
+    when: "Test for IP-based access controls (403 / 401 lifts when right XFF is presented). Also useful for SSRF via Host / X-Real-IP."
+
+  - name: "Through HTTP proxy (Burp inspection)"
+    command: "ffuf -u {url}/FUZZ -w /usr/share/seclists/Discovery/Web-Content/common.txt -x http://127.0.0.1:8080 -fc 404 -of json -o /session/ffuf-proxy.json"
+    when: "Route requests through Burp/ZAP for inspection. Distinct from -replay-proxy (which only replays MATCHED requests post-filter)."
+
+  - name: "All output formats at once (-of all)"
+    command: "ffuf -u {url}/FUZZ -w /usr/share/seclists/Discovery/Web-Content/common.txt -fc 404 -of all -o /session/ffuf-all"
+    when: "Write every output format (json, csv, html, md, ecsv, ejson) using a single basename. Useful when downstream consumers expect specific formats."
+
+output_formats:
+  - flag: "-of json -o {path}"
+    format: "json"
+    preferred: true
+  - flag: "-of ejson -o {path}"
+    format: "extended_json"
+    preferred: false
+  - flag: "-of csv -o {path}"
+    format: "csv"
+    preferred: false
+  - flag: "-of ecsv -o {path}"
+    format: "extended_csv"
+    preferred: false
+  - flag: "-of html -o {path}"
+    format: "html"
+    preferred: false
+  - flag: "-of md -o {path}"
+    format: "markdown"
+    preferred: false
+  - flag: "-of all -o {basename}"
+    format: "all_formats"
+    preferred: false
+  - flag: "-od {path}"
+    format: "matched_response_dir"
+    preferred: false
+  - flag: "-debug-log {path}"
+    format: "debug_log"
+    preferred: false
+
+common_options:
+  targeting:
+    - "-u URL: target URL (mandatory). FUZZ keyword is the placeholder — can appear in path, query, header value (-H), or body (-d)"
+    - "FUZZ keyword can be customized: -w wordlist:KEYWORD lets you use any name (e.g., :PARAM, :VAL, :HOST)"
+  wordlist:
+    - "-w PATH[:KEYWORD]: wordlist file. Multiple -w flags for multi-position fuzzing"
+    - "-mode clusterbomb: every wordlist1 × wordlist2 (default)"
+    - "-mode pitchfork: paired by index (wordlist1[i] with wordlist2[i])"
+    - "-input-cmd 'CMD': generate input from a command instead of -w (use with -input-num N)"
+    - "-e .ext1,.ext2: extend each wordlist entry with extensions"
+  filtering:
+    - "-fc CODES: filter status codes (e.g., '404' or '404,403,400-499')"
+    - "-fs SIZE: filter response sizes (e.g., '0' or '1024-2048')"
+    - "-fw WORDS: filter word counts"
+    - "-fl LINES: filter line counts"
+    - "-fr REGEXP: filter responses matching regexp"
+    - "-ft TIME: filter by response time"
+    - "-fmode and|or: combine filters (default 'or' — any match suppresses)"
+  matching:
+    - "-mc CODES: match ONLY these status codes (ffuf v2.x default: 200,204,301,302,307,401,403,405)"
+    - "-ms SIZE: match by response size"
+    - "-mw WORDS: match by word count"
+    - "-ml LINES: match by line count"
+    - "-mr REGEXP: match responses matching regexp"
+    - "-mt TIME: match by response time"
+  http:
+    - "-H 'Name: Value': custom header (repeatable). Set 'Host: FUZZ.target' for vhost fuzzing"
+    - "-b 'name=val; n2=v2': cookie data (Cookie header)"
+    - "-X METHOD: HTTP method (default GET; use POST for body fuzzing)"
+    - "-d 'data': POST body (sets Content-Type: application/x-www-form-urlencoded)"
+    - "-r: follow redirects (boolean)"
+    - "-ignore-body: skip response body (HEAD-style, faster)"
+  recursion:
+    - "-recursion: recurse into discovered directories (URL must end in /FUZZ)"
+    - "-recursion-depth N: max recursion depth (default 0 = unlimited)"
+    - "-recursion-strategy default|greedy: default = recurse only into successful matches"
+  threading:
+    - "-t N: concurrent threads (default 40)"
+    - "-rate N: max requests/second (overrides -t for soft cap)"
+    - "-p SECS: delay between requests (e.g., '0.1' or '0.1-2.0' for random)"
+    - "-timeout N: per-request HTTP timeout in seconds (default 10)"
+    - "-maxtime N: hard cap on total runtime (seconds)"
+    - "-maxtime-job N: hard cap per recursion job"
+  auto_calibration:
+    - "-ac: auto-calibrate filtering (probes a few random paths to baseline 404/soft-404)"
+    - "-acc 'STRING': custom calibration string (repeatable; implies -ac)"
+    - "-ach: re-calibrate on every host (useful with vhost fuzzing)"
+    - "-ack KEYWORD: keyword to use during calibration (default FUZZ)"
+  proxy:
+    - "-x http://host:port: HTTP proxy for ALL requests (e.g., Burp at 127.0.0.1:8080)"
+    - "-replay-proxy http://host:port: proxy ONLY for replaying matched requests (post-filter inspection)"
+  output:
+    - "-o PATH: output file path"
+    - "-of FORMAT: format (json, ejson, csv, ecsv, html, md, all)"
+    - "-or: only write output when matches found"
+    - "-od DIR: dump matched-response bodies into a directory"
+    - "-debug-log PATH: write internal debug log"
+  noise_control:
+    - "-s: silent mode (no progress bar, no banner)"
+    - "-v: verbose (print full URL + redirect targets in matches)"
+    - "-c: colorized output (terminal only)"
+    - "-sf: stop scan when >95% of responses return 403 (likely IP-blocked)"
+    - "-se: stop on spurious errors"
+    - "-sa: stop on all errors (implies -sf and -se)"
+
+gotchas:
+  - "FUZZ is the default keyword. ffuf REQUIRES FUZZ to appear somewhere — in URL (-u), header (-H), or body (-d). Otherwise ffuf errors with 'No FUZZ keyword(s) found in headers, method, URL or POST data, exiting'"
+  - "ffuf does NOT auto-append /FUZZ to a bare URL. If the agent emits '-u http://target.com' without FUZZ, ffuf errors immediately with 'No FUZZ keyword'. Always include FUZZ explicitly: '-u http://target.com/FUZZ'. (The legacy MCP wrapper silently rewrote bare URLs to add /FUZZ; the kind:cli path does not — the LLM must construct the full URL.)"
+  - "FUZZ can be renamed: -w wordlist:KEYWORD lets you use any custom name. Multi-FUZZ uses different keywords per wordlist (e.g., -w params.txt:PARAM -w values.txt:VAL)"
+  - "-w wordlist is INPUT data, NOT a target. Wordlists are local /session/ files (or seclists in the image). They are NOT scope-validated."
+  - "Without filters ffuf is greedy by default — every response that matches the default -mc (200,204,301,302,307,401,403) is reported. ALWAYS pair with -fc / -fs / -fw or use -ac to suppress noise"
+  - "-ac (auto-calibrate) probes a few random paths first to baseline default/error responses, then filters them. Highly recommended for unknown targets — saves manual baseline calls"
+  - "Recursion (-recursion) requires the URL to end in /FUZZ AND the wordlist to be a path-segment list, not a full-path list. Otherwise no directories will recurse"
+  - "Default HTTP timeout is 10 s — may be too short for slow targets. Raise with -timeout 30 if you see 'context deadline exceeded' / connection timeouts in stderr"
+  - "Default thread count is 40 — high enough to trigger rate-limiting on small targets. Drop to -t 10 -rate 100 on auth endpoints / production-style targets"
+  - "ffuf is silent (no stdout) when no matches found — exit code 0 either way. Always check the output file (-o) AND raw_output for the summary line"
+  - "When -of all is used, output files take the basename you pass to -o and append per-format extensions (.json, .csv, .html, .md, .ecsv, .ejson)"
+  - "POST body fuzzing requires -X POST AND -d 'param=FUZZ'. ffuf does NOT auto-add Content-Type — pass it via -H if the target requires it"
+  - "Header values can contain FUZZ but the header NAME cannot — use multi-position with -w wordlist:HEADER + -H 'HEADER: value' if you need to fuzz the name"
+  - "Subdomain fuzzing via -u https://FUZZ.target/ triggers DNS lookups per request — slower than path fuzzing. Reduce thread count (-t 20) to avoid overwhelming the resolver"
+  - "vhost discovery returns the SAME response size as the default vhost when the wildcard catches everything. Always verify hits with curl -H 'Host: name.target' against the IP"
+  - "The -x proxy is for ALL requests; -replay-proxy is for MATCHED requests only — use the latter when you want Burp to see only the interesting hits, not the full wordlist"
+  - "ffuf v2.x uses single-dash long flags (-recursion-depth, NOT --recursion-depth). Old wfuzz / gobuster muscle memory does NOT translate"
+  - "Stop conditions (-sf / -se / -sa) only trigger AFTER the wordlist is partially consumed — they don't pre-empt before the first request. -sf is excellent against 403-blocked targets"
+  - "Wordlist sizing rule of thumb (~100 req/sec at -t 40): common.txt (~4.6K) ≈ 45 s; raft-medium (~30K) ≈ 5 min; directory-list-2.3-medium (~220K) ≈ 35 min. Multiply by (1 + ext-count) when using -e. Set -maxtime accordingly so a single scan never exceeds budget — 60 s floor, 15 min sane ceiling unless explicitly long-running"
+  - "Wordlist path verification: if a seclists / dirb path doesn't exist in the image, ffuf fails with 'Could not open file'. Fall back to /usr/share/seclists/Discovery/Web-Content/common.txt (always present in Kali base). The legacy MCP wrapper silently degraded to common.txt; the kind:cli path requires the LLM to retry with the fallback explicitly"
+  - "ffuf may exit 0 even when many per-request errors occurred — if at least one request matched, exit code is 0 with errors in stderr. tool_runner classifier MUST pattern-match failure signals against output regardless of exit code"
+
+failure_signatures:
+  # Layer-diverse signals (SKILL #11):
+  #   - DNS layer (resolver)
+  #   - TCP layer (kernel/network)
+  #   - TLS layer (Go crypto/x509)
+  #   - File / wordlist layer (Go os.Open)
+  #   - Param-validation layer (ffuf input check)
+  #   - Output layer (ffuf-internal validation)
+  - signal: "lookup"
+    remediation: "DNS resolution failed — Go's net resolver. Verify hostname spelling, /etc/hosts inside container, or use IP. Often appears as 'lookup HOSTNAME: no such host'"
+  - signal: "no such host"
+    remediation: "DNS resolution failed — same as above. Use IP if DNS isn't authoritative or check resolver config"
+  - signal: "Cannot resolve hostname"
+    remediation: "Older form of DNS-failure message. Switch to bare IP or fix /etc/hosts inside the container"
+  - signal: "connection refused"
+    remediation: "TCP refused — port closed or service down. Confirm with nmap -p N <host> first; the web service may have stopped"
+  - signal: "connect: connection refused"
+    remediation: "Same as above — Go's net stack version of the same message"
+  - signal: "i/o timeout"
+    remediation: "Connect or response timeout — raise -timeout (default 10 s); reduce -t threads; check VPN / network path"
+  - signal: "context deadline exceeded"
+    remediation: "Per-request HTTP timeout exceeded — raise -timeout 30; reduce -t threads; check network latency"
+  - signal: "x509:"
+    remediation: "TLS certificate error (self-signed, expired, hostname mismatch). For HTB / lab targets you can disable verification by routing through -x http://proxy/ that allows insecure (ffuf has no native -k flag — must proxy)"
+  - signal: "certificate signed by unknown authority"
+    remediation: "Same — self-signed cert without trusted CA. Pin the cert or proxy via Burp"
+  - signal: "wordlist file not found"
+    remediation: "Wordlist path doesn't exist in the container. Check /usr/share/seclists/ availability or pass an absolute /session/ path that you've copied in"
+  - signal: "Could not open file"
+    remediation: "ffuf v2.x file-open error — wordlist or -d @file path is wrong. Verify with 'ls' inside the container or use a known-good seclists path"
+  - signal: "Wordlist is empty"
+    remediation: "Wordlist file exists but has no entries (or only whitespace). Check the file or use a different one"
+  - signal: "No FUZZ keyword"
+    remediation: "URL/headers/body do not contain the FUZZ keyword (or your custom keyword if -w wordlist:KEYWORD was used). Add FUZZ where you want the wordlist injected"
+  - signal: "URL contains no FUZZ keyword"
+    remediation: "Same — URL is missing FUZZ. ffuf v1.x phrasing"
+  - signal: "Encountered error(s):"
+    remediation: "ffuf input-validation rollup — usually missing -u, missing -w, or no FUZZ. Read the next lines for the specific cause"
+  - signal: "matcher and filter configuration is in conflict"
+    remediation: "You set both -mc and -fc on the same code (or similar overlapping match/filter). Pick one direction"
+  - signal: "missing keyword from"
+    remediation: "Multi-wordlist with mismatched keywords — every -w must have a unique :KEYWORD AND all keywords must appear in the URL/header/body"
+  - signal: "Maximum running time"
+    remediation: "-maxtime / -maxtime-job hit. Raise the cap or split the wordlist into chunks"
+
+help_commands:
+  - command: "ffuf -h"
+    purpose: "Full flag reference grouped by category (HTTP, GENERAL, MATCHER, FILTER, INPUT, OUTPUT)"
+  - command: "ffuf -V"
+    purpose: "Version and build information (verify v2.x — flag set differs from v1.x)"

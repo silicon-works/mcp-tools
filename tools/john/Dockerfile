@@ -7,14 +7,14 @@ LABEL org.opencontainers.image.source="https://github.com/silicon-works/mcp-tool
 LABEL org.opencontainers.image.description="john MCP server for OpenSploit"
 LABEL org.opencontainers.image.licenses="MIT"
 
-# Install john and wordlists
+# Install john and wordlists. Use python3-full not separate python3-pip/python3-venv —
+# Kali rolling occasionally has stale repo indexes that 404 on the discrete packages
+# but resolve python3-full cleanly. Same fix as nuclei / impacket Dockerfiles.
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
         john \
         wordlists \
-        python3 \
-        python3-pip \
-        python3-venv && \
+        python3-full && \
     rm -rf /var/lib/apt/lists/* && \
     apt-get clean
 
@@ -33,10 +33,6 @@ ENV PATH="/app/venv/bin:$PATH"
 # Copy and install shared mcp-common package
 COPY packages/mcp-common /app/packages/mcp-common
 RUN pip install --no-cache-dir /app/packages/mcp-common
-
-# Install tool-specific dependencies
-COPY tools/john/requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy MCP server code
 COPY tools/john/mcp-server.py .

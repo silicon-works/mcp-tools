@@ -1,18 +1,62 @@
 name: nikto
-version: "2.5"
-description: "Web server vulnerability scanner that checks for 6,900+ vulnerability tests (plus 6,200+ Drupal-specific and 1,800+ dictionary checks), outdated server versions (Apache, nginx, IIS, Tomcat), and server-level misconfigurations including insecure HTTP methods, default credentials, and known CVEs with OSVDB references"
+kind: cli
+binary: nikto
+version: "2.5.0"
+description: "Perl-based legacy web-server vulnerability scanner that runs ~6,900 HTTP-server checks (plus 6,200 Drupal-specific and 1,800 dictionary checks) against a target. Surfaces outdated server software (Apache / nginx / IIS / Tomcat / lighttpd), dangerous default files (phpinfo.php, server-status, server-info, .git, backup dumps), insecure HTTP methods (PUT / DELETE / TRACE / CONNECT), server-level misconfigurations (directory listing, default credentials, exposed admin consoles), CGI vulnerabilities, and known CVEs cross-referenced with OSVDB. Uses single-dash long flags with mixed case (-Format, -Help, -Tuning, -Plugins, -Display). Output flag is -Format with values txt / csv / htm / xml / sql / nbe / json (json preferred for tooling). Native CLI; LLM constructs the full nikto invocation. Use nuclei for modern template-based CVE scanning, ffuf for content discovery, curl for one-shot probes, sqlmap for SQLi exploitation."
 image: "ghcr.io/silicon-works/mcp-tools-nikto:latest"
 image_size_mb: 150
-timeout_seconds: 300
+# Dual-clock model:
+#   idle_timeout_seconds — silence between MCP heartbeats. nikto streams
+#     `+ ` lines as findings emerge but can be silent for stretches between
+#     test groups (especially file-search categories). 10 min silent = stuck
+#     or wedged on a single check.
+#   max_runtime_seconds  — hard wall-clock cap; never resets on heartbeat.
+#     4 h covers a full all-categories scan against a slow target.
+# Legacy `timeout_seconds` is used by older clients as the hard cap.
+idle_timeout_seconds: 600
+max_runtime_seconds: 14400
+timeout_seconds: 14400
 
 capabilities:
   - web_vulnerability_scanning
-  - server_misconfiguration
+  - server_misconfiguration_detection
   - outdated_software_detection
+  - cgi_vulnerability_scanning
+  - dangerous_default_file_detection
+  - insecure_http_method_detection
   - technology_detection
 
 phases:
   - enumeration
+
+routing:
+  use_for:
+    - "legacy web server vulnerability scanning"
+    - "server misconfiguration detection"
+    - "outdated server software detection (Apache nginx IIS Tomcat lighttpd)"
+    - "dangerous default file and backup file detection (phpinfo, server-status, .git)"
+    - "insecure HTTP methods check (PUT DELETE TRACE CONNECT)"
+    - "CGI vulnerability scanning"
+    - "OSVDB cross-referenced legacy CVE detection"
+    - "web server fingerprinting"
+    - "exposed admin console detection"
+    - "broad server-level security audit"
+  never_use_for:
+    - "modern template-based CVE scanning — use nuclei (more templates, faster, structured)"
+    - "directory and file brute-forcing — use ffuf"
+    - "SQL injection exploitation — use sqlmap"
+    - "single one-shot HTTP request — use curl"
+    - "JavaScript-rendered pages — use playwright"
+    - "port scanning — use nmap"
+    - "password brute-force — use hydra or hashcat"
+  triggers:
+    - "nikto"
+    - "web server scan"
+    - "server misconfiguration"
+    - "outdated server"
+    - "CGI scan"
+    - "default files"
+    - "OSVDB"
 
 requirements:
   network: true
@@ -22,58 +66,294 @@ resources:
   memory_mb: 256
   cpu: 0.5
 
-# Routing hints for tool selection
-routing:
-  use_for:
-    - "web server vulnerability scanning"
-    - "server misconfiguration detection"
-    - "outdated software detection"
-    - "web server fingerprinting"
-    - "dangerous default files and backup file detection"
-    - "insecure HTTP headers and methods check"
-    - "Apache nginx IIS Tomcat version vulnerability check"
-    - "server-level CVE and OSVDB detection"
-    - "CGI vulnerability scanning"
-    - "web server security audit"
-  never_use_for:
-    - "port scanning"
-    - "SQL injection"
-    - "password cracking"
-    - "directory brute-forcing"
-  triggers:
-    - "nikto"
-    - "web server scan"
-    - "server misconfiguration"
-    - "outdated server"
+see_also:
+  - tool: nmap
+    reason: "Run nmap first to enumerate open ports and services; feed identified HTTP / HTTPS services into nikto for server-level vulnerability scanning"
+  - tool: nuclei
+    reason: "Modern template-based scanner with more templates and structured JSONL output — generally preferred over nikto. Use nikto for legacy CGI/default-file checks, nuclei for current CVE template matching"
+  - tool: ffuf
+    reason: "For directory and content discovery — ffuf finds endpoints, nikto checks server-level misconfigurations on the discovered host"
+  - tool: web-fingerprint
+    reason: "Faster signature-based tech detection — try web-fingerprint first; nikto's -Display V banner-grabs are slower"
+  - tool: curl
+    reason: "For one-shot probes to confirm a single nikto finding (e.g., verify a default file actually exists, check a header)"
+  - tool: sqlmap
+    reason: "Once nikto's tuning category 9 (SQL injection) flags a candidate URL, hand off to sqlmap for confirmed exploitation"
 
-methods:
-  scan:
-    description: "Scan a web server for known vulnerabilities including outdated server software (Apache, nginx, IIS, Tomcat, lighttpd), dangerous default files (phpinfo.php, .git, .svn, server-status, server-info, backup files, database dumps), insecure HTTP methods (PUT, DELETE, TRACE, CONNECT), server misconfigurations (directory listing, default credentials, exposed admin consoles), and known CVEs with OSVDB cross-references. Uses a database of 6,900+ checks (plus 6,200+ Drupal-specific checks) organized by vulnerability category."
-    when_to_use: "After discovering HTTP/HTTPS service on a port (from nmap) to check for server-level vulnerabilities like outdated server versions, dangerous default files, insecure HTTP headers, exposed admin interfaces, and known CVEs against the server software. Complements nuclei which focuses on template-based application-level CVE scanning. Use nikto for broad server-level checks and default file/misconfiguration discovery, nuclei for specific CVE verification, and zap for deep application-level active scanning."
-    params:
-      target:
-        type: string
-        required: true
-        description: "Target URL or IP:port (e.g., 'http://10.10.10.1', '10.10.10.1:8080', 'https://target.htb')"
-      tuning:
-        type: string
-        description: "Focus scan on specific check categories. Values: 0=file upload, 1=interesting file/log, 2=misconfiguration/default file, 3=information disclosure, 4=injection (XSS/script/HTML), 5=remote file retrieval (inside web root), 6=denial of service (avoid in engagements), 7=remote file retrieval (server-wide), 8=command execution/remote shell, 9=SQL injection, a=authentication bypass, b=software identification, c=remote source inclusion, d=WebService, e=administrative console, x=reverse tuning (exclude selected categories instead of including). Combine multiple (e.g., '1234' for web app focus, '89' for command exec + SQLi, '12ab' for files + misconfig + auth bypass + software ID). Default: all categories"
-      ssl:
-        type: boolean
-        default: false
-        description: "Force SSL/TLS connection. Use when target serves HTTPS on a non-standard port or when you want to explicitly test the SSL endpoint"
-      timeout:
-        type: integer
-        default: 300
-        description: "Subprocess timeout in seconds (note: max_time controls the actual nikto scan duration)"
-      max_time:
-        type: integer
-        default: 600
-        description: "Maximum total scan duration in seconds. Increase for thorough scans of large sites (e.g., 1800 for 30 minutes)"
-    returns:
-      findings:
-        type: array
-        description: "List of vulnerabilities and interesting findings, each with description text, optional OSVDB reference ID, and discovered path"
-      server_info:
-        type: object
-        description: "Server information including server software banner, target IP, hostname, and port"
+# ── kind:cli specific sections ──────────────────────────────────────
+
+target_extraction:
+  # nikto target is supplied via -h (or its -host alias).
+  # The -h value can be: a hostname, an IPv4/IPv6 address, a URL, OR a
+  # file path containing newline-separated hostnames. The file-path form
+  # is a target-list ingestion shape (see gotchas) — we extract by URL/host
+  # parsing; file paths will fail url_host parsing and surface as null,
+  # which the plugin correlates against the gotcha note.
+  # Note: -port (port number), -id (auth credentials), -cert / -key / -CA*
+  # (TLS material), -Save / -output / -o (output paths), -useproxy (proxy
+  # URL — NOT the target), -config / -c (config files), -Plugins (plugin
+  # list), -Format (output format), -evasion (evasion techniques) all
+  # carry values that are NOT targets — they appear in value_flags so the
+  # DSL skips them.
+  # Positional form (nikto target.com without -h) is rare and discouraged
+  # in nikto docs — included as a fallback only.
+  - rule: "flag_value"
+    flag: "-h"
+    parse_as: "url_host"
+  - rule: "flag_value"
+    flag: "-host"
+    parse_as: "url_host"
+  - rule: "positional_match"
+    parse_as: "url_host"
+
+# Flags that put the target outside the command line where scope validation
+# can't reach it. Plugin's cli_in_container rejects the call before container
+# spawn when any of these appear.
+# Note: nikto's -h flag itself can accept a file path with multiple hosts
+# inside (target-list shape), but it's dual-use — most invocations pass a
+# single host. We document this in gotchas and let url_host parsing fail
+# naturally for file paths rather than rejecting -h outright.
+reject_flags: []
+reject_flags_reason: "nikto has no dedicated target-list flag (the -h flag is dual-use: single host or file containing hosts). The file-path form is documented in gotchas; url_host parsing will return null for file paths so scope validation can flag the call. Do NOT reject -h itself — that would block all nikto calls."
+
+# Per-tool value-taking flags whose values must NOT be confused with positional
+# targets. nikto uses single-dash long flags with MIXED CASE (-Format, -Help,
+# -Tuning, -Plugins, -Display, -Save, -CA*, -IgnoreCode, -LASTMOD, -NoLookup,
+# -Cgidirs) — verified against `nikto -H` (capital H = full help in nikto).
+# The DSL merges these with its built-in defaults.
+value_flags:
+  # Targeting
+  - "-h"               # target host or URL (extracted)
+  - "-host"            # alias for -h (extracted)
+  - "-port"            # target port(s), comma-separated multi-value
+  - "-p"               # short alias for -port
+  - "-vhost"           # virtual host header value
+  - "-root"            # URL root prefix (e.g., -root /app/)
+  # Output / format
+  - "-Format"          # output format: txt | csv | htm | xml | sql | nbe | json
+  - "-F"               # short alias for -Format
+  - "-output"          # output file path
+  - "-o"               # short alias for -output
+  - "-Save"            # save HTTP request/response to directory
+  - "-Display"         # display flags: V (verbose), D (debug), P (progress), 1-4, E, F, S
+  - "-D"               # short alias for -Display
+  # Tuning / scope
+  - "-Tuning"          # tuning categories: 0-9, a-c, d, e, x (reverse)
+  - "-T"               # short alias for -Tuning
+  - "-Plugins"         # comma-separated plugin list (e.g., 'apache_expect_xss,headers')
+  - "-Single"          # single test ID
+  - "-Pause"           # delay between requests (seconds, supports decimal)
+  - "-mutate"          # mutation technique: 1-6
+  - "-mutate-options"  # mutation options
+  - "-evasion"         # evasion technique: 1-8 (random URL encoding, double slash, etc.)
+  # SSL / TLS material
+  - "-key"             # client TLS private key
+  - "-cert"            # client TLS certificate
+  - "-CA"              # CA bundle (some versions)
+  - "-CAfile"          # CA bundle file path
+  - "-Capath"          # CA path directory
+  # Auth
+  - "-id"              # basic auth credentials in user:pass[:realm] form
+  - "-useragent"       # custom User-Agent string
+  # Connection / proxy
+  - "-useproxy"        # HTTP proxy URL (host:port or full URL) — NOT the target
+  - "-IgnoreCode"      # status codes to ignore (comma-separated)
+  - "-timeout"         # per-request timeout in seconds (default 10)
+  - "-maxtime"         # overall scan timeout in seconds (or '60s', '5m' suffixes)
+  - "-NoLookup"        # disable reverse-DNS lookup (boolean — listed for completeness)
+  # Database / config
+  - "-config"          # custom config file path
+  - "-c"               # short alias for -config
+  - "-database"        # database name override
+  - "-dbcheck"         # check database integrity (boolean — listed for completeness)
+  - "-Cgidirs"         # CGI directory list to scan (comma-separated)
+  # Help / discovery
+  - "-Help"            # full help screen — NOT a target
+  - "-H"               # short alias for -Help (capital H = help, NOT a header flag)
+  - "-Version"         # version info — NOT a target
+  - "-list-plugins"    # list all available plugins (boolean)
+  - "-LASTMOD"         # last-modified database check (boolean)
+  - "-Logo"            # show ASCII logo (boolean)
+  # Update
+  - "-update"          # update plugin / database from upstream (boolean)
+
+usage_patterns:
+  - name: "Quick scan with JSON output (default tuning)"
+    command: "nikto -h http://{target} -Format json -output /session/nikto.json -Display P -nointeractive"
+    when: "First-pass server-level scan with all default tuning categories. JSON output is best for downstream parsing. -Display P shows progress so the agent knows the scan is alive. -nointeractive prevents nikto from prompting on errors."
+
+  - name: "Tuning-scoped scan (misconfig + info-disclosure only)"
+    command: "nikto -h http://{target} -Tuning 23 -Format json -output /session/nikto-misc.json -Display P -nointeractive"
+    when: "Scope to specific check categories to cut runtime drastically. -Tuning 23 = category 2 (misconfiguration / default file) + category 3 (information disclosure). Combine multiple digits (e.g., 234, 1234, 89). Excludes destructive categories (6=DoS, 8=command exec) and slow ones."
+
+  - name: "SSL scan with custom port"
+    command: "nikto -h {target} -ssl -port 8443 -Format json -output /session/nikto-ssl.json -Display P -nointeractive"
+    when: "Target serves HTTPS on a non-standard port. -ssl forces TLS (overrides auto-detect). -port can be a single port or comma-separated multi-port (e.g., '443,8443,9443'). Useful when nmap surfaces multiple HTTPS ports on one host."
+
+  - name: "Authenticated scan (basic auth)"
+    command: "nikto -h http://{target} -id 'admin:password' -Format json -output /session/nikto-auth.json -Display P -nointeractive"
+    when: "Target has HTTP Basic auth on the area you want scanned. -id format is 'user:pass' or 'user:pass:realm' if multiple realms exist. Pull credentials from the engagement workflow (web-session, prior login, default creds list)."
+
+  - name: "Targeted plugin scan"
+    command: "nikto -h http://{target} -Plugins 'apache_expect_xss,headers,cookies' -Format json -output /session/nikto-plugins.json -Display P -nointeractive"
+    when: "Run only specific plugins instead of all categories. Useful after web-fingerprint identifies the stack — e.g., -Plugins 'apache_expect_xss' for Apache-only checks. Use `nikto -list-plugins` to see available plugins."
+
+  - name: "Stealth-tuned scan (paced requests)"
+    command: "nikto -h http://{target} -Tuning 23 -Pause 1 -timeout 30 -Format json -output /session/nikto-stealth.json -Display P -nointeractive"
+    when: "Pace requests to avoid triggering WAF / rate-limit on shared infrastructure. -Pause 1 = 1 second delay between requests. -timeout 30 raises per-request timeout for slow responses. Pair with -Tuning to scope the categories."
+
+  - name: "Through HTTP proxy (Burp inspection)"
+    command: "nikto -h http://{target} -useproxy http://127.0.0.1:8080 -Format json -output /session/nikto-proxy.json -Display P -nointeractive"
+    when: "Route nikto traffic through Burp / ZAP for inspection or replay. -useproxy accepts a full proxy URL or host:port. Combine with tunnel MCP for scanning internal targets via SSH SOCKS proxy."
+
+  - name: "Custom port + vhost scan"
+    command: "nikto -h http://{target} -port 8080,8443 -vhost {hostname} -Format json -output /session/nikto-vhost.json -Display P -nointeractive"
+    when: "Target hosts multiple sites by Host header on non-standard ports. -port accepts comma-separated multi-port (nikto scans each). -vhost sets the Host header value so the right virtual host responds."
+
+output_formats:
+  - flag: "-Format json -output {path}"
+    format: "json"
+    preferred: true   # JSON array, one report per file — best for tooling
+  - flag: "-Format csv -output {path}"
+    format: "csv"
+    preferred: false
+  - flag: "-Format htm -output {path}"
+    format: "html"
+    preferred: false  # human-readable, less useful for parsers
+  - flag: "-Format xml -output {path}"
+    format: "xml"
+    preferred: false  # nessus-style XML
+  - flag: "-Format sql -output {path}"
+    format: "sql"
+    preferred: false  # SQL INSERT statements (legacy)
+  - flag: "-Format nbe -output {path}"
+    format: "nbe"
+    preferred: false  # nessus binary export legacy
+  - flag: "-Format txt -output {path}"
+    format: "text"
+    preferred: false  # default if no -Format given
+  - flag: "-Save {dir}"
+    format: "raw_request_response_dir"
+    preferred: false  # dumps every HTTP request/response pair to dir
+
+common_options:
+  targeting:
+    - "-h HOST_OR_URL: target host (FQDN, IP, or full URL). REQUIRED. Examples: -h http://target.htb -h 10.10.10.5 -h https://target:8443/admin"
+    - "-host HOST_OR_URL: alias for -h"
+    - "-port N[,N...]: target port(s). Comma-separated for multi-port (e.g., -port 80,443,8080). Defaults to 80 if not specified"
+    - "-p N: short alias for -port"
+    - "-vhost NAME: set virtual-host Host header (when target serves multiple sites by Host header)"
+    - "-root /path/: URL root prefix (e.g., -root /app/ scans /app/* not /*)"
+  tuning:
+    - "-Tuning CODES: scope checks to specific categories. Codes: 0=file upload, 1=interesting file/log, 2=misconfiguration/default file, 3=information disclosure, 4=injection (XSS/script/HTML), 5=remote file retrieval inside web root, 6=denial of service (avoid in engagements), 7=remote file retrieval server-wide, 8=command execution/remote shell, 9=SQL injection, a=authentication bypass, b=software identification, c=remote source inclusion, d=WebService, e=administrative console, x=reverse tuning (exclude selected). Combine multiple (e.g., '234' = misconfig + info-disclosure + injection)"
+    - "-T CODES: short alias for -Tuning"
+    - "-Plugins LIST: run only specified plugins (comma-separated). Use `nikto -list-plugins` to see available"
+    - "-Single ID: run only the test with this ID"
+  ssl:
+    - "-ssl: force SSL/TLS connection (overrides auto-detect)"
+    - "-nossl: force plain HTTP (overrides auto-detect)"
+    - "-key PATH: client TLS private key (for mutual TLS)"
+    - "-cert PATH: client TLS certificate"
+    - "-CAfile PATH: custom CA bundle"
+    - "-Capath DIR: custom CA directory"
+  auth:
+    - "-id USER:PASS[:REALM]: HTTP Basic auth credentials"
+    - "-useragent STRING: custom User-Agent header"
+  connection:
+    - "-useproxy URL: HTTP proxy URL (host:port or full URL). Routes ALL requests through proxy"
+    - "-timeout N: per-request timeout in seconds (default 10). Raise for slow targets"
+    - "-Pause N: delay between requests in seconds (supports decimal — 0.5, 1.0). Use for stealth or fragile targets"
+    - "-maxtime N[s|m|h]: hard wall-clock cap on total scan time. Suffix s/m/h for seconds/minutes/hours. Default unlimited"
+    - "-NoLookup: skip reverse-DNS lookup of target IP (faster on slow DNS)"
+    - "-IgnoreCode CODES: status codes to filter from output (comma-separated, e.g., '403,404')"
+  evasion:
+    - "-evasion N: IDS/WAF evasion technique. 1=random URL encoding, 2=directory self-reference (/./), 3=premature URL ending, 4=prepend long random string, 5=fake parameter, 6=tab as request spacer, 7=change case, 8=use Windows directory separator (\\)"
+    - "-mutate N: mutation technique. 1=test all files with all root dirs, 2=guess passwords, 3=enumerate user accounts, 4=enumerate Apache user accounts via ~user, 5=attempt to brute-force sub-domain names, 6=attempt to guess directory names from a supplied user list"
+  output:
+    - "-Format FORMAT -output PATH: PREFERRED — JSON output (-Format json -output /session/nikto.json)"
+    - "-F FORMAT -o PATH: short aliases for -Format/-output"
+    - "-Save DIR: dump every HTTP request/response pair to a directory (DEBUG, very verbose)"
+    - "-Display CODES: display flag codes. V=verbose, D=debug, P=progress, 1-4=verbosity levels, E=show errors, F=show full URL, S=skip prompt"
+    - "-D CODES: short alias for -Display"
+  config:
+    - "-config PATH: custom config file (overrides /etc/nikto.conf)"
+    - "-c PATH: short alias for -config"
+    - "-database NAME: alternate database name"
+    - "-Cgidirs LIST: CGI directories to scan (comma-separated). 'all' to scan all known dirs, 'none' to skip CGI checks"
+  noise_control:
+    - "-nointeractive: never prompt for input (CRITICAL in containers — without it nikto may block on prompts)"
+    - "-Display P: progress display so heartbeats reach the supervisor"
+    - "-Display E: show errors (useful for failure classification)"
+
+gotchas:
+  - "nikto's -h flag is DUAL-USE: it accepts a single hostname/URL OR a file path containing newline-separated targets. The file-path form is target-list ingestion — security boundary concern. We do NOT reject -h itself (it's the only target flag), but url_host parsing returns null for file paths so scope validation will flag the call. If the agent needs multi-target scanning, issue separate tool_runner calls (one -h per call) instead."
+  - "Default tuning runs ALL categories (~6,900 checks) — extremely slow and noisy. ALWAYS scope with -Tuning <codes> to cut runtime by 80%+. -Tuning 23 (misconfig + info-disclosure) is the typical first-pass."
+  - "nikto uses MIXED CASE single-dash long flags: -Format / -Help / -Tuning / -Plugins / -Display / -Save / -CAfile / -IgnoreCode / -LASTMOD / -NoLookup / -Cgidirs. Lowercase versions (e.g., -format, -tuning) silently fail or are ignored — case-sensitive parser."
+  - "Capital -H = help screen (alias for -Help), NOT a header flag (unlike curl / nuclei). -h (lowercase) = host. Easy to confuse — verified against `nikto -Help` output."
+  - "nikto exits 0 even on connection failures, DNS resolution failures, and SSL errors. ALWAYS pattern-match output for failure_signatures regardless of exit code — same anti-pattern as ffuf, sqlmap, and nuclei."
+  - "-Pause N is critical for stealth scans on shared infrastructure — without it nikto fires requests as fast as the network allows (~50-200 req/s). Use -Pause 0.5 or higher on production-style targets."
+  - "-Display V adds verbose banner output; -Display P shows a progress bar (RECOMMENDED in containers so the supervisor sees heartbeats). -Display 1-4 adjusts verbosity levels."
+  - "-Format json writes a JSON ARRAY (not JSONL / NDJSON) — must be parsed as a whole, not streamed line-by-line. One report per output file. Use one -output file per scan."
+  - "First container start triggers nikto database checks (~3-5 MB of fingerprint DBs). Pre-cached in the image at build time, but if the image is rebuilt fresh allow extra startup time on the first call."
+  - "-nointeractive should ALWAYS be passed in container runs — without it nikto may prompt 'Continue? [y/N]' on certain errors and block forever. Same as nuclei's -no-stdin."
+  - "-ssl and -nossl override auto-detect. nikto auto-detects SSL by trying both — but if the target is HTTPS-only on a non-standard port, -ssl avoids a slow round-trip first."
+  - "Multi-port scans via -port 80,443,8080 run sequentially within one nikto process — not parallel. Long total runtime; consider separate tool_runner calls if parallelism matters."
+  - "-evasion techniques (1-8) modify how nikto encodes URLs to evade IDS/WAF. They DON'T disable signatures — the WAF will still see SOMETHING. Use sparingly and only on authorized targets where evasion is in scope."
+  - "-Save dumps EVERY HTTP request and response to a directory — generates thousands of files on a full-tuning scan. Only use with scoped -Tuning, never on unscoped scans."
+  - "OSVDB references in output are LEGACY — OSVDB shut down in 2016. The IDs are still useful for cross-referencing in offline databases but won't resolve via the OSVDB website."
+  - "nikto's plugin system loads from /usr/share/nikto/plugins/ (Kali) — `nikto -list-plugins` enumerates them. Custom plugins can be added but require restart and config changes (out of scope for kind:cli)."
+  - "ALWAYS pass BOTH `-nointeractive` AND `-maxtime <N>s` together in container runs. The legacy MCP server hard-coded both on every invocation; missing either reverts to potentially blocking / unbounded behavior. Suffix is required on -maxtime (`60s`, `5m`, `1h`) — bare integers are accepted but suffix form is the documented shape."
+  - "Legacy text-output regex parser (server_info / OSVDB-NNNNN / path heuristics) is replaced by `-Format json` in kind:cli. If you need the legacy text shape (rare — for human reading or grep pipelines), use `-Format txt -output ...`; downstream tooling should always prefer JSON."
+
+failure_signatures:
+  # Layer-diverse signals (SKILL #11):
+  #   - DNS layer (Perl Net::DNS / system resolver)
+  #   - TCP layer (Perl IO::Socket::INET)
+  #   - TLS layer (Perl IO::Socket::SSL)
+  #   - HTTP layer (nikto-internal status check)
+  #   - Plugin / config layer (nikto plugin loader)
+  #   - Input / argument-validation layer (nikto getopt parser)
+  - signal: "Could not resolve"
+    remediation: "DNS resolution failed. Verify hostname spelling, /etc/hosts inside container, or pass an IP. nikto's Perl resolver is less verbose than Go's — usually one short message."
+  - signal: "host lookup failed"
+    remediation: "Same root cause as 'Could not resolve' — Perl Net::DNS lookup error. Use IP if DNS isn't authoritative or fix resolver config."
+  - signal: "Name or service not known"
+    remediation: "System getaddrinfo error — DNS resolution failed at the libc layer. Check /etc/resolv.conf in the container or pass a bare IP."
+  - signal: "No web server found"
+    remediation: "TCP-level reachable but no HTTP response on the port — service may not be a web server. Confirm with curl -I or nmap -p N <host>; the port may serve a different protocol."
+  - signal: "Connection refused"
+    remediation: "TCP refused — port closed or service down. Confirm with nmap -p N <host> first; the web service may have stopped or moved."
+  - signal: "Error connecting"
+    remediation: "Generic connection failure — read the next line for the specific cause (DNS, TCP, TLS). Common phrasing in nikto output."
+  - signal: "SSL handshake failed"
+    remediation: "TLS handshake aborted — cipher suite mismatch, protocol version mismatch, or peer rejected handshake. Try -nossl if target serves both HTTP/HTTPS, or check target's TLS config."
+  - signal: "Certificate verify failed"
+    remediation: "Self-signed or expired certificate. nikto has no native -k flag — pin the cert into the container or proxy via -useproxy through Burp."
+  - signal: "certificate verify failed"
+    remediation: "Lowercase variant of the same — Perl IO::Socket::SSL phrasing. Same root cause; same remediation."
+  - signal: "unable to get local issuer certificate"
+    remediation: "TLS chain broken — root CA not trusted in the container. Add the CA via -CAfile or pin into the container's CA bundle."
+  - signal: "No targets specified"
+    remediation: "Argument validation failed — -h was not passed. Add -h <host>. Common when extracting target from prior context fails."
+  - signal: "Error: No host"
+    remediation: "Same as above — nikto's getopt validation rejects the call. Pass -h <host>."
+  - signal: "Could not load plugin"
+    remediation: "Plugin path doesn't exist or plugin Perl module failed to compile. Verify with `nikto -list-plugins` and check spelling. Custom plugins need to be in /usr/share/nikto/plugins/."
+  - signal: "Plugin .* failed"
+    remediation: "Specific plugin errored during execution. Read the next line for the cause. Drop the plugin from -Plugins or report a nikto bug."
+  - signal: "ERROR: Cannot read"
+    remediation: "File-read error (config file, wordlist, custom database). Verify the path exists in the container and has read permissions."
+  - signal: "Bad option"
+    remediation: "nikto getopt parse error — unrecognized flag or missing value. Verify flag spelling AND case (nikto is case-sensitive: -Format not -format)."
+  - signal: "Maximum running time"
+    remediation: "Hard runtime cap reached — comes from the dual-clock max_runtime_seconds wrapper or -maxtime flag. Split the scan with -Tuning scoping or raise the cap."
+
+help_commands:
+  - command: "nikto -Help"
+    purpose: "Full flag reference grouped by category (TARGET, TUNING, OUTPUT, AUTH, CONNECTION, EVASION, MUTATE, MISC)"
+  - command: "nikto -H"
+    purpose: "Short alias for -Help (capital H — NOT lowercase -h which is host)"
+  - command: "nikto -Version"
+    purpose: "Version and build information (verify v2.5+ — flag set differs from v2.1 era)"
+  - command: "nikto -list-plugins"
+    purpose: "List all available plugins with descriptions (use to plan -Plugins scope)"

@@ -8,13 +8,13 @@ LABEL org.opencontainers.image.description="SSH MCP server for OpenSploit"
 LABEL org.opencontainers.image.licenses="MIT"
 
 # Install SSH client and sshpass for password auth
+# python3-full bundles python3 + venv + ensurepip on Kali rolling (the split
+# python3-pip / python3-venv packages are no longer reliably available).
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
         openssh-client \
         sshpass \
-        python3 \
-        python3-pip \
-        python3-venv && \
+        python3-full && \
     rm -rf /var/lib/apt/lists/* && \
     apt-get clean
 
@@ -28,10 +28,6 @@ ENV PATH="/app/venv/bin:$PATH"
 # Copy and install shared mcp-common package
 COPY packages/mcp-common /app/packages/mcp-common
 RUN pip install --no-cache-dir /app/packages/mcp-common
-
-# Install tool-specific dependencies
-COPY tools/ssh/requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy MCP server code
 COPY tools/ssh/mcp-server.py .

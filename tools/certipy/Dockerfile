@@ -10,11 +10,12 @@ LABEL org.opencontainers.image.licenses="MIT"
 
 # Install certipy-ad and Kerberos dependencies
 # DEBIAN_FRONTEND=noninteractive prevents krb5-user from prompting for realm
+# python3-full bundles python3 + pip + venv as a single Kali-rolling-friendly
+# package (avoids the python3-pip / python3-venv split which intermittently
+# breaks on Kali rolling).
 RUN apt-get update && \
     DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-        python3 \
-        python3-pip \
-        python3-venv \
+        python3-full \
         python3-dev \
         build-essential \
         libssl-dev \

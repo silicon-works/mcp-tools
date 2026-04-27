@@ -13,9 +13,7 @@ RUN apt-get update && \
         wget \
         unzip \
         ca-certificates \
-        python3 \
-        python3-pip \
-        python3-venv && \
+        python3-full && \
     rm -rf /var/lib/apt/lists/* && \
     apt-get clean
 
@@ -36,10 +34,6 @@ ENV PATH="/app/venv/bin:$PATH"
 # Copy and install shared mcp-common package
 COPY packages/mcp-common /app/packages/mcp-common
 RUN pip install --no-cache-dir /app/packages/mcp-common
-
-# Install tool-specific dependencies
-COPY tools/cloudfox/requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy MCP server code
 COPY tools/cloudfox/mcp-server.py .

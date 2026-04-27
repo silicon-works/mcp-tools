@@ -8,12 +8,12 @@ LABEL org.opencontainers.image.description="searchsploit MCP server for OpenSplo
 LABEL org.opencontainers.image.licenses="MIT"
 
 # Install exploitdb and Python
+# Note: Kali rolling repos no longer ship python3-pip / python3-venv as
+# separate packages — use python3-full which bundles them.
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
         exploitdb \
-        python3 \
-        python3-pip \
-        python3-venv && \
+        python3-full && \
     rm -rf /var/lib/apt/lists/* && \
     apt-get clean
 
@@ -27,10 +27,6 @@ ENV PATH="/app/venv/bin:$PATH"
 # Copy and install shared mcp-common package
 COPY packages/mcp-common /app/packages/mcp-common
 RUN pip install --no-cache-dir /app/packages/mcp-common
-
-# Install tool-specific dependencies
-COPY tools/searchsploit/requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy MCP server code
 COPY tools/searchsploit/mcp-server.py .

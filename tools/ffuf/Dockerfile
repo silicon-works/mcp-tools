@@ -8,14 +8,16 @@ LABEL org.opencontainers.image.description="ffuf MCP server for OpenSploit"
 LABEL org.opencontainers.image.licenses="MIT"
 
 # Install ffuf and Python with wordlists
+# python3-full is Kali/Debian's metapackage that bundles python3 + pip + venv
+# in one shot — splitting them as `python3-pip python3-venv` causes
+# "Unable to locate package" on stale Kali roots, but `python3-full` resolves
+# cleanly (same fix used in tools/impacket/Dockerfile).
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
         ffuf \
         dirb \
         seclists \
-        python3 \
-        python3-pip \
-        python3-venv && \
+        python3-full && \
     rm -rf /var/lib/apt/lists/* && \
     apt-get clean
 
@@ -29,10 +31,6 @@ ENV PATH="/app/venv/bin:$PATH"
 # Copy and install shared mcp-common package
 COPY packages/mcp-common /app/packages/mcp-common
 RUN pip install --no-cache-dir /app/packages/mcp-common
-
-# Install tool-specific dependencies
-COPY tools/ffuf/requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy MCP server code
 COPY tools/ffuf/mcp-server.py .

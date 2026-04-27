@@ -125,6 +125,110 @@ class BaseMCPServer(ABC):
                 handler=self._verify_clock,
             )
 
+        # Auto-register the generic CLI runner. Every tool server inherits this
+        # by virtue of subclassing BaseMCPServer — kind:cli tools rely on it
+        # exclusively, kind:mcp tools use it as an escape hatch for ad-hoc
+        # invocations the curated methods don't cover.
+        self.register_method(
+            name="run_cli",
+            description=(
+                "Execute the tool's binary with the given argv. Generic CLI "
+                "runner for tools that take raw command-line arguments rather "
+                "than structured method parameters. Returns stdout/stderr/exit "
+                "code. Heartbeats every 30s; hard cap defaults to 24h."
+            ),
+            params={
+                "binary": {
+                    "type": "string",
+                    "description": "Binary to execute (e.g. 'curl', 'sqlmap', 'impacket-secretsdump'). Must be on PATH inside the container.",
+                    "required": True,
+                },
+                "args": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Argv list, already tokenized by the client. Each element is a single argv slot.",
+                    "required": True,
+                },
+                "stdin_data": {
+                    "type": "string",
+                    "description": "Optional bytes/text fed to the binary's stdin (e.g. for john --stdin or hashcat).",
+                    "required": False,
+                },
+                "max_runtime": {
+                    "type": "integer",
+                    "description": "Hard wall-clock cap in seconds. Defaults to 86400 (24h). Never resets — set generously.",
+                    "required": False,
+                    "default": 86400,
+                },
+            },
+            handler=self.run_cli,
+        )
+
+    async def run_cli(
+        self,
+        binary: str,
+        args: List[str],
+        stdin_data: Optional[str] = None,
+        max_runtime: int = 86400,
+    ) -> "ToolResult":
+        """Generic CLI runner — execute ``binary args...`` and return raw output.
+
+        This is the keystone of the kind:cli architecture. The client supplies
+        a fully-tokenized argv (no shell, no quoting surprises). We just exec
+        and return the result. Target validation, scope checks, reject_flags
+        all happened in the plugin before we ever got the call.
+
+        Heartbeat-driven progress notifications keep the client's idle clock
+        alive. ``max_runtime`` is the hard cap that catches genuinely wedged
+        binaries.
+        """
+        if not binary or not isinstance(binary, str):
+            return ToolResult(
+                success=False,
+                error="run_cli requires non-empty 'binary'",
+                error_class="params",
+            )
+        if not isinstance(args, list) or not all(isinstance(a, str) for a in args):
+            return ToolResult(
+                success=False,
+                error="run_cli requires 'args' to be a list of strings",
+                error_class="params",
+            )
+
+        cmd = [binary, *args]
+
+        try:
+            result = await self.run_command_with_progress(
+                cmd,
+                timeout=max_runtime,
+                stdin_data=stdin_data,
+            )
+        except ToolError as e:
+            # ToolError from run_command_with_progress is the hard-cap path —
+            # subprocess was killed and we need to surface it as a timeout.
+            return ToolResult(
+                success=False,
+                error=str(e),
+                error_class="timeout",
+                retryable=True,
+            )
+
+        # MCP-level "success" means "the run completed and we have output for
+        # the caller". A non-zero exit is information, not a transport
+        # failure — let tool_runner / the LLM interpret exit codes. Only true
+        # failures (param errors, hard-cap timeout) return success=False.
+        return ToolResult(
+            success=True,
+            data={
+                "exit_code": result.returncode,
+                "stdout": result.stdout,
+                "stderr": result.stderr,
+                "binary": binary,
+                "args": args,
+                "completed": True,
+            },
+        )
+
     async def _verify_clock(self) -> "ToolResult":
         """Return the container's current time and FAKETIME configuration.
 
@@ -381,24 +485,37 @@ class BaseMCPServer(ABC):
         progress_filter: Callable[[str], str | None] | None = None,
         heartbeat_interval: float = 30.0,
         env: Optional[Dict[str, str]] = None,
+        stdin_data: str | bytes | None = None,
     ) -> subprocess.CompletedProcess:
         """Run a command while streaming progress notifications from its output.
 
-        Like ``run_command`` but reads stdout/stderr line-by-line and sends MCP
-        progress notifications for lines matched by *progress_filter*, plus a
-        generic heartbeat every *heartbeat_interval* seconds of silence.
+        Dual-clock contract:
+          * **Hard cap** (this method) — ``timeout`` seconds wall-clock from
+            start to finish. Never resets. Catches a hung subprocess that fools
+            the heartbeat.
+          * **Idle clock** (client-side) — driven by the heartbeat notifications
+            this method emits every *heartbeat_interval* seconds. The MCP client
+            resets its own idle timer on each heartbeat. Catches a dead server.
+
+        Both work together. If the subprocess wedges but the asyncio event loop
+        is healthy, heartbeats keep flowing and the client's idle clock won't
+        fire — but the server-side ``timeout`` will, and we kill the subprocess.
 
         Args:
             cmd: Command and arguments as list.
-            timeout: Overall wall-clock timeout in seconds, or ``None`` for
-                unlimited (the client controls the deadline via MCP request
-                cancellation).
+            timeout: Hard wall-clock cap in seconds, or ``None`` for unlimited.
+                For untrusted/long-running tools, set this generously (3600+);
+                the heartbeat-driven idle clock is the first line of defense.
             check: Raise ``ToolError`` on non-zero exit code.
             progress_filter: ``(line) -> message | None``.  Return a short
                 string to emit as a progress notification, or ``None`` to skip.
             heartbeat_interval: Seconds between automatic "Still running…"
-                heartbeat notifications when no filter match occurs.
+                heartbeat notifications. Drives the client's idle clock; must be
+                less than the client's idle_timeout (typically idle/2 or less).
             env: Optional env vars to merge with os.environ for the subprocess.
+            stdin_data: Optional bytes/str to feed to the subprocess via stdin.
+                When ``None``, stdin is closed (DEVNULL). Tools like ``john
+                --stdin`` and ``hashcat`` need this.
 
         Returns:
             ``subprocess.CompletedProcess`` with full accumulated stdout/stderr
@@ -408,13 +525,36 @@ class BaseMCPServer(ABC):
 
         merged_env = {**os.environ, **env} if env else None
 
+        # If caller provided stdin_data we open a pipe; otherwise close stdin.
+        stdin_mode = (
+            asyncio.subprocess.PIPE
+            if stdin_data is not None
+            else asyncio.subprocess.DEVNULL
+        )
+
         proc = await asyncio.create_subprocess_exec(
             *cmd,
             env=merged_env,
-            stdin=asyncio.subprocess.DEVNULL,
+            stdin=stdin_mode,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
+
+        # Feed stdin (if any) and close so the subprocess sees EOF.
+        if stdin_data is not None and proc.stdin is not None:
+            payload = (
+                stdin_data.encode("utf-8")
+                if isinstance(stdin_data, str)
+                else stdin_data
+            )
+            try:
+                proc.stdin.write(payload)
+                await proc.stdin.drain()
+            finally:
+                try:
+                    proc.stdin.close()
+                except Exception:
+                    pass
 
         stdout_buf: list[str] = []
         stderr_buf: list[str] = []

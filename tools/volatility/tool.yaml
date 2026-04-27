@@ -1,9 +1,23 @@
 name: volatility
+kind: cli
+binary: vol
 version: "2.27.0"
-description: "Memory forensics framework — Volatility 3 v2.27.0 with 100+ plugins for Windows, Linux, and Mac memory dump analysis. Five methods: analyze (generic plugin runner for any of 100+ plugins), list_plugins (discover available plugins with filtering), pslist (process listing with auto OS detection), filescan (file object scanning), hashdump (SAM hash extraction). Supports raw, vmem, dmp, and lime dump formats. Operates on dump files in /session/ directory. No network access required."
+description: "Memory forensics framework — Volatility 3 v2.27.0 (binary `vol`) with 100+ plugins for Windows, Linux, and Mac memory dump analysis. Operates ENTIRELY OFFLINE on local memory dump files (raw, vmem, dmp, lime) inside the container — there is no network target. The positional argument is a NAMESPACED PLUGIN NAME (e.g., `windows.pslist.PsList`, `linux.bash.Bash`, `mac.lsmod.Lsmod`); the dump file is supplied via `-f /path/to/dump`. Native CLI; the LLM constructs the full vol invocation. Volatility 2 (`volatility`) is a DIFFERENT, INCOMPATIBLE binary with different plugin names — this image ships ONLY vol3."
 image: "ghcr.io/silicon-works/mcp-tools-volatility:latest"
 image_size_mb: 214
-timeout_seconds: 900
+# Dual-clock model:
+#   idle_timeout_seconds — silence between MCP heartbeats. vol3 prints little
+#     during long plugin runs (no built-in --status flag); 10 min idle is the
+#     conservative "stuck" threshold. Most plugins finish in seconds; the
+#     heavy ones (mftscan, full timeliner, malfind across all processes) can
+#     run quietly for minutes while building layer caches.
+#   max_runtime_seconds — hard wall-clock cap; never resets on heartbeat.
+#     4h covers exhaustive plugins (timeliner, mftscan, full memmap dumps)
+#     against multi-GB dumps with cold caches.
+# Legacy `timeout_seconds` is used by older clients as the hard cap.
+idle_timeout_seconds: 600
+max_runtime_seconds: 14400
+timeout_seconds: 14400
 
 capabilities:
   - memory_forensics
@@ -11,40 +25,64 @@ capabilities:
   - hash_extraction
   - file_scanning
   - malware_detection
+  - network_artifact_extraction
+  - registry_analysis
+
+phases:
+  - post-exploitation
 
 routing:
   use_for:
     - "analyze a memory dump for running processes and malware"
-    - "extract password hashes from a Windows memory dump"
-    - "list running processes from a RAM capture"
-    - "scan memory for file objects and open file handles"
-    - "extract command line history from a memory dump"
-    - "analyze network connections from a memory image"
-    - "detect rootkits and hidden processes in memory"
-    - "dump the SAM registry hive hashes from memory"
-    - "analyze a vmem or dmp memory snapshot"
-    - "list loaded kernel modules from a memory dump"
-    - "extract registry keys from memory"
-    - "timeline system activity from a memory capture"
+    - "extract password hashes from a Windows memory dump (windows.registry.hashdump)"
+    - "list running processes from a RAM capture (windows.pslist.PsList / linux.pslist.PsList)"
+    - "render a process tree from a memory dump (windows.pstree.PsTree)"
+    - "scan memory for file objects and open file handles (windows.filescan.FileScan)"
+    - "extract command line history from a Linux memory dump (linux.bash.Bash)"
+    - "analyze network connections from a memory image (windows.netscan.NetScan / windows.netstat.NetStat)"
+    - "detect rootkits and hidden processes in memory (windows.psscan.PsScan, windows.malfind.Malfind)"
+    - "dump the SAM registry hive hashes from memory (windows.registry.hashdump.Hashdump)"
+    - "analyze a vmem/dmp/raw/lime memory snapshot"
+    - "list loaded kernel modules from a memory dump (windows.modules.Modules / linux.lsmod.Lsmod)"
+    - "extract registry hives and printkey values from memory (windows.registry.printkey.PrintKey)"
+    - "timeline system activity from a memory capture (timeliner.Timeliner)"
+    - "extract MFT entries from memory (windows.mftscan.MFTScan)"
+    - "detect injected code via VAD analysis (windows.malfind.Malfind, windows.vadinfo.VadInfo)"
+    - "identify the OS / kernel version of a memory dump (windows.info.Info / linux.banners.Banners)"
   never_use_for:
     - "file-level forensics like binwalk extraction or steganography (use forensics)"
     - "disk image file carving (use forensics.carve with foremost)"
     - "live system analysis (volatility operates on memory dumps, not live systems)"
     - "network packet analysis (use wireshark/tshark)"
-    - "YARA-based memory scanning (yarascan plugin is unavailable — the yara-python dependency is not installed in this image)"
+    - task: "YARA-based memory scanning (yarascan plugin is unavailable)"
+      use_instead: "yara (separate tool against extracted process memory)"
+      reason: "yara-python is NOT installed in this image; yarascan plugin will error. Dump processes with windows.dumpfiles.DumpFiles or windows.memmap.Memmap, then run yara on the extracted artifacts."
+    - task: "cracking the hashes extracted from memory"
+      use_instead: "hashcat (-m 1000 NTLM) or john (--format=NT)"
+      reason: "Volatility extracts NTLM hashes; cracking is a separate offline step."
+    - task: "Volatility 2 plugin invocations (e.g., `volatility -f dump.raw imageinfo`)"
+      use_instead: "volatility 3 plugin namespaces (`vol -f dump.raw windows.info.Info`)"
+      reason: "Vol2 binary is `volatility` and uses non-namespaced plugin names (imageinfo, pslist, hashdump). This image ships only Vol3 (`vol`) with namespaced plugins (windows.info.Info, windows.pslist.PsList, windows.registry.hashdump.Hashdump)."
   triggers:
     - "volatility"
+    - "vol3"
     - "memory dump"
     - "memory forensics"
     - "RAM analysis"
+    - "RAM capture"
     - "pslist"
+    - "pstree"
     - "hashdump"
     - "filescan"
+    - "netscan"
+    - "malfind"
     - "vmem"
     - "memdump"
-
-phases:
-  - post-exploitation
+    - "mftscan"
+    - "timeliner"
+    - "lime dump"
+    - "raw memory"
+  prefer_over: []
 
 requirements:
   network: false
@@ -55,109 +93,277 @@ resources:
   cpu: 1.0
 
 see_also:
-  - tool: forensics
-    reason: "Use forensics for file-level analysis (binwalk extraction, steghide, exiftool metadata). Volatility handles memory dumps."
   - tool: hashcat
-    reason: "After extracting hashes with hashdump, crack them with hashcat (NTLM mode 1000) or john."
+    reason: "After extracting NTLM hashes with `vol -f dump.raw windows.registry.hashdump.Hashdump`, crack them with hashcat -m 1000 (NTLM)."
   - tool: john
-    reason: "After hashdump extracts NTLM hashes from memory, use john for quick dictionary/mask cracking. John is simpler for basic cracking; hashcat for advanced modes."
+    reason: "After hashdump extracts NTLM hashes from memory, use john --format=NT for quick dictionary/mask cracking. John is simpler for basic cracking; hashcat for advanced modes."
   - tool: impacket
     reason: "After extracting hashes or credentials from memory, use impacket secretsdump for further hash extraction, or psexec/wmiexec for pass-the-hash lateral movement."
+  - tool: forensics
+    reason: "Use forensics for file-level analysis (binwalk extraction, steghide, exiftool metadata) on artifacts extracted from memory (dumped processes, files from filescan)."
   - tool: ghidra
-    reason: "After identifying suspicious processes in memory, dump the executable and use ghidra for reverse engineering."
+    reason: "After identifying suspicious processes in memory (windows.malfind.Malfind), dump the executable with windows.dumpfiles.DumpFiles and use ghidra for reverse engineering."
 
-methods:
-  analyze:
-    description: "Run any Volatility 3 plugin against a memory dump. Runs `vol -f <dump> -q -r json <plugin> [extra_args]`. The generic method supports all 100+ Volatility plugins. Output is parsed as JSON when available, falling back to text table parsing. Use list_plugins to discover available plugins."
-    when_to_use: "(1) When you need a plugin not covered by the convenience methods (pslist, filescan, hashdump). (2) For advanced analysis: windows.netscan (network connections), windows.cmdline (command history), windows.malfind (malware detection), windows.dlllist (loaded DLLs). (3) For Linux dumps: linux.bash (bash history), linux.pslist, linux.proc.Maps. (4) Pass extra_args for plugin-specific options like '--pid 1234'."
-    required_ports: []
-    params:
-      dump_file:
-        type: string
-        required: true
-        description: "Path to memory dump file (under /session/). Supported formats: raw, vmem, dmp, lime."
-      plugin:
-        type: string
-        required: true
-        description: "Volatility 3 plugin name (e.g., 'windows.pslist', 'windows.netscan', 'windows.cmdline', 'linux.bash'). Dot-separated namespace. Use list_plugins to see all."
-      extra_args:
-        type: string
-        description: "Additional arguments for the plugin (e.g., '--pid 1234'). Space-separated."
-    returns:
-      plugin:
-        type: string
-        description: "Plugin name that was run."
-      results:
-        type: array
-        description: "Plugin output as array of objects. Structure varies by plugin."
-      result_count:
-        type: integer
-        description: "Number of result rows."
+# ── kind:cli specific sections ──────────────────────────────────────
 
-  list_plugins:
-    description: "List all available Volatility 3 plugins by parsing vol --help output. Includes Windows, Linux, and Mac plugins."
-    when_to_use: "Before analyze — discover which plugins are available and their descriptions. Filter by OS or keyword."
-    required_ports: []
-    params:
-      filter:
-        type: string
-        description: "Filter plugins by name or description substring (e.g., 'windows', 'hash', 'net', 'linux'). Case-insensitive."
-    returns:
-      plugins:
-        type: array
-        description: "Available plugins. Each entry: {name, description}."
-      plugin_count:
-        type: integer
-        description: "Number of matching plugins."
+target_extraction:
+  # Volatility 3 has NO network target. Its operation is purely local memory
+  # dump analysis. The "operands" of a vol call are:
+  #   1. The dump file path supplied via -f (e.g., /session/dump.raw)
+  #   2. The plugin name as a positional (e.g., windows.pslist.PsList)
+  #   3. Optional plugin-specific arguments (e.g., --pid 1234, -o /session/out)
+  # NONE of these are network endpoints. The plugin's TargetValidation
+  # framework is designed for network targets (host/IP/URL); applying it to
+  # a file path or plugin name would either always reject (wrong) or always
+  # accept (also wrong) — the right answer is N/A.
+  #
+  # Decision: declare NO target_extraction rules. The plugin extracts
+  # target=null. The downstream gotcha note documents that scope-validation
+  # is N/A for volatility because the operation is purely local memory
+  # forensics.
+  #
+  # Same design as john / hashcat — all three are offline analysis tools
+  # operating on local files. (--single-location accepts a URL form like
+  # file:// or http:// for an alternate dump source, but in practice the
+  # OpenSploit workflow pre-stages dumps in /session/; the URL path is
+  # documented as NOT-EXTRACTED via gotcha rather than wired into the rules.)
+  []
 
-  pslist:
-    description: "List running processes from a memory dump. Auto-selects windows.pslist or linux.pslist based on os_type parameter. Returns process name, PID, PPID, threads, handles, and creation time."
-    when_to_use: "(1) First step in memory analysis — see what was running. (2) Look for suspicious processes. (3) Find PIDs for further analysis with other plugins."
-    required_ports: []
-    params:
-      dump_file:
-        type: string
-        required: true
-        description: "Path to memory dump file."
-      os_type:
-        type: string
-        default: "windows"
-        description: "'windows', 'linux', or 'mac'. Determines which pslist plugin to use (windows.pslist, linux.pslist, or mac.pslist)."
-    returns:
-      results:
-        type: array
-        description: "Process list. Each entry contains PID, PPID, process name, creation time."
-      process_count:
-        type: integer
-        description: "Total number of processes found."
+# Volatility has no target-list flag analog. Dumps are local file paths
+# (`-f`), plugin names are positionals, and any URL-shape operand (the
+# rare `--single-location http://...` case) is a remote-dump-fetch URL not
+# a pentest target. Nothing to reject.
+reject_flags: []
+reject_flags_reason: "Volatility 3 has no network target and no target-list flag. The operands are a local dump file path (-f), a namespaced plugin name (positional), and plugin-specific options (also local artifacts inside the container). --single-location accepts an alternate dump source URL (file:// http:// etc.) but that's a memory-image FETCH source, not a pentest target — and is not extracted as a target either. There is no scope-validation surface to protect."
 
-  filescan:
-    description: "Scan memory for file objects (Windows only). Runs windows.filescan. Returns file paths and their memory offsets."
-    when_to_use: "(1) Find files that were open when the dump was taken. (2) Locate files for extraction with windows.dumpfiles. (3) Search for specific file types or paths."
-    required_ports: []
-    params:
-      dump_file:
-        type: string
-        required: true
-        description: "Path to memory dump file."
-    returns:
-      results:
-        type: array
-        description: "File objects found. Each entry contains offset and filename."
+# Per-tool value-taking flags whose values must NOT be confused with
+# positional plugin names or accidentally extracted as targets. vol3 uses
+# BOTH single-dash short flags (-f, -r, -s, -o, -q, -v, -h, -l, -p) AND
+# double-dash long flags. Most flags accept both `--flag value` and
+# `--flag=value` forms. Values verified against `vol --help`.
+value_flags:
+  # Dump source / config
+  - "-f"                          # dump file path (REQUIRED for analysis runs)
+  - "--file"                      # long form of -f
+  - "--single-location"           # alternate dump source URL (file://, http://, smb://)
+  - "--config"                    # path to JSON config file
+  - "--save-config"               # path to write current config as JSON
+  # Symbol tables / cache
+  - "-s"                          # symbol-table override
+  - "--symbol-table"              # long form of -s
+  - "--symbol-dirs"               # additional symbol-table dirs (colon-separated)
+  - "--cache-path"                # cache dir path (pin to /session/vol-cache for persistence)
+  - "--clear-cache"               # boolean — listed for safety
+  # Plugin discovery / dirs
+  - "-p"                          # additional plugin dirs (colon-separated)
+  - "--plugin-dirs"               # long form of -p
+  # Output / rendering
+  - "-r"                          # renderer: table | csv | json | json_lines | pretty
+  - "--renderer"                  # long form of -r
+  - "-o"                          # output dir for plugins that write extracted artifacts
+  - "--output-dir"                # long form of -o
+  # Logging
+  - "-l"                          # log file path
+  - "--log"                       # long form of -l
+  # OS-specific / advanced
+  - "--offline"                   # boolean — listed for safety
+  - "--write"                     # boolean — listed for safety (allow plugins to modify dump)
+  - "--info"                      # boolean — print framework info and exit
+  - "--remove-files"              # boolean — listed for safety (cleanup after extraction)
+  # Verbosity / quiet
+  - "-q"                          # quiet — boolean
+  - "--quiet"                     # long form of -q
+  - "-v"                          # verbose (stackable -vvv) — boolean
+  - "--verbose"                   # long form of -v
+  - "-h"                          # help — boolean
+  - "--help"                      # long form of -h
+  # Plugin-specific value flags (commonly used; not exhaustive — every plugin
+  # has its own flags, exposed via `vol <plugin> -h`)
+  - "--pid"                       # PID filter (windows.pslist, windows.dlllist, etc.)
+  - "--pids"                      # comma-separated PID list (some plugins)
+  - "--name"                      # process-name filter (windows.pslist --name)
+  - "--offset"                    # virtual/physical offset (varies per plugin)
+  - "--virtaddr"                  # virtual address (windows.memmap)
+  - "--physaddr"                  # physical address
+  - "--key"                       # registry key path (windows.registry.printkey)
+  - "--hive-offset"               # registry hive offset
+  - "--filter"                    # generic filter expression (some plugins)
+  - "--dump"                      # boolean — listed for safety (windows.dumpfiles, etc.)
+  - "--regex"                     # regex pattern (windows.filescan --regex, etc.)
+  - "--vad"                       # VAD address (windows.vadinfo)
+  - "--max-size"                  # int bytes — extraction size cap
+  - "--min-size"                  # int bytes — extraction size floor
+  - "--threshold"                 # int — confidence threshold (some scanner plugins)
+  - "--columns"                   # comma-separated column list (renderer)
 
-  hashdump:
-    description: "Extract NTLM password hashes from a Windows memory dump by reading the SAM registry hive. Runs windows.registry.hashdump (the non-deprecated plugin; windows.hashdump is deprecated). Returns username:rid:lmhash:nthash format suitable for cracking with hashcat (mode 1000) or john."
-    when_to_use: "(1) After obtaining a memory dump during post-exploitation. (2) To extract local account password hashes. (3) Results feed directly into hashcat -m 1000 or john --format=NT."
-    required_ports: []
-    params:
-      dump_file:
-        type: string
-        required: true
-        description: "Path to Windows memory dump file."
-    returns:
-      results:
-        type: array
-        description: "Extracted hashes. Each entry: {User, rid, lmhash, nthash}."
-      hash_count:
-        type: integer
-        description: "Number of hashes extracted."
+usage_patterns:
+  - name: "Identify dump OS and basic info"
+    command: "vol -f /session/dump.raw windows.info.Info"
+    when: "ALWAYS run this first on a new dump. windows.info.Info prints the kernel version, build number, NTBuildLabEx, system time, layer details, and confirms the dump is parseable. For Linux dumps use `linux.banners.Banners`; for Mac dumps use `mac.kevents.KEvents` or `mac.bash.Bash` as a smoke test. If windows.info.Info fails ('Could not determine layer'), try linux.banners.Banners next — auto OS-detection is via the symbol-table match."
+
+  - name: "List running processes (Windows)"
+    command: "vol -f /session/dump.raw windows.pslist.PsList -r json"
+    when: "Standard process enumeration. -r json emits machine-readable output (preferred for downstream tooling vs the default table renderer). For Linux dumps use `linux.pslist.PsList`; for Mac use `mac.pslist.PsList`. Returns process name, PID, PPID, threads, handles, creation/exit times. Use -r csv for spreadsheet-friendly output, -r pretty for boxed table output. windows.pslist.PsList walks the EPROCESS list (can be hidden by rootkits); pair with windows.psscan.PsScan (pool-tag scan) and windows.psxview.PsXView (multi-source view) to detect hidden processes."
+
+  - name: "Process tree (parent-child relationships)"
+    command: "vol -f /session/dump.raw windows.pstree.PsTree -r json"
+    when: "Render the process hierarchy. Useful to spot suspicious parent-child pairs (e.g., winword.exe → cmd.exe → powershell.exe → mshta.exe = phishing payload chain). Indentation in table renderer; nested objects in json. For Linux: `linux.pstree.PsTree`."
+
+  - name: "Network connections snapshot"
+    command: "vol -f /session/dump.raw windows.netscan.NetScan -r json"
+    when: "Extract TCP/UDP connection records from memory. Returns local/remote IPs, ports, owning PIDs, and connection state. windows.netscan scans the pool for connection structures; windows.netstat.NetStat walks the partition table (more accurate but version-dependent). Pair with windows.pslist to map connections back to process names. For Linux: `linux.sockstat.Sockstat`."
+
+  - name: "Linux bash command history"
+    command: "vol -f /session/dump.lime linux.bash.Bash"
+    when: "Extract bash command history from a Linux memory dump. linux.bash.Bash scans bash process memory for HISTFILE-style entries — recovers the in-memory history even if .bash_history was deleted on disk. Lime format (`.lime` extension) is the typical Linux memory capture format from LiME LKM (Linux Memory Extractor). Other Linux dump formats: raw (dd), AVML (.aff4)."
+
+  - name: "Extract NTLM hashes from SAM hive"
+    command: "vol -f /session/dump.raw windows.registry.hashdump.Hashdump -r json"
+    when: "Extract NTLM password hashes from the SAM registry hive. Returns User:rid:lmhash:nthash format suitable for cracking with hashcat -m 1000 or john --format=NT. Note: this is the FULL plugin name `windows.registry.hashdump.Hashdump` (CamelCase class suffix). The legacy alias `windows.hashdump` may also work but the namespaced form is preferred. Requires SAM + SYSTEM hives present in the dump (typical for full memory captures)."
+
+  - name: "Memory-injection / shellcode detection"
+    command: "vol -f /session/dump.raw windows.malfind.Malfind --pid 1234 -r json"
+    when: "Detect injected code via VAD analysis. windows.malfind.Malfind looks for memory regions that are RWX (read/write/execute) AND backed by no file (anonymous private mapping) — the classic shellcode-injection signature. Use `--pid N` to scope to a single process; omit for an all-process scan (slower, more output). Pair with windows.vadinfo.VadInfo for raw VAD walking and windows.dumpfiles.DumpFiles to extract suspicious regions for offline yara/ghidra analysis."
+
+  - name: "MFT extraction with output directory"
+    command: "vol -f /session/dump.raw windows.mftscan.MFTScan -o /session/mft/ --cache-path /session/vol-cache"
+    when: "Extract NTFS Master File Table entries from memory. windows.mftscan.MFTScan recovers file metadata (filenames, timestamps, sizes, parent dirs) from MFT records cached in RAM. -o /session/mft/ sets the output directory for any extracted artifacts (the directory MUST exist; mkdir -p first via a separate run_cli or rely on the plugin to create). --cache-path /session/vol-cache persists the layer-discovery cache across runs (significant speedup on large dumps after first analysis)."
+
+  - name: "Registry printkey (specific hive + key)"
+    command: "vol -f /session/dump.raw windows.registry.printkey.PrintKey --key 'Software\\Microsoft\\Windows\\CurrentVersion\\Run' -r json"
+    when: "Print a specific registry key's values. Useful for autostart enumeration (Run/RunOnce keys), service config (HKLM\\SYSTEM\\CurrentControlSet\\Services), or recently-used items. Backslashes in --key MUST be escaped or single-quoted in shell context (here single-quoted). Pair with windows.registry.hivelist.HiveList to enumerate available hives, then printkey to drill in. For full hive dump use windows.registry.hivescan.HiveScan."
+
+  - name: "Timeliner — full system event timeline"
+    command: "vol -f /session/dump.raw timeliner.Timeliner -r csv --cache-path /session/vol-cache"
+    when: "Build a chronological timeline by aggregating timestamps from multiple plugins (process create/exit, registry last-write, file timestamps, network events). -r csv is preferred (one row per event, sortable by time column). EXPENSIVE on large dumps — first run can take 30+ minutes building the cache; subsequent runs reuse --cache-path. Use after triage to construct an attack-narrative."
+
+  - name: "List available plugins (introspection)"
+    command: "vol -h"
+    when: "Print the framework help including the full namespaced plugin list (windows.*, linux.*, mac.*, plus framework plugins like timeliner, banners.Banners, layerwriter.LayerWriter). 100+ entries — pipe to less or grep for a specific OS/capability. To see plugin-specific options use `vol <plugin> -h` (e.g., `vol windows.pslist.PsList -h`)."
+
+  - name: "Plugin-specific help"
+    command: "vol windows.malfind.Malfind -h"
+    when: "Each plugin has its own --help with plugin-specific flags. windows.malfind exposes --pid, --max-vads-per-process, etc.; windows.dumpfiles.DumpFiles exposes --pid, --virtaddr, --physaddr, --dump, --filter; windows.registry.printkey exposes --key, --hive-offset, --recursive. ALWAYS check `vol <plugin> -h` before passing plugin-specific args — flag names vary between plugins."
+
+output_formats:
+  - flag: "-r json"
+    format: "json"
+    preferred: true   # most useful for downstream tooling
+  - flag: "--renderer json"
+    format: "json"
+    preferred: true   # long form of -r json
+  - flag: "-r json_lines"
+    format: "json_lines"
+    preferred: false  # one JSON object per line — streaming-friendly
+  - flag: "-r csv"
+    format: "csv"
+    preferred: false  # spreadsheet-friendly, good for timeliner
+  - flag: "-r table"
+    format: "table"
+    preferred: false  # default human-readable table
+  - flag: "-r pretty"
+    format: "pretty"
+    preferred: false  # boxed/colored table for terminals
+
+common_options:
+  input:
+    - "-f PATH / --file PATH: REQUIRED for all analysis runs. Path to memory dump (raw, vmem, dmp, lime, AVML, snapshot.vmsn). Pre-stage in /session/."
+    - "--single-location URL: alternate dump source. Supports file://, http(s)://, smb://, gs://, s3://. Used for streaming dumps from remote storage. NOT a network target — it's an alternate input transport. In OpenSploit workflows always use -f with /session/ paths."
+  plugin:
+    - "POSITIONAL PLUGIN NAME: namespaced and CASE-SENSITIVE. Format: <namespace>.<group>.<ClassName> for most (e.g., windows.pslist.PsList). A few are top-level: timeliner.Timeliner, banners.Banners, layerwriter.LayerWriter, isfinfo.IsfInfo, frameworkinfo.FrameworkInfo, configwriter.ConfigWriter, regexscan.RegExScan, vmscan.Vmscan."
+    - "Windows plugins: windows.pslist.PsList, windows.psscan.PsScan, windows.pstree.PsTree, windows.netscan.NetScan, windows.netstat.NetStat, windows.dlllist.DllList, windows.handles.Handles, windows.cmdline.CmdLine, windows.envars.Envars, windows.malfind.Malfind, windows.vadinfo.VadInfo, windows.filescan.FileScan, windows.mftscan.MFTScan, windows.dumpfiles.DumpFiles, windows.modules.Modules, windows.driverscan.DriverScan, windows.svcscan.SvcScan, windows.registry.hivelist.HiveList, windows.registry.printkey.PrintKey, windows.registry.hashdump.Hashdump, windows.registry.lsadump.Lsadump, windows.registry.cachedump.Cachedump, windows.info.Info, windows.memmap.Memmap, windows.sessions.Sessions, windows.netfile.NetFile, ..."
+    - "Linux plugins: linux.pslist.PsList, linux.pstree.PsTree, linux.bash.Bash, linux.lsmod.Lsmod, linux.lsof.Lsof, linux.proc.Maps, linux.sockstat.Sockstat, linux.elfs.Elfs, linux.envars.Envars, linux.tty_check.tty_check, linux.banners.Banners, ..."
+    - "Mac plugins: mac.pslist.PsList, mac.lsmod.Lsmod, mac.bash.Bash, mac.netstat.Netstat, mac.dmesg.Dmesg, mac.malfind.Malfind, ..."
+  output:
+    - "-r {table|csv|json|json_lines|pretty} / --renderer {...}: output format. Default `table`. Prefer `json` for downstream parsing."
+    - "-o DIR / --output-dir DIR: directory for plugins that write extracted artifacts (windows.dumpfiles.DumpFiles, windows.mftscan.MFTScan with --dump, etc.). Directory MUST exist beforehand."
+    - "--columns LIST: subset of columns to render (renderer-dependent)."
+  config:
+    - "--config PATH: load JSON config file (symbol overrides, layer config, etc.). Useful when auto-detection picks the wrong symbol table."
+    - "--save-config PATH: write current resolved config to PATH for reuse on subsequent runs."
+    - "-s / --symbol-table NAME: explicit symbol table override (e.g., a specific NT kernel build). Use after `vol -f dump.raw isfinfo.IsfInfo` to enumerate available tables."
+    - "--symbol-dirs DIRS: colon-separated list of extra symbol-table directories (custom .pdb / ISF JSON files)."
+    - "--cache-path DIR: cache directory for layer auto-detection results. PIN TO /session/vol-cache for persistence — first run builds the cache (~30-60s on large dumps); subsequent runs reuse it."
+    - "--clear-cache: invalidate the cache (rare; use when symbol-table changes break the cache)."
+    - "-p DIRS / --plugin-dirs DIRS: colon-separated list of extra plugin directories (custom community plugins)."
+  performance:
+    - "-q / --quiet: suppress framework progress output (only emit plugin results)."
+    - "-v / --verbose: stackable (-v, -vv, -vvv) — increasing diagnostic detail. Use -vvv when debugging 'Unsatisfied requirement' or 'Could not determine layer' errors."
+    - "-l PATH / --log PATH: write framework log to PATH (separate from stdout)."
+
+gotchas:
+  - "VOLATILITY 3 vs VOLATILITY 2 are DIFFERENT, INCOMPATIBLE TOOLS. Vol3 binary is `vol`; Vol2 binary is `volatility`. This image ships ONLY Vol3. Plugin names changed: vol2 `imageinfo` → vol3 `windows.info.Info`; vol2 `pslist` → vol3 `windows.pslist.PsList`; vol2 `hashdump` → vol3 `windows.registry.hashdump.Hashdump`; vol2 `--profile=Win7SP1x64` is GONE (vol3 auto-detects via symbol-table match). If you copy vol2 invocations from old write-ups they will fail."
+  - "PLUGIN NAME IS A POSITIONAL after flags: `vol -f dump.raw windows.pslist.PsList`, NOT `vol windows.pslist.PsList -f dump.raw` (though the latter does parse — argparse is permissive). Plugin names are CASE-SENSITIVE. Common errors: typing `windows.pslist` (missing `.PsList` class suffix), `Windows.pslist.PsList` (wrong-case namespace), `windows.PSlist.PsList` (wrong-case group)."
+  - "Plugin namespacing: `windows.X.Y` for Windows targets, `linux.X.Y` for Linux, `mac.X.Y` for macOS. A few plugins are top-level (no OS namespace): timeliner.Timeliner, banners.Banners, layerwriter.LayerWriter, regexscan.RegExScan, isfinfo.IsfInfo, vmscan.Vmscan, frameworkinfo.FrameworkInfo, configwriter.ConfigWriter."
+  - "First run on a NEW dump runs layer auto-detection — can take 30-60 seconds (or more on large dumps) while symbol-table matching scans the dump. Subsequent runs reuse the cache. ALWAYS pass `--cache-path /session/vol-cache` to persist this cache across container restarts; without it every fresh container redoes the work."
+  - "`-r json` is the most useful renderer for downstream parsing. Default `table` is human-readable but uses tabs and ASCII drawings that break naive parsers. `json_lines` is good for streaming (one object per line). `csv` is good for spreadsheets and timeliner. `pretty` is `table` with ANSI box-drawing — only for terminal viewing."
+  - "Some plugins WRITE TO DISK — windows.dumpfiles.DumpFiles, windows.mftscan.MFTScan with --dump, windows.memmap.Memmap with --dump. They REQUIRE -o /path/to/dir AND the directory MUST EXIST. Pre-create with `vol ... mkdir-equivalent` (NOT a vol command; do it via a separate run_cli `mkdir`). The `--remove-files` flag cleans up extracted files after the plugin finishes — combine with `--dump` for ephemeral analysis."
+  - "Volatility has NO NETWORK TARGET. The positional argument is a PLUGIN NAME (e.g., `windows.pslist.PsList`), and the dump file path is supplied via `-f`. target_extraction returns null; scope-validation does NOT apply because there is no remote host to validate against. Same design as john / hashcat — all three operate on local artifacts."
+  - "`--single-location URL` accepts file://, http://, smb://, s3://, gs:// for streaming a dump from remote storage — NOT a pentest target. The URL specifies an alternate input transport, not a host to probe. In standard OpenSploit workflows always pre-stage dumps in /session/ and use `-f /session/<name>` instead."
+  - "Some plugins require WRITE access to the dump file (rare; e.g., extraction plugins that write reconstructed files back to slack space). Default is read-only. Pass `--write` to allow modification — DO NOT use casually; you can corrupt the dump for further analysis. Most analysis-only plugins (pslist, netscan, hashdump, malfind) do NOT need --write."
+  - "Symbol-table failures: 'No symbols available' / 'Failed to find symbols' / 'Could not determine layer' usually mean the dump's kernel build isn't in the bundled symbol cache. Run `vol -f dump.raw isfinfo.IsfInfo` to enumerate available symbol tables; if missing, download from https://github.com/Abyss-W4tcher/volatility3-symbols (community pack) or generate with the volatility3 ISF generator."
+  - "yarascan plugin (`windows.yarascan.YaraScan`) is UNAVAILABLE in this image — yara-python is not installed. Workaround: dump processes with windows.dumpfiles.DumpFiles or windows.memmap.Memmap, then run yara on the extracted files via a separate yara tool (or out-of-band)."
+  - "Verbosity stacks: -v (info), -vv (debug), -vvv (trace). Default is warn-only. When debugging 'Unsatisfied requirement' or layer-detection failures, run with -vvv and inspect the framework messages — they reveal which symbol tables were tried and why each was rejected."
+  - "Plugin-specific flags vary per plugin. ALWAYS check `vol <plugin> -h` before passing flags. Common: --pid (process filter), --offset (memory offset), --key (registry path for printkey), --regex (filescan name filter), --dump (extract artifacts; combine with -o), --recursive (registry walk)."
+  - "Quote/escape value-flag values that contain spaces, backslashes, or shell-meta characters. Most-common offender is windows.registry.printkey.PrintKey `--key 'Software\\Microsoft\\Windows\\CurrentVersion\\Run'` — the backslashes MUST be inside single quotes (or doubled when double-quoted) so the shell hands the literal value to vol. Same for `--regex` patterns containing `$`/`*`/`(`/`)`, and for any `--filter` expression. Without quoting, the shell expands or splits the value and vol sees fragments that look like additional positionals."
+  - "Legacy short plugin names (without the CamelCase class suffix) sometimes still resolve as aliases — e.g., `windows.pslist` → `windows.pslist.PsList`, `windows.filescan` → `windows.filescan.FileScan`, `windows.registry.hashdump` → `windows.registry.hashdump.Hashdump`. This works in current vol3 but is NOT guaranteed across versions and is not the canonical form. ALWAYS prefer the fully-namespaced `windows.X.Y.ClassName` form in scripted invocations; only fall back to the short alias if a write-up uses it and you're matching style."
+  - "Exit codes: 0 = success (even if zero results); non-zero = error (invalid plugin, layer-detection failure, file-open error, plugin crash). Plugin returns zero results does NOT raise non-zero — check stdout content."
+
+failure_signatures:
+  # Layer-diverse signals (SKILL #11):
+  #   - File / I/O layer (-f path open, -o dir create, --cache-path access)
+  #   - Layer-detection / format layer (dump format detection, OS/arch detection)
+  #   - Plugin-resolution layer (plugin name not found, namespace typo)
+  #   - Symbol-table layer (kernel build missing from symbol pack)
+  #   - Argument / argparse layer (unknown flag, missing required arg, malformed value)
+  #   - Plugin-runtime layer (Unsatisfied requirement, plugin internal error)
+  - signal: "No such file or directory"
+    remediation: "Dump file path passed to -f doesn't exist. Verify with `ls /session/` and re-check the filename. /session/ is the standard mount; paths outside /session/ may not be reachable."
+  - signal: "Could not open"
+    remediation: "Volatility-specific variant of file-open failure on the -f path. Same root cause: wrong path or permission denied. Check the file exists and is readable: `ls -l /session/<name>`."
+  - signal: "Could not determine layer"
+    remediation: "Layer auto-detection failed — the dump format isn't recognized or the symbol table for the dump's kernel isn't available. Run `vol -f <dump> -vvv windows.info.Info` (or linux.banners.Banners for Linux) to see which detectors were tried. May need a community symbol pack (https://github.com/Abyss-W4tcher/volatility3-symbols) for unusual Windows builds."
+  - signal: "unable to validate plugin requirements"
+    remediation: "Plugin loaded but required dependencies (a parent layer, kernel module, or symbol table) couldn't be satisfied. Run with -vvv to see the missing requirement. Often means wrong-OS plugin (e.g., `windows.pslist.PsList` against a Linux dump) — try the matching `linux.*` or `mac.*` variant."
+  - signal: "Unsatisfied requirement"
+    remediation: "Same family as 'unable to validate plugin requirements' — a plugin TranslationLayerRequirement or SymbolRequirement isn't met. Verify the dump is the right OS for the plugin namespace, and that symbol tables for the kernel build are present (isfinfo.IsfInfo to enumerate)."
+  - signal: "plugin .* not found"
+    remediation: "Plugin name typo or wrong namespace. Run `vol -h` to see the full plugin list and copy the exact name. Common errors: missing class suffix (`windows.pslist` instead of `windows.pslist.PsList`), wrong namespace case (`Windows.X` instead of `windows.X`), vol2-style names (`pslist` instead of `windows.pslist.PsList`)."
+  - signal: "usage: vol"
+    remediation: "vol printed its argparse usage banner — almost always means a malformed invocation: a plugin name that argparse rejected before plugin-resolution (so it falls back to the top-level usage), or a missing required positional. Distinguish from `plugin .* not found`: `usage: vol` appears when argparse itself bails (typically on a totally unknown positional or when `-f` is missing for a non-introspection run); `plugin .* not found` appears when argparse accepted the positional but the framework's plugin registry didn't resolve it. Re-check: (a) is the plugin name the full namespaced form ending in CamelCase class (`windows.pslist.PsList`)? (b) is `-f /session/<dump>` present? (c) any flag typos (`--profile=` from vol2 etc.)?"
+  - signal: "Required plugin failed"
+    remediation: "A plugin that depends on another plugin's output failed because the dependency raised. Run the dependency directly first (e.g., before windows.dumpfiles.DumpFiles, run windows.filescan.FileScan to confirm filescan works). May indicate an underlying layer-detection or symbol issue."
+  - signal: "No symbols available"
+    remediation: "Symbol-table layer couldn't find an ISF JSON for the dump's kernel build. Run `vol -f <dump> isfinfo.IsfInfo` to list bundled tables. If the dump's build is missing, fetch from the community symbol pack (https://github.com/Abyss-W4tcher/volatility3-symbols) and unpack into /usr/local/lib/python3.11/site-packages/volatility3/symbols/ (or pass --symbol-dirs)."
+  - signal: "Failed to find symbols"
+    remediation: "Same family as 'No symbols available'. Same fix: enumerate via isfinfo.IsfInfo, fetch missing tables from the community pack."
+  - signal: "unrecognized arguments"
+    remediation: "argparse rejected an unknown flag. Check spelling against `vol --help` (framework flags) and `vol <plugin> -h` (plugin-specific flags). Common error: passing `--profile=X` (vol2 syntax) — vol3 has no profile flag (auto-detect via symbol-table match)."
+  - signal: "error: argument"
+    remediation: "argparse error on a known flag (missing value, wrong type, out-of-range). Re-check the flag's expected type via `vol --help` — e.g., --pid expects int, -r expects one of {table, csv, json, json_lines, pretty}."
+  - signal: "the following arguments are required"
+    remediation: "Missing required argument — usually `-f`. vol3 needs both `-f <dump>` and a positional plugin name for any analysis run. Exception: introspection commands like `vol -h`, `vol --help`, `vol --info`, `vol frameworkinfo.FrameworkInfo` don't require -f."
+  - signal: "Permission denied"
+    remediation: "File or directory permission error — typically on `-o` output dir or `--cache-path`. Verify the path is writable: /session/ should always be writable; if using --cache-path, the parent dir must exist."
+  - signal: "JSONDecodeError"
+    remediation: "A plugin's output stream contained malformed JSON (rare; usually a plugin internal error mid-stream). Re-run with -r table to see plain text output and identify what the plugin actually emitted. Report as a plugin bug if reproducible."
+  - signal: "is not a writeable layer"
+    remediation: "Plugin tried to modify the dump but --write wasn't passed. Add --write to allow modification — but only if you intentionally want the dump modified (most analysis plugins do not need this)."
+
+help_commands:
+  - command: "vol -h"
+    purpose: "Top-level help: framework flags + the full namespaced plugin list (100+ entries). Pipe to less or grep for a specific OS/capability (e.g., `vol -h | grep windows.registry`)."
+  - command: "vol --help"
+    purpose: "Long form of -h — same output."
+  - command: "vol -V"
+    purpose: "Print volatility version (e.g., `volatility 2.27.0`). Confirms the container is vol3 not vol2."
+  - command: "vol --version"
+    purpose: "Long form of -V — same output."
+  - command: "vol <plugin> -h"
+    purpose: "Plugin-specific help: lists flags accepted by that particular plugin (e.g., `vol windows.malfind.Malfind -h` shows --pid, --max-vads-per-process, etc.). ALWAYS check before passing plugin-specific flags."
+  - command: "vol -f <dump> isfinfo.IsfInfo"
+    purpose: "Enumerate available symbol tables and which one matches the supplied dump. Use to diagnose 'No symbols available' / 'Could not determine layer' failures."
+  - command: "vol -f <dump> frameworkinfo.FrameworkInfo"
+    purpose: "Print framework configuration (loaded plugins, symbol dirs, plugin dirs, cache path). Useful for diagnosing missing-plugin or wrong-cache-path issues."
+  - command: "vol --info"
+    purpose: "Boolean flag — print framework info including all plugin descriptions and exit. Equivalent to `frameworkinfo.FrameworkInfo` without needing -f."

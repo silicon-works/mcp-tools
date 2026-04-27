@@ -1,15 +1,101 @@
 name: dns
+kind: cli
+binary: dig
+# Single-binary tool: wraps `dig` (BIND 9.18 — Debian/Kali `dnsutils` package).
+# Source code path: tools/dns/mcp-server.py — the legacy method handlers
+# (lookup, zone_transfer, enum) auto-inherit run_cli from BaseMCPServer
+# (mcp-common 0.3.0); kind:cli is the new default. The three legacy
+# methods are preserved as the rollback path per SKILL #21.
+#
+# dig's argv form is UNUSUAL — almost everything is positional, and the
+# `@<server>` syntax uses a literal `@` prefix on a positional rather than
+# a flag. The canonical form is:
+#
+#   dig [@server] [options] <name> [type] [class]
+#
+# `@<server>`  — DNS server (positional with literal `@` prefix). The DSL
+#                must skip these — they are NOT the target.
+# `<name>`     — domain to query (positional). THIS is the target.
+# `[type]`     — record type, e.g., A AAAA MX NS TXT SOA SRV PTR ANY AXFR
+#                (positional). Optional; defaults to A. NOT a target.
+# `[class]`    — IN | CH | HS (positional, rare). NOT a target.
+# `+<option>`  — dig "+option" syntax (e.g., +short, +trace, +tcp,
+#                +timeout=N, +tries=N). Positional from the tokeniser's
+#                point of view (no `-` prefix), but NEVER a target.
+# `-<flag> <v>` — flag-value form: -x <ip> (reverse), -t <type>, -q <name>,
+#                -p <port>, -b <bind-addr>, -c <class>, -k <keyfile>,
+#                -y <key>, -f <batchfile>.
+# `-4` / `-6`  — boolean flags (force IPv4 / IPv6).
+#
+# There is NO sub-command (unlike dnsrecon / dnsenum). dig dispatches via
+# argv only. The tool's mcp-server.py wraps ONLY dig — no dnsrecon /
+# dnsenum / massdns. For DNS subdomain brute-force use the `amass` or
+# `ffuf` tools.
 version: "9.18"
-description: "DNS enumeration via dig (dnsutils 9.18) — zone transfers, reverse lookups, and record queries. 3 methods: lookup (forward/reverse DNS query for specific record types with optional DNS server targeting), zone_transfer (attempt AXFR to retrieve all records for a domain — extracts hostnames and record counts), enum (enumerate all common record types A/AAAA/CNAME/MX/NS/SOA/TXT/SRV for a domain in one call). Supports TCP mode, custom DNS servers, and short-form output. For subdomain brute-force discovery use amass. For port scanning discovered hosts use nmap."
+description: >
+  DNS enumeration via dig (BIND 9.18 / dnsutils) — zone transfers, reverse
+  lookups, and record queries. Single-binary, positional-argv tool: the
+  canonical form is `dig [@server] [options] <name> [type] [class]`.
+
+  Argv form is binary-canonical:
+
+    dig
+        [@<server>]                         # positional with `@` prefix — DNS server
+        [-x <ip>]                           # reverse lookup (target is the IP)
+        [-t <type>]                         # record type (alternate to positional)
+        [-q <name>]                         # query name (alternate to positional)
+        [-p <port>]                         # port (default 53)
+        [-b <addr>]                         # source bind address
+        [-c <class>]                        # query class (IN | CH | HS)
+        [-4 | -6]                           # force IPv4 / IPv6 (boolean)
+        [-k <keyfile> | -y [hmac:]name:key] # TSIG auth
+        [+<option>[=<value>]]               # dig +options (see below)
+        <name> [<type>] [<class>]           # positional name + type + class
+
+  Common +options (POSITIONAL but not the target):
+    +short           — answer-only output (one value per line)
+    +trace           — trace from root nameservers
+    +tcp / +notcp    — force TCP / UDP
+    +dnssec          — request DNSSEC records
+    +nssearch        — query each authoritative NS for SOA
+    +nocomments / +nocmd / +nostats — suppress dig output sections
+    +noall +answer   — show only the ANSWER section (compact)
+    +timeout=N       — per-query timeout (seconds)
+    +tries=N         — retry count
+    +retry=N         — alias for +tries
+    +ndots=N         — search-list dots threshold
+    +bufsize=N       — EDNS UDP buffer size
+    +edns=N          — EDNS version
+    +subnet=ADDR     — EDNS Client Subnet (ECS)
+
+  Output is line-oriented text — dig emits one record per line in the
+  ANSWER / AUTHORITY / ADDITIONAL sections. The `+short` flag collapses
+  output to one value per line (compact form for scripting). There is
+  no JSON option upstream.
+
+  Feature 28 dynamic recipes are RETIRED for the kind:cli path — the LLM
+  writes argv directly. Recipes still load for legacy method calls
+  (lookup, zone_transfer, enum) if /session/tool_recipes/dns/ exists,
+  but they're a dead branch under run_cli (REQ-TR-016).
+
 image: "ghcr.io/silicon-works/mcp-tools-dns:latest"
 image_size_mb: 200
-timeout_seconds: 120
+
+# Dual-clock model — single DNS queries are sub-second, but +trace can
+# run multiple seconds (root → TLD → authoritative chain), AXFR on a
+# large zone can run minutes, and looped reverse-lookup sweeps over a
+# /16 take 10+ minutes. idle_timeout covers the longest reasonable
+# silence (DNS resolver retransmits + TCP fallback negotiation).
+idle_timeout_seconds: 60        # 1 min silence == wedged (resolver dropped, retries hung)
+max_runtime_seconds: 1800       # 30 min hard cap — bulk reverse sweep / large AXFR
+timeout_seconds: 1800
 
 capabilities:
   - dns_enumeration
   - zone_transfer
   - reverse_lookup
   - record_query
+  - dnssec_validation
 
 phases:
   - reconnaissance
@@ -24,149 +110,405 @@ resources:
 
 routing:
   use_for:
-    - "DNS zone transfer (AXFR) to discover all subdomains and records for a domain"
-    - "reverse DNS lookup to identify hostnames from IP addresses"
-    - "query specific DNS record types (A, AAAA, MX, TXT, SRV, NS, SOA, PTR, CNAME)"
-    - "enumerate all DNS record types for a target domain in one call"
-    - "query a specific DNS server (e.g., target's internal DNS) for internal hostnames"
-    - "check SOA record to identify authoritative nameservers"
+    - "DNS zone transfer (AXFR) to dump all records for a domain from a misconfigured nameserver"
+    - "reverse DNS lookup (-x <ip>) to identify hostnames from IP addresses"
+    - "query specific DNS record types (A, AAAA, MX, TXT, SRV, NS, SOA, PTR, CNAME, ANY, DNSKEY, DS, TLSA)"
+    - "enumerate authoritative nameservers (NS query) before attempting AXFR"
+    - "query a specific DNS server (e.g., target's internal DNS via @<ip>) for internal-only records"
+    - "check SOA record to identify authoritative nameservers (the candidates for AXFR)"
+    - "trace the DNS resolution chain from root (+trace) — diagnose split-horizon DNS"
+    - "request DNSSEC records (+dnssec) to verify zone signing"
+    - "force TCP queries (+tcp) when UDP is filtered or when responses exceed UDP MTU"
   never_use_for:
-    - "subdomain brute-force discovery (use amass for passive OSINT, ffuf for DNS brute-force)"
+    - "subdomain brute-force discovery (use amass for OSINT, ffuf for DNS brute-force, or dnsrecon for built-in brute)"
     - "port scanning discovered hosts (use nmap)"
     - "web content discovery (use ffuf)"
     - "DNS-based vulnerability scanning (use nuclei with dns templates)"
+    - "bulk subdomain enumeration across many TLDs (use amass intel)"
   triggers:
-    - dig
-    - zone transfer
-    - AXFR
-    - reverse DNS
-    - DNS lookup
-    - DNS records
-    - DNS query
-    - MX record
-    - TXT record
-    - SOA record
-    - NS record
-    - SRV record
-    - PTR record
-    - nameserver
+    - "dig"
+    - "zone transfer"
+    - "AXFR"
+    - "reverse DNS"
+    - "DNS lookup"
+    - "DNS records"
+    - "DNS query"
+    - "MX record"
+    - "TXT record"
+    - "SOA record"
+    - "NS record"
+    - "SRV record"
+    - "PTR record"
+    - "CNAME record"
+    - "DNSKEY"
+    - "DNSSEC"
+    - "nameserver"
+    - "authoritative DNS"
+    - "split horizon DNS"
+    - "+short"
+    - "+trace"
   prefer_over: []
 
 see_also:
   - tool: amass
-    reason: Use amass for OSINT-based subdomain discovery (passive sources, no target contact). Use dns for interactive queries, zone transfers, and specific record lookups against known DNS servers.
+    reason: "Use amass for OSINT-based subdomain discovery (passive sources, no target contact). Use dns (dig) for interactive queries, zone transfers, and specific record lookups against known DNS servers."
   - tool: nmap
-    reason: After DNS enumeration discovers hostnames, use nmap to port scan those hosts. Nmap has basic DNS NSE scripts but dns (dig) provides much more control for zone transfers and record queries.
+    reason: "After DNS enumeration discovers hostnames, use nmap to port-scan those hosts. Nmap has basic DNS NSE scripts (`dns-zone-transfer`, `dns-recursion`, `dns-cache-snoop`) but dns (dig) provides much more control for zone transfers and record queries."
   - tool: ffuf
-    reason: Use ffuf for DNS subdomain brute-force when amass passive enumeration and dns zone transfer both fail to find subdomains.
+    reason: "Use ffuf for DNS subdomain brute-force when amass passive enumeration and dns zone transfer both fail to find subdomains."
+  - tool: nuclei
+    reason: "nuclei has DNS templates (CNAME takeover, DNSSEC misconfigurations, dangling records) that complement manual dig queries — nuclei automates known signatures, dns lets you inspect arbitrary records."
 
-methods:
-  lookup:
-    description: "Perform a DNS lookup for a specific record type. Supports forward lookups (domain → IP), reverse lookups (IP → hostname via -x), and queries against custom DNS servers. Returns parsed answer records with TTL, class, type, and value."
-    when_to_use: "First DNS interaction after identifying a target domain or IP. Try reverse lookup on target IP to discover hostnames. Query the target's DNS server directly for internal records that public DNS won't have. Check MX records to find mail servers, TXT records for SPF/DKIM, NS records for nameservers, SOA for the authoritative DNS server (needed for zone_transfer)."
-    params:
-      target:
-        type: string
-        required: true
-        description: "Domain name (e.g., 'target.htb') or IP address (for reverse lookups)."
-      record_type:
-        type: string
-        default: "A"
-        description: "DNS record type: A, AAAA, MX, TXT, NS, SOA, SRV, PTR, CNAME, ANY, DNSKEY, DS, HINFO, NAPTR, TLSA."
-      server:
-        type: string
-        description: "DNS server to query (e.g., '10.10.10.5'). Omit to use system default. Use target's DNS server for internal records."
-      reverse:
-        type: boolean
-        default: false
-        description: "Perform reverse DNS lookup (-x flag). Target should be an IP address."
-      short:
-        type: boolean
-        default: false
-        description: "Return short-form answer only (+short). Cleaner output for scripting."
-      tcp:
-        type: boolean
-        default: false
-        description: "Use TCP instead of UDP (+tcp). Required for large responses or when UDP is filtered."
-      timeout:
-        type: integer
-        default: 10
-        description: "Query timeout in seconds."
-    returns:
-      target:
-        type: string
-        description: "The queried target."
-      record_type:
-        type: string
-        description: "The record type queried."
-      records:
-        type: array
-        description: "Parsed DNS records, each with: name, ttl, class, type, value."
-      count:
-        type: integer
-        description: "Number of records returned."
+# ── kind:cli specific sections ──────────────────────────────────────
 
-  zone_transfer:
-    description: "Attempt a DNS zone transfer (AXFR) to retrieve all DNS records for a domain. Zone transfers are often misconfigured on internal DNS servers and leak the entire zone — all subdomains, mail servers, service records, and internal hostnames. Returns parsed records and extracted unique hostnames."
-    when_to_use: "After identifying the authoritative DNS server for a domain (via SOA record or nmap). Zone transfers are a quick win — if allowed, they reveal the entire DNS zone without brute-forcing. Always try AXFR before resorting to subdomain brute-force. Common in HTB/CTF where DNS misconfiguration is a deliberate vulnerability."
-    params:
-      domain:
-        type: string
-        required: true
-        description: "Domain to attempt zone transfer on (e.g., 'target.htb', 'hackfail.htb')."
-      server:
-        type: string
-        required: true
-        description: "DNS server to query — must be the authoritative nameserver for the domain."
-      timeout:
-        type: integer
-        default: 30
-        description: "Query timeout in seconds. Zone transfers can be slow for large zones."
-    returns:
-      domain:
-        type: string
-        description: "The domain queried."
-      transfer_allowed:
-        type: boolean
-        description: "Whether the zone transfer was permitted by the server."
-      records:
-        type: array
-        description: "All DNS records from the zone, each with: name, ttl, class, type, value."
-      record_count:
-        type: integer
-        description: "Total number of records in the zone."
-      hostnames:
-        type: array
-        description: "Unique hostnames (A/AAAA/CNAME records) extracted from the zone — the subdomains you discovered."
-      hostname_count:
-        type: integer
-        description: "Number of unique hostnames discovered."
+target_extraction:
+  # dig's target convention is UNUSUAL — three orthogonal positions:
+  #
+  #   1. `-x <ip>` flag-value:  REVERSE lookup. The IP IS the target.
+  #      e.g., `dig -x 8.8.8.8` → target = 8.8.8.8
+  #      The DSL captures via flag_value, NOT positional_match.
+  #
+  #   2. `-q <name>` flag-value: alternate query-name spec. The name IS
+  #      the target. e.g., `dig -q example.com -t MX` → target = example.com.
+  #      Less common (most users put the name as a positional) but
+  #      well-documented in `dig -h`.
+  #
+  #   3. positional `<name>`:   THE COMMON FORM. The first non-flag
+  #      positional that:
+  #         - does NOT start with `@` (DNS server, not target)
+  #         - does NOT start with `+` (dig +option, not target)
+  #         - has at least one `.` (domain shape) OR is an IP literal
+  #
+  #      Critically, this excludes record-type-only tokens like `A`,
+  #      `MX`, `AXFR`, `ANY` which are also positional but follow the
+  #      target. Requiring a `.` in the regex eliminates them.
+  #
+  # Extraction rule precedence (first non-empty match wins):
+  #   1. flag_value -x       — reverse lookup IP literal
+  #   2. flag_value -q       — explicit query-name flag
+  #   3. positional_match    — domain or IP shape, excluding @ / + prefixes
+  - rule: "flag_value"
+    flag: "-x"
+    parse_as: "raw"
+  - rule: "flag_value"
+    flag: "-q"
+    parse_as: "raw"
+  # Domain shape: at least one dot, plus letter TLD; or IPv4; or
+  # bracketed IPv6. Excludes positionals starting with `@` or `+` and
+  # bare record-type tokens (A, AAAA, MX, etc. have no dots and would
+  # not match without dotted form anyway).
+  - rule: "positional_match"
+    pattern: '^(?![@+])(\[[0-9a-fA-F:]*:[0-9a-fA-F:]*\]|[0-9a-fA-F]*:[0-9a-fA-F:]*:[0-9a-fA-F:]*|[0-9]{1,3}(?:\.[0-9]{1,3}){3}|[a-zA-Z0-9][a-zA-Z0-9.-]*\.[a-zA-Z]{2,})$'
+    group: 1
+    parse_as: "raw"
 
-  enum:
-    description: "Enumerate all common DNS record types (A, AAAA, CNAME, MX, NS, SOA, TXT, SRV, PTR) for a domain in one call. Returns results grouped by record type with short-form values. Quick way to get a complete DNS picture of a domain."
-    when_to_use: "Early reconnaissance to get a full DNS overview of a target domain. Discovers mail servers (MX), nameservers (NS), SPF/DKIM records (TXT), service locations (SRV), and IPv6 addresses (AAAA) in a single call. Use before zone_transfer to understand the DNS landscape."
-    params:
-      domain:
-        type: string
-        required: true
-        description: "Domain to enumerate (e.g., 'target.htb')."
-      server:
-        type: string
-        description: "DNS server to query. Omit to use system default."
-      timeout:
-        type: integer
-        default: 10
-        description: "Timeout per query in seconds."
-    returns:
-      domain:
-        type: string
-        description: "The enumerated domain."
-      records:
-        type: object
-        description: "Records grouped by type, e.g., {'A': ['10.10.10.1'], 'MX': ['mail.target.htb'], 'TXT': ['v=spf1 ...']}."
-      record_types_found:
-        type: array
-        description: "List of record types that returned results (e.g., ['A', 'MX', 'NS', 'SOA', 'TXT'])."
-      total_records:
-        type: integer
-        description: "Total number of records across all types."
+# Flags whose presence makes target scope un-validatable. The plugin's
+# cli_in_container rejects the call before docker spawn when any of these
+# appear, with the reason below.
+reject_flags:
+  - "-f"          # batch file: multi-query input file, queries off-argv
+reject_flags_reason: >
+  dig's `-f <batchfile>` reads queries (one per line, each in full dig
+  argv form) from a file, putting target names outside argv where scope
+  validation cannot reach. Iterate yourself via the `read` tool + a
+  per-query call with the target as a positional. The mcp-server.py
+  legacy methods do not use -f either.
+
+# Per-tool value-taking flags whose values must NOT be confused with
+# targets. Verified against `dig -h` on Kali rolling 2026-04 (BIND
+# 9.18.x).
+value_flags:
+  # ── dig: targeting / query specification ──
+  - "-x"               # reverse lookup IP (extracted as target)
+  - "-q"               # explicit query name (extracted as target)
+  - "-t"               # record type (e.g., A, AAAA, MX, TXT, SOA, AXFR, ANY)
+  - "-c"               # class (IN | CH | HS)
+  # ── dig: network ──
+  - "-p"               # port (default 53)
+  - "-b"               # source bind address (host[#port])
+  # ── dig: TSIG authentication ──
+  - "-k"               # TSIG keyfile path
+  - "-y"               # TSIG key inline (hmac:name:key)
+  # ── dig: input/output flags whose values aren't targets ──
+  - "-f"               # batch file — REJECTED above
+  # ── dig: misc value-taking ──
+  - "-m"               # memory debug flags (e.g., trace,record,usage)
+  # ── boolean / no-value flags listed for safety (DSL skips harmlessly) ──
+  - "-h"               # help — boolean
+  - "-v"               # version — boolean
+  - "-4"               # force IPv4 — boolean
+  - "-6"               # force IPv6 — boolean
+  - "-u"               # microseconds in stats — boolean (rare)
+
+usage_patterns:
+  # ── basic forward queries ──────────────────────────────────────
+  - name: "Basic A record query (default)"
+    command: "{domain}"
+    when: "Simplest dig invocation — query the A record for a domain. Defaults: type=A, class=IN, server=system resolver. Returns full dig output (HEADER, QUESTION, ANSWER, AUTHORITY, ADDITIONAL, SERVER, WHEN, MSG SIZE) unless +short is added. First-contact DNS query when you have a domain name and want its IPv4 address."
+
+  - name: "Specific record type as positional"
+    command: "{domain} {record_type}"
+    when: "Query a specific record type by adding it as the second positional. record_type is one of: A, AAAA, ANY, CNAME, DNSKEY, DS, HINFO, MX, NAPTR, NS, PTR, SOA, SRV, TLSA, TXT, AXFR, IXFR. e.g., `example.com MX`. The record type is NOT a target — the DSL's positional_match regex requires at least one dot, so bare types like `MX` won't be misextracted."
+
+  - name: "Short-form output (compact, one value per line)"
+    command: "{domain} {record_type} +short"
+    when: "Use +short when you want just the answer values without the header/stats noise. Output is one value per line (e.g., `93.184.216.34`). Most useful for scripting / piping to xargs. Legacy lookup() method handler uses +short via the `short=true` parameter."
+
+  - name: "Cleaner text output without comments"
+    command: "{domain} {record_type} +noall +answer"
+    when: "Suppress everything except the ANSWER section. Cleaner than full output but keeps the standard `<name> <ttl> <class> <type> <value>` form. Useful when you want to parse records but lose the +short collapse."
+
+  # ── server selection ──────────────────────────────────────
+  - name: "Query a specific DNS server with @<server> prefix"
+    command: "@{server} {domain} {record_type}"
+    when: "Override the default resolver — useful for: querying the target's internal DNS server (10.10.10.5) to leak internal-only records, querying authoritative nameservers directly to bypass caches, or comparing answers across resolvers (split-horizon DNS detection). The `@<server>` is a positional with literal `@` prefix — the DSL skips it via the `^(?![@+])` regex prefix."
+
+  - name: "Query specific server with port override"
+    command: "@{server} -p {port} {domain} {record_type}"
+    when: "Some hardened DNS servers run on non-default ports (5353, 8053). nmap UDP scan reveals the port; pass via `-p`. The mDNS port (5353) is also a common alternative."
+
+  # ── reverse lookups ──────────────────────────────────────
+  - name: "Reverse DNS lookup (-x <ip>)"
+    command: "-x {ip}"
+    when: "PTR / reverse lookup — given an IP, find its hostname via the in-addr.arpa (IPv4) or ip6.arpa (IPv6) zones. dig auto-builds the in-addr.arpa form. Useful for IP-to-hostname mapping discovered via portscan, or for reverse-walking a CIDR after nmap. The DSL extracts the IP via flag_value `-x` rule."
+
+  - name: "Reverse DNS against specific server"
+    command: "@{server} -x {ip} +short"
+    when: "Reverse via a specific server — internal DNS servers often have richer reverse zones than public DNS. +short collapses to just the hostname(s). Common chain: nmap finds a host → dig reverse via internal DNS → discover hostname for follow-up enumeration."
+
+  # ── zone transfer (the misconfig hit) ──────────────────────────────────────
+  - name: "Zone transfer attempt (AXFR) — the misconfig hit"
+    command: "@{ns} {domain} AXFR"
+    when: "Attempt a DNS zone transfer (AXFR) — if the authoritative nameserver is misconfigured to allow AXFR from any client, this dumps the ENTIRE zone (all subdomains, mail servers, service records, internal hostnames). The headline DNS misconfig in HTB / CTF and occasionally in real-world legacy infrastructure. Always try AXFR before resorting to subdomain brute-force. Identify the NS first via `dig {domain} NS +short`."
+
+  - name: "Zone transfer with TCP forced (some servers reject UDP AXFR)"
+    command: "@{ns} {domain} AXFR +tcp"
+    when: "RFC mandates TCP for AXFR but some dig builds will try UDP first. +tcp forces the TCP attempt explicitly. Use when an AXFR query gets `; Transfer failed.` even though the server is suspected vulnerable."
+
+  - name: "Incremental zone transfer (IXFR) attempt"
+    command: "@{ns} {domain} IXFR={serial}"
+    when: "IXFR is incremental zone transfer — request only changes since the given SOA serial. Far less commonly accepted than AXFR but worth trying if AXFR is blocked. The serial number comes from a prior SOA query."
+
+  # ── record-type-specific queries (info gathering) ──────────────────────────────────────
+  - name: "MX records (mail servers)"
+    command: "{domain} MX +short"
+    when: "Discover mail servers — the MX record points at the SMTP servers for a domain. Each MX entry has a priority + hostname. Useful for: targeting SMTP enumeration (smtp tool / hydra), checking MX-based phishing infrastructure (third-party mail filters like Mimecast / Proofpoint show in MX), and inferring email provider (Google MX = Google Workspace tenant)."
+
+  - name: "TXT records (SPF, DKIM, verification)"
+    command: "{domain} TXT +short +nocomments"
+    when: "TXT records hold: SPF policies (`v=spf1 ...`), DKIM keys, DMARC policies, domain-verification tokens (Google, Microsoft, AWS, Cloudflare, Atlassian — each leaves a tracker), and frequently leaked internal info. +short outputs one TXT value per line (quoted). Always grep TXT records for `v=spf1` (mail infrastructure) and verification strings (third-party services)."
+
+  - name: "NS records (authoritative nameservers — pre-AXFR)"
+    command: "{domain} NS +short"
+    when: "List authoritative nameservers for a domain. Required input for the AXFR attempt — try `dig @<ns> <domain> AXFR` against EACH returned NS, since some misconfigured fleets have one bad server out of many. Also useful for vendor identification (e.g., `ns1.bluehost.com` = Bluehost-hosted, `dns1.registrar-servers.com` = Namecheap)."
+
+  - name: "SOA record (zone serial + admin contact)"
+    command: "{domain} SOA +short"
+    when: "Start of Authority — the canonical zone record. Contains the primary nameserver (mname), admin email (rname, with @ replaced by `.`), serial number, refresh/retry/expire/minimum TTLs. The admin email often leaks a real human address. The primary nameserver is the canonical AXFR target."
+
+  - name: "ANY record (everything in one query)"
+    command: "{domain} ANY"
+    when: "Request all records for a domain in one query. Many modern resolvers refuse ANY (RFC 8482 — `meta-query` policy) and return REFUSED or empty. When it works (typically only when querying authoritative directly), it's a fast aggregate of A + AAAA + MX + NS + SOA + TXT + ... Most useful against authoritative nameservers (`@<ns>`) rather than caches."
+
+  - name: "DNSKEY records (DNSSEC public keys)"
+    command: "{domain} DNSKEY +dnssec"
+    when: "Retrieve the DNSSEC keys for a zone. +dnssec asks for RRSIG records too. Useful for: verifying DNSSEC signing is in place, identifying weak key algorithms (RSA-1024 = legacy / weak), and gathering DS-record candidates for delegation chains."
+
+  - name: "TLSA records (DANE certificate pinning)"
+    command: "_443._tcp.{domain} TLSA +short"
+    when: "DANE — certificate pinning via DNSSEC-protected TLSA records. Format `_<port>._tcp.<host>`. Rare but DANE-pinned services can have very specific certificate constraints; mismatch = cert doesn't validate. Useful for finding exposed (mis-)configured DANE deployments."
+
+  # ── advanced flags ──────────────────────────────────────
+  - name: "Trace from root (full delegation chain)"
+    command: "{domain} +trace"
+    when: "Walk the DNS resolution chain from root (.) → TLD → authoritative. Each hop emits a query line. Useful for: diagnosing split-horizon DNS (different answers from root vs. local resolver), confirming a domain's authoritative chain, and finding the responsible authoritative server for AXFR. Slow (multiple hops, multi-second runtime). Cannot be combined with `@<server>` — trace IGNORES the server arg and starts from root."
+
+  - name: "Force TCP for large responses"
+    command: "{domain} ANY +tcp"
+    when: "Force TCP transport. Required when: the response > UDP-default MTU (4096B with EDNS, 512B without — common for ANY queries returning many records, large TXT, or zone-flush DNSKEY sets), or UDP/53 is filtered (some firewalls allow only TCP/53). Default is UDP for most queries, TCP for AXFR/IXFR."
+
+  - name: "Custom timeout / retries (slow networks)"
+    command: "{domain} +timeout=5 +tries=3"
+    when: "Tune dig's per-query budget. +timeout=N (seconds, default 5) for slow links / lossy networks. +tries=N (default 3) for retry count. Total wall-clock = timeout × tries. Useful for tunnelled / VPN'd lab targets where 5 seconds isn't enough."
+
+  - name: "Single-query lifestyle (CI / fast triage)"
+    command: "{domain} +noall +answer +nocmd +nostats +short"
+    when: "Strip dig output to absolute minimum — just the answer, one record per line. Same as +short but with belt-and-suspenders suppression (some dig builds emit comment lines even with +short). For one-off scripting / quick sanity checks."
+
+  - name: "EDNS Client Subnet (ECS) — geo-targeted CDN testing"
+    command: "{domain} A +subnet={subnet}"
+    when: "Send EDNS Client Subnet hint with the query — many CDNs (Akamai, Cloudflare, Fastly, AWS CloudFront) use ECS to return geo-localised IPs. Useful for: discovering region-specific endpoints, verifying CDN behaviour, identifying which subnet the resolver claims to represent. Format: 1.2.3.0/24 or full IPv6 prefix."
+
+  - name: "DNSSEC validation chain"
+    command: "{domain} A +dnssec"
+    when: "Request DNSSEC RRSIG records alongside the answer. Useful for verifying that a zone is signed and inspecting signature lifetimes. dig's `ad` (Authenticated Data) flag in the response indicates the resolver itself validated. Combine with +cd (checking-disabled) to bypass resolver validation and see raw signatures."
+
+  # ── help & version (target=null is fine) ──────────────────────────────────────
+  - name: "dig help — flag reference"
+    command: "-h"
+    when: "Print dig's full flag set. Useful when verifying a less-common flag's exact spelling. NOTE: dig also documents +options separately; `dig` alone or `dig -h` covers both."
+
+  - name: "dig version"
+    command: "-v"
+    when: "Print BIND version (e.g., `DiG 9.18.21-1+deb12u2-Debian`). Useful to verify the image's dig supports a flag the agent wants to use — older builds may lack `+subnet`, `+ednsopt`, `+nsid`."
+
+output_formats:
+  # dig output is text-only. There is no JSON option upstream. The +short
+  # flag is the canonical compact form; +noall +answer gives section-only;
+  # default is the full HEADER+QUESTION+ANSWER+AUTHORITY+ADDITIONAL form.
+  - flag: ""
+    format: "text_full"
+    preferred: false
+    notes: "Default — full dig output with HEADER, QUESTION, ANSWER, AUTHORITY, ADDITIONAL, SERVER, WHEN, MSG SIZE sections. Verbose but human-readable; awkward to parse."
+  - flag: "+short"
+    format: "text_short"
+    preferred: true
+    notes: "Compact — one value per line, no sections / metadata. Best for piping to xargs / scripts. The legacy lookup() handler uses this when short=true."
+  - flag: "+noall +answer"
+    format: "text_answer_only"
+    preferred: false
+    notes: "Keep ANSWER section only — `<name> <ttl> <class> <type> <value>` form preserved. Compromise between full output and +short."
+  - flag: "+nocomments +nocmd +nostats"
+    format: "text_no_meta"
+    preferred: false
+    notes: "Suppress dig's comment/cmd/stats sections — keep just the records. Combinable with +noall+answer for ultra-compact output."
+  - flag: "+dnssec"
+    format: "text_with_rrsig"
+    preferred: false
+    notes: "Include DNSSEC RRSIG records alongside the answer — useful for DNSSEC validation work."
+  - flag: "+trace"
+    format: "text_trace_chain"
+    preferred: false
+    notes: "Trace output — each delegation hop emits a query/response section. Multi-second runtime."
+
+common_options:
+  targeting:
+    - "<name>: target domain — first non-flag positional (NOT prefixed with `@` or `+`). MUST contain a dot (or be an IP literal) so the DSL regex matches. Bare record-type tokens (A, MX, ...) are excluded."
+    - "@<server>: DNS server (positional with `@` prefix). NOT a target — the DSL skips `@`-prefixed positionals."
+    - "-x <ip>: REVERSE lookup IP. The IP IS the target."
+    - "-q <name>: alternate query-name flag. The name IS the target. Less common than positional form."
+  record_type:
+    - "<type>: positional after <name> — A AAAA ANY CNAME DNSKEY DS HINFO MX NAPTR NS PTR SOA SRV TLSA TXT AXFR IXFR."
+    - "-t <type>: alternate flag-value form for record type."
+  server_and_port:
+    - "@<server>: DNS server (positional with `@` prefix). Examples: @8.8.8.8, @1.1.1.1, @<target-internal-ip>."
+    - "-p <port>: alternate DNS port (default 53). Used for mDNS (5353), test deployments (5300, 8053), or hardened relocations."
+    - "-b <addr>: source bind address — useful when the host has multiple interfaces and you want queries from a specific tun0 / eth0."
+  transport:
+    - "+tcp: force TCP transport. Required for AXFR/IXFR; useful for large responses or UDP-filtered networks."
+    - "+notcp: force UDP."
+    - "-4: force IPv4 (boolean)."
+    - "-6: force IPv6 (boolean)."
+  output:
+    - "+short: compact output — answer values only, one per line (PREFERRED for scripting)."
+    - "+noall +answer: keep ANSWER section only (legacy lookup() uses this when short=false)."
+    - "+nocomments +nocmd +nostats: suppress dig metadata sections."
+    - "+dnssec: include DNSSEC RRSIG records."
+    - "+trace: trace delegation chain from root (slow)."
+    - "+nssearch: query each authoritative NS for the SOA — handy for SOA-consistency checks."
+    - "+stats: include stats section (default on)."
+  performance:
+    - "+timeout=N: per-query timeout in SECONDS (default 5)."
+    - "+tries=N: retry count (default 3)."
+    - "+retry=N: alias for +tries."
+    - "+ndots=N: search-list dots threshold."
+    - "+bufsize=N: EDNS UDP buffer size (default 4096)."
+  edns:
+    - "+edns=N: EDNS version (default 0)."
+    - "+subnet=ADDR: EDNS Client Subnet hint (e.g., 1.2.3.0/24)."
+    - "+ednsopt=CODE[:HEX]: arbitrary EDNS option."
+    - "+nsid: request NSID (RFC 5001) — server identification string."
+  tsig:
+    - "-k <keyfile>: TSIG keyfile path."
+    - "-y [hmac:]name:key: TSIG key inline (hmac defaults to hmac-md5)."
+  class:
+    - "-c <class>: query class — IN (default), CH (CHAOS, used for `version.bind` queries), HS (Hesiod, rare)."
+    - "<class>: positional class form (after type)."
+
+gotchas:
+  - "TARGET IS POSITIONAL, NOT FLAG-DRIVEN — dig's canonical form is `dig [@server] [options] <name> [type] [class]`. The DSL extracts via positional_match (with a regex that excludes `@` and `+` prefixes), NOT first_non_flag_positional (which would grab `@<server>` or `+option` if they came first). The DSL's regex requires at least one dot or IP shape."
+  - "`@<server>` IS A POSITIONAL WITH LITERAL `@` PREFIX — not a flag. The DSL's positional_match regex starts with `(?![@+])` to skip these tokens. Without that, an LLM-generated command like `dig @8.8.8.8 example.com` would extract `8.8.8.8` (the resolver) as the target instead of `example.com`."
+  - "`+options` ARE POSITIONALS TOO — dig's `+short`, `+trace`, `+timeout=10`, `+tries=2`, etc. are positionals from the tokeniser's perspective (no `-` prefix). The regex `(?![@+])` skips them. If you forget this, `+timeout=10` could be treated as a target candidate."
+  - "RECORD TYPES (A, AAAA, MX, ANY, AXFR, ...) ARE POSITIONALS BUT NOT TARGETS — they appear as the SECOND positional after the name. The DSL's domain-shape regex (requires `.`) naturally excludes them since bare types have no dots. AXFR for zone transfer also has no dots — excluded."
+  - "REVERSE LOOKUP TARGET IS THE -x VALUE — `dig -x 8.8.8.8` queries the in-addr.arpa zone for 8.8.8.8. dig auto-builds `8.8.8.8.in-addr.arpa` PTR query internally. The DSL's flag_value rule for `-x` extracts the IP literal as the canonical target for scope validation."
+  - "AXFR IS THE HEADLINE MISCONFIG — `dig @<ns> <domain> AXFR` against a misconfigured authoritative server dumps the entire zone (all subdomains, MX, SRV, internal hostnames). Always try BEFORE subdomain brute-force. Identify NS via `dig <domain> NS +short` first, then attempt AXFR against EACH listed NS — some fleets have one misbehaving server out of many."
+  - "ANY IS LARGELY DEPRECATED — RFC 8482 lets resolvers refuse ANY queries (returning a single HINFO `RFC8482` answer). Cloudflare, Google, Quad9 all do this. ANY only reliably works against authoritative servers directly (`@<ns> <domain> ANY`) — and even then some servers reject it."
+  - "+trace IGNORES @<server> — `+trace` always starts from root (.) and walks down. Combining with `@8.8.8.8` is misleading — the @8.8.8.8 is silently ignored. Use `+trace` OR `@<server>`, not both."
+  - "+timeout IS IN SECONDS — unlike amass `-timeout` (which is minutes). dig's `+timeout=5` = 5 seconds. Easy to confuse if copy-pasting between tools. Default is 5 seconds."
+  - "+short COLLAPSES OUTPUT TO ANSWER VALUES ONLY — no headers, no stats, no SOA. Best for piping. The legacy lookup() handler uses this when short=true."
+  - "DEFAULT TYPE IS A — `dig example.com` queries A records. To query other types, add the positional type: `dig example.com MX` or use `-t MX`."
+  - "DEFAULT CLASS IS IN — `-c CH` (CHAOS) is famously used for `version.bind` and `hostname.bind` queries that leak BIND server info — `dig @<ns> -c CH version.bind TXT`."
+  - "TSIG REQUIRES -k OR -y — when querying a server with TSIG-required zones (some internal AD-DNS deployments), pass either `-k <keyfile>` or `-y hmac:name:key`. Without it, queries return `BADKEY` or `REFUSED`."
+  - "IPv6 BRACKETS — IPv6 server addresses go BARE (no brackets) in `@<server>` form. dig accepts `@2001:db8::1` directly. The DSL strips brackets in post-processing."
+  - "BATCH FILE (-f) IS REJECTED — see reject_flags. dig's `-f <batchfile>` reads multiple queries from disk; the targets are inside the file body, outside argv where scope validation can't reach."
+  - "EXIT CODE 0 EVEN ON NXDOMAIN — dig exits 0 for NXDOMAIN (the query SUCCEEDED, the answer was 'no such domain'). Pattern-match the output for 'NXDOMAIN' / 'status: NXDOMAIN' to detect, regardless of exit code. Same for REFUSED, SERVFAIL."
+  - "Feature 28 dynamic recipes are RETIRED for the kind:cli path — the LLM writes argv directly. Recipes still load for legacy method calls (lookup, zone_transfer, enum) if /session/tool_recipes/dns/ exists, but they're a dead branch under run_cli (REQ-TR-016)."
+  - "LEGACY-PARITY: NON-+short OUTPUT COMPOSITION — the legacy lookup() handler's verbose path uses `+noall +answer +authority +comments +stats` (NOT just `+noall +answer`). If you need parity with the legacy parser's view of the world (ANSWER + AUTHORITY + ADDITIONAL sections together with header/stats), emit all five flags. `+noall +answer` alone drops AUTHORITY / ADDITIONAL / stats — fine for terse parsing, lossy for legacy parity."
+  - "LEGACY-PARITY: AXFR USES `+tries=1`, NOT `+tries=2` — the legacy zone_transfer() handler explicitly sets `+tries=1` for AXFR (a TCP-only single-attempt query; retrying AXFR rarely changes the outcome and wastes wall-clock against a denying server). Default lookup() uses `+tries=2`. When emitting argv, prefer `+tries=1` for AXFR to match legacy and avoid wasted retransmits."
+  - "LEGACY-PARITY: PARSER COVERED ANSWER + AUTHORITY + ADDITIONAL SECTIONS — the legacy `_parse_dig_answer` extracts records from ALL THREE sections (ANSWER, AUTHORITY, ADDITIONAL), not just ANSWER. When manually parsing dig text (e.g., for downstream tools), parse all three sections — AUTHORITY contains the SOA on negative answers, ADDITIONAL contains glue records. `+noall +answer` strips AUTHORITY / ADDITIONAL out of the output entirely; use `+noall +answer +authority +additional` if you need parity."
+  - "TIMEOUT BUDGET = +timeout × +tries + ~10s GRACE — the legacy handlers wrap dig in `run_command(cmd, timeout=timeout + 10)` — i.e., dig's per-query budget is `+timeout=N` (seconds) but the outer subprocess gets an extra 10s for cleanup / TCP teardown. When tuning under tight wall-clock budgets, multiply: total ≈ N(timeout) × M(tries) + 10s. Default lookup() = 10 × 2 + 10 = 30s; default AXFR = 30 × 1 + 10 = 40s; default enum() = 10 × 1 + 5 = 15s per query × 9 types = ~135s outer."
+  - "ANSWER-ONLY EXTRACTION (legacy +short post-processing) — the legacy `_parse_short` strips lines beginning with `;` or `<<>>` (dig comment / banner lines). Even with `+short`, some dig builds emit a banner; if you script post-processing, also strip `;`-prefixed and `<<>>`-prefixed lines. Belt-and-suspenders alternative: emit `+short +nocomments +nocmd`."
+
+failure_signatures:
+  # Layer-diverse signals (SKILL #11) — at least 5 distinct verifiable layers:
+  #   1. DNS-protocol (NXDOMAIN, REFUSED, SERVFAIL, NOTAUTH)
+  #   2. Network (timeout, no servers, unreachable)
+  #   3. AXFR-specific (Transfer failed, communications error)
+  #   4. Argument / flag (Invalid option, unknown query type)
+  #   5. TSIG / auth (BADKEY, BADSIG)
+  #   6. dig-internal (couldn't get address for, stop unsigned)
+  #
+  # Verified against:
+  #   - dig 9.18 source / man page
+  #   - real-world responses from public + lab DNS servers
+  - signal: "NXDOMAIN"
+    remediation: "DNS-protocol: domain doesn't exist. The query was successful and the authoritative answer is 'no such name'. Verify domain spelling, check whether you intended a subdomain (e.g., `www.<domain>` vs `<domain>`), or the domain is genuinely not registered."
+  - signal: "Non-existent domain"
+    remediation: "Same root cause as NXDOMAIN — alternate phrasing in some dig builds. Domain doesn't exist."
+  - signal: "REFUSED"
+    remediation: "DNS-protocol: server refused the query. Common causes: AXFR not allowed (try a different NS), recursion disabled (you're querying an authoritative server with a non-authoritative name), or ACL blocks your source IP. Verify with another server (`@8.8.8.8`)."
+  - signal: "SERVFAIL"
+    remediation: "DNS-protocol: server-side failure. The server tried to answer but couldn't (DNSSEC validation failed, upstream timeout, broken delegation). Try +cd (checking-disabled) to bypass DNSSEC, or query a different resolver."
+  - signal: "NOTAUTH"
+    remediation: "DNS-protocol: the queried server is not authoritative for the zone. Use `dig {domain} NS +short` to find the authoritative server, then `@<that-ns>` for the AXFR / direct query."
+  - signal: "Transfer failed"
+    remediation: "AXFR-specific — zone transfer denied or failed. Most common: server allows AXFR only from secondary NS IPs. Try other NS records for the zone, or check if the server permits AXFR at all (most modern DNS does NOT). Fall back to subdomain brute-force via amass / ffuf."
+  - signal: "communications error"
+    remediation: "AXFR-specific or general — TCP fallback failure. Combined with `Transfer failed` for zone transfers. Verify TCP/53 is reachable: `nc -vz <ns> 53`. Some firewalls allow UDP/53 but block TCP/53."
+  - signal: "connection timed out; no servers could be reached"
+    remediation: "Network: dig's resolvers (system /etc/resolv.conf or `@<server>`) didn't respond. Causes: VPN tun0 down (HTB / lab), wrong @<server> IP, UDP/53 filtered. Check `cat /etc/resolv.conf` inside container; verify connectivity with `ping <server>` (note: dig isn't ping)."
+  - signal: "no servers could be reached"
+    remediation: "Same root cause as 'connection timed out' — variant phrasing. dig walked all candidate resolvers and none responded."
+  - signal: "couldn't get address for"
+    remediation: "dig couldn't resolve the @<server> hostname (e.g., `@nonexistent.invalid`). Check the server hostname spelling or use IP directly (`@8.8.8.8`)."
+  - signal: "Invalid option"
+    remediation: "dig argv parse error — flag spelled wrong or unsupported. Common: `+tries=N` is correct; `+retries=N` is NOT (alias is `+retry=N` not `+retries=N`). Run `dig -h` and verify the +option list."
+  - signal: "unknown query type"
+    remediation: "dig argv parse error — record type isn't recognised. Valid types: A AAAA ANY CNAME DNSKEY DS HINFO MX NAPTR NS PTR SOA SRV TLSA TXT AXFR IXFR (case-insensitive). Check spelling; some types like `RRSIG` are query-result-only (you can't query for them directly)."
+  - signal: "Argument required"
+    remediation: "dig argv parse error — flag missing its value. Common: `-x` without IP, `-t` without record type, `-q` without name. Fix the missing arg."
+  - signal: "BADKEY"
+    remediation: "TSIG / auth: the TSIG key in `-y` or `-k` is invalid or unknown to the server. Verify the keyname matches the server's key registration; verify the HMAC algorithm matches (default is hmac-md5; some servers require hmac-sha256 — use `-y hmac-sha256:name:key`)."
+  - signal: "BADSIG"
+    remediation: "TSIG / auth: the signature didn't match. Usually wrong shared secret in `-y name:key`. Verify the base64 key matches the server's. Also possible: clock skew between client / server > 5 minutes."
+  - signal: "BADTIME"
+    remediation: "TSIG / auth: timestamp out of range. Container clock is more than 5 minutes off from the DNS server. Sync with `ntpdate` or check `date` inside the container."
+  - signal: "stop unsigned"
+    remediation: "DNSSEC validation: an intermediate zone is unsigned in a chain that should be signed. Use `+cd` (checking-disabled) to bypass validation and see the raw answer."
+  - signal: "Bad value"
+    remediation: "argv parse error — flag value didn't pass validation. Common: `-p NaN` (port), `+timeout=` (empty), `-c <class>` with invalid class. Verify with `dig -h`."
+  - signal: "Operation not permitted"
+    remediation: "Privilege error — typically `-b <port-below-1024>` (binding low source port). Drop `-b` or use a high source port. Containers don't run as root by default."
+  - signal: "; Transfer failed."
+    remediation: "AXFR explicit failure marker (note leading semicolon — dig comment line). Server refused AXFR. Try other NS records for the zone; consider that AXFR may be disabled across the entire fleet."
+  - signal: "; XFR size:"
+    remediation: "AXFR SUCCESS marker (note leading semicolon — dig comment line). The zone transfer COMPLETED and `XFR size: <N> records` shows the count. Not a failure but documented for completeness."
+
+help_commands:
+  - command: "dig -h"
+    purpose: "dig full flag reference (~30 flags + ~50 +options)."
+  - command: "dig -v"
+    purpose: "BIND / dig version (e.g., `DiG 9.18.21-1+deb12u2-Debian`). Useful to verify which `+options` are supported by the image's build."
+  - command: "dig"
+    purpose: "Bare invocation prints the dig usage summary (different from -h, less verbose)."
+

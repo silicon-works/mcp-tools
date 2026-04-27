@@ -1,17 +1,21 @@
-# OpenSploit kind:cli image: curl
+# OpenSploit MCP Server: curl
 # HTTP/HTTPS/FTP client for web requests, exploit testing, and file downloads.
-# Plain CLI — no Python wrapper, no MCP server. Plugin invokes `curl` directly
-# via cli_in_container() with the full command constructed by the LLM.
+#
+# kind:cli at the SCHEMA layer (LLM emits raw argv, no per-tool methods needed
+# for tool_runner) — but routed via MCP TRANSPORT for persistent containers,
+# heartbeat-driven idle timeouts, hard-cap dual clock, and battle-tested
+# infrastructure. Container exposes the auto-inherited `run_cli` method from
+# BaseMCPServer; the tool-specific methods (request, inject, upload, etc.)
+# remain available for kind:mcp callers that prefer structured params.
 
 FROM debian:bookworm-slim
 
 LABEL org.opencontainers.image.source="https://github.com/silicon-works/mcp-tools"
-LABEL org.opencontainers.image.description="curl (kind:cli) for OpenSploit"
+LABEL org.opencontainers.image.description="curl MCP server for OpenSploit"
 LABEL org.opencontainers.image.licenses="MIT"
 
-# Install curl + the libraries it needs for the full feature surface our YAML
-# advertises (NTLM/Kerberos/HTTP2/HTTP3, libidn2 for IDN URLs, libpsl for cookies).
-# libcurl4-gnutls-dev is dropped in favour of the openssl-backed package.
+# curl + libraries (full feature surface) + Python for the MCP server.
+# bookworm-slim is ~80 MB lighter than kali-rolling and has everything we need.
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
         curl \
@@ -20,10 +24,27 @@ RUN apt-get update && \
         libgssapi-krb5-2 \
         libpsl5 \
         libidn2-0 \
-    && rm -rf /var/lib/apt/lists/* \
-    && apt-get clean
+        python3 \
+        python3-pip \
+        python3-venv && \
+    rm -rf /var/lib/apt/lists/* && \
+    apt-get clean
 
+WORKDIR /app
+
+# Virtualenv keeps Python deps off the system pip.
+RUN python3 -m venv /app/venv
+ENV PATH="/app/venv/bin:$PATH"
+
+# Shared mcp-common (BaseMCPServer with auto-inherited run_cli).
+COPY packages/mcp-common /app/packages/mcp-common
+RUN pip install --no-cache-dir /app/packages/mcp-common
+
+# MCP server (subclasses BaseMCPServer; auto-registers run_cli).
+COPY tools/curl/mcp-server.py .
+
+# Session directory for artifacts (mounted by ContainerManager).
 WORKDIR /session
 
-# Plugin will pass the full curl invocation via `docker run <image> curl ...`.
-# No CMD set on purpose — the cli_in_container primitive overrides it per call.
+# stdio MCP transport — ContainerManager spawns this and connects.
+CMD ["python3", "/app/mcp-server.py"]

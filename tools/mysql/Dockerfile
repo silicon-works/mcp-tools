@@ -7,13 +7,11 @@ LABEL org.opencontainers.image.source="https://github.com/silicon-works/mcp-tool
 LABEL org.opencontainers.image.description="MySQL MCP server for OpenSploit"
 LABEL org.opencontainers.image.licenses="MIT"
 
-# Install MySQL client and Python
+# Install MySQL client and Python (python3-full bundles venv + pip on Kali)
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
         default-mysql-client \
-        python3 \
-        python3-pip \
-        python3-venv && \
+        python3-full && \
     rm -rf /var/lib/apt/lists/* && \
     apt-get clean
 
@@ -27,10 +25,6 @@ ENV PATH="/app/venv/bin:$PATH"
 # Copy and install shared mcp-common package
 COPY packages/mcp-common /app/packages/mcp-common
 RUN pip install --no-cache-dir /app/packages/mcp-common
-
-# Install tool-specific dependencies
-COPY tools/mysql/requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy MCP server code
 COPY tools/mysql/mcp-server.py .

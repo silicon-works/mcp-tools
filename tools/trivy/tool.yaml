@@ -1,9 +1,145 @@
 name: trivy
+kind: cli
+binary: trivy
+# Trivy v0.69 — Aquasecurity's flagship all-in-one vulnerability scanner.
+# Single binary `trivy` with a SUB-COMMAND architecture (cobra-style):
+#
+#   trivy <subcommand> [flags] <target>
+#
+# Sub-commands (one of):
+#
+#   image    <image-ref>      # container image vuln + secret + misconfig scan
+#   fs       <path>           # local filesystem scan (lock files + OS pkgs)
+#   filesystem <path>         # alias for `fs`
+#   repo     <git-url>        # git repository scan (clones + scans)
+#   k8s      <cluster|context> # Kubernetes cluster vuln + misconfig scan
+#   config   <path>           # IaC misconfiguration scan (Terraform, K8s yaml,
+#                             #   Dockerfile, CloudFormation, Helm)
+#   aws      [flags]          # AWS account scan (IAM, S3, etc. — uses --account-id
+#                             #   or env credentials, NOT a positional target)
+#   vm       <vm-image>       # VM image scan (.vmdk / .ova / .qcow2)
+#   sbom     <sbom-file>      # scan an existing SBOM (CycloneDX / SPDX)
+#   server                    # run trivy server mode (long-running, NOT for run_cli)
+#   plugin   <plugin-cmd>     # plugin management
+#   version                   # print version (no target)
+#   --help / help             # help
+#
+# Argv form for the common scanning sub-commands:
+#
+#   trivy image
+#       [-f|--format <fmt>]                # table | json | cyclonedx | spdx |
+#                                          #   github | sarif | junit | template
+#       [-o|--output <file>]               # write to file (else stdout)
+#       [-t|--template <file>]             # custom Go template (--format template)
+#       [--severity <list>]                # UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL
+#       [--vuln-type <list>]               # os,library
+#       [--scanners <list>]                # vuln,misconfig,secret,license
+#                                          #   (replaces --security-checks)
+#       [--security-checks <list>]         # legacy alias for --scanners
+#       [--ignore-unfixed]
+#       [--ignorefile <file>]              # .trivyignore equivalent
+#       [--ignore-status <list>]           # not_affected,affected,fixed,
+#                                          #   end_of_life,unknown
+#       [--exit-code <int>]                # exit non-zero if findings present
+#       [--cache-dir <dir>]                # default ~/.cache/trivy
+#       [--clear-cache]
+#       [--reset]                          # reset everything
+#       [--download-db-only]
+#       [--skip-db-update]                 # offline / pre-baked DB
+#       [--db-repository <oci>]            # custom DB OCI registry
+#       [--java-db-repository <oci>]
+#       [--list-all-pkgs]                  # include all packages, not just
+#                                          #   vulnerable ones (SBOM-style)
+#       [--no-progress]                    # no progress bar (CI mode)
+#       [--quiet]
+#       [--insecure]                       # skip TLS verification
+#       [--registry-token <token>]         # private registry auth
+#       [--username <u>] [--password <p>]  # registry creds
+#       [--http-host <h>] [--proxy <url>]
+#       [--timeout <duration>]             # 5m / 10m / 1h
+#       <target>                           # image ref / path / URL (LAST positional)
+#
+#   trivy fs       — same flag set, target is a filesystem path
+#   trivy repo     — same flag set, target is a git URL
+#   trivy config   — same flag set, target is an IaC dir
+#   trivy sbom     — same flag set, target is an SBOM file
+#
+#   trivy aws — DIFFERENT shape: no positional target. Uses:
+#       --account-id <id>
+#       --region <r>
+#       --service <s>      # filter to a specific AWS service
+#       --arn <arn>        # specific resource
+#     Credentials come from env (AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY) or
+#     ~/.aws/credentials. The "target" for scope validation purposes is the
+#     account-id + region; in argv terms there is NO positional.
+#
+# Output: `-f json -o /session/<file>` is the canonical form for tooling.
+# Trivy's JSON schema is stable across v0.50+ and cross-references CVEs to
+# OS-package and language-package fixes. SARIF / CycloneDX / SPDX are
+# alternates for compliance / SBOM / GitHub-Dependency-Submission consumers.
+#
+# Single-binary tool. Source code path: tools/trivy/mcp-server.py — the
+# legacy method handlers (scan_image, scan_filesystem, scan_iac, scan_sbom,
+# list_vulns) auto-inherit run_cli from BaseMCPServer (mcp-common 0.3.0);
+# kind:cli is the new default. The five legacy methods are preserved as the
+# rollback path per SKILL #21.
 version: "0.69.2"
-description: "Container, filesystem, and IaC vulnerability scanner — Trivy v0.69 with CVE detection for OS packages and language dependencies (npm, pip, gem, Go, Rust, etc.), Infrastructure-as-Code misconfiguration detection (Terraform, Kubernetes, Dockerfile, CloudFormation), and SBOM generation. Five methods: scan_image (Docker image CVE scan), scan_filesystem (local path vulnerability scan), scan_iac (IaC misconfiguration detection), scan_sbom (SBOM with vulnerability cross-reference), list_vulns (quick severity summary). Pre-downloaded vulnerability database for offline use."
+description: >
+  Comprehensive vulnerability scanner via Aquasecurity Trivy v0.69 — single
+  binary with sub-command architecture covering: container image CVE scans
+  (OS packages + language deps + secrets + misconfig), filesystem dependency
+  scans (lock files: package-lock.json, requirements.txt, Gemfile.lock,
+  go.sum, Cargo.lock), IaC misconfiguration detection (Terraform, Kubernetes
+  YAML, Dockerfile, CloudFormation, Helm), Git repository scans, Kubernetes
+  cluster scans, AWS account scans, VM image scans, and SBOM generation /
+  consumption (CycloneDX / SPDX).
+
+  Argv form is sub-command first:
+
+    trivy <subcmd> [flags] <target>
+
+  Common sub-commands:
+
+    image    <image-ref>     # e.g., alpine:3.14, registry.io/org/img:tag
+    fs       <path>          # e.g., /session/source
+    repo     <git-url>       # e.g., https://github.com/example/app
+    config   <path>          # IaC dir — Terraform, K8s yaml, Dockerfile
+    sbom     <sbom-file>     # CycloneDX / SPDX json/xml
+    k8s      <ctx>           # Kubernetes cluster (uses kubeconfig)
+    aws      --account-id .. # AWS account (no positional)
+    vm       <image>         # VM image (vmdk/ova/qcow2)
+    version                  # print version (no target)
+
+  Universal flags: `-f|--format <fmt>` (json/sarif/cyclonedx/spdx/github/
+  table/junit), `-o|--output <file>`, `--severity <list>`, `--scanners <list>`
+  (vuln,misconfig,secret,license — replaces --security-checks), `--vuln-type
+  <list>` (os,library), `--ignore-unfixed`, `--exit-code <int>`, `--cache-dir
+  <dir>`, `--skip-db-update`, `--no-progress`, `--quiet`, `--insecure`,
+  `--timeout <duration>`, `--list-all-pkgs`, `--ignorefile <file>`.
+
+  DB: trivy downloads a vulnerability DB (~500 MB) from
+  ghcr.io/aquasecurity/trivy-db on first run unless `--skip-db-update`.
+  The container ships with a pre-fetched DB to avoid first-call latency.
+  Persistent cache at /session/trivy-cache (or default ~/.cache/trivy).
+
+  Feature 28 dynamic recipes are RETIRED for the kind:cli path — the LLM
+  writes argv directly. Recipes still load for legacy method calls
+  (scan_image, scan_filesystem, scan_iac, scan_sbom, list_vulns) if
+  /session/tool_recipes/trivy/ exists, but they're a dead branch under
+  run_cli (REQ-TR-016).
+
 image: "ghcr.io/silicon-works/mcp-tools-trivy:latest"
 image_size_mb: 1390
-timeout_seconds: 900
+
+# Dual-clock model — large image scans (e.g., a multi-GB vendor image with
+# 10k installed packages, language scans through every node_modules tree)
+# and AWS-account scans (which iterate every region × every service via
+# AWS API) routinely run 30-60 minutes. Idle timeout covers the longest
+# reasonable silence between phases (DB load + image pull + scan kickoff
+# is sometimes silent for several minutes on a slow link).
+idle_timeout_seconds: 600       # 10 min silence == wedged registry / DB pull
+max_runtime_seconds: 7200       # 2 h hard cap — large image / AWS account
+timeout_seconds: 7200
 
 capabilities:
   - vulnerability_scanning
@@ -11,24 +147,31 @@ capabilities:
   - iac_scanning
   - sbom_generation
   - misconfiguration_detection
+  - secret_scanning
+  - license_scanning
+
+phases:
+  - enumeration
 
 routing:
   use_for:
-    - "scan a Docker image for known CVE vulnerabilities"
-    - "find vulnerabilities in installed packages on a filesystem"
-    - "scan Terraform files for security misconfigurations"
-    - "scan Kubernetes manifests for security issues"
-    - "check a Dockerfile for best practice violations"
-    - "generate a software bill of materials for a project"
-    - "list critical vulnerabilities in a container image"
-    - "scan CloudFormation templates for misconfigurations"
-    - "check npm pip gem Go Rust dependencies for known CVEs"
-    - "audit container security posture"
+    - "scan a Docker / OCI image for known CVE vulnerabilities"
+    - "scan a filesystem path or repository for vulnerable dependencies"
+    - "scan Terraform / Kubernetes YAML / Dockerfile / CloudFormation for misconfigurations"
+    - "generate a software bill of materials (SBOM) for a container or filesystem"
+    - "scan a CycloneDX / SPDX SBOM file for vulnerabilities"
+    - "find hardcoded secrets in a container image or repository"
+    - "scan a Kubernetes cluster for vulnerable workloads + misconfigured resources"
+    - "scan an AWS account for service-level misconfigurations"
+    - "audit a VM image (.vmdk/.ova/.qcow2) for vulnerabilities"
+    - "check npm pip gem Go Rust Java dependencies for known CVEs"
   never_use_for:
     - "web application vulnerability scanning (use nuclei or nikto)"
-    - "network vulnerability scanning (use nmap with scripts)"
-    - "CVE research and details (use cve-lookup for NVD database queries)"
-    - "cloud account security auditing (use prowler for AWS/Azure/GCP)"
+    - "network port / service vulnerability scanning (use nmap with scripts)"
+    - "single-CVE research and CVSS lookup (use cve-lookup for NVD details)"
+    - "AWS read-only compliance auditing (use prowler — broader checks)"
+    - "AWS attack-path analysis (use cloudfox — cross-service correlation)"
+    - "deep secret pattern scanning across git history (use trufflehog)"
   triggers:
     - "trivy"
     - "container scan"
@@ -40,9 +183,9 @@ routing:
     - "kubernetes security"
     - "SBOM"
     - "docker security"
-
-phases:
-  - enumeration
+    - "CycloneDX"
+    - "SPDX"
+    - "supply chain"
 
 requirements:
   network: true
@@ -52,107 +195,451 @@ resources:
   memory_mb: 512
   cpu: 1.0
 
+environment:
+  TRIVY_AUTH_URL:
+    description: "Optional registry auth endpoint URL when scanning images from a private registry (used together with --username / --password or --registry-token)."
+    required: false
+  TRIVY_USERNAME:
+    description: "Registry username for `trivy image` scans of private images. Alternative to --username on the command line."
+    required: false
+  TRIVY_PASSWORD:
+    description: "Registry password for `trivy image` scans of private images. Alternative to --password on the command line."
+    required: false
+  AWS_ACCESS_KEY_ID:
+    description: "AWS credentials for `trivy aws` sub-command. Alternative to --profile if the role is scoped via env. Read-only IAM is sufficient."
+    required: false
+  AWS_SECRET_ACCESS_KEY:
+    description: "Companion to AWS_ACCESS_KEY_ID."
+    required: false
+  AWS_SESSION_TOKEN:
+    description: "AWS STS session token (for assume-role / temporary credentials)."
+    required: false
+
 see_also:
   - tool: cve-lookup
-    reason: "Use cve-lookup to research specific CVEs found by trivy — get CVSS scores, descriptions, and references from NVD."
+    reason: "Use cve-lookup to research specific CVEs found by trivy — get CVSS scores, descriptions, and references from NVD. trivy reports CVE IDs but not full advisory detail."
   - tool: nuclei
-    reason: "Use nuclei for web application vulnerability scanning. Trivy scans containers/packages, nuclei scans running web services."
+    reason: "nuclei scans RUNNING web services for vulnerabilities; trivy scans IMAGES / CODE / CONFIGS at rest. Pair them when targeting a containerized app — trivy on the image, nuclei against the running endpoint."
   - tool: prowler
-    reason: "Use prowler for auditing live cloud account configurations (IAM, security groups, encryption). Trivy scans artifacts (images, IaC files), prowler audits running infrastructure."
+    reason: "Use prowler for read-only AWS compliance auditing across hundreds of CIS / NIST / PCI checks. trivy aws covers a smaller set of vuln + misconfig checks. Both can run against the same account."
+  - tool: cloudfox
+    reason: "cloudfox does cross-service AWS attack-path correlation (trust chains, env-var secrets, role assumptions). trivy is a finding scanner, cloudfox is exploit-path analysis. Run both for a complete cloud picture."
+  - tool: trufflehog
+    reason: "trufflehog deep-scans git history for secret patterns. trivy's `--scanners secret` covers the working tree + image filesystem only. Use trufflehog when you have a git repo and need historical commits scanned."
 
-methods:
-  scan_image:
-    description: "Scan a Docker image for CVE vulnerabilities. Runs `trivy image --format json --severity <sev> <image>`. Detects vulnerabilities in OS packages (apt, rpm, apk) and language-specific packages (npm, pip, gem, Go modules, Rust crates, Java JARs). Returns vulnerability list with CVE IDs, severity, affected package, installed version, and fixed version."
-    when_to_use: "(1) Audit a Docker image before deployment. (2) Check base images for known vulnerabilities. (3) During enumeration — scan target's container images if accessible. (4) Use severity filter 'HIGH,CRITICAL' to focus on actionable findings."
-    required_ports: []
-    params:
-      image:
-        type: string
-        required: true
-        description: "Docker image to scan (e.g., 'nginx:latest', 'python:3.11-slim'). Must be pullable from a registry."
-      severity:
-        type: string
-        default: "UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL"
-        description: "Comma-separated severity filter. Use 'HIGH,CRITICAL' to only show high-impact vulnerabilities."
-    returns:
-      vulnerabilities:
-        type: array
-        description: "CVE list (capped at 100). Each: {id, severity, package, installed_version, fixed_version, title, target}."
-      total_vulnerabilities:
-        type: integer
-        description: "Total CVEs found (may exceed returned array size)."
-      summary:
-        type: object
-        description: "Counts by severity: {CRITICAL, HIGH, MEDIUM, LOW, UNKNOWN}."
+# ── kind:cli specific sections ──────────────────────────────────────
 
-  scan_filesystem:
-    description: "Scan a local filesystem path for vulnerabilities. Runs `trivy filesystem --format json <path>`. Detects vulnerable packages from lock files (package-lock.json, requirements.txt, Gemfile.lock, go.sum, Cargo.lock) and OS package databases."
-    when_to_use: "(1) Scan a project directory for dependency vulnerabilities. (2) Audit a compromised filesystem. (3) Check /session/ files from post-exploitation for vulnerable software."
-    required_ports: []
-    params:
-      path:
-        type: string
-        required: true
-        description: "Directory or file to scan."
-      severity:
-        type: string
-        default: "UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL"
-        description: "Severity filter."
-    returns:
-      vulnerabilities:
-        type: array
-        description: "CVE list with package details."
-      summary:
-        type: object
-        description: "Counts by severity."
+target_extraction:
+  # trivy uses a SUB-COMMAND architecture: argv is `trivy <subcmd> [flags]
+  # <target>`. The sub-command (image / fs / repo / config / sbom / k8s /
+  # aws / vm / version) is itself a positional argument, but the SCAN
+  # TARGET is a SECOND positional that follows ALL flag-values.
+  #
+  # Examples:
+  #   trivy image -f json -o /session/x.json --severity HIGH,CRITICAL alpine:3.14
+  #     ^^^^^                                                          ^^^^^^^^^^
+  #     subcmd                                                          target
+  #   trivy fs --scanners vuln,secret --no-progress /session/source
+  #            (flags + values consumed)            ^^^^^^^^^^^^^^^
+  #                                                  target
+  #   trivy repo -f json https://github.com/example/app
+  #                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  #                      target (git URL)
+  #   trivy config /session/terraform/   (zero flags)
+  #                ^^^^^^^^^^^^^^^^^^^^
+  #                 target
+  #   trivy aws --account-id 123456789012 --region us-east-1
+  #     (NO positional target — account-id+region is the scope, but
+  #      argv has zero positionals. last_non_flag_positional resolves to
+  #      `aws` itself; positional_match falls through. Treat as null.)
+  #   trivy version       — no target. Sub-command is the only positional.
+  #
+  # Approach:
+  #   The DSL's `last_non_flag_positional` rule walks argv left-to-right,
+  #   skipping every flag and every value-flag's argument (per `value_flags`
+  #   below), and returns the LAST positional that isn't a flag value.
+  #
+  #   When the user passes `trivy <subcmd> <target>`, this returns <target>
+  #   (correct — sub-cmd is also a positional, but `<target>` is later).
+  #
+  #   When the user passes `trivy version` or `trivy --help`, the last
+  #   positional is `version` (or null if only flags) — these calls don't
+  #   contact a target anyway, so scope validation skipping is fine.
+  #
+  #   For `trivy aws --account-id <id> --region <r>`, the last positional
+  #   is `aws` (the sub-cmd itself). The positional_match fallback won't
+  #   match `aws` against IPv4/CIDR/URL/path patterns, so target=null —
+  #   and tool_runner permits null-target calls (treated as informational /
+  #   non-network — the LLM's responsibility to provide explicit consent
+  #   for AWS account scans via the engagement state).
+  #
+  # Precedence (first match wins):
+  #   1. last_non_flag_positional — captures the target (which is always
+  #      the LAST positional, after the sub-command and any flag values)
+  #   2. positional_match — fallback shape-match for IPv4 / IPv4 CIDR /
+  #      hostname / URL host / file path. Conservative pattern that
+  #      tolerates image refs (`alpine:3.14`), local paths (`/session/`),
+  #      git URLs (`https://github.com/...`), and bracketed IPv6.
+  - rule: "last_non_flag_positional"
+    parse_as: "raw"
+  - rule: "positional_match"
+    pattern: '^(?:(?:[a-zA-Z][a-zA-Z0-9+.-]*)://)?\[?([^\]:/?#\s]+|[0-9a-fA-F:]+)\]?(?::\d+)?(?:/.*)?$'
+    group: 1
+    parse_as: "raw"
 
-  scan_iac:
-    description: "Scan IaC files for misconfigurations. Runs `trivy config --format json <path>`. Detects issues in Terraform (.tf), Kubernetes YAML, Dockerfile, CloudFormation, and Helm charts."
-    when_to_use: "(1) Audit cloud infrastructure definitions. (2) Find security misconfigurations in Kubernetes manifests. (3) Check Dockerfiles for security best practices."
-    required_ports: []
-    params:
-      path:
-        type: string
-        required: true
-        description: "Path to IaC files."
-    returns:
-      misconfigurations:
-        type: array
-        description: "Misconfiguration list. Each: {id, severity, title, description, resolution, target}."
-      summary:
-        type: object
-        description: "Counts by severity."
+# Flags whose presence puts the target outside argv. trivy has one:
+# `--input <file>` for `trivy image` reads the image from a local tar
+# (a `docker save` archive). The image identity comes from the tar,
+# not argv — scope validation can't reach it.
+reject_flags:
+  - "--input"   # trivy image: load image from a tar file (e.g., docker save)
+reject_flags_reason: >
+  `trivy image --input <tar>` loads the image from a local docker-save tar
+  file. The actual image identity (registry/name:tag) lives in the tar
+  metadata, putting the target outside argv where scope validation cannot
+  reach. Pull and tag the image explicitly inside the container or pass a
+  registry reference as the positional argument instead.
 
-  scan_sbom:
-    description: "Generate and scan SBOM for a filesystem path. Runs `trivy filesystem --list-all-pkgs --format json <path>`. Returns complete package inventory with vulnerability cross-reference."
-    when_to_use: "(1) Generate an inventory of all packages in a project. (2) Supply chain security — enumerate all dependencies."
-    required_ports: []
-    params:
-      path:
-        type: string
-        required: true
-        description: "Path to scan for SBOM."
-    returns:
-      packages:
-        type: array
-        description: "Package list (capped at 200). Each: {name, version, type}."
-      total_packages:
-        type: integer
-        description: "Total packages found."
+# Per-tool value-taking flags whose values must NOT be confused with
+# positional targets. Verified against `trivy --help`, `trivy image --help`,
+# `trivy fs --help`, `trivy config --help`, `trivy aws --help`.
+value_flags:
+  # ── output / format ──
+  - "-f"
+  - "--format"
+  - "-o"
+  - "--output"
+  - "-t"
+  - "--template"
+  - "--report"               # detail level (all|summary)
+  - "--dependency-tree"
+  # ── filtering ──
+  - "--severity"
+  - "-s"
+  - "--vuln-type"
+  - "--scanners"
+  - "--security-checks"      # legacy alias for --scanners
+  - "--ignorefile"
+  - "--ignore-status"
+  - "--exit-code"
+  - "--exit-on-eol"
+  - "--pkg-types"            # newer alias for --vuln-type (os|library)
+  - "--pkg-relationships"
+  - "--include-non-failures"
+  - "--detection-priority"
+  # ── cache / DB ──
+  - "--cache-dir"
+  - "--cache-backend"
+  - "--cache-ttl"
+  - "--db-repository"
+  - "--java-db-repository"
+  - "--checks-bundle-repository"
+  # ── network / registry auth ──
+  - "--insecure"
+  - "--registry-token"
+  - "--username"
+  - "--password"
+  - "--password-stdin"
+  - "--http-host"
+  - "--http-listen"
+  - "--proxy"
+  - "--no-proxy"
+  - "--registry-mirror"
+  # ── timeout / perf ──
+  - "--timeout"
+  - "--parallel"
+  # ── image-specific ──
+  - "--platform"
+  - "--image-config-scanners"
+  - "--image-src"
+  - "--input"                # ALSO in reject_flags — but defensive value_flag
+                             #   so if reject is bypassed in dry-run, the
+                             #   tar path is consumed as a value (not a
+                             #   positional target).
+  - "--removed-pkgs"
+  # ── fs / repo / config-specific ──
+  - "--branch"
+  - "--commit"
+  - "--tag"
+  - "--config-policy"
+  - "--config-data"
+  - "--policy-namespaces"
+  - "--policy-bundle-repository"
+  - "--config-file-schemas"
+  - "--render-cause"
+  - "--include-deprecated-checks"
+  - "--skip-files"
+  - "--skip-dirs"
+  - "--file-patterns"
+  - "--rekor-url"
+  - "--vex"
+  - "--show-suppressed"
+  # ── k8s-specific ──
+  - "--namespaces"
+  - "--exclude-namespaces"
+  - "--components"
+  - "--node-collector-imageref"
+  - "--node-collector-namespace"
+  - "--exclude-nodes"
+  - "--qps"
+  - "--burst"
+  - "--kubeconfig"
+  - "--context"
+  - "--cluster"
+  - "--k8s-version"
+  - "--tolerations"
+  - "--include-kinds"
+  - "--exclude-kinds"
+  - "--exclude-owned"
+  # ── aws-specific ──
+  - "--account-id"
+  - "--region"
+  - "--service"
+  - "--arn"
+  - "--max-cache-age"
+  - "--update-cache"
+  - "--endpoint"
+  # ── sbom-specific ──
+  - "--sbom-format"
+  # ── secret / license ──
+  - "--secret-config"
+  - "--license-confidence-level"
+  - "--license-categories"
+  - "--license-full"
+  # ── misconfig ──
+  - "--misconfig-scanners"
+  # ── module / plugin ──
+  - "--module-dir"
+  - "--enable-modules"
+  # ── compliance ──
+  - "--compliance"
+  # ── boolean / no-arg flags listed for parser correctness (DSL skips harmlessly) ──
+  - "--reset"
+  - "--clear-cache"
+  - "--download-db-only"
+  - "--download-java-db-only"
+  - "--skip-db-update"
+  - "--skip-java-db-update"
+  - "--skip-check-update"
+  - "--skip-policy-update"
+  - "--skip-version-check"
+  - "--list-all-pkgs"
+  - "--no-progress"
+  - "--quiet"
+  - "-q"
+  - "--debug"
+  - "-d"
+  - "--ignore-unfixed"
+  - "--offline-scan"
+  - "--server"               # value-taking — server URL — but in BOTH columns
+                             #   (boolean for `trivy server` subcmd, value for
+                             #    --server <url>). Treat as value to be safe.
+  - "--no-color"
+  - "--generate-default-config"
+  - "--show-version"
+  - "-v"
+  - "--version"
+  - "-h"
+  - "--help"
 
-  list_vulns:
-    description: "Quick vulnerability summary for an image — severity counts and top critical CVEs without full details."
-    when_to_use: "Quick triage — see how many critical/high vulns before a full scan."
-    required_ports: []
-    params:
-      image:
-        type: string
-        required: true
-        description: "Docker image to summarize."
-    returns:
-      summary:
-        type: object
-        description: "Counts: {CRITICAL, HIGH, MEDIUM, LOW, UNKNOWN}."
-      top_critical:
-        type: array
-        description: "Up to 10 critical CVEs with details."
+usage_patterns:
+  # ── default / opening probes ──────────────────────────────────────
+  - name: "Container image vuln scan (HIGH+CRITICAL only, JSON)"
+    command: "image -f json -o /session/trivy-image.json --severity HIGH,CRITICAL --no-progress {image}"
+    when: "First-pass container image audit — pulls the image, scans OS packages and language deps, and writes structured JSON. The HIGH,CRITICAL severity filter focuses on actionable findings (skip LOW/MEDIUM noise on a triage scan). `--no-progress` disables the spinner (CI-friendly). `{image}` is a registry/name:tag reference (e.g., alpine:3.14, registry.example.com/org/app:1.2.3). Add `--scanners vuln,secret,misconfig` to also detect hardcoded secrets and Dockerfile misconfigs in the image."
+
+  - name: "Filesystem dependency + secret scan (project source)"
+    command: "fs -f json -o /session/trivy-fs.json --scanners vuln,secret --no-progress /session/source"
+    when: "Audit a project directory for vulnerable lock-file dependencies (package-lock.json, requirements.txt, Gemfile.lock, go.sum, Cargo.lock, pom.xml) AND hardcoded secrets (AWS keys, GitHub tokens, etc.). Useful for post-exploitation triage of a captured filesystem dump or for pre-deploy code audit. `/session/source` should be a directory you've already populated (via git clone, scp, or extraction)."
+
+  - name: "Git repository scan (clone + scan)"
+    command: "repo -f json -o /session/trivy-repo.json --scanners vuln,secret,misconfig {git-url}"
+    when: "trivy clones the repository to a temp dir and runs the same checks as `fs`. Useful when you've identified a target repository (e.g., from S3 leak, GitHub org enumeration, or BloodHound output) and want an automated dependency / secret / misconfig audit. `{git-url}` accepts HTTPS URLs (https://github.com/example/app) — SSH URLs require key setup. Add `--commit <sha>` or `--branch <name>` to pin the scan to a specific revision."
+
+  - name: "IaC misconfiguration scan (Terraform / K8s / Dockerfile)"
+    command: "config -f json -o /session/trivy-iac.json --severity HIGH,CRITICAL /session/terraform/"
+    when: "Scan an IaC directory for security misconfigurations — Terraform (.tf), Kubernetes YAML, Dockerfile, CloudFormation, Helm charts. Detects issues like 'public S3 bucket', 'pod runs as root', 'security group open to 0.0.0.0/0'. Useful when you've extracted IaC from a target repo or captured CI/CD artifacts. The directory is scanned recursively; no need to enumerate sub-folders."
+
+  - name: "SBOM scan (consume existing CycloneDX / SPDX)"
+    command: "sbom -f json -o /session/trivy-sbom.json /session/sbom.cdx.json"
+    when: "Cross-reference a pre-existing SBOM file against the trivy vulnerability DB. Useful when you have a CycloneDX or SPDX document from an upstream supplier (or generated by another tool like syft) and need to find vulnerable components without re-scanning. Supports `.cdx.json`, `.spdx.json`, `.cdx.xml`, and `.spdx` formats."
+
+  - name: "Generate SBOM from filesystem (CycloneDX format)"
+    command: "fs -f cyclonedx -o /session/sbom.cdx.json --list-all-pkgs /session/source"
+    when: "Generate a CycloneDX SBOM for a project directory — full package inventory regardless of vulnerability status. `--list-all-pkgs` is the key flag (without it, only vulnerable packages appear in the output). The resulting `.cdx.json` can be fed back into `trivy sbom` later, uploaded to a SBOM registry, or attached to a release."
+
+  - name: "AWS account vulnerability + misconfig scan"
+    command: "aws --account-id {account-id} --region {region} -f json -o /session/trivy-aws.json"
+    when: "Scan an AWS account for service-level misconfigurations and IaC findings. Credentials come from environment variables (AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY / AWS_SESSION_TOKEN) or ~/.aws/credentials inside the container. NOTE: this is a DIFFERENT shape from other sub-commands — there is NO positional target. The account-id + region is the scope. Use `--service iam` or `--service s3` to filter to a specific service if a full-account scan is too noisy."
+
+  - name: "Kubernetes cluster scan (uses kubeconfig)"
+    command: "k8s -f json -o /session/trivy-k8s.json --report summary --severity HIGH,CRITICAL"
+    when: "Scan the Kubernetes cluster pointed to by KUBECONFIG. Iterates every workload (Deployment, StatefulSet, DaemonSet, Job, CronJob), scans the underlying container images, AND audits the manifest configurations. Use `--namespaces <list>` to limit scope. `--report summary` collapses findings to severity counts; omit for full per-resource detail."
+
+  - name: "Offline scan (pre-baked DB, no network)"
+    command: "image --skip-db-update --skip-java-db-update --offline-scan -f json -o /session/trivy-offline.json {image}"
+    when: "When the container has no internet access (air-gapped engagement) but the trivy DB has been pre-cached. `--skip-db-update` prevents the network fetch; `--offline-scan` skips lookups that need the network (e.g., go.mod indirect deps that need GOPROXY). The container image ships with a pre-fetched DB at build time, so this works out of the box."
+
+  - name: "CI / pipeline gate (exit non-zero on findings)"
+    command: "image --severity HIGH,CRITICAL --exit-code 1 --ignore-unfixed -f sarif -o /session/trivy-gate.sarif {image}"
+    when: "Pipeline-gating mode — trivy exits 1 if any HIGH or CRITICAL fixed vulnerabilities are found, suitable for breaking a CI build. `--ignore-unfixed` filters out vulns with no available fix (less actionable for a release gate). SARIF output integrates with GitHub Security tab and other code-scanning consumers."
+
+  - name: "Help / version check"
+    command: "--help"
+    when: "Verify the current sub-command set, flag spelling, or version. Quick way to confirm `--scanners` vs the legacy `--security-checks`, the format list, etc. Sub-command-specific help: `image --help`, `fs --help`, `config --help`, `aws --help`."
+
+output_formats:
+  - flag: "-f json -o {file}"
+    format: "json"
+    preferred: true
+    notes: "Structured trivy JSON — top-level keys: SchemaVersion, ArtifactName, ArtifactType, Metadata, Results[]. Each Result has Target, Class, Type, Vulnerabilities[], Misconfigurations[], Secrets[], Licenses[]. Stable schema across v0.50+. PREFERRED for tooling."
+  - flag: "-f sarif -o {file}"
+    format: "sarif"
+    preferred: false
+    notes: "SARIF 2.1.0 — for GitHub Code Scanning, Azure DevOps, and other code-scanning platforms. Each finding maps to a sarif `result` with rule, level, location."
+  - flag: "-f cyclonedx -o {file}"
+    format: "cyclonedx"
+    preferred: false
+    notes: "CycloneDX 1.5 SBOM — package inventory with optional vulnerability cross-reference. Combine with `--list-all-pkgs` for a full inventory. Cross-tool standard."
+  - flag: "-f spdx -o {file}"
+    format: "spdx"
+    preferred: false
+    notes: "SPDX 2.3 SBOM (tag-value form). `-f spdx-json` for the JSON variant. Used by Linux Foundation supply-chain tools."
+  - flag: "-f github -o {file}"
+    format: "github-dependency-submission"
+    preferred: false
+    notes: "GitHub Dependency Submission API JSON — for posting dependency graphs back to a GitHub repo via `dependency-submission` action."
+  - flag: "-f junit -o {file}"
+    format: "junit-xml"
+    preferred: false
+    notes: "JUnit-style XML — useful for CI test reports that want findings to surface as failed test cases."
+  - flag: "-f table"
+    format: "text"
+    preferred: false
+    notes: "Human-readable table (default if no -f specified). Easy to read, hard to parse."
+  - flag: "-f template -t @{template-file}"
+    format: "custom"
+    preferred: false
+    notes: "Custom Go template — for bespoke output formats. Trivy ships with built-in templates at /contrib/*.tpl. Use only when JSON / SARIF don't fit the consumer."
+
+common_options:
+  targeting:
+    - "SUB-COMMAND IS REQUIRED — the very first positional after `trivy` MUST be one of: image, fs, repo, config, sbom, k8s, aws, vm, version, plugin. `trivy alpine:3.14` (no subcmd) prints help and exits non-zero with `Error: unknown command`."
+    - "TARGET IS THE LAST POSITIONAL after the sub-command. Examples: `trivy image alpine:3.14`, `trivy fs /session/source`, `trivy repo https://github.com/example/app`, `trivy config /session/terraform/`. Sub-command `aws` is the exception — it has no positional target (uses --account-id / --region / env credentials)."
+  filtering:
+    - "--severity LIST: comma-separated subset of UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL. Default is all. For triage, use `HIGH,CRITICAL` to skip LOW/MEDIUM noise."
+    - "--scanners LIST: vuln,misconfig,secret,license — combine multiple in one run. Default is `vuln`. For container images, `vuln,secret,misconfig` covers all common findings. Replaces the older `--security-checks` (still works as alias)."
+    - "--vuln-type LIST: os,library — restrict to OS-level packages or language-level libraries only. Default is both."
+    - "--ignore-unfixed: filter out vulnerabilities that have no fix available — actionable triage."
+    - "--ignorefile FILE: path to a `.trivyignore` (or .yaml) file listing CVE IDs to suppress. Useful for FP allowlists."
+  output:
+    - "-f FORMAT / --format FORMAT: table | json | sarif | cyclonedx | spdx | spdx-json | github | junit | template. JSON is preferred for tooling, SARIF for code-scanning integrations, CycloneDX/SPDX for SBOM consumers."
+    - "-o FILE / --output FILE: write to file instead of stdout. Combined with `-f json -o /session/trivy-<x>.json`."
+  cache:
+    - "--cache-dir DIR: persist DB + scan cache. Default is ~/.cache/trivy. Use /session/trivy-cache for engagement-persistent cache (survives container restart inside the same session)."
+    - "--clear-cache: delete the existing cache before running. Useful if the DB is corrupted."
+    - "--skip-db-update: don't fetch the latest DB. Pair with the pre-baked image DB for offline mode."
+  network:
+    - "--insecure: skip TLS verification when pulling images / DB / artifacts. Lab targets only."
+    - "--registry-token / --username / --password: private registry auth. Tokens preferred (no plaintext password in argv)."
+    - "--proxy URL: HTTP proxy for registry / DB pulls."
+  perf:
+    - "--timeout DURATION: per-scan timeout (e.g., 5m, 1h). Default is 5 minutes. Increase for large images or git repos."
+    - "--no-progress: disable the progress spinner — CI/log-friendly."
+    - "--parallel INT: parallel scan workers (image scans can fan out)."
+
+gotchas:
+  - "SUB-COMMAND IS MANDATORY — every trivy invocation MUST start with one of `image`, `fs`, `repo`, `config`, `sbom`, `k8s`, `aws`, `vm`, `version`, `plugin`, or `--help`. `trivy alpine:3.14` (forgetting `image`) fails with `Error: unknown command \"alpine:3.14\" for \"trivy\"`. Each sub-command has its own flag set; `trivy --severity HIGH image alpine` works (global flag before subcmd) but most flag examples are documented as sub-command-local."
+  - "TARGET SHAPE DEPENDS ON SUB-COMMAND — `image` expects a registry reference (alpine:3.14, registry.io/org/img:tag); `fs` and `config` expect a local filesystem path; `repo` expects a git URL (HTTPS or SSH); `sbom` expects an SBOM file; `aws` has no positional (uses --account-id / env). Mixing them up gives unhelpful errors like `failed to parse image reference` or `no such file or directory`."
+  - "DEFAULT DB DOWNLOAD ON FIRST RUN — trivy fetches a ~500 MB vulnerability DB from ghcr.io/aquasecurity/trivy-db on first scan unless `--skip-db-update` is set. The container image ships with a pre-fetched DB at build time (Dockerfile runs `trivy image --download-db-only` to bake it in), so the first call is fast. Persistent cache via `--cache-dir /session/trivy-cache` lets multiple scans within an engagement reuse the DB."
+  - "`--security-checks` IS DEPRECATED — newer trivy uses `--scanners vuln,misconfig,secret,license`. The old name still works as an alias but logs a deprecation warning. Always prefer `--scanners` in new commands."
+  - "`--scanners vuln,misconfig,secret,license` COMBINES MULTIPLE CHECKS IN ONE RUN — single scan covers CVEs, IaC misconfigs, hardcoded secrets, and license issues. For container images, `vuln,secret,misconfig` is the high-value combo. License scanning is independent and rarely useful in pentest context (more relevant for compliance teams)."
+  - "`--exit-code 1` MAKES TRIVY EXIT NON-ZERO ON FINDINGS — useful for CI/CD gates. Pair with `--severity HIGH,CRITICAL` to gate only on high-impact findings, and `--ignore-unfixed` to skip vulns with no fix yet."
+  - "`-f json -o <file>` IS THE TOOLING-FRIENDLY FORM — without `-o`, JSON goes to stdout; without `-f json`, you get a human-readable table that's hard to parse. Always combine both for agent / pipeline consumers. Same applies to SARIF / CycloneDX / SPDX outputs."
+  - "AWS SUB-COMMAND IS DIFFERENT — `trivy aws` doesn't take a positional target. Scope is defined by `--account-id <id>` + `--region <r>` (and env credentials). Without explicit account-id, trivy uses `aws sts get-caller-identity` to determine the active account — error if no creds are configured. Out-of-region resources are NOT scanned unless you pass `--region <r>` explicitly or rerun per region."
+  - "K8S NEEDS KUBECONFIG — `trivy k8s` reads ~/.kube/config (or KUBECONFIG env var) for cluster credentials. The container needs the kubeconfig mounted in (`/root/.kube/config`) or the kubeconfig contents passed via env. Without valid creds, `trivy k8s` errors with `cannot connect to the cluster`."
+  - "`--input <tar>` LOADS IMAGE FROM A TAR FILE — useful when the image isn't pullable (private registry, air-gapped) but the tarball was captured via `docker save`. The plugin REJECTS this flag in scope-validated mode because the image identity lives in the tar metadata (outside argv) — pull and tag the image instead, or pass an explicit registry reference."
+  - "`--insecure` SKIPS TLS VERIFICATION FOR ALL FETCHES — DB updates, image pulls, git clones. Lab-only; never in production engagements unless the engagement explicitly authorizes self-signed targets."
+  - "Feature 28 dynamic recipes are RETIRED for the kind:cli path — the LLM writes argv directly. Recipes still load for legacy method calls (scan_image, scan_filesystem, scan_iac, scan_sbom, list_vulns) if /session/tool_recipes/trivy/ exists, but they're a dead branch under run_cli (REQ-TR-016)."
+  - "TRIVY'S INTERNAL `--timeout` DEFAULTS TO 5m — distinct from the container's `idle_timeout_seconds: 600` and `max_runtime_seconds: 7200`. Large image scans (multi-GB vendor images, sprawling node_modules trees) and AWS account scans (region × service iteration) routinely blow past 5 min. ALWAYS pass `--timeout 30m` (or `1h` for AWS / monorepos) for non-trivial targets. Without it, trivy aborts with `context deadline exceeded` long before the container's max_runtime hits."
+  - "`--ignore-status <list>` SUPPRESSES VULNS BY FIX STATUS — values are `not_affected`, `affected`, `fixed`, `end_of_life`, `unknown`. Useful triage: `--ignore-status not_affected,end_of_life` cuts EOL noise from very old base images. Distinct from `--ignore-unfixed` (which only filters by `FixedVersion` field absence). Combine: `--ignore-unfixed --ignore-status end_of_life,not_affected` for the cleanest CI signal."
+
+failure_signatures:
+  # Layer-diverse signals (SKILL #11) — at least 6 distinct verifiable layers:
+  #   1. Network / DB (DB download or registry fetch failed)
+  #   2. Auth (unauthorized / denied — private registry)
+  #   3. Image (image not found / manifest unknown)
+  #   4. Argument (unknown subcommand / unknown flag)
+  #   5. DB-init (corrupted local DB, stale schema)
+  #   6. Empty-result (no security issues found — informational)
+  #   7. Path (filesystem path not found, for fs/config/sbom)
+  #   8. AWS (credential / API errors)
+  - signal: "failed to download"
+    remediation: "Network: DB download or layer fetch failed. Common causes: no internet (use --skip-db-update with the pre-baked DB), proxy required (--proxy), or the DB OCI registry is rate-limited (--db-repository <mirror>). Check container DNS / connectivity with `getent hosts ghcr.io`."
+  - signal: "connection refused"
+    remediation: "Network: TCP-level error pulling DB or image. The remote registry / DB endpoint is unreachable. Verify with `nc -vz ghcr.io 443` from inside the container. If air-gapped, ensure the pre-baked DB is in place at $TRIVY_CACHE_DIR/db/ and use `--skip-db-update`."
+  - signal: "unauthorized"
+    remediation: "Auth: registry returned 401. For private images, pass `--username <u> --password <p>` or `--registry-token <t>`. Env vars TRIVY_USERNAME / TRIVY_PASSWORD also work. Verify creds with `docker login <registry>` first to isolate trivy-specific issues."
+  - signal: "denied"
+    remediation: "Auth: registry returned 403 (or 401 in some registries). Same remediation as `unauthorized` but credentials may be valid yet lack permission for the specific repository. Confirm the role has `pull` for the target image."
+  - signal: "image not found"
+    remediation: "Image: the registry returned 'manifest unknown' or similar. Verify the image:tag exists with `docker manifest inspect <image>` or `crane manifest <image>`. Common cause: tag typo, missing :tag suffix (defaults to :latest which may not exist), or a private registry without auth."
+  - signal: "manifest unknown"
+    remediation: "Image: alternate phrasing for image not found. Same root cause."
+  - signal: "no such image"
+    remediation: "Image: alternate phrasing — usually means the image was supposed to be local (loaded via `--input <tar>`) but the tar is missing or wasn't loaded into the daemon."
+  - signal: "failed to initialize db"
+    remediation: "DB-init: trivy's local DB is corrupt, stale, or has a schema mismatch. Clear the cache with `--clear-cache` and re-run, or delete `$TRIVY_CACHE_DIR/db/` manually and rerun (will trigger a fresh download). On air-gapped systems, restore the pre-baked DB from the container build."
+  - signal: "db update error"
+    remediation: "DB-init: alternate phrasing. Same remediation as `failed to initialize db`. May also indicate the DB schema version doesn't match the trivy binary version (DB needs to match binary major.minor)."
+  - signal: "DB schema version"
+    remediation: "DB-init: explicit schema mismatch. Upgrade trivy to match the DB, or downgrade the DB to match trivy. Often fixed by running `trivy --download-db-only` once with a fresh trivy binary."
+  - signal: "Error: unknown command"
+    remediation: "Argument: typo in sub-command. The sub-command MUST be one of: image, fs, repo, config, sbom, k8s, aws, vm, version, plugin, server, help. `filesystem` (the long form of `fs`) also works. Check `trivy --help` for the canonical list."
+  - signal: "unknown flag"
+    remediation: "Argument: unsupported flag for the current sub-command (or trivy version). `--scanners` was introduced in v0.37; older versions use `--security-checks`. Run `trivy <subcmd> --help` to see the supported flag set for the current binary version."
+  - signal: "unknown shorthand flag"
+    remediation: "Argument: a single-char flag (e.g., `-x`) is not recognized. Same fix as `unknown flag` — check `--help`."
+  - signal: "no such file or directory"
+    remediation: "Path: for `fs`, `config`, `sbom` sub-commands — the positional path doesn't exist inside the container. Verify with `ls -la <path>` from a bash call. /session/ paths must be created first by writing files into the container's session mount."
+  - signal: "could not parse reference"
+    remediation: "Argument: image reference malformed. Format is `[registry/]name[:tag][@digest]`. Common errors: missing tag (some registries require explicit tag), invalid characters in name (must be lowercase + alphanumeric + dashes/underscores), bad digest format."
+  - signal: "no such host"
+    remediation: "DNS: registry hostname did not resolve. Check container DNS with `getent hosts <host>` and `cat /etc/resolv.conf`. If using a local registry, ensure the container has the required /etc/hosts entry or DNS configuration."
+  - signal: "no security issues"
+    remediation: "Empty-result (informational): scan completed cleanly with zero findings at the configured severity. Either the target is genuinely clean OR `--severity HIGH,CRITICAL` filtered out all the LOW/MEDIUM findings. Drop the severity filter to confirm. NOT a failure."
+  - signal: "no vulnerabilities found"
+    remediation: "Empty-result (informational): same as above. Confirm with no severity filter (or `--severity LOW,MEDIUM,HIGH,CRITICAL,UNKNOWN`)."
+  - signal: "could not load credentials"
+    remediation: "AWS: `trivy aws` couldn't find AWS credentials. Set AWS_ACCESS_KEY_ID + AWS_SECRET_ACCESS_KEY (and AWS_SESSION_TOKEN for STS) env vars in the container, or mount ~/.aws/credentials. Verify with `aws sts get-caller-identity` first."
+  - signal: "AccessDenied"
+    remediation: "AWS: IAM identity doesn't have the permissions trivy needs (typically read-only on the targeted services + sts:GetCallerIdentity). Check the IAM policy. Trivy's docs list the exact permissions per --service."
+  - signal: "InvalidClientTokenId"
+    remediation: "AWS: credentials are malformed or for a different account. Verify with `aws sts get-caller-identity`."
+  - signal: "Throttling"
+    remediation: "AWS: API rate-limited. Reduce `--parallel`, scope to one --service / --region per call, or wait and retry."
+  - signal: "context deadline exceeded"
+    remediation: "Timeout: scan exceeded `--timeout` (default 5m). Increase: `--timeout 30m` for large images, `--timeout 1h` for AWS account scans or massive monorepos."
+  - signal: "exit status 1"
+    remediation: "Often paired with `--exit-code 1` when findings are present (CI gate behavior, NOT a failure). Confirm the JSON output (`-o /session/<file>.json`) contains the actual findings — if so, this is expected pipeline behavior, not a tool error."
+
+help_commands:
+  - command: "--help"
+    purpose: "Top-level help — lists all sub-commands and global flags."
+  - command: "image --help"
+    purpose: "Image sub-command flag reference (most common — registry auth, format, severity, scanners)."
+  - command: "fs --help"
+    purpose: "Filesystem sub-command flag reference (skip-files / skip-dirs / file-patterns)."
+  - command: "repo --help"
+    purpose: "Repository sub-command flag reference (branch / commit / tag / clone-related options)."
+  - command: "config --help"
+    purpose: "IaC config sub-command flag reference (config-policy, policy-namespaces, render-cause)."
+  - command: "aws --help"
+    purpose: "AWS sub-command flag reference (account-id / region / service / arn) — different shape, no positional."
+  - command: "k8s --help"
+    purpose: "Kubernetes sub-command flag reference (kubeconfig / context / namespaces / components)."
+  - command: "sbom --help"
+    purpose: "SBOM sub-command flag reference (supported SBOM formats, severity / scanners filters)."
+  - command: "version"
+    purpose: "Print trivy version + DB metadata (DB version, last update timestamp, schema version)."
+

@@ -7,13 +7,17 @@ LABEL org.opencontainers.image.source="https://github.com/silicon-works/mcp-tool
 LABEL org.opencontainers.image.description="mssql MCP server for OpenSploit"
 LABEL org.opencontainers.image.licenses="MIT"
 
-# Install Python
+# Install Python.
+# python3-full is Kali/Debian's metapackage that bundles python3 + pip + venv
+# in one shot — splitting them as `python3-pip python3-venv` causes
+# "Unable to locate package" on stale Kali rolling roots. python3-full resolves
+# cleanly across rolling-index dates. Same fix as the sibling impacket image.
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
         ca-certificates \
-        python3 \
-        python3-pip \
-        python3-venv && \
+        python3-full \
+        krb5-user \
+        libkrb5-dev && \
     rm -rf /var/lib/apt/lists/* && \
     apt-get clean
 

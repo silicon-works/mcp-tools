@@ -424,9 +424,9 @@ These are used in almost every engagement. They mostly work but haven't been sys
 
 ### Tier 4: Low/No-Usage Tools
 
-32 tools that have never been used in a real engagement. These still need smoke tests but lower priority.
+31 tools that have never been used in a real engagement. These still need smoke tests but lower priority.
 
-amass, aws, cloudfox, dns, elasticsearch, embedding, forensics, ghidra, git-dumper, ike-scan, ilspy, mongodb, mssql, mysql, nikto, nosqlmap, office-exploit, pacu, phpggc, prowler, pygpoabuse, s3scanner, smtp, snmp, sqlite, ssrfmap, ssti, target-tracker, theharvester, trivy, trufflehog, volatility, wpscan, ysoserial
+amass, aws, cloudfox, dns, elasticsearch, embedding, forensics, ghidra, git-dumper, ike-scan, ilspy, mongodb, mssql, mysql, nikto, office-exploit, pacu, phpggc, prowler, pygpoabuse, s3scanner, smtp, snmp, sqlite, ssrfmap, ssti, target-tracker, theharvester, trivy, trufflehog, volatility, wpscan, ysoserial
 
 Note: chisel (5 calls, Pirate), lfi-rfi (4 calls, Pterodactyl+Facts), ftp (1 call, WingData), nuclei (2 calls, Cobblestone+Facts), zap (3 calls, Facts) have minimal real usage — they belong in Tier 3.
 

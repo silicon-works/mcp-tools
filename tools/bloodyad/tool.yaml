@@ -1,16 +1,44 @@
 name: bloodyad
+kind: cli
+binary: bloodyAD
 version: "2.1.7"
 description: >
-  Active Directory privilege escalation via LDAP using bloodyAD.
-  27 methods covering ACL abuse (GenericAll, WriteDacl), RBCD delegation,
-  shadow credentials, password resets, group manipulation, DCSync rights,
-  UAC flag modification, DNS record management, object deletion, and AD enumeration/search.
-  Supports NTLM, Kerberos (ccache), and certificate (PKINIT) authentication.
+  Active Directory privilege escalation via LDAP using bloodyAD (CravateRouge/bloodyAD).
+  Single binary `bloodyAD` (CASE-SENSITIVE — capital A and D) with action-based
+  architecture: `bloodyAD --host <DC> -d <DOMAIN> -u <USER> -p <PASS> <action>
+  [sub-action] [args]`. Five top-level actions — `add`, `get`, `set`, `remove`,
+  and an internal `commit` — each with sub-actions. Covers ACL abuse
+  (GenericAll via add genericAll, WriteDacl chains), RBCD (set rbcd / add rbcd),
+  shadow credentials (add shadowCredentials), password reset (set password),
+  group manipulation (add/remove groupMember), DCSync rights (add/remove dcsync),
+  UAC flag modification (add/remove uac), DNS record management
+  (add/remove dnsRecord), object lifecycle (add user, add computer, remove
+  object), and AD enumeration/search (get search, get object, get writable, get
+  membership, get children, get dnsDump, get trusts). Authentication: NTLM
+  password, NTLM hash (-p :NTHASH leading-colon), Kerberos pass-the-ticket
+  (-k with KRB5CCNAME), or PKINIT certificate (-c key:cert). Outputs are
+  human-readable text on stdout — NO native JSON; agents parse text. The legacy
+  method handlers (set_password, add_genericall, add_rbcd, add_shadow_credentials,
+  add_group_member, add_computer, add_dcsync, add_uac, add_dns_record, add_user,
+  set_owner, set_object, get_object, get_children, get_search, get_writable,
+  get_membership, get_dnsdump, get_trusts, remove_*) auto-inherit run_cli from
+  BaseMCPServer (mcp-common 0.3.0); kind:cli is the new default. 27 methods
+  preserved as legacy / rollback path with rich error classification (auth vs
+  permission vs config vs network).
 
 image: ghcr.io/silicon-works/mcp-tools-bloodyad:latest
 image_size_mb: 650
-timeout_seconds: 120
-idle_timeout: 1800
+
+# Dual-clock model — most bloodyAD operations are seconds-fast (single LDAP
+# modify or search). `get writable` against a large forest can stretch to a
+# few minutes. `get search` with a wide filter (objectClass=*) on a big domain
+# is the longest plausible operation. idle catches a wedged container;
+# max_runtime is the hard cap.
+idle_timeout_seconds: 300       # 5 min
+max_runtime_seconds: 1800       # 30 min — covers worst-case `get writable` on a large forest
+timeout_seconds: 1800
+idle_timeout: 1800              # legacy field, retained for older clients
+allow_multi_target: false       # bloodyAD targets a single DC per call
 
 capabilities:
   - ad_acl_abuse
@@ -22,6 +50,10 @@ capabilities:
   - uac_modification
   - ad_enumeration
   - ldap_search
+  - dns_record_management
+  - object_lifecycle
+  - certificate_authentication
+  - kerberos_authentication
 
 phases:
   - exploitation
@@ -37,529 +69,384 @@ resources:
 
 routing:
   use_for:
-    - "Change or reset an AD user's password via LDAP (ForceChangePassword abuse)"
-    - "Grant GenericAll or WriteDacl permissions on AD objects"
-    - "Set up Resource-Based Constrained Delegation (RBCD)"
-    - "Add shadow credentials (msDS-KeyCredentialLink) to a target"
-    - "Add or remove users from AD groups"
-    - "Create machine accounts for delegation attacks"
-    - "Grant DCSync rights to a principal"
-    - "Modify UAC flags (DONT_REQ_PREAUTH, TRUSTED_TO_AUTH_FOR_DELEGATION)"
-    - "Read AD object attributes via LDAP"
-    - "Search AD with LDAP filters"
-    - "Find writable AD objects"
-    - "Set ownership of AD objects (WriteOwner abuse)"
-    - "Remove DNS records from AD-integrated DNS zones"
-    - "Delete AD objects (cleanup machine accounts, users)"
-    - "Authenticate to AD with certificates (PKINIT) after ADCS abuse"
+    - "Change or reset an AD user's password via LDAP (ForceChangePassword abuse via `set password`)"
+    - "Grant GenericAll or WriteDacl permissions on AD objects (`add genericAll`)"
+    - "Set up Resource-Based Constrained Delegation (`set rbcd` / `add rbcd`)"
+    - "Add shadow credentials (msDS-KeyCredentialLink) to a target (`add shadowCredentials`)"
+    - "Add or remove users from AD groups (`add groupMember` / `remove groupMember`)"
+    - "Create machine accounts for delegation attacks (`add computer`)"
+    - "Grant DCSync rights to a principal (`add dcsync`)"
+    - "Modify UAC flags — DONT_REQ_PREAUTH for AS-REP roasting, TRUSTED_TO_AUTH_FOR_DELEGATION (`add uac`)"
+    - "Read AD object attributes via LDAP (`get object`)"
+    - "Search AD with LDAP filters (`get search`)"
+    - "Find writable AD objects to discover privesc paths (`get writable`)"
+    - "Set ownership of AD objects (WriteOwner abuse via `set owner`)"
+    - "Modify generic AD attributes (`set object`)"
+    - "Add or remove DNS records on AD-integrated DNS zones (`add dnsRecord` / `remove dnsRecord`)"
+    - "Dump all DNS records from AD-integrated DNS (`get dnsDump`)"
+    - "Enumerate AD trust relationships (`get trusts`)"
+    - "Delete AD objects for cleanup (`remove object`)"
+    - "Authenticate to AD with certificates (PKINIT) after ADCS abuse (`-c key:cert`)"
+    - "Pass-the-ticket via Kerberos ccache (`-k`)"
+    - "Pass-the-hash via NTLM (`-p :NTHASH`)"
   never_use_for:
     - "Network scanning or port discovery (use nmap)"
-    - "Kerberos ticket requests (use impacket get_tgt/get_st)"
-    - "Certificate attacks (use certipy)"
+    - "Kerberos ticket requests (use impacket get_tgt / get_st — bloodyAD CONSUMES tickets via -k, doesn't request them)"
+    - "Certificate enrollment / forging / find (use certipy — bloodyAD CONSUMES PKINIT certs via -c, doesn't request them)"
     - "Remote command execution (use evil-winrm, impacket psexec/wmiexec)"
-    - "SMB file operations (use impacket smb_get/smb_put)"
+    - "SMB file operations (use impacket smb_get / smb_put)"
+    - "BloodHound graph collection (use bloodhound — bloodyAD has no graph engine)"
+    - "Password spraying or brute-force (use kerbrute, netexec — bloodyAD requires valid creds)"
+    - "Cracking NT hashes (use john / hashcat)"
   triggers:
-    - bloodyAD
-    - bloodyad
-    - ForceChangePassword
-    - GenericAll
-    - WriteDacl
-    - WriteOwner
-    - RBCD
-    - shadow credentials
-    - msDS-KeyCredentialLink
-    - group membership
-    - DCSync rights
-    - UAC flags
-    - DONT_REQ_PREAUTH
-    - TRUSTED_TO_AUTH_FOR_DELEGATION
-    - AD ACL abuse
-    - LDAP privesc
-    - remove DNS record
-    - delete AD object
-    - certificate auth LDAP
-    - PKINIT LDAP
+    - "bloodyAD"
+    - "bloodyad"
+    - "ForceChangePassword"
+    - "GenericAll"
+    - "WriteDacl"
+    - "WriteOwner"
+    - "RBCD"
+    - "shadow credentials"
+    - "msDS-KeyCredentialLink"
+    - "msDS-AllowedToActOnBehalfOfOtherIdentity"
+    - "group membership"
+    - "DCSync rights"
+    - "Replicating Directory Changes"
+    - "UAC flags"
+    - "DONT_REQ_PREAUTH"
+    - "TRUSTED_TO_AUTH_FOR_DELEGATION"
+    - "AD ACL abuse"
+    - "LDAP privesc"
+    - "writable AD objects"
+    - "add DNS record"
+    - "remove DNS record"
+    - "delete AD object"
+    - "AD trusts"
+    - "certificate auth LDAP"
+    - "PKINIT LDAP"
+    - "set password"
+    - "add user"
+    - "add computer"
+    - "add groupMember"
   prefer_over:
-    - impacket  # for ACL/RBCD/shadow creds operations (bloodyAD has dedicated methods vs generic LDAP)
+    - impacket  # for ACL/RBCD/shadow creds operations (bloodyAD has dedicated actions vs generic LDAP)
 
 see_also:
   - tool: impacket
-    reason: "Use impacket for Kerberos ticket operations (getTGT, getST) that feed into bloodyAD Kerberos auth"
+    reason: "Use impacket for Kerberos ticket operations (getTGT, getST) that feed into bloodyAD's `-k` Kerberos auth. Use ntlmrelayx for ESC8 relay; bloodyAD is the post-relay LDAP-modify path."
   - tool: certipy
-    reason: "Use certipy for certificate-based attacks (ADCS). bloodyAD handles shadow credentials via LDAP"
+    reason: "Use certipy for ADCS find / req / forge / shadow auto. bloodyAD consumes the resulting PFX via `-c key.pem:cert.pem` for PKINIT-bound LDAP, or invokes `add shadowCredentials` directly when the LDAP-only path is preferred."
   - tool: bloodhound
-    reason: "Use BloodHound to discover ACL paths, then bloodyAD to exploit them"
+    reason: "Use BloodHound to discover ACL paths (ForceChangePassword, GenericAll, WriteDacl, AddKeyCredentialLink) — then bloodyAD to exploit them. BloodHound is read-only graph; bloodyAD is the modify primitive."
+  - tool: netexec
+    reason: "Validate NT hashes obtained from password reset / DCSync across SMB, WinRM, LDAP, MSSQL via `netexec ... -H :NTHASH`."
+  - tool: kerbrute
+    reason: "Enumerate valid usernames before bloodyAD auth attempts. bloodyAD requires valid credentials and does not brute-force."
 
-methods:
-  set_password:
-    description: "Force-change a user's password via LDAP (ForceChangePassword or GenericAll required)"
-    when_to_use: "When you have ForceChangePassword, GenericAll, or AllExtendedRights on a target user"
-    required_ports: [389, 636]
-    params:
-      host: { type: string, required: true, description: "DC hostname or IP" }
-      domain: { type: string, required: true, description: "AD domain name" }
-      username: { type: string, description: "Auth username" }
-      password: { type: string, description: "Auth password or hash" }
-      kerberos: { type: boolean, default: false, description: "Use Kerberos auth" }
-      ccache_path: { type: string, description: "Path to ccache file" }
-      certificate: { type: string, description: "Certificate auth: 'key_path:cert_path' for PKINIT after ADCS abuse" }
-      format: { type: string, enum: [b64, hex, aes, rc4, default], description: "Format for --password or -k keyfile" }
-      target: { type: string, required: true, description: "Target user sAMAccountName" }
-      new_password: { type: string, required: true, description: "New password" }
-      extra_args: { type: string, description: "Additional bloodyAD flags as a single string" }
+# ── kind:cli specific sections ──────────────────────────────────────
 
-  set_owner:
-    description: "Change ownership of an AD object (WriteOwner required)"
-    when_to_use: "When you have WriteOwner permission and need to take ownership before modifying DACLs"
-    required_ports: [389, 636]
-    params:
-      host: { type: string, required: true, description: "DC hostname or IP" }
-      domain: { type: string, required: true, description: "AD domain name" }
-      username: { type: string, description: "Auth username" }
-      password: { type: string, description: "Auth password or hash" }
-      kerberos: { type: boolean, default: false, description: "Use Kerberos auth" }
-      ccache_path: { type: string, description: "Path to ccache file" }
-      certificate: { type: string, description: "Certificate auth: 'key_path:cert_path' for PKINIT after ADCS abuse" }
-      format: { type: string, enum: [b64, hex, aes, rc4, default], description: "Format for --password or -k keyfile" }
-      target: { type: string, required: true, description: "Target object" }
-      owner: { type: string, required: true, description: "New owner" }
-      extra_args: { type: string, description: "Additional bloodyAD flags as a single string" }
+target_extraction:
+  # bloodyAD invocation form: `bloodyAD --host <DC> -d <DOMAIN> -u <USER> -p
+  # <PASS> <action> [sub-action] [args]`. The DC is ALWAYS specified via
+  # `--host` (IP or hostname). `--dc-ip` is an OPTIONAL override that only
+  # kicks in when --host is a hostname that doesn't resolve via the
+  # container's DNS. There is NO positional target — every action positional
+  # (`add`, `get`, `set`, `remove`) and every sub-action positional (`user`,
+  # `computer`, `groupMember`, `password`, `rbcd`, `genericAll`,
+  # `shadowCredentials`, `uac`, `dnsRecord`, `dcsync`, `object`, `trusts`,
+  # `writable`, `membership`, `search`, `children`, `dnsDump`) MUST NEVER be
+  # picked as a target.
+  #
+  # Precedence (first match wins):
+  #   1. --host value     — REQUIRED for all DC-bound operations
+  #   2. --dc-ip value    — fallback / IP override when --host is FQDN
+  #
+  # NO positional_match rule — actions and sub-actions are positionals 1
+  # and 2 (and sometimes 3+ for object names like user names, group names,
+  # passwords, etc.); ALL non-flag positionals are operation arguments,
+  # never targets.
+  - rule: "flag_value"
+    flag: "--host"
+    parse_as: "raw"
+  - rule: "flag_value"
+    flag: "--dc-ip"
+    parse_as: "raw"
 
-  set_object:
-    description: "Add/replace/delete attributes on AD objects"
-    when_to_use: "For direct LDAP attribute manipulation — modifying SPNs, descriptions, or custom attributes"
-    required_ports: [389, 636]
-    params:
-      host: { type: string, required: true, description: "DC hostname or IP" }
-      domain: { type: string, required: true, description: "AD domain name" }
-      username: { type: string, description: "Auth username" }
-      password: { type: string, description: "Auth password or hash" }
-      kerberos: { type: boolean, default: false, description: "Use Kerberos auth" }
-      ccache_path: { type: string, description: "Path to ccache file" }
-      certificate: { type: string, description: "Certificate auth: 'key_path:cert_path' for PKINIT after ADCS abuse" }
-      format: { type: string, enum: [b64, hex, aes, rc4, default], description: "Format for --password or -k keyfile" }
-      target: { type: string, required: true, description: "Target object" }
-      attribute: { type: string, required: true, description: "Attribute name" }
-      values: { type: array, description: "Values to set (omit to delete)" }
-      extra_args: { type: string, description: "Additional bloodyAD flags as a single string" }
+# bloodyAD has no bulk-target ingest flag (no -tF / --targets-file). It
+# operates on a SINGLE DC per invocation. The action positionals (`add`,
+# `get`, `set`, `remove`) and sub-action positionals are operation tokens,
+# not target lists. Nothing to reject at the flag layer.
+reject_flags: []
+reject_flags_reason: "bloodyAD has no bulk-target ingest flag. All positionals are action/sub-action tokens or operation arguments (sAMAccountName, DN, password value, attribute name, LDAP filter), NEVER targets. Single-target tool — one DC per call."
 
-  add_genericall:
-    description: "Grant full control (GenericAll) to a principal on a target (WriteDacl required)"
-    when_to_use: "When you have WriteDacl on an object and need to grant yourself full control"
-    required_ports: [389, 636]
-    params:
-      host: { type: string, required: true, description: "DC hostname or IP" }
-      domain: { type: string, required: true, description: "AD domain name" }
-      username: { type: string, description: "Auth username" }
-      password: { type: string, description: "Auth password or hash" }
-      kerberos: { type: boolean, default: false, description: "Use Kerberos auth" }
-      ccache_path: { type: string, description: "Path to ccache file" }
-      certificate: { type: string, description: "Certificate auth: 'key_path:cert_path' for PKINIT after ADCS abuse" }
-      format: { type: string, enum: [b64, hex, aes, rc4, default], description: "Format for --password or -k keyfile" }
-      target: { type: string, required: true, description: "Target object" }
-      trustee: { type: string, required: true, description: "Principal to grant access to" }
-      extra_args: { type: string, description: "Additional bloodyAD flags as a single string" }
+# Per-tool value-taking flags whose values must NOT be confused with positional
+# targets or with each other. bloodyAD uses MIXED dash conventions — single
+# letter short flags use single dash (`-u`, `-p`, `-d`, `-k`, `-c`, `-f`, `-v`,
+# `-s`), but multi-character long flags use DOUBLE dash (`--host`, `--dc-ip`,
+# `--oldpass`, `--ou`, `--attr`, `--filter`, `--base`, `--otype`, `--right`,
+# `--detail`, `--no-recurse`, `--zone`, `--ttl`, `--port`, `--priority`,
+# `--weight`, `--preference`, `--forest`, `--dnstype`, `--target`, `--direct`,
+# `--resolve-sd`, `--no-detail`, `--transitive`, `--key`, `--path`).
+# Verified by reading mcp-server.py's _build_auth (line 953) and per-handler
+# argv construction (lines 1027-1645).
+value_flags:
+  # ── Authentication & targeting (apply to ALL actions) ──
+  - "--host"               # canonical DC IP/FQDN — the target
+  - "--dc-ip"              # IP override when --host is unresolvable hostname
+  - "-d"                   # short for domain (no --domain alias in bloodyAD)
+  - "-u"                   # username (NTLM); UPN form NOT required (sAMAccountName works)
+  - "-p"                   # password OR :NTHASH OR AES-key-as-hex (with -f)
+  - "-c"                   # PKINIT cert: 'key_path:cert_path' (NOT a config file — bloodyAD has no -c config)
+  - "-f"                   # format: b64 / hex / aes / rc4 / default
+  - "-k"                   # boolean Kerberos — listed for safety (NEVER takes a value; KRB5CCNAME env feeds the ccache)
+  - "-s"                   # boolean LDAPS toggle — listed for safety
+  - "-v"                   # boolean verbose — listed for safety
+  # ── set sub-action flags ──
+  - "--oldpass"            # `set password` — original pass for ChangePassword (vs ForceChangePassword)
+  # ── add sub-action flags ──
+  - "--ou"                 # `add user` / `add computer` — Organizational Unit DN
+  - "--path"               # `add shadowCredentials` — output cert file path
+  # ── get sub-action flags ──
+  - "--attr"               # `get object` / `get search` — comma-separated attribute list
+  - "--filter"             # `get search` — LDAP filter (e.g., '(objectClass=user)')
+  - "--base"               # `get search` — base DN
+  - "--otype"              # `get children` / `get writable` — object class filter (USER/COMPUTER/GROUP/ALL)
+  - "--right"              # `get writable` — right type (ALL/WRITE/CHILD)
+  - "--target"             # `get children` — parent object (default: domain root)
+  - "--detail"             # boolean — `get writable` detailed output
+  - "--direct"             # boolean — `get children` non-recursive
+  - "--resolve-sd"         # boolean — `get object` / `get search` resolve security descriptors
+  - "--no-recurse"         # boolean — `get membership` only direct
+  - "--no-detail"          # boolean — `get dnsDump` skip system records
+  - "--transitive"         # boolean — `get dnsDump` cross trust boundaries
+  # ── DNS record flags (add/remove dnsRecord) ──
+  - "--dnstype"            # A / AAAA / CNAME / MX / PTR / SRV / TXT
+  - "--zone"               # DNS zone (default: domain zone)
+  - "--ttl"                # TTL seconds
+  - "--port"               # SRV record port
+  - "--priority"           # SRV record priority
+  - "--weight"             # SRV record weight
+  - "--preference"         # MX record preference
+  - "--forest"             # boolean — register in forest instead of domain
+  # ── remove sub-action flags ──
+  - "--key"                # `remove shadowCredentials` — specific key ID
 
-  add_rbcd:
-    description: "Configure RBCD on target to allow impersonation via a controlled service account"
-    when_to_use: "When you control a machine account and have Write on target's msDS-AllowedToActOnBehalfOfOtherIdentity"
-    required_ports: [389, 636]
-    params:
-      host: { type: string, required: true, description: "DC hostname or IP" }
-      domain: { type: string, required: true, description: "AD domain name" }
-      username: { type: string, description: "Auth username" }
-      password: { type: string, description: "Auth password or hash" }
-      kerberos: { type: boolean, default: false, description: "Use Kerberos auth" }
-      ccache_path: { type: string, description: "Path to ccache file" }
-      certificate: { type: string, description: "Certificate auth: 'key_path:cert_path' for PKINIT after ADCS abuse" }
-      format: { type: string, enum: [b64, hex, aes, rc4, default], description: "Format for --password or -k keyfile" }
-      target: { type: string, required: true, description: "Target machine" }
-      service: { type: string, required: true, description: "Attacker service account" }
-      extra_args: { type: string, description: "Additional bloodyAD flags as a single string" }
+usage_patterns:
+  - name: "find writable AD objects (privesc path discovery)"
+    command: "bloodyAD --host {dc_ip} -d {domain} -u {username} -p '{password}' get writable"
+    when: "First-pass post-credential AD privesc enumeration. `get writable` walks the user's effective ACL on every AD object and reports anything writable. Foundation for ESC1-style chain discovery — the writable set tells you which set/add operations will actually succeed. Pair with `--otype USER` or `--otype COMPUTER` to filter, or `--right WRITE` for property writes only. NB: action `get` is positional 1, sub-action `writable` is positional 2 — neither is a target."
 
-  add_shadow_credentials:
-    description: "Add Key Credentials for shadow credentials attack"
-    when_to_use: "When you have Write on msDS-KeyCredentialLink — alternative to password reset"
-    required_ports: [389, 636]
-    params:
-      host: { type: string, required: true, description: "DC hostname or IP" }
-      domain: { type: string, required: true, description: "AD domain name" }
-      username: { type: string, description: "Auth username" }
-      password: { type: string, description: "Auth password or hash" }
-      kerberos: { type: boolean, default: false, description: "Use Kerberos auth" }
-      ccache_path: { type: string, description: "Path to ccache file" }
-      certificate: { type: string, description: "Certificate auth: 'key_path:cert_path' for PKINIT after ADCS abuse" }
-      format: { type: string, enum: [b64, hex, aes, rc4, default], description: "Format for --password or -k keyfile" }
-      target: { type: string, required: true, description: "Target account" }
-      cert_path: { type: string, description: "Output path for certificate" }
-      extra_args: { type: string, description: "Additional bloodyAD flags as a single string" }
+  - name: "LDAP search with custom filter (targeted enumeration)"
+    command: "bloodyAD --host {dc_ip} -d {domain} -u {username} -p '{password}' get search --filter '({ldap_filter})' --attr {attributes}"
+    when: "Targeted AD enumeration — find users with DONT_REQ_PREAUTH (AS-REP roastable), find computers with LAPS, find Kerberoastable accounts, etc. The filter is RFC 4515 LDAP syntax. Use --attr to limit attribute set. Sub-action `search` is positional 2 after `get`. NB: --filter value contains parens which the shell handles only if quoted."
 
-  add_group_member:
-    description: "Add a principal to an AD group"
-    when_to_use: "When you have Write access on a group and need to add a user/computer"
-    required_ports: [389, 636]
-    params:
-      host: { type: string, required: true, description: "DC hostname or IP" }
-      domain: { type: string, required: true, description: "AD domain name" }
-      username: { type: string, description: "Auth username" }
-      password: { type: string, description: "Auth password or hash" }
-      kerberos: { type: boolean, default: false, description: "Use Kerberos auth" }
-      ccache_path: { type: string, description: "Path to ccache file" }
-      certificate: { type: string, description: "Certificate auth: 'key_path:cert_path' for PKINIT after ADCS abuse" }
-      format: { type: string, enum: [b64, hex, aes, rc4, default], description: "Format for --password or -k keyfile" }
-      group: { type: string, required: true, description: "Target group" }
-      member: { type: string, required: true, description: "Member to add" }
-      extra_args: { type: string, description: "Additional bloodyAD flags as a single string" }
+  - name: "reset a user's password (ForceChangePassword abuse)"
+    command: "bloodyAD --host {dc_ip} -d {domain} -u {username} -p '{password}' set password {target_user} '{new_password}'"
+    when: "Privesc step when you have ForceChangePassword, GenericAll, or AllExtendedRights on `target_user`. Sub-action `password` is positional 2 after `set`. The target sAMAccountName and new password are positionals 3 and 4 — VALUES of the operation, NOT targets. Add `--oldpass <old>` if you have ChangePassword (not ForceChangePassword). After success, validate with `netexec ldap <DC> -u <target_user> -p <new_password>`."
 
-  add_computer:
-    description: "Create a machine account in AD"
-    when_to_use: "When you need a machine account for RBCD attacks (default MAQ allows 10)"
-    required_ports: [389, 636]
-    params:
-      host: { type: string, required: true, description: "DC hostname or IP" }
-      domain: { type: string, required: true, description: "AD domain name" }
-      username: { type: string, description: "Auth username" }
-      password: { type: string, description: "Auth password or hash" }
-      kerberos: { type: boolean, default: false, description: "Use Kerberos auth" }
-      ccache_path: { type: string, description: "Path to ccache file" }
-      certificate: { type: string, description: "Certificate auth: 'key_path:cert_path' for PKINIT after ADCS abuse" }
-      format: { type: string, enum: [b64, hex, aes, rc4, default], description: "Format for --password or -k keyfile" }
-      hostname: { type: string, required: true, description: "Computer name (no trailing $)" }
-      computer_pass: { type: string, required: true, description: "Password for machine account" }
-      extra_args: { type: string, description: "Additional bloodyAD flags as a single string" }
+  - name: "add a user to a privileged group (Domain Admins)"
+    command: "bloodyAD --host {dc_ip} -d {domain} -u {username} -p '{password}' add groupMember '{group_name}' {member_name}"
+    when: "Direct privesc when you have Write on a group's member list. Sub-action `groupMember` is positional 2 after `add`; group and member are positionals 3 and 4. Group name with spaces (e.g., 'Domain Admins') MUST be quoted to survive the shell. After success, the new membership applies on next Kerberos ticket request — agent typically purges existing tickets and re-authenticates."
 
-  add_dcsync:
-    description: "Grant DCSync (Replicating Directory Changes) rights to a principal"
-    when_to_use: "When you have WriteDacl on the domain object and want to enable DCSync"
-    required_ports: [389, 636]
-    params:
-      host: { type: string, required: true, description: "DC hostname or IP" }
-      domain: { type: string, required: true, description: "AD domain name" }
-      username: { type: string, description: "Auth username" }
-      password: { type: string, description: "Auth password or hash" }
-      kerberos: { type: boolean, default: false, description: "Use Kerberos auth" }
-      ccache_path: { type: string, description: "Path to ccache file" }
-      certificate: { type: string, description: "Certificate auth: 'key_path:cert_path' for PKINIT after ADCS abuse" }
-      format: { type: string, enum: [b64, hex, aes, rc4, default], description: "Format for --password or -k keyfile" }
-      trustee: { type: string, required: true, description: "Principal to grant DCSync to" }
-      extra_args: { type: string, description: "Additional bloodyAD flags as a single string" }
+  - name: "configure RBCD (set msDS-AllowedToActOnBehalfOfOtherIdentity)"
+    command: "bloodyAD --host {dc_ip} -d {domain} -u {username} -p '{password}' set rbcd '{target_machine}$' '{controlled_machine}$'"
+    when: "Resource-Based Constrained Delegation chain. After `add computer` produces a controlled machine account (via MachineAccountQuota), `set rbcd` writes the SID of the controlled account to `target_machine`'s msDS-AllowedToActOnBehalfOfOtherIdentity. Sub-action `rbcd` is positional 2; both machine sAMAccountNames are positionals 3 and 4 (note the trailing `$`). Followed by impacket's getST -impersonate <admin> for the actual impersonation."
 
-  add_uac:
-    description: "Add UAC flags to user/computer objects"
-    when_to_use: "To set DONT_REQ_PREAUTH for AS-REP roasting, or TRUSTED_TO_AUTH_FOR_DELEGATION"
-    required_ports: [389, 636]
-    params:
-      host: { type: string, required: true, description: "DC hostname or IP" }
-      domain: { type: string, required: true, description: "AD domain name" }
-      username: { type: string, description: "Auth username" }
-      password: { type: string, description: "Auth password or hash" }
-      kerberos: { type: boolean, default: false, description: "Use Kerberos auth" }
-      ccache_path: { type: string, description: "Path to ccache file" }
-      certificate: { type: string, description: "Certificate auth: 'key_path:cert_path' for PKINIT after ADCS abuse" }
-      format: { type: string, enum: [b64, hex, aes, rc4, default], description: "Format for --password or -k keyfile" }
-      target: { type: string, required: true, description: "Target object" }
-      flags: { type: array, required: true, description: "UAC flags to add" }
-      extra_args: { type: string, description: "Additional bloodyAD flags as a single string" }
+  - name: "add a DNS record (poisoning / phishing setup)"
+    command: "bloodyAD --host {dc_ip} -d {domain} -u {username} -p '{password}' add dnsRecord {dns_name} {ip_or_data}"
+    when: "Add a DNS A-record (default) or other record type to the AD-integrated DNS zone. Useful for typosquatting (`mssql-prod.corp.local -> 10.10.14.5`), phishing (`teams-login.corp.local`), or pointing legitimate hostnames at attacker-controlled IPs for MITM. Sub-action `dnsRecord` is positional 2; record name and data are positionals 3 and 4. Use `--dnstype CNAME/MX/SRV/TXT` for non-A records."
 
-  add_dns_record:
-    description: "Add a DNS record to the AD-integrated DNS zone"
-    when_to_use: "To add DNS records for phishing, MITM attacks, or pointing a hostname to an attacker-controlled IP. Supports A, AAAA, CNAME, MX, PTR, SRV, TXT record types."
-    required_ports: [389, 636]
-    params:
-      host: { type: string, required: true, description: "DC hostname or IP" }
-      domain: { type: string, required: true, description: "AD domain name" }
-      username: { type: string, description: "Auth username" }
-      password: { type: string, description: "Auth password or hash" }
-      kerberos: { type: boolean, default: false, description: "Use Kerberos auth" }
-      ccache_path: { type: string, description: "Path to ccache file" }
-      certificate: { type: string, description: "Certificate auth: 'key_path:cert_path' for PKINIT after ADCS abuse" }
-      format: { type: string, enum: [b64, hex, aes, rc4, default], description: "Format for --password or -k keyfile" }
-      name: { type: string, required: true, description: "DNS record name" }
-      data: { type: string, required: true, description: "DNS record data (e.g., IP address)" }
-      dnstype: { type: string, enum: [A, AAAA, CNAME, MX, PTR, SRV, TXT], default: "A", description: "DNS record type" }
-      zone: { type: string, description: "DNS zone (default: domain zone)" }
-      ttl: { type: integer, description: "TTL in seconds" }
-      port: { type: integer, description: "Listening port of the service (SRV records only)" }
-      priority: { type: integer, description: "Priority of a DNS SRV record (lower = preferred)" }
-      weight: { type: integer, description: "Weight of a DNS SRV record (higher = preferred at same priority)" }
-      preference: { type: integer, description: "MX record preference (lower = preferred)" }
-      forest: { type: boolean, default: false, description: "Register DNS record in forest instead of domain" }
-      extra_args: { type: string, description: "Additional bloodyAD flags as a single string" }
+  - name: "Kerberos pass-the-ticket auth (with KRB5CCNAME)"
+    command: "bloodyAD --host {dc_fqdn} -d {domain} -u {username} -k get search --filter '(objectClass=user)'"
+    when: "Pass-the-ticket via Kerberos ccache. The ccache is supplied via the `KRB5CCNAME` environment variable (NOT a flag — bloodyAD's argparse `-k` has nargs='*' but consumes the action token if a value follows; bare `-k` with KRB5CCNAME env is the canonical form). The container's mcp-server.py auto-restores ccache from /session/credentials/*.ccache; cli_in_container path requires the agent to set KRB5CCNAME explicitly OR pre-stage the ccache to /etc/krb5.cc. NB: --host MUST be FQDN (DC FQDN like `dc01.corp.local`), NOT IP, for Kerberos SPN resolution."
 
-  add_user:
-    description: "Create a new user account in the domain"
-    when_to_use: "When you have CreateChild rights on an OU and need a new domain user for persistence or further attacks"
-    required_ports: [389, 636]
-    params:
-      host: { type: string, required: true, description: "DC hostname or IP" }
-      domain: { type: string, required: true, description: "AD domain name" }
-      username: { type: string, description: "Auth username" }
-      password: { type: string, description: "Auth password or hash" }
-      kerberos: { type: boolean, default: false, description: "Use Kerberos auth" }
-      ccache_path: { type: string, description: "Path to ccache file" }
-      certificate: { type: string, description: "Certificate auth: 'key_path:cert_path' for PKINIT after ADCS abuse" }
-      format: { type: string, enum: [b64, hex, aes, rc4, default], description: "Format for --password or -k keyfile" }
-      sam_account_name: { type: string, required: true, description: "sAMAccountName for the new user" }
-      new_password: { type: string, required: true, description: "Password for the new user" }
-      ou: { type: string, description: "Organizational Unit DN" }
-      extra_args: { type: string, description: "Additional bloodyAD flags as a single string" }
+  - name: "PKINIT certificate auth (after ADCS abuse via certipy)"
+    command: "bloodyAD --host {dc_ip} -d {domain} -u {target_user} -c '/session/{key_path}.key:/session/{cert_path}.crt' get writable"
+    when: "Authenticate via certificate (PKINIT) after extracting a key+cert pair via certipy. The `-c` flag value is the literal string `<key_path>:<cert_path>` — the colon is a separator, NOT shell syntax (does not need escaping). Useful when NTLM is disabled and you have a PFX from certipy ESC1/4/8 — split the PFX into key.pem + cert.pem first via `certipy cert -pfx ... -nocert -out key.pem` and `certipy cert -pfx ... -nokey -out cert.pem`. NB: the `-c` value has FQDN-shape after the colon if the cert filename contains dots — value_flag consumes it atomically."
 
-  get_object:
-    description: "Read LDAP attributes of an AD object"
-    when_to_use: "To inspect object properties, check ACLs, or verify attack results"
-    required_ports: [389, 636]
-    params:
-      host: { type: string, required: true, description: "DC hostname or IP" }
-      domain: { type: string, required: true, description: "AD domain name" }
-      username: { type: string, description: "Auth username" }
-      password: { type: string, description: "Auth password or hash" }
-      kerberos: { type: boolean, default: false, description: "Use Kerberos auth" }
-      ccache_path: { type: string, description: "Path to ccache file" }
-      certificate: { type: string, description: "Certificate auth: 'key_path:cert_path' for PKINIT after ADCS abuse" }
-      format: { type: string, enum: [b64, hex, aes, rc4, default], description: "Format for --password or -k keyfile" }
-      target: { type: string, required: true, description: "Target object" }
-      attr: { type: string, description: "Comma-separated attributes" }
-      extra_args: { type: string, description: "Additional bloodyAD flags as a single string" }
+  - name: "find users vulnerable to AS-REP roasting (DONT_REQ_PREAUTH)"
+    command: "bloodyAD --host {dc_ip} -d {domain} -u {username} -p '{password}' get search --filter '(&(objectClass=user)(userAccountControl:1.2.840.113556.1.4.803:=4194304))' --attr sAMAccountName"
+    when: "Find users with DONT_REQ_PREAUTH set (UF_DONT_REQUIRE_PREAUTH = 4194304). The bitwise-AND LDAP rule `(userAccountControl:1.2.840.113556.1.4.803:=<flag>)` is the canonical filter. Output: list of sAMAccountNames you can hand to impacket's GetNPUsers.py for AS-REP hash extraction."
 
-  get_children:
-    description: "List child objects of an AD container/OU"
-    when_to_use: "To enumerate objects within an OU or container"
-    required_ports: [389, 636]
-    params:
-      host: { type: string, required: true, description: "DC hostname or IP" }
-      domain: { type: string, required: true, description: "AD domain name" }
-      username: { type: string, description: "Auth username" }
-      password: { type: string, description: "Auth password or hash" }
-      kerberos: { type: boolean, default: false, description: "Use Kerberos auth" }
-      ccache_path: { type: string, description: "Path to ccache file" }
-      certificate: { type: string, description: "Certificate auth: 'key_path:cert_path' for PKINIT after ADCS abuse" }
-      format: { type: string, enum: [b64, hex, aes, rc4, default], description: "Format for --password or -k keyfile" }
-      target: { type: string, description: "Parent object (default: domain)" }
-      otype: { type: string, description: "Object class filter" }
-      extra_args: { type: string, description: "Additional bloodyAD flags as a single string" }
+output_formats:
+  # bloodyAD has NO native JSON/CSV/XML output — it writes human-readable text
+  # to stdout with `[+]` (success), `[-]` (info), and `[!]` (error/warning)
+  # prefixes. The format is consistent enough for grep but not formally
+  # structured. The text output is the ONLY output format.
+  - flag: ""               # default — text-only stdout
+    format: "text"
+    preferred: true
+    notes: "bloodyAD writes plain text to stdout. Success markers: `[+]` lines (e.g., `[+] Password changed successfully`). Info: `[-]` lines (e.g., LDAP search result rows). Errors: `[!]` lines OR Python tracebacks for exceptions. Agent must pattern-match the text — no -o/-output/--json flags exist."
+  - flag: "--path /session/{name}.pem"
+    format: "pem"
+    preferred: true
+    notes: "`add shadowCredentials --path /session/<name>.pem` writes the generated Key Credentials PEM key+cert (and a separate .pfx in CWD). PIN to /session/ for persistence; default CWD is /app inside the container, which is wiped on container restart."
 
-  get_search:
-    description: "Search AD with LDAP filter"
-    when_to_use: "For targeted LDAP queries — finding LAPS passwords, specific object classes, etc."
-    required_ports: [389, 636]
-    params:
-      host: { type: string, required: true, description: "DC hostname or IP" }
-      domain: { type: string, required: true, description: "AD domain name" }
-      username: { type: string, description: "Auth username" }
-      password: { type: string, description: "Auth password or hash" }
-      kerberos: { type: boolean, default: false, description: "Use Kerberos auth" }
-      ccache_path: { type: string, description: "Path to ccache file" }
-      certificate: { type: string, description: "Certificate auth: 'key_path:cert_path' for PKINIT after ADCS abuse" }
-      format: { type: string, enum: [b64, hex, aes, rc4, default], description: "Format for --password or -k keyfile" }
-      filter: { type: string, required: true, description: "LDAP filter" }
-      attr: { type: string, description: "Comma-separated attributes" }
-      resolve_sd: { type: boolean, default: false, description: "Resolve security descriptor permissions in results" }
-      extra_args: { type: string, description: "Additional bloodyAD flags as a single string" }
+common_options:
+  global_targeting:
+    - "--host IP|FQDN: Domain Controller hostname or IP (REQUIRED for all DC-bound operations). For Kerberos `-k` auth, MUST be FQDN for SPN resolution."
+    - "--dc-ip IP: optional override when --host is an unresolvable hostname. Acts as DNS resolver hint for the LDAP / Kerberos paths."
+  global_authentication:
+    - "-d DOMAIN: AD domain name (e.g., `corp.local`). REQUIRED."
+    - "-u USERNAME: sAMAccountName for NTLM bind. UPN form (`user@domain`) ALSO works but is not required — bloodyAD accepts both."
+    - "-p PASSWORD|:NTHASH: cleartext password OR NTLM hash. For PtH, prefix with leading colon (`:31d6cfe0d16ae931b73c59d7e0c089c0`). Bare `NTHASH` without colon may be interpreted as a literal password — always use `:NT` form."
+    - "-k: Kerberos pass-the-ticket via KRB5CCNAME env (boolean). DO NOT pass a value — bloodyAD's argparse uses nargs='*' and would greedily consume the action token. Set KRB5CCNAME=/path/to/file.ccache in the environment."
+    - "-c KEY:CERT: PKINIT certificate auth — value is `<key_path>:<cert_path>` (colon-separated PEM file paths). For ADCS-derived certs after certipy req/forge."
+    - "-f FORMAT: hash/key format hint — `b64`, `hex`, `aes`, `rc4`, or `default`. Use `aes` when -p value is a Kerberos AES key (32 hex chars for AES128, 64 for AES256), `rc4` for RC4 keys, `hex` for hex-encoded passwords."
+    - "-s: use LDAPS instead of plain LDAP (boolean). LDAPS is REQUIRED for some operations (e.g., set password on hardened domains). LDAPS uses port 636 by default."
+  action_set:
+    - "POSITIONAL after auth flags: `set` action. Sub-actions: `password`, `owner`, `object`, `rbcd`, `userAccountControl`."
+    - "`set password <user> <new_pass>` — ForceChangePassword. Optional `--oldpass <pwd>` for ChangePassword."
+    - "`set owner <object> <new_owner>` — change owner of object (WriteOwner abuse)."
+    - "`set object <object> <attribute>` — modify a generic LDAP attribute. Add `-v <value>` for each value (repeated for multi-valued)."
+    - "`set rbcd <target> <service>` — write to msDS-AllowedToActOnBehalfOfOtherIdentity. Both args are sAMAccountNames with trailing $ for machines."
+  action_get:
+    - "POSITIONAL after auth flags: `get` action. Sub-actions: `object`, `children`, `search`, `writable`, `membership`, `dnsDump`, `trusts`."
+    - "`get object <target>` — read object attributes. Optional `--attr CN,sAMAccountName` to limit, `--resolve-sd` to render SDs."
+    - "`get children` — list child objects. Optional `--target <DN>`, `--otype <class>`, `--direct` (non-recursive)."
+    - "`get search --filter '<ldap_filter>'` — RFC 4515 LDAP search. Optional `--base <DN>`, `--attr ...`, `--resolve-sd`."
+    - "`get writable` — find writable objects. Optional `--otype ALL|OU|USER|COMPUTER|GROUP|DOMAIN|GPO`, `--right ALL|WRITE|CHILD`, `--detail`."
+    - "`get membership <target>` — group memberships (recursive by default). Optional `--no-recurse`."
+    - "`get dnsDump` — dump DNS zone. Optional `--zone <zone>`, `--no-detail`, `--transitive`."
+    - "`get trusts` — enumerate AD trust relationships."
+  action_add:
+    - "POSITIONAL after auth flags: `add` action. Sub-actions: `user`, `computer`, `groupMember`, `dcsync`, `dnsRecord`, `genericAll`, `rbcd`, `shadowCredentials`, `uac`."
+    - "`add user <sAMAccountName> <password>` — create new user. Optional `--ou <DN>`."
+    - "`add computer <hostname> <pwd>` — create machine account. Optional `--ou <DN>`. Subject to MachineAccountQuota (default 10 per user)."
+    - "`add groupMember <group> <member>` — add member to group."
+    - "`add dcsync <trustee>` — grant Replicating Directory Changes to trustee."
+    - "`add dnsRecord <name> <data>` — add DNS record. Optional `--dnstype A|AAAA|CNAME|MX|PTR|SRV|TXT`, `--zone`, `--ttl`, etc."
+    - "`add genericAll <target> <trustee>` — grant GenericAll ACE."
+    - "`add rbcd <target> <service>` — same as `set rbcd` (alias for clarity)."
+    - "`add shadowCredentials <target>` — add Key Credentials. Optional `--path /session/out.pem`."
+    - "`add uac <target> -f FLAG [-f FLAG ...]` — add UAC bits. -f is REPEATED for each flag (DONT_REQ_PREAUTH, TRUSTED_TO_AUTH_FOR_DELEGATION, etc.)."
+  action_remove:
+    - "POSITIONAL after auth flags: `remove` action. Sub-actions: `genericAll`, `rbcd`, `groupMember`, `shadowCredentials`, `dcsync`, `uac`, `dnsRecord`, `object`."
+    - "`remove genericAll <target> <trustee>` — strip GenericAll ACE (cleanup)."
+    - "`remove rbcd <target> <service>` — strip RBCD entry."
+    - "`remove groupMember <group> <member>` — remove member from group."
+    - "`remove shadowCredentials <target>` — strip Key Credentials. Optional `--key <id>` to target a specific key."
+    - "`remove dcsync <trustee>` — strip DCSync rights."
+    - "`remove uac <target> -f FLAG [-f FLAG ...]` — clear UAC bits."
+    - "`remove dnsRecord <name> <data>` — strip DNS record. Same flags as `add dnsRecord`."
+    - "`remove object <target>` — DELETE the AD object (user/computer/group). Requires Delete permission."
 
-  get_writable:
-    description: "Find AD objects writable by the current user"
-    when_to_use: "To discover privilege escalation paths via writable objects"
-    required_ports: [389, 636]
-    params:
-      host: { type: string, required: true, description: "DC hostname or IP" }
-      domain: { type: string, required: true, description: "AD domain name" }
-      username: { type: string, description: "Auth username" }
-      password: { type: string, description: "Auth password or hash" }
-      kerberos: { type: boolean, default: false, description: "Use Kerberos auth" }
-      ccache_path: { type: string, description: "Path to ccache file" }
-      certificate: { type: string, description: "Certificate auth: 'key_path:cert_path' for PKINIT after ADCS abuse" }
-      format: { type: string, enum: [b64, hex, aes, rc4, default], description: "Format for --password or -k keyfile" }
-      otype: { type: string, default: "ALL", description: "Object type filter" }
-      right: { type: string, default: "ALL", description: "Right type filter" }
-      extra_args: { type: string, description: "Additional bloodyAD flags as a single string" }
+gotchas:
+  - "BINARY NAME IS CASE-SENSITIVE: `bloodyAD` (capital A and D), NOT `bloodyad` or `bloodyad-cli`. The `kalilinux/kali-rolling` apt package installs `/usr/bin/bloodyAD`. The mcp-server.py confirms this (line 954). Wrong casing → `command not found`."
+  - "ACTION POSITIONAL ORDER: action MUST come AFTER auth/targeting flags. Form is `bloodyAD --host <DC> -d <DOMAIN> -u <USER> -p <PASS> <action> [sub-action] [args]`. Putting the action before the auth flags produces argparse errors. The DSL's flag_value-only target extraction correctly leaves all positionals untouched."
+  - "SUB-ACTION POSITIONAL: every action takes a sub-action positional (e.g., `add user`, `get search`, `set password`). Some sub-actions take FURTHER positionals (e.g., `add user <name> <pwd>` has 2 more). NONE of these are targets. The DSL extracts target only from `--host` and `--dc-ip` flag values."
+  - "DASH CONVENTION IS MIXED: short single-letter flags use SINGLE dash (`-u`, `-p`, `-d`, `-k`, `-c`, `-f`, `-v`, `-s`); multi-character long flags use DOUBLE dash (`--host`, `--dc-ip`, `--filter`, `--oldpass`, `--ou`, `--attr`, `--otype`, `--right`, `--detail`, `--direct`, `--no-recurse`, `--resolve-sd`, `--zone`, `--dnstype`, `--ttl`, `--port`, `--priority`, `--weight`, `--preference`, `--forest`, `--no-detail`, `--transitive`, `--key`, `--path`, `--target`, `--base`). NOT `-host` (single dash multi-char) or `--u` (double dash single-char). Verified against mcp-server.py argv construction."
+  - "PASS-THE-HASH FORMAT: `-p :NTHASH` requires the LEADING COLON. The colon represents an empty LM half. Bare `NTHASH` may be interpreted as a literal password. Full form `-p LMHASH:NTHASH` also works."
+  - "PASS-THE-TICKET AUTH: `-k` is BARE BOOLEAN. Pair with KRB5CCNAME env var pointing to the ccache file. DO NOT use `-k <ccache_path>` inline — bloodyAD's argparse `nargs='*'` would greedily consume the action token. The legacy mcp-server.py (line 961) confirms this anti-pattern."
+  - "PKINIT CERT FORMAT: `-c key.pem:cert.pem` where the colon is a separator. The two PEM files are split from a PFX via `certipy cert -pfx <pfx> -nocert -out key.pem` and `... -nokey -out cert.pem`. The colon is value_flag-internal; cli_in_container preserves it."
+  - "AES-KEY AUTH: pair `-p <hex_key>` with `-f aes` (or `-f rc4` / `-f hex`). Without `-f`, bloodyAD treats the hex string as a literal password and binds fail with KDC_ERR_PREAUTH_FAILED."
+  - "FQDN REQUIRED FOR KERBEROS: when using `-k`, `--host` MUST be the DC FQDN (e.g., `dc01.corp.local`), NOT an IP. Kerberos uses the FQDN to construct the LDAP/<dc_fqdn> SPN. With IP, Kerberos returns `KDC_ERR_S_PRINCIPAL_UNKNOWN`. NTLM auth (no -k) accepts either."
+  - "--dc-ip IS A DNS RESOLVER OVERRIDE: the canonical use is `--host dc01.corp.local --dc-ip 10.10.10.5` when the container's resolv.conf doesn't have the AD nameserver. --dc-ip alone (without --host being a hostname) is unusual and may not be needed."
+  - "LDAPS via -s: some operations (notably `set password` on hardened domains with LDAP-signing-required) FAIL on plain LDAP and need LDAPS. Add `-s` to switch to port 636. Symptom: `LDAP error: STRONG_AUTH_REQUIRED`."
+  - "NO STRUCTURED OUTPUT: bloodyAD writes plain text only. Success markers are `[+]` lines (e.g., `[+] Password changed successfully`); error markers are Python tracebacks with `Traceback (most recent call last)` or `[!]` prefix. Agents pattern-match the text via the `failure_signatures` table — there is no `--json` flag."
+  - "EXIT CODE INCONSISTENCY: bloodyAD often exits 0 even on operation-level failure (insufficientAccessRights, etc.). The legacy method handlers in mcp-server.py inspect output for error patterns (insufficientAccessRights, KRB_AP_ERR_SKEW, NoResultError) — see `_classify_bloodyad_error` (line 779, ~115 LOC). cli_in_container does NOT have this classification; agents must pattern-match using the `failure_signatures` table below."
+  - "shadow CREDENTIALS BAR: the most common shadow-credentials failure is `[+] KeyCredential generated` followed by `insufficientAccessRights` — the cert is generated locally BEFORE the LDAP modify is attempted, so partial output is misleading. Treat the run as FAILED unless the final line is the success marker. Garfield engagement blocker — encoded in failure_signatures."
+  - "GROUP NAMES WITH SPACES: many privileged groups have spaces (`Domain Admins`, `Enterprise Admins`, `Account Operators`). The shell MUST receive the value as a single argv token — agents quote with single quotes (`'Domain Admins'`)."
+  - "MACHINE ACCOUNT TRAILING $: when referring to machine accounts (e.g., for `set rbcd <target> <delegate-from>`), use the sAMAccountName form `MACHINE$` (with trailing dollar). Without the $, bloodyAD won't find the object."
+  - "NO LOCAL FILE WRITES BY DEFAULT: most actions write only to LDAP. The exception is `add shadowCredentials` which writes a PEM key+cert to CWD (or `--path` location) and a .pfx. PIN `--path /session/<name>.pem` for persistence — without it, the file lands in /app and is wiped on container restart."
+  - "WORKING DIRECTORY: bloodyAD chdir's nothing — it runs in /app inside the container. Generated files (e.g., shadow credentials PEM) land in /app unless `--path /session/...` is set. mcp-server.py's _ensure_work_dir is NOT used in the cli_in_container path."
+  - "Feature 28 dynamic recipes are RETIRED for the kind:cli path — the LLM writes argv directly. Recipes still load for legacy method calls if /session/tool_recipes/bloodyad/ exists, but they're a dead branch under run_cli (REQ-TR-016)."
+  - "PER-USER WRITE PERMISSION REQUIREMENT: bloodyAD shines when you have ACL write rights on AD objects. For read-only enum (`get search`, `get object`, `get writable`, `get membership`, `get children`, `get dnsDump`, `get trusts`), any authenticated user works. For modify operations (set/add/remove), explicit ACL grant is required — `get writable` first to discover what you CAN modify."
+  - "CASE-SENSITIVE SUB-ACTIONS: bloodyAD argparse uses CASE-SENSITIVE sub-action names. `add groupMember` (camelCase, lowercase first letter) — NOT `add GroupMember`, `add groupmember`, or `add group_member`. Same for `add shadowCredentials`, `add dcsync`, `add genericAll`, `get dnsDump`, `add dnsRecord`. Verified against mcp-server.py argv construction."
+  - "SET PASSWORD FALSE-NEGATIVE: bloodyAD's `set password` may exit NON-ZERO yet still succeed — the legacy method handler (mcp-server.py line 1047) uses `success_check=lambda out, rc: rc == 0 or 'changed successfully' in out.lower()`. Under kind:cli, agents must pattern-match `[+] Password changed successfully` (case-insensitive) on stdout INDEPENDENTLY of exit code. Treat the line as authoritative success even on rc != 0."
+  - "EXTRA_ARGS PASSTHROUGH: every legacy method accepted `extra_args` as a single string, split via `shlex.split` and appended to the command. Under kind:cli, agents pass these flags directly in argv — no shlex post-processing is performed by the runner. If an extra_args value contains shell metacharacters (`'`, `\"`, `$`, parens), the LLM must quote it correctly inside the argv list itself."
+  - "SHADOW CREDENTIALS DEFAULT OUTPUT DIR: legacy `add_shadow_credentials` does NOT pre-create or chdir to /session — bloodyAD writes the PEM/PFX to CWD (which is `/app` for kind:cli, `/app` for legacy too). The legacy method does NOT auto-pin to /session; the cert_path parameter is plumbed through `--path` only when explicitly provided. ALWAYS pass `--path /session/<name>.pem` to survive container restart."
 
-  get_membership:
-    description: "List all groups a target belongs to (recursive)"
-    when_to_use: "To understand group memberships for privilege analysis"
-    required_ports: [389, 636]
-    params:
-      host: { type: string, required: true, description: "DC hostname or IP" }
-      domain: { type: string, required: true, description: "AD domain name" }
-      username: { type: string, description: "Auth username" }
-      password: { type: string, description: "Auth password or hash" }
-      kerberos: { type: boolean, default: false, description: "Use Kerberos auth" }
-      ccache_path: { type: string, description: "Path to ccache file" }
-      certificate: { type: string, description: "Certificate auth: 'key_path:cert_path' for PKINIT after ADCS abuse" }
-      format: { type: string, enum: [b64, hex, aes, rc4, default], description: "Format for --password or -k keyfile" }
-      target: { type: string, required: true, description: "Target object" }
-      extra_args: { type: string, description: "Additional bloodyAD flags as a single string" }
+failure_signatures:
+  # Layer-diverse signals (SKILL #11) — at least 7 distinct verifiable layers:
+  #   1. DNS  2. TCP  3. LDAP bind/auth  4. LDAP modify (permission)
+  #   5. Kerberos  6. AD policy / object  7. argparse
+  - signal: "Could not resolve"
+    remediation: "DNS resolution failed for the DC. Verify --host (try IP literal), or pair --host <FQDN> with --dc-ip <IP> to bypass DNS. The container's resolv.conf is typically the Docker bridge resolver; AD DNS is not visible by default."
+  - signal: "Name or service not known"
+    remediation: "DNS unreachable — same root as 'Could not resolve'. Use --host <IP> directly when DNS resolution is unreliable, or add --dc-ip as fallback."
+  - signal: "Connection refused"
+    remediation: "TCP connection refused on the LDAP port (389/636). The DC is reachable but LDAP is filtered or down. Verify with nmap; check VPN/network routing; try -s for LDAPS port 636 if 389 is blocked."
+  - signal: "ConnectionResetError"
+    remediation: "TCP connection actively reset — usually a firewall midstream or TLS handshake failure. Try -s for LDAPS, or check VPN tunnel stability."
+  - signal: "TimeoutError"
+    remediation: "Connection to DC timed out — DC is unreachable, network path is dropping packets, or LDAP port filtered. Retry or check VPN/network connectivity."
+  - signal: "LDAP connection failed"
+    remediation: "Generic LDAP layer failure — read prior lines for the specific cause. Common: refused (firewall), reset (handshake), or timeout (unreachable)."
+  - signal: "invalidCredentials"
+    remediation: "LDAP bind failed — wrong password / hash. Verify -u, -p, -d. For PtH, format MUST be `:NT` (leading colon for empty LM half) or `LM:NT`. For AES key auth, pair -p <hex> with -f aes."
+  - signal: "AcceptSecurityContext error"
+    remediation: "NTLM negotiation failed — same root as invalidCredentials. Verify credentials. NTLM may be disabled domain-wide — switch to Kerberos with -k (set KRB5CCNAME)."
+  - signal: "STRONG_AUTH_REQUIRED"
+    remediation: "DC requires LDAP signing or LDAPS — plain LDAP bind rejected. Add -s flag to switch to LDAPS (port 636). Common on hardened domains for password reset operations."
+  - signal: "insufficientAccessRights"
+    remediation: "Auth succeeded but operation rejected at LDAP modify layer — current user lacks the required write permission on the target attribute. Use `get writable` to discover modifiable objects. For shadow credentials: needs Write on msDS-KeyCredentialLink. For RBCD: needs Write on msDS-AllowedToActOnBehalfOfOtherIdentity. For password reset: needs ForceChangePassword (or ChangePassword + --oldpass)."
+  - signal: "INSUFF_ACCESS_RIGHTS"
+    remediation: "ACE check failed at LDAP layer — synonym for insufficientAccessRights. See above; verify ACL via `get writable` or BloodHound."
+  - signal: "unwillingToPerform"
+    remediation: "DC policy block — the operation is structurally rejected. Common causes: target has adminCount=1 (protected by AdminSDHolder, ACLs reset hourly); password change blocked by GPO password policy; group membership change blocked on protected groups."
+  - signal: "WILL_NOT_PERFORM"
+    remediation: "Synonym for unwillingToPerform — DC policy block. Try a different attack vector or a different (non-protected) target."
+  - signal: "noSuchObject"
+    remediation: "Target DN or sAMAccountName does not exist. Verify the target exists with `get search --filter '(sAMAccountName=<name>)'`. CASE matters for some attribute-value comparisons."
+  - signal: "NoResultError"
+    remediation: "LDAP query returned zero objects — same root as noSuchObject. Verify spelling, scope, and that the target is in the searched tree."
+  - signal: "constraintViolation"
+    remediation: "Value violates AD schema constraint. For password reset: complexity policy not met. For RBCD: bad SID format. For DNS record: invalid record-type-specific data (e.g., non-IP for A record). Check the value format against the schema requirements."
+  - signal: "CONSTRAINT_ATT_TYPE"
+    remediation: "Synonym for constraintViolation — value type mismatch. Check attribute syntax."
+  - signal: "Password can't be changed"
+    remediation: "Password reset rejected by DC. Common causes: password complexity / minimum age policy; old_password mismatch (when --oldpass is used). For ForceChangePassword (no --oldpass), this usually means the user is in a protected group (adminCount=1)."
+  - signal: "oldpass provided is not valid"
+    remediation: "ChangePassword path — wrong old password. Verify the original password. If you have ForceChangePassword (not ChangePassword), drop the --oldpass argument entirely."
+  - signal: "KRB_AP_ERR_SKEW"
+    remediation: "Clock skew >5 minutes between container and DC. Set FAKETIME via the entrypoint (the bloodyad image has libfaketime baked in for this — clock_offset detection in opensploit feeds FAKETIME automatically). Alternatively: nmap-detect DC time and adjust container clock via chrony."
+  - signal: "Clock skew too great"
+    remediation: "Synonym for KRB_AP_ERR_SKEW — Kerberos AP_REQ rejected for time difference. Same fix: FAKETIME via libfaketime."
+  - signal: "KDC_ERR_PREAUTH_FAILED"
+    remediation: "Kerberos pre-auth failed — wrong password / hash / AES key. Verify credentials. With -k, this means the ccache is invalid or for a different user."
+  - signal: "KDC_ERR_S_PRINCIPAL_UNKNOWN"
+    remediation: "Service principal not found — pass --host <DC FQDN> (NOT IP) for SPN resolution when using -k. Kerberos requires the FQDN to construct ldap/<dc_fqdn> SPN."
+  - signal: "KerberosError"
+    remediation: "Generic Kerberos failure — read prior lines for the specific KDC_ERR. Verify ccache (KRB5CCNAME) is valid and not expired. Try NTLM auth instead (drop -k, supply -p)."
+  - signal: "minikerberos.protocol.errors"
+    remediation: "Kerberos subsystem error — bloodyAD uses minikerberos for the Kerberos client. Read the specific exception class for the cause."
+  - signal: "invalidAttributeSyntax"
+    remediation: "Attribute value format is invalid for the AD schema type. For DNS records: data shape doesn't match dnstype (e.g., text in A record, missing port for SRV). For UAC flags: bad flag name (must be UF_DONT_REQUIRE_PREAUTH style or numeric). Check schema reference."
+  - signal: "KeyCredential generated"
+    remediation: "Shadow credentials FALSE-positive trap — when followed by `insufficientAccessRights`, the local key was created but the LDAP modify failed. Treat as FAILED. The standalone `[+] KeyCredential generated` line is NOT a success marker; success requires the subsequent LDAP modify to also succeed."
+  - signal: "NoneType' object is not subscriptable"
+    remediation: "msldap crash on invalid creds — connection established but auth state corrupt. Verify -u, -p, -d format. UPN form `user@domain` may conflict with -d setting the domain separately — use sAMAccountName for -u when -d is also set."
+  - signal: "error: argument"
+    remediation: "argparse — invalid action / sub-action / flag. CHECK CASING: sub-actions are camelCase (`groupMember`, `shadowCredentials`, `dnsRecord`, `dnsDump`, `genericAll`). CHECK DASHES: short flags single-dash (`-u`), long flags double-dash (`--host`)."
+  - signal: "the following arguments are required"
+    remediation: "argparse — missing required positional or flag. Common: `--host`, `-d`, `-u`, the action positional, the sub-action positional, or an action-specific positional (target, password, group, member). Read the specific arg name in the error."
+  - signal: "invalid choice"
+    remediation: "argparse — bad value for an enum. Common: --otype must be ALL/OU/USER/COMPUTER/GROUP/DOMAIN/GPO; --right must be ALL/WRITE/CHILD; --dnstype must be A/AAAA/CNAME/MX/PTR/SRV/TXT; -f format must be b64/hex/aes/rc4/default."
 
-  get_dnsdump:
-    description: "Dump all DNS records from the AD-integrated DNS zone"
-    when_to_use: "To enumerate DNS records for target discovery, finding hidden hosts, or identifying DNS-based misconfigurations"
-    required_ports: [389, 636]
-    params:
-      host: { type: string, required: true, description: "DC hostname or IP" }
-      domain: { type: string, required: true, description: "AD domain name" }
-      username: { type: string, description: "Auth username" }
-      password: { type: string, description: "Auth password or hash" }
-      kerberos: { type: boolean, default: false, description: "Use Kerberos auth" }
-      ccache_path: { type: string, description: "Path to ccache file" }
-      certificate: { type: string, description: "Certificate auth: 'key_path:cert_path' for PKINIT after ADCS abuse" }
-      format: { type: string, enum: [b64, hex, aes, rc4, default], description: "Format for --password or -k keyfile" }
-      zone: { type: string, description: "Only print records in this DNS zone" }
-      no_detail: { type: boolean, default: false, description: "Exclude system records (_ldap, _kerberos, @, etc.)" }
-      transitive: { type: boolean, default: false, description: "Fetch DNS records across AD trust boundaries" }
-      extra_args: { type: string, description: "Additional bloodyAD flags as a single string" }
+help_commands:
+  - command: "bloodyAD --help"
+    purpose: "Top-level help — lists global flags (--host, --dc-ip, -d, -u, -p, -k, -c, -f, -s, -v) and the five action positionals (add, get, set, remove, commit)"
+  - command: "bloodyAD -h"
+    purpose: "Short alias for --help"
+  - command: "bloodyAD add --help"
+    purpose: "add action: sub-actions user / computer / groupMember / dcsync / dnsRecord / genericAll / rbcd / shadowCredentials / uac"
+  - command: "bloodyAD get --help"
+    purpose: "get action: sub-actions object / children / search / writable / membership / dnsDump / trusts"
+  - command: "bloodyAD set --help"
+    purpose: "set action: sub-actions password / owner / object / rbcd / userAccountControl"
+  - command: "bloodyAD remove --help"
+    purpose: "remove action: sub-actions genericAll / rbcd / groupMember / shadowCredentials / dcsync / uac / dnsRecord / object"
+  - command: "bloodyAD add user --help"
+    purpose: "add user sub-action: positional <sAMAccountName> <password>; flag --ou <DN>"
+  - command: "bloodyAD set password --help"
+    purpose: "set password sub-action: positional <target> <new_password>; flag --oldpass <old> for ChangePassword (vs ForceChangePassword)"
+  - command: "bloodyAD get search --help"
+    purpose: "get search sub-action: --filter <ldap_filter>; optional --base <DN>, --attr <comma-separated>, --resolve-sd"
+  - command: "bloodyAD get writable --help"
+    purpose: "get writable sub-action: optional --otype ALL|OU|USER|COMPUTER|GROUP|DOMAIN|GPO, --right ALL|WRITE|CHILD, --detail"
+  - command: "bloodyAD add shadowCredentials --help"
+    purpose: "add shadowCredentials sub-action: positional <target>; optional --path /session/<name>.pem for cert output"
+  - command: "bloodyAD add dnsRecord --help"
+    purpose: "add dnsRecord sub-action: positional <name> <data>; optional --dnstype, --zone, --ttl, --port, --priority, --weight, --preference, --forest"
 
-  get_trusts:
-    description: "Enumerate all Active Directory trust relationships"
-    when_to_use: "To discover inter-domain and inter-forest trust relationships for lateral movement paths"
-    required_ports: [389, 636]
-    params:
-      host: { type: string, required: true, description: "DC hostname or IP" }
-      domain: { type: string, required: true, description: "AD domain name" }
-      username: { type: string, description: "Auth username" }
-      password: { type: string, description: "Auth password or hash" }
-      kerberos: { type: boolean, default: false, description: "Use Kerberos auth" }
-      ccache_path: { type: string, description: "Path to ccache file" }
-      certificate: { type: string, description: "Certificate auth: 'key_path:cert_path' for PKINIT after ADCS abuse" }
-      format: { type: string, enum: [b64, hex, aes, rc4, default], description: "Format for --password or -k keyfile" }
-      extra_args: { type: string, description: "Additional bloodyAD flags as a single string" }
-
-  remove_genericall:
-    description: "Remove GenericAll ACE from a target (cleanup)"
-    when_to_use: "Post-exploitation cleanup — remove the ACE you added"
-    required_ports: [389, 636]
-    params:
-      host: { type: string, required: true, description: "DC hostname or IP" }
-      domain: { type: string, required: true, description: "AD domain name" }
-      username: { type: string, description: "Auth username" }
-      password: { type: string, description: "Auth password or hash" }
-      kerberos: { type: boolean, default: false, description: "Use Kerberos auth" }
-      ccache_path: { type: string, description: "Path to ccache file" }
-      certificate: { type: string, description: "Certificate auth: 'key_path:cert_path' for PKINIT after ADCS abuse" }
-      format: { type: string, enum: [b64, hex, aes, rc4, default], description: "Format for --password or -k keyfile" }
-      target: { type: string, required: true, description: "Target object" }
-      trustee: { type: string, required: true, description: "Trustee to remove" }
-      extra_args: { type: string, description: "Additional bloodyAD flags as a single string" }
-
-  remove_rbcd:
-    description: "Remove RBCD delegation (cleanup)"
-    when_to_use: "Post-exploitation cleanup — remove the RBCD entry you added"
-    required_ports: [389, 636]
-    params:
-      host: { type: string, required: true, description: "DC hostname or IP" }
-      domain: { type: string, required: true, description: "AD domain name" }
-      username: { type: string, description: "Auth username" }
-      password: { type: string, description: "Auth password or hash" }
-      kerberos: { type: boolean, default: false, description: "Use Kerberos auth" }
-      ccache_path: { type: string, description: "Path to ccache file" }
-      certificate: { type: string, description: "Certificate auth: 'key_path:cert_path' for PKINIT after ADCS abuse" }
-      format: { type: string, enum: [b64, hex, aes, rc4, default], description: "Format for --password or -k keyfile" }
-      target: { type: string, required: true, description: "Target machine" }
-      service: { type: string, required: true, description: "Service account to remove" }
-      extra_args: { type: string, description: "Additional bloodyAD flags as a single string" }
-
-  remove_group_member:
-    description: "Remove a member from a group (cleanup)"
-    when_to_use: "Post-exploitation cleanup — remove the user you added"
-    required_ports: [389, 636]
-    params:
-      host: { type: string, required: true, description: "DC hostname or IP" }
-      domain: { type: string, required: true, description: "AD domain name" }
-      username: { type: string, description: "Auth username" }
-      password: { type: string, description: "Auth password or hash" }
-      kerberos: { type: boolean, default: false, description: "Use Kerberos auth" }
-      ccache_path: { type: string, description: "Path to ccache file" }
-      certificate: { type: string, description: "Certificate auth: 'key_path:cert_path' for PKINIT after ADCS abuse" }
-      format: { type: string, enum: [b64, hex, aes, rc4, default], description: "Format for --password or -k keyfile" }
-      group: { type: string, required: true, description: "Target group" }
-      member: { type: string, required: true, description: "Member to remove" }
-      extra_args: { type: string, description: "Additional bloodyAD flags as a single string" }
-
-  remove_shadow_credentials:
-    description: "Remove shadow credentials (Key Credentials) from a target (cleanup)"
-    when_to_use: "Post-exploitation cleanup — remove the shadow credentials you added"
-    required_ports: [389, 636]
-    params:
-      host: { type: string, required: true, description: "DC hostname or IP" }
-      domain: { type: string, required: true, description: "AD domain name" }
-      username: { type: string, description: "Auth username" }
-      password: { type: string, description: "Auth password or hash" }
-      kerberos: { type: boolean, default: false, description: "Use Kerberos auth" }
-      ccache_path: { type: string, description: "Path to ccache file" }
-      certificate: { type: string, description: "Certificate auth: 'key_path:cert_path' for PKINIT after ADCS abuse" }
-      format: { type: string, enum: [b64, hex, aes, rc4, default], description: "Format for --password or -k keyfile" }
-      target: { type: string, required: true, description: "Target account" }
-      key: { type: string, description: "Specific key identifier to remove" }
-      extra_args: { type: string, description: "Additional bloodyAD flags as a single string" }
-
-  remove_dcsync:
-    description: "Remove DCSync rights from a principal (cleanup)"
-    when_to_use: "Post-exploitation cleanup — remove the DCSync rights you granted"
-    required_ports: [389, 636]
-    params:
-      host: { type: string, required: true, description: "DC hostname or IP" }
-      domain: { type: string, required: true, description: "AD domain name" }
-      username: { type: string, description: "Auth username" }
-      password: { type: string, description: "Auth password or hash" }
-      kerberos: { type: boolean, default: false, description: "Use Kerberos auth" }
-      ccache_path: { type: string, description: "Path to ccache file" }
-      certificate: { type: string, description: "Certificate auth: 'key_path:cert_path' for PKINIT after ADCS abuse" }
-      format: { type: string, enum: [b64, hex, aes, rc4, default], description: "Format for --password or -k keyfile" }
-      trustee: { type: string, required: true, description: "Principal to remove DCSync from" }
-      extra_args: { type: string, description: "Additional bloodyAD flags as a single string" }
-
-  remove_uac:
-    description: "Remove UAC flags from a user/computer object (cleanup)"
-    when_to_use: "Post-exploitation cleanup — remove the UAC flags you added"
-    required_ports: [389, 636]
-    params:
-      host: { type: string, required: true, description: "DC hostname or IP" }
-      domain: { type: string, required: true, description: "AD domain name" }
-      username: { type: string, description: "Auth username" }
-      password: { type: string, description: "Auth password or hash" }
-      kerberos: { type: boolean, default: false, description: "Use Kerberos auth" }
-      ccache_path: { type: string, description: "Path to ccache file" }
-      certificate: { type: string, description: "Certificate auth: 'key_path:cert_path' for PKINIT after ADCS abuse" }
-      format: { type: string, enum: [b64, hex, aes, rc4, default], description: "Format for --password or -k keyfile" }
-      target: { type: string, required: true, description: "Target object" }
-      flags: { type: array, required: true, description: "UAC flags to remove" }
-      extra_args: { type: string, description: "Additional bloodyAD flags as a single string" }
-
-  remove_dns_record:
-    description: "Remove a DNS record from the AD-integrated DNS zone (cleanup)"
-    when_to_use: "Post-exploitation cleanup — remove DNS records you added, or to remove legitimate records for MITM"
-    required_ports: [389, 636]
-    params:
-      host: { type: string, required: true, description: "DC hostname or IP" }
-      domain: { type: string, required: true, description: "AD domain name" }
-      username: { type: string, description: "Auth username" }
-      password: { type: string, description: "Auth password or hash" }
-      kerberos: { type: boolean, default: false, description: "Use Kerberos auth" }
-      ccache_path: { type: string, description: "Path to ccache file" }
-      certificate: { type: string, description: "Certificate auth: 'key_path:cert_path' for PKINIT after ADCS abuse" }
-      format: { type: string, enum: [b64, hex, aes, rc4, default], description: "Format for --password or -k keyfile" }
-      name: { type: string, required: true, description: "DNS record name (hostname)" }
-      data: { type: string, required: true, description: "DNS record data to remove" }
-      dnstype: { type: string, enum: [A, AAAA, CNAME, MX, PTR, SRV, TXT], default: "A", description: "DNS record type" }
-      zone: { type: string, description: "DNS zone (default: domain zone)" }
-      ttl: { type: integer, description: "TTL in seconds" }
-      port: { type: integer, description: "Listening port of the service (SRV records only)" }
-      priority: { type: integer, description: "Priority of a DNS SRV record" }
-      weight: { type: integer, description: "Weight of a DNS SRV record" }
-      preference: { type: integer, description: "MX record preference" }
-      forest: { type: boolean, default: false, description: "Remove DNS record from forest instead of domain" }
-      extra_args: { type: string, description: "Additional bloodyAD flags as a single string" }
-
-  remove_object:
-    description: "Delete an AD object entirely (user, computer, group, etc.)"
-    when_to_use: "Post-exploitation cleanup — delete objects you created (machine accounts, users). Requires Delete permission on the object."
-    required_ports: [389, 636]
-    params:
-      host: { type: string, required: true, description: "DC hostname or IP" }
-      domain: { type: string, required: true, description: "AD domain name" }
-      username: { type: string, description: "Auth username" }
-      password: { type: string, description: "Auth password or hash" }
-      kerberos: { type: boolean, default: false, description: "Use Kerberos auth" }
-      ccache_path: { type: string, description: "Path to ccache file" }
-      certificate: { type: string, description: "Certificate auth: 'key_path:cert_path' for PKINIT after ADCS abuse" }
-      format: { type: string, enum: [b64, hex, aes, rc4, default], description: "Format for --password or -k keyfile" }
-      target: { type: string, required: true, description: "sAMAccountName, DN, GUID or SID of the object to delete" }
-      extra_args: { type: string, description: "Additional bloodyAD flags as a single string" }

@@ -15,7 +15,7 @@ RUN apt-get update && \
         foremost \
         steghide \
         libimage-exiftool-perl \
-        python3 python3-pip python3-venv && \
+        python3-full && \
     rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app

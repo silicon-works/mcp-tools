@@ -1,18 +1,209 @@
 name: trufflehog
+kind: cli
+binary: trufflehog
+# TruffleHog v3 — Truffle Security's flagship secret/credential discovery tool.
+# Single binary `trufflehog` with a SUB-COMMAND architecture (cobra-style):
+#
+#   trufflehog <subcommand> [flags] [target]
+#
+# Sub-commands (one of):
+#
+#   git          <repo-url-or-path>     # scan git repo (URL or local path)
+#                                       # — clones if URL, scans every commit
+#   github       --repo=<url>|--org=<o> # scan GitHub repo or whole org
+#   gitlab       --repo=<url> --token=. # scan GitLab repo
+#   filesystem   <path>                 # scan a local filesystem path
+#   fs           <path>                 # alias for filesystem
+#   s3           --bucket=<b>           # scan an S3 bucket's contents
+#   gcs          --bucket=<b>           # scan a Google Cloud Storage bucket
+#   docker       --image=<img>          # scan a Docker image
+#   huggingface  --model=<m>|--space=<s>|--user=<u>  # scan an HF resource
+#   postman      --token=<t>            # scan Postman collections
+#   circleci     --token=<t>            # scan CircleCI projects
+#   jenkins      --url=<url>            # scan a Jenkins server
+#   syslog       --address=<addr>       # listen on syslog stream
+#   stdin                               # scan from stdin
+#   git-history-scan                    # alternate git scanner (rarely used)
+#   --help / help                       # help
+#
+# Argv form for the most-common sub-commands:
+#
+#   trufflehog git
+#       [--branch <name>]              # restrict to a specific branch
+#       [--since-commit <sha>]         # only commits AFTER this SHA
+#       [--max-depth <int>]            # max commit depth (default unlimited)
+#       [--bare]                       # treat path as a bare git repo
+#       [--include-paths <regex>]      # whitelist file path regex
+#       [--exclude-paths <regex>]      # blacklist file path regex
+#       [--include-detectors <list>]   # whitelist detector names
+#       [--exclude-detectors <list>]   # blacklist detector names
+#       [--head <sha>]                 # set HEAD ref for scan
+#       [--config <file>]              # custom detector config (YAML)
+#       [--json]                       # NDJSON output (one obj per line)
+#       [--no-verification]            # skip live cred validation
+#       [--only-verified]              # filter to verified-only (forces verify)
+#       [--filter-unverified]          # drop unverified hits
+#       [--filter-entropy <float>]     # drop hits below entropy threshold
+#       [--allow-verification-overlap] # allow detector overlap
+#       [--no-update]                  # skip self-update + detector update
+#       [--archive-max-size <size>]    # max archive size to traverse
+#       [--archive-max-depth <int>]    # max archive recursion depth
+#       [--concurrency <int>]          # detector workers (default 8)
+#       [--debug] [--trace] [--profile]
+#       [--no-color]
+#       <repo-url-or-path>             # LAST positional — git URL or local path
+#
+#   trufflehog filesystem <path>       — same flags, target is a path
+#   trufflehog github --repo=<url>     — target lives inside the flag VALUE
+#   trufflehog github --org=<org>      — target = org name (also flag value)
+#   trufflehog s3 --bucket=<bucket>    — target = bucket (flag value)
+#   trufflehog gcs --bucket=<bucket>   — target = bucket (flag value)
+#   trufflehog docker --image=<image>  — target = image (flag value)
+#   trufflehog huggingface --model=<m> — target = model (flag value)
+#
+# Output: NDJSON (`--json`) — one JSON object per line. Each finding has
+# {DetectorType, DetectorName, Verified, Raw, Redacted, SourceMetadata}.
+# Stable schema across v3.x. Default text output is human-readable but hard to
+# parse — always use `--json` for tooling.
+#
+# Verification: by default trufflehog ATTEMPTS LIVE VERIFICATION of each
+# detected secret by hitting the upstream service (e.g., AWS sts:GetCallerIdentity
+# for AWS keys, GitHub /user for GitHub tokens). This is FAST and LOW-NOISE
+# (single-request per secret) but IS A LIVE CALL — may be detected by the
+# target's logs. Use `--no-verification` for offline-only static analysis.
+#
+# Single-binary tool. Source code path: tools/trufflehog/mcp-server.py — the
+# legacy method handlers (scan_git, scan_filesystem, scan_s3) auto-inherit
+# run_cli from BaseMCPServer (mcp-common 0.3.0); kind:cli is the new default.
+# The three legacy methods are preserved as the rollback path per SKILL #21.
 version: "3.0"
-description: "Secret and credential discovery via TruffleHog v3 — scans git repos, filesystems, S3 buckets, and Docker images for 800+ credential types with auto-verification. 3 methods: scan_git (scan git repo history for leaked AWS keys, API tokens, passwords, private keys), scan_filesystem (scan directories for secrets in config files), scan_s3 (scan S3 bucket contents for leaked credentials). Auto-verifies discovered credentials by attempting authentication. For exploit database search use searchsploit. For S3 bucket discovery use s3scanner."
+description: >
+  Secret and credential discovery via TruffleHog v3 — Truffle Security's
+  flagship deep-scanner for leaked credentials. Single binary with a
+  SUB-COMMAND architecture covering: git history scans (every commit, every
+  branch), filesystem scans (config files, env files, dumps), GitHub/GitLab
+  repo and org scans (via API), Docker image layer scans, S3 / GCS bucket
+  content scans, and CI/CD-platform scans (CircleCI, Jenkins, Postman,
+  Hugging Face). 800+ credential detectors with optional LIVE verification
+  against the upstream service (AWS, GitHub, Slack, Stripe, etc.).
+
+  Argv form is sub-command first:
+
+    trufflehog <subcmd> [flags] [target]
+
+  Common sub-commands:
+
+    git          <repo-url-or-path>      # git history scan
+    filesystem   <path>                  # local fs scan (alias: fs)
+    github       --repo=<url> | --org=<o> # GitHub via API
+    gitlab       --repo=<url> --token=.  # GitLab via API
+    s3           --bucket=<bucket>       # S3 bucket contents
+    gcs          --bucket=<bucket>       # GCS bucket contents
+    docker       --image=<image>         # Docker image layers
+    huggingface  --model=<m>             # HuggingFace model/space/user
+    postman      --token=<t>             # Postman collections
+    circleci     --token=<t>             # CircleCI builds
+    jenkins      --url=<url>             # Jenkins server
+    syslog       --address=<addr>       # listen on syslog stream
+
+  Universal flags: `--json` (NDJSON output), `--only-verified` (filter +
+  forces live verify), `--no-verification` (offline only), `--config <file>`
+  (custom detector YAML), `--include-paths <regex>` / `--exclude-paths
+  <regex>` (path filter), `--include-detectors <list>` / `--exclude-detectors
+  <list>` (detector filter), `--filter-entropy <float>` (entropy threshold),
+  `--filter-unverified`, `--allow-verification-overlap`, `--archive-max-size
+  <size>`, `--archive-max-depth <int>`, `--concurrency <int>` (default 8),
+  `--no-update` (disable self + detector update), `--debug`, `--trace`,
+  `--profile`, `--no-color`.
+
+  Per-subcommand: `git` adds `--branch`, `--since-commit`, `--max-depth`,
+  `--bare`, `--head`. `github` adds `--repo`, `--org`, `--token`,
+  `--include-forks`, `--include-members`, `--endpoint` (for GHE), `--issue-comments`,
+  `--pr-comments`, `--gist-comments`. `gitlab` adds `--repo`, `--token`,
+  `--include-paths`. `s3` adds `--bucket`, `--key`, `--secret`, `--role-arn`,
+  `--cloud-environment`. `docker` adds `--image`. `huggingface` adds
+  `--model`, `--space`, `--user`, `--token`. `postman` / `circleci` add
+  `--token` (+ `--workspace`, `--collection` for postman).
+
+  Verification: by default LIVE verifies each hit (attempts authentication
+  against the upstream service). Useful for high-signal triage but may be
+  detected by the target's logging / DLP. Use `--no-verification` for
+  offline-only static analysis. `--only-verified` keeps only confirmed-valid
+  creds (forces verification, can't combine with `--no-verification`).
+
+  Detector updates: trufflehog auto-updates its own binary AND its detector
+  set on launch. Disable with `--no-update`. The container ships with a
+  pinned binary; auto-update is fine in most engagements but `--no-update`
+  is recommended for reproducibility / air-gapped runs.
+
+  Feature 28 dynamic recipes are RETIRED for the kind:cli path — the LLM
+  writes argv directly. Recipes still load for legacy method calls
+  (scan_git, scan_filesystem, scan_s3) if /session/tool_recipes/trufflehog/
+  exists, but they're a dead branch under run_cli (REQ-TR-016).
+
 image: "ghcr.io/silicon-works/mcp-tools-trufflehog:latest"
 image_size_mb: 400
-timeout_seconds: 600
+
+# Dual-clock model — trufflehog scans CAN be very long-running:
+#   - a multi-thousand-commit git repo with deep history easily spans 10-30 min
+#   - a GitHub org with hundreds of repos (`--org`) can take 1-2 h
+#   - an S3 bucket with millions of objects can take hours
+#   - a HuggingFace user with many models likewise
+# Idle timeout covers the longest reasonable silence between detector batches
+# (the per-batch verification phase can be silent for several minutes when
+# many secrets are queued for live-verification against rate-limited APIs).
+idle_timeout_seconds: 600       # 10 min silence == wedged API verifier
+max_runtime_seconds: 7200       # 2 h hard cap — large org / bucket scans
+timeout_seconds: 7200
 
 capabilities:
   - secret_scanning
   - credential_discovery
   - git_history_analysis
   - s3_scanning
+  - docker_image_scanning
+  - github_org_scanning
 
 phases:
   - reconnaissance
+  - post_exploitation
+
+routing:
+  use_for:
+    - "scan a git repository (local or remote URL) for leaked credentials across all commits"
+    - "deep-scan git history for secrets that were committed and later removed"
+    - "scan a GitHub repo or whole org for leaked secrets via API"
+    - "scan a GitLab repo for leaked secrets via API"
+    - "scan a Docker image for leaked credentials in layers and config"
+    - "scan an S3 bucket's contents for leaked credentials and sensitive data"
+    - "scan a Google Cloud Storage bucket's contents for leaked credentials"
+    - "scan a Hugging Face model, space, or user repo for leaked credentials"
+    - "scan a filesystem directory for leaked secrets in config files (.env, .conf, .ini, .yaml)"
+    - "verify discovered credentials by attempting live authentication"
+    - "find leaked AWS keys, GitHub tokens, Slack tokens, Stripe keys, private keys, JWT tokens, database connection strings"
+  never_use_for:
+    - "exploit database search (use searchsploit)"
+    - "S3 bucket discovery / brute-force enumeration (use s3scanner — trufflehog scans CONTENTS, not discovers buckets)"
+    - "web vulnerability scanning (use nuclei)"
+    - "password cracking (use hashcat or john)"
+    - "container image vulnerability scanning (use trivy — trufflehog only finds secrets in images, not CVEs)"
+    - "IaC misconfiguration scanning (use trivy config — trufflehog only finds secrets in IaC files)"
+  triggers:
+    - "trufflehog"
+    - "secret scanning"
+    - "credential scanning"
+    - "leaked credentials"
+    - "leaked secrets"
+    - "API key scan"
+    - "git secrets"
+    - "secret detection"
+    - "credential discovery"
+    - "leaked AWS keys"
+    - "leaked tokens"
+    - "GitHub org secret scan"
+    - "S3 bucket secret scan"
+    - "docker image secrets"
+  prefer_over: []
 
 requirements:
   network: true
@@ -22,121 +213,392 @@ resources:
   memory_mb: 512
   cpu: 1.0
 
-routing:
-  use_for:
-    - "scan git repositories for leaked credentials (AWS keys, API tokens, passwords)"
-    - "find secrets in filesystem directories and config files"
-    - "scan S3 buckets for leaked credentials and sensitive data"
-    - "detect leaked private keys, database connection strings, and API tokens"
-    - "verify discovered credentials by attempting authentication"
-  never_use_for:
-    - "exploit database search (use searchsploit)"
-    - "S3 bucket discovery/brute-force (use s3scanner — trufflehog scans CONTENTS, not discovers buckets)"
-    - "web vulnerability scanning (use nuclei)"
-    - "password cracking (use hashcat or john)"
-  triggers:
-    - trufflehog
-    - secret scanning
-    - credential scanning
-    - leaked credentials
-    - leaked secrets
-    - API key scan
-    - git secrets
-    - secret detection
-  prefer_over: []
+environment:
+  GITHUB_TOKEN:
+    description: "Optional GitHub PAT for `trufflehog github` sub-command. Required for org scans, private repos, and to lift the unauthenticated rate-limit ceiling. Alternative to --token on the command line (preferred — keeps token out of argv)."
+    required: false
+  GITLAB_TOKEN:
+    description: "GitLab PAT for `trufflehog gitlab` sub-command. Required for private repos and authenticated rate-limit. Alternative to --token."
+    required: false
+  AWS_ACCESS_KEY_ID:
+    description: "AWS credentials for `trufflehog s3` sub-command. Read-only S3 access (s3:ListBucket + s3:GetObject) is sufficient. Alternative to --key."
+    required: false
+  AWS_SECRET_ACCESS_KEY:
+    description: "Companion to AWS_ACCESS_KEY_ID."
+    required: false
+  AWS_SESSION_TOKEN:
+    description: "AWS STS session token (for assume-role / temporary credentials)."
+    required: false
+  AWS_DEFAULT_REGION:
+    description: "AWS region for `trufflehog s3` (default us-east-1)."
+    required: false
+  GOOGLE_APPLICATION_CREDENTIALS:
+    description: "Path inside the container to a GCP service-account JSON file for `trufflehog gcs`. Mount via /session/."
+    required: false
 
 see_also:
   - tool: git-dumper
-    reason: Use git-dumper to extract a repo from an exposed .git directory, then use trufflehog scan_git on the extracted repo for automated secret detection.
+    reason: "Use git-dumper to extract a repo from an exposed .git directory (e.g., found via web enum), then run `trufflehog git /session/extracted` to scan the recovered history for credentials."
   - tool: s3scanner
-    reason: Use s3scanner to discover and test S3 bucket permissions. Use trufflehog scan_s3 to scan bucket contents for leaked secrets.
+    reason: "s3scanner discovers S3 buckets and tests permissions. Once you have read access, use `trufflehog s3 --bucket=<name>` to scan the bucket contents for leaked secrets."
+  - tool: trivy
+    reason: "trivy's `--scanners secret` covers a working tree + image filesystem only (not git history). Use trivy for vulns + IaC + image-level secrets, and trufflehog for deep-history secret discovery on git repos."
   - tool: aws
-    reason: After trufflehog finds AWS credentials, use aws tool to enumerate and exploit the AWS account.
+    reason: "After trufflehog finds AWS credentials and verifies them, use the `aws` tool to enumerate the AWS account (IAM, S3, EC2, etc.) and continue the kill chain."
+  - tool: nuclei
+    reason: "When trufflehog finds a leaked API key for a known service (e.g., a Slack webhook URL or a Twilio token), use nuclei templates to validate / exploit the access at scale."
 
-methods:
-  scan_git:
-    description: "Scan a git repository for leaked secrets across all commits. Detects 800+ credential types including AWS keys, API tokens, passwords, private keys, database connection strings. Auto-verifies by attempting authentication."
-    when_to_use: "After cloning or dumping a git repo (via git-dumper or git clone) — scan the entire commit history for credentials that may have been committed and later removed (they persist in git history). Also works on remote GitHub/GitLab URLs."
-    params:
-      uri:
-        type: string
-        required: true
-        description: "Git repo — local path (/session/repo) or remote URL (https://github.com/org/repo)."
-      no_verification:
-        type: boolean
-        default: false
-        description: "Skip auto-verification (faster but no confirmation of credential validity)."
-      branch:
-        type: string
-        description: "Specific branch to scan (default: all branches)."
-      max_depth:
-        type: integer
-        description: "Maximum commit depth to scan."
-      timeout:
-        type: integer
-        default: 300
-        description: "Scan timeout in seconds."
-    returns:
-      secrets:
-        type: array
-        description: "Found secrets, each with: detector_type, verified, raw, source (file, commit, line)."
-      total_found:
-        type: integer
-        description: "Total secrets found."
-      verified_count:
-        type: integer
-        description: "Secrets confirmed valid by auto-verification."
+# ── kind:cli specific sections ──────────────────────────────────────
 
-  scan_filesystem:
-    description: "Scan a filesystem directory for leaked secrets in files. Checks config files, scripts, logs, and other text files for credentials."
-    when_to_use: "On a compromised host — scan directories for credentials in config files (.env, .conf, .ini, .yaml, etc.). Also useful for scanning loot directories after data exfiltration."
-    params:
-      path:
-        type: string
-        required: true
-        description: "Directory path to scan."
-      no_verification:
-        type: boolean
-        default: false
-        description: "Skip auto-verification."
-      timeout:
-        type: integer
-        default: 300
-        description: "Scan timeout in seconds."
-    returns:
-      secrets:
-        type: array
-        description: "Found secrets with source file and line info."
-      total_found:
-        type: integer
-        description: "Total secrets found."
+target_extraction:
+  # trufflehog uses a SUB-COMMAND architecture: argv is `trufflehog <subcmd>
+  # [flags] [target]`. The sub-command (git / filesystem / github / gitlab /
+  # s3 / gcs / docker / huggingface / postman / circleci / jenkins /
+  # syslog) is itself a positional argument. The "target" lives in one of
+  # several places depending on sub-command:
+  #
+  #   trufflehog git <repo-url-or-path>
+  #   trufflehog filesystem <path>
+  #     ──> last positional is the target.
+  #
+  #   trufflehog github --repo=<url>
+  #   trufflehog github --org=<org>
+  #     ──> target lives inside a flag VALUE (--repo or --org).
+  #
+  #   trufflehog s3 --bucket=<bucket>
+  #   trufflehog gcs --bucket=<bucket>
+  #     ──> target = bucket name (flag value).
+  #
+  #   trufflehog docker --image=<image>
+  #     ──> target = image reference (flag value).
+  #
+  #   trufflehog huggingface --model=<m>|--space=<s>|--user=<u>
+  #     ──> target = HF resource (flag value).
+  #
+  #   trufflehog jenkins --url=<url>
+  #     ──> target = Jenkins URL (flag value).
+  #
+  #   trufflehog postman --token=<t>     # NO target in argv (token-scoped)
+  #   trufflehog circleci --token=<t>    # NO target in argv (token-scoped)
+  #     ──> scope is the API token; no positional / repo target.
+  #
+  # Approach: combine `flag_value` rules (one per "target-bearing" flag)
+  # with `last_non_flag_positional` as the fallback for positional-shape
+  # sub-commands (git, filesystem). Precedence: flag_value rules first
+  # (more specific), then last_non_flag_positional.
+  #
+  # For postman / circleci (no positional, token-scoped), all rules fall
+  # through to null target. The plugin permits null-target calls (treated
+  # as informational / non-engagement-target — the LLM is responsible for
+  # providing explicit consent for token-scoped scans via engagement state).
+  - rule: "flag_value"
+    flag: "--repo"
+    parse_as: "raw"
+  - rule: "flag_value"
+    flag: "--org"
+    parse_as: "raw"
+  - rule: "flag_value"
+    flag: "--bucket"
+    parse_as: "raw"
+  - rule: "flag_value"
+    flag: "--image"
+    parse_as: "raw"
+  - rule: "flag_value"
+    flag: "--url"
+    parse_as: "raw"
+  - rule: "flag_value"
+    flag: "--model"
+    parse_as: "raw"
+  - rule: "flag_value"
+    flag: "--space"
+    parse_as: "raw"
+  - rule: "flag_value"
+    flag: "--user"
+    parse_as: "raw"
+  - rule: "flag_value"
+    flag: "--address"
+    parse_as: "raw"
+  - rule: "last_non_flag_positional"
+    parse_as: "raw"
+  - rule: "positional_match"
+    pattern: '^(?:(?:[a-zA-Z][a-zA-Z0-9+.-]*)://)?\[?([^\]:/?#\s]+|[0-9a-fA-F:]+)\]?(?::\d+)?(?:/.*)?$'
+    group: 1
+    parse_as: "raw"
 
-  scan_s3:
-    description: "Scan an S3 bucket's contents for leaked secrets. Requires read access to the bucket."
-    when_to_use: "When you have read access to an S3 bucket (via discovered AWS credentials or public bucket) — scan all objects for leaked credentials."
-    params:
-      bucket:
-        type: string
-        required: true
-        description: "S3 bucket name or URI (e.g., 'my-bucket' or 's3://my-bucket')."
-      aws_access_key:
-        type: string
-        description: "AWS access key for authenticated access."
-      aws_secret_key:
-        type: string
-        description: "AWS secret key."
-      aws_region:
-        type: string
-        default: "us-east-1"
-        description: "AWS region."
-      timeout:
-        type: integer
-        default: 600
-        description: "Scan timeout in seconds."
-    returns:
-      secrets:
-        type: array
-        description: "Found secrets with S3 object key info."
-      total_found:
-        type: integer
-        description: "Total secrets found."
+# trufflehog has no flag that shifts the target outside argv (no --input or
+# --target-list-file). All sub-commands keep the target either in argv as a
+# positional or inside a target-bearing flag, both of which scope validation
+# can reach.
+reject_flags: []
+reject_flags_reason: >
+  trufflehog has no flag that puts the engagement target outside argv. All
+  scope-relevant identifiers (--repo, --org, --bucket, --image, --url, --model,
+  --space, --user) are flag values that target_extraction picks up via
+  `flag_value` rules; positional-shape sub-commands (git, filesystem) are
+  picked up via `last_non_flag_positional`.
+
+# Per-tool value-taking flags whose values must NOT be confused with
+# positional targets. Verified against `trufflehog --help`,
+# `trufflehog git --help`, `trufflehog github --help`, `trufflehog filesystem
+# --help`, `trufflehog s3 --help`, `trufflehog docker --help`,
+# `trufflehog huggingface --help`.
+value_flags:
+  # ── target-bearing flags (also extracted by flag_value rules) ──
+  - "--repo"
+  - "--org"
+  - "--bucket"
+  - "--image"
+  - "--url"
+  - "--model"
+  - "--space"
+  - "--user"
+  - "--address"
+  - "--endpoint"               # GitHub Enterprise / GitLab self-hosted base URL
+  # ── auth ──
+  - "--token"
+  - "--username"
+  - "--password"
+  - "--key"                    # AWS access key (s3)
+  - "--secret"                 # AWS secret key (s3)
+  - "--role-arn"               # AWS assume-role ARN (s3)
+  - "--session-token"          # AWS STS session token (s3)
+  - "--cloud-environment"      # s3 / gcs cloud env name
+  # ── git / repo specific ──
+  - "--branch"
+  - "--since-commit"
+  - "--max-depth"
+  - "--head"                   # git ref to use as HEAD
+  - "--config"                 # custom detector config YAML
+  # ── path / detector filters ──
+  - "--include-paths"
+  - "--exclude-paths"
+  - "--include-detectors"
+  - "--exclude-detectors"
+  - "--detectors"              # legacy alias
+  # ── filtering / entropy ──
+  - "--filter-entropy"
+  - "--results"                # legacy: filter by verified/unverified/unknown
+  # ── archive traversal ──
+  - "--archive-max-size"
+  - "--archive-max-depth"
+  # ── perf / output ──
+  - "--concurrency"
+  - "--log-level"
+  - "--log-file"
+  # ── github / gitlab / postman / circleci specific ──
+  - "--workspace"              # postman: workspace ID
+  - "--collection"             # postman: collection ID
+  - "--workspace-paths"
+  - "--include-issue-comments"
+  - "--include-pull-request-comments"
+  - "--include-gist-comments"
+  - "--include-members"        # github: scan org member repos
+  - "--include-forks"          # github: include forked repos
+  - "--include-repos"          # github: include filter
+  - "--exclude-repos"          # github: exclude filter
+  - "--object-filter"          # generic object filter
+  # ── jenkins / syslog ──
+  - "--cert"                   # jenkins TLS cert
+  - "--protocol"               # syslog protocol (tcp/udp/tls)
+  - "--family"                 # syslog address family
+  - "--format"                 # syslog format
+  # ── boolean / no-arg flags listed for parser correctness (DSL skips harmlessly) ──
+  - "--json"
+  - "--only-verified"
+  - "--no-verification"
+  - "--filter-unverified"
+  - "--allow-verification-overlap"
+  - "--no-update"
+  - "--no-color"
+  - "--debug"
+  - "--trace"
+  - "--profile"
+  - "--bare"                   # git: treat path as bare repo
+  - "--print-avg-detector-time"
+  - "--no-fail"                # don't fail run on errors
+  - "--include-detectors-by-id"
+  - "--unauthenticated"        # github: scan public repos without auth
+  - "-h"
+  - "--help"
+  - "--version"
+  - "-v"
+
+usage_patterns:
+  # ── default / opening probes ──────────────────────────────────────
+  - name: "Filesystem secret scan (post-exploitation captured tree)"
+    command: "filesystem /session/source --json --only-verified --no-update"
+    when: "Scan a captured project / config / dump tree for VERIFIED leaked credentials. `/session/source` is a directory you've already populated (via git clone, scp, exfil, or git-dumper). `--only-verified` filters to creds that trufflehog confirmed valid via live API call (high signal — but does generate a verification request to each upstream service). `--no-update` pins the detector set to the container build for reproducibility. Drop `--only-verified` if you want unverified hits as leads. NDJSON output goes to stdout."
+
+  - name: "Git history scan (remote URL — clone + scan all commits)"
+    command: "git https://github.com/example/repo.git --json --only-verified --no-update"
+    when: "Deep-scan a public git repo's full commit history for credentials that may have been committed and later removed (they persist in git history forever). trufflehog clones the repo to a temp dir and walks every branch + every commit. Replaces `git clone <url> && trufflehog filesystem <path>` (filesystem only sees the working tree, not history). For private repos via SSH, set up SSH keys first. Add `--branch <name>` to limit to one branch, `--since-commit <sha>` to scan only after a specific SHA."
+
+  - name: "Git history scan (local path — already-cloned repo)"
+    command: "git file:///session/source --json --only-verified --no-update"
+    when: "Scan a git repo that's already been cloned into /session/. The `file://` URL form forces git-mode (history walk) on a local directory; without `file://`, trufflehog interprets a local path as filesystem-mode (working tree only, no history). Use this AFTER `git clone` or `git-dumper` to get the full history scan rather than just the snapshot."
+
+  - name: "GitHub repo scan (via GitHub API)"
+    command: "github --repo=https://github.com/example/repo --json --only-verified --no-update"
+    when: "Scan a single GitHub repo via the GitHub API (no clone). Faster than `git` mode for shallow scans because the API returns commits+blobs directly. Set GITHUB_TOKEN env var (or `--token`) to scan private repos and lift the unauthenticated rate-limit. Add `--include-issue-comments`, `--include-pull-request-comments`, `--include-gist-comments` to also scan comment text. For GitHub Enterprise, add `--endpoint=https://github.example.com`."
+
+  - name: "GitHub org scan (every public+private repo in an org)"
+    command: "github --org=example-org --json --only-verified --no-update --include-members"
+    when: "Scan EVERY repo in a GitHub org. Requires GITHUB_TOKEN with org-read access for private repos. `--include-members` extends the scan to org-member personal repos (often a goldmine — devs commit secrets to personal projects). This is a LONG scan (large orgs have thousands of repos); budget hours. NDJSON streams as findings emerge — pipe to `tee /session/findings.ndjson` to persist. NOTE: stay within engagement scope — org-wide scans hit lots of repos."
+
+  - name: "Docker image secret scan (image layers + config)"
+    command: "docker --image=alpine:3.14 --json --only-verified --no-update"
+    when: "Scan a Docker image's layers, environment variables, and labels for leaked secrets. trufflehog pulls the image (or uses a local cached copy if available) and walks every layer's filesystem + the image config (env vars, labels, history). Useful for: (1) auditing your own pre-deploy images, (2) post-recon when a target's container image is reachable via a public registry. Pair with `trivy image` for CVE coverage."
+
+  - name: "S3 bucket secret scan (bucket contents)"
+    command: "s3 --bucket=my-bucket --json --only-verified --no-update"
+    when: "Scan every object in an S3 bucket for leaked credentials. Requires read access — set AWS_ACCESS_KEY_ID + AWS_SECRET_ACCESS_KEY env vars (or `--key` + `--secret`) for authenticated scans. For public buckets, no creds needed. NOTE: trufflehog scans bucket CONTENTS — for bucket DISCOVERY use s3scanner first. Large buckets (millions of objects) take hours; consider `--include-paths` regex to filter to high-value object key patterns (e.g., `^.*\\.(env|conf|ini|yaml|json|sh|sql|key|pem)$`)."
+
+  - name: "Google Cloud Storage bucket scan"
+    command: "gcs --bucket=my-bucket --json --only-verified --no-update"
+    when: "Same as S3 scan but for Google Cloud Storage. Set GOOGLE_APPLICATION_CREDENTIALS env var pointing at a GCP service-account JSON file mounted under /session/. For public buckets, no creds needed. Less common than S3 in pentest engagements but worth a try when the target is GCP-native."
+
+  - name: "Hugging Face model scan"
+    command: "huggingface --model=user/model-name --json --only-verified --no-update"
+    when: "Scan a Hugging Face model repo for leaked credentials. HF model repos are git LFS under the hood and frequently contain config files / training scripts / API tokens that devs commit accidentally. Use `--space=<space>` for a Spaces deployment or `--user=<user>` to scan all of a user's models. Public — no auth needed. Surprisingly fruitful for AI-focused engagements."
+
+  - name: "Filesystem scan (offline, no live verification)"
+    command: "filesystem /session/source --json --no-verification --no-update"
+    when: "Static analysis ONLY — `--no-verification` skips all live API calls. Use when stealth matters (target has DLP / cred-monitoring) or when you're air-gapped. Hits will be unverified — manual triage needed to confirm validity. Often a good FIRST PASS before a verified scan: identify candidate keys offline, then selectively verify the high-value ones manually."
+
+  - name: "Filesystem scan with custom detector config"
+    command: "filesystem /session/source --json --config /session/custom-detectors.yaml --no-update"
+    when: "Override or extend the built-in detector set with a custom YAML config. Useful for: (1) adding company-internal credential patterns (Bearer tokens, internal API key formats), (2) disabling noisy detectors that flood findings, (3) tuning entropy thresholds per detector. See https://docs.trufflesecurity.com/regex-detectors for the YAML schema."
+
+  - name: "Filesystem scan with path filters"
+    command: "filesystem /session/source --json --include-paths '\\.(env|conf|ini|yaml|json|sh|sql|key|pem|p12|pfx)$' --exclude-paths '(^|/)(\\.git|node_modules|vendor|venv|\\.cache)/' --only-verified --no-update"
+    when: "Filter scan to high-value file types and skip noisy directories. `--include-paths` whitelist is a Go regex (anchored matches use `^` / `$`); `--exclude-paths` blacklist runs first. Single-quoted to keep shell from expanding. Reduces scan time on huge trees by 10x+. Path patterns are file path within the scanned root, not absolute."
+
+  - name: "Help / version check"
+    command: "--help"
+    when: "Verify the current sub-command set, flag spelling, or version. Quick way to confirm `--only-verified` vs `--filter-unverified`, the `--json` flag presence, etc. Sub-command-specific help: `git --help`, `github --help`, `filesystem --help`, `s3 --help`, `docker --help`."
+
+output_formats:
+  - flag: "--json"
+    format: "ndjson"
+    preferred: true
+    notes: "Newline-delimited JSON — one JSON object per finding, written to stdout. Each object: {DetectorType, DetectorName, DecoderName, Verified, Raw, Redacted, ExtraData, SourceMetadata{Data{Git|Filesystem|S3|Github|...}}, SourceID, SourceType, SourceName}. Stable schema across v3.x. PREFERRED for tooling — pipe to `tee /session/findings.ndjson` to persist. Use `jq -c .` to filter."
+  - flag: "(default — no flag)"
+    format: "text"
+    preferred: false
+    notes: "Human-readable colored text output (one finding per block: Found verified result?, Detector Type, Decoder Type, Raw result, Source). Easy to read, hard to parse — never use for tooling. Combine with `--no-color` if you need clean text without ANSI escapes."
+
+common_options:
+  targeting:
+    - "SUB-COMMAND IS REQUIRED — the very first positional after `trufflehog` MUST be one of: git, github, gitlab, filesystem (alias: fs), s3, gcs, docker, huggingface, postman, circleci, jenkins, syslog, stdin, --help. `trufflehog /session/source` (no subcmd) errors with `Error: unknown command`."
+    - "TARGET LOCATION VARIES BY SUB-COMMAND: positional for `git` and `filesystem` (the URL/path is the LAST positional after the sub-command); flag value for `github` (`--repo` / `--org`), `s3` / `gcs` (`--bucket`), `docker` (`--image`), `huggingface` (`--model` / `--space` / `--user`), `jenkins` (`--url`); no target for `postman` / `circleci` (token-scoped — scope is the API token, no positional/flag target)."
+  filtering:
+    - "--only-verified: keep ONLY hits trufflehog confirmed valid via live verification. High signal but forces verification (live API calls to upstream)."
+    - "--no-verification: skip ALL live verification. Offline-safe / stealth. Hits are unverified — needs manual triage."
+    - "--filter-unverified: drop unverified hits (similar to --only-verified but doesn't force verification — useful when you want to filter the output of a default scan)."
+    - "--filter-entropy <float>: drop hits below an entropy threshold (default varies per detector). Useful to suppress detector noise."
+    - "--include-paths <regex>: Go regex of file paths to scan (whitelist)."
+    - "--exclude-paths <regex>: Go regex of file paths to skip (blacklist). Runs first."
+    - "--include-detectors <list>: comma-separated detector names to enable exclusively (e.g., `aws,github,slack`)."
+    - "--exclude-detectors <list>: comma-separated detector names to disable."
+  output:
+    - "--json: NDJSON to stdout. PREFERRED for tooling. Without it, output is human-readable text (hard to parse)."
+    - "--no-color: strip ANSI color codes from text output (does not affect --json)."
+    - "(no --output / -o flag): trufflehog writes to stdout only. Use shell redirect: `trufflehog ... > /session/findings.ndjson` or `| tee`."
+  perf:
+    - "--concurrency <int>: number of detector workers (default 8). Increase for big scans (16-32 on a beefy box). Decrease if hitting rate limits."
+    - "--archive-max-size <size>: max archive size to traverse (e.g., `100MB`). Default reasonable. Increase for engagements with big tarballs."
+    - "--archive-max-depth <int>: max recursion depth for nested archives. Default 5."
+    - "--no-update: skip self-update + detector update on launch. Pins to container build version. Recommended for reproducibility / air-gapped runs / faster startup."
+  auth:
+    - "--token <t>: GitHub PAT (github), GitLab PAT (gitlab), Postman token (postman), CircleCI token (circleci). Prefer env vars (GITHUB_TOKEN / GITLAB_TOKEN) to keep tokens out of argv."
+    - "--key / --secret: AWS access key + secret for s3. Prefer AWS_ACCESS_KEY_ID + AWS_SECRET_ACCESS_KEY env vars."
+    - "--role-arn: AWS assume-role ARN for s3 cross-account scans."
+    - "--endpoint <url>: GitHub Enterprise base URL (github subcmd) or GitLab self-hosted base URL (gitlab subcmd). E.g., `https://github.example.com`."
+
+gotchas:
+  - "SUB-COMMAND IS MANDATORY — every trufflehog invocation MUST start with one of `git`, `github`, `gitlab`, `filesystem` / `fs`, `s3`, `gcs`, `docker`, `huggingface`, `postman`, `circleci`, `jenkins`, `syslog`, `stdin`. `trufflehog /session/source` (forgetting `filesystem`) fails with `Error: unknown command \"/session/source\" for \"trufflehog\"`. Each sub-command has its own flag set; flags are NOT global between sub-commands."
+  - "TARGET SHAPE DEPENDS ON SUB-COMMAND — `git` / `filesystem` take a positional (URL or path); `github` / `gitlab` use `--repo` / `--org`; `s3` / `gcs` use `--bucket`; `docker` uses `--image`; `huggingface` uses `--model` / `--space` / `--user`; `jenkins` uses `--url`. Mixing them up gives unhelpful errors like `repository not found` or `path does not exist`."
+  - "`--only-verified` TRIGGERS LIVE CRED VERIFICATION — this is a LIVE CALL to the upstream service (AWS sts:GetCallerIdentity, GitHub /user, Slack auth.test, etc.) for EVERY detected secret. High signal but visible in the target's logs / DLP / WAF. Use `--no-verification` for stealth / offline-only static analysis. Cannot combine `--only-verified` with `--no-verification`."
+  - "`--no-verification` TURNS OFF ALL LIVE CHECKS — you'll get raw detector hits with no validity confirmation. Manual triage needed. Often a good FIRST PASS to identify candidates without alerting the target, then selectively verify high-value candidates manually."
+  - "AUTO-UPDATE IS ON BY DEFAULT — trufflehog updates BOTH its own binary and its detector set on every launch. This is fine in most engagements but adds startup latency and changes the scanner version mid-engagement. Use `--no-update` for: (1) reproducibility (pin to container-build version), (2) air-gapped runs, (3) faster startup. Auto-update fetches from GitHub releases — fails silently if blocked."
+  - "GITHUB ENTERPRISE NEEDS `--endpoint` — for GHE, pass `--endpoint=https://github.example.com` plus `--token=<PAT>`. Without `--endpoint`, trufflehog talks to api.github.com (the public GitHub) regardless of the repo URL. GitLab self-hosted likewise needs `--endpoint=https://gitlab.example.com` for the `gitlab` subcmd."
+  - "`git` SUB-CMD ACCEPTS URL OR LOCAL PATH BUT BEHAVES DIFFERENTLY — a HTTPS/SSH URL triggers a clone + scan-all-history. A local path is treated as filesystem-mode (working tree only, no history) UNLESS prefixed with `file://`. Use `git file:///session/source` to force history walk on a local directory."
+  - "`filesystem` SCANS WORKING TREE ONLY (no git history) — even if the path is a git repo, `filesystem` only sees the current working-tree files, not the commit history. Use the `git` sub-command (with `file://` for local paths) for full history coverage."
+  - "S3 / GCS REQUIRE READ ACCESS — `s3` reads via S3 ListBucket + GetObject; if creds lack `s3:GetObject` on the bucket the scan returns no findings (silently — no error). Verify creds with `aws s3 ls s3://<bucket>` first. Public buckets work without creds. For GCS, set GOOGLE_APPLICATION_CREDENTIALS to a service-account JSON path."
+  - "S3 BUCKET ARGV ACCEPTS BOTH FORMS — `--bucket=my-bucket` and `--bucket=s3://my-bucket` both work; trufflehog strips the `s3://` prefix internally. The legacy MCP wrapper auto-prepended `s3://` if missing; under kind:cli the LLM passes either form raw. Either is fine — they parse identically. Stick to bare bucket names in usage_patterns for consistency with the AWS SDK convention."
+  - "S3 / GCS SCANS CAN BE LONG — multi-million-object buckets take hours. Use `--include-paths '<regex>'` to filter to high-value object key patterns BEFORE the scan starts. The regex matches against object keys (paths within the bucket)."
+  - "NO `-o` / `--output` FLAG — trufflehog writes to stdout only. Use shell redirect: `trufflehog ... --json > /session/findings.ndjson`, or `| tee /session/findings.ndjson` to also display."
+  - "DETECTOR UPDATES VS REPRODUCIBILITY — without `--no-update`, two runs of trufflehog on the same target may produce DIFFERENT results because the detector set updated between runs. For engagement-grade reproducibility, ALWAYS pass `--no-update` and pin the binary version."
+  - "Feature 28 dynamic recipes are RETIRED for the kind:cli path — the LLM writes argv directly. Recipes still load for legacy method calls (scan_git, scan_filesystem, scan_s3) if /session/tool_recipes/trufflehog/ exists, but they're a dead branch under run_cli (REQ-TR-016)."
+
+failure_signatures:
+  # Layer-diverse signals (SKILL #11) — at least 6 distinct verifiable layers:
+  #   1. Network / DNS — hostname doesn't resolve, connection refused
+  #   2. Auth — 401 unauthorized, 403 forbidden (private repos, private buckets)
+  #   3. Repo / Path — repository not found, path does not exist, not a git repository
+  #   4. Argument — unknown sub-command, unknown flag, missing required flag
+  #   5. Verification — informational: individual cred verification failed (NOT a tool error)
+  #   6. Empty-result — informational: zero findings (NOT a tool error)
+  #   7. Rate-limit — GitHub / verification API throttle
+  #   8. Permission — S3 AccessDenied, GitHub forbidden
+  - signal: "connection refused"
+    remediation: "Network: TCP-level error reaching git remote, GitHub/GitLab API, or S3/GCS endpoint. Verify connectivity from inside the container with `nc -vz github.com 443` or equivalent. If air-gapped, prefer `filesystem` sub-cmd against a pre-cloned local copy."
+  - signal: "dial tcp"
+    remediation: "Network: Go-stdlib-formatted TCP error. Same root cause as `connection refused`. Check container DNS + outbound firewall. Common when a corporate proxy is required — set HTTP_PROXY / HTTPS_PROXY env vars."
+  - signal: "no such host"
+    remediation: "DNS: hostname did not resolve. Check container DNS with `getent hosts <host>` and `cat /etc/resolv.conf`. Common with typo'd repo URLs (e.g., github.cmo instead of github.com). For GitHub Enterprise / self-hosted GitLab, ensure the container has the right DNS / hosts entry."
+  - signal: "401 Unauthorized"
+    remediation: "Auth: GitHub / GitLab / cloud API returned 401. Set GITHUB_TOKEN / GITLAB_TOKEN env var (or `--token`). For GHE, also pass `--endpoint=https://<your-ghe>`. Verify the token has the required scopes (repo for private repos, read:org for org scans)."
+  - signal: "Forbidden"
+    remediation: "Auth: 403 — token is valid but lacks permission for the target. For org scans, the PAT needs `read:org`. For private repo scans, it needs `repo`. Check token scopes at https://github.com/settings/tokens."
+  - signal: "403 Forbidden"
+    remediation: "Auth: explicit 403. Same root cause as `Forbidden`. Common with org-archived repos or with GitHub apps that haven't been granted access to the org."
+  - signal: "AccessDenied"
+    remediation: "Auth (S3): IAM identity lacks s3:GetObject or s3:ListBucket on the target bucket. Verify with `aws s3 ls s3://<bucket>` first. Use `--role-arn` for cross-account scans where the assumed role has the right permissions."
+  - signal: "repository not found"
+    remediation: "Repo: GitHub returned 404 — the repo doesn't exist OR your token can't see it (private repo + insufficient scope). Verify the URL and the token scope. Try `git ls-remote <url>` to test reachability with the same creds."
+  - signal: "not a git repository"
+    remediation: "Path: the local path passed to `git` sub-cmd isn't a git repo (no .git directory or wrong format). Use `filesystem` sub-cmd for non-git paths, or run `git init` / `git clone` first to populate the path."
+  - signal: "path does not exist"
+    remediation: "Path: the positional path passed to `filesystem` doesn't exist inside the container. Verify with `ls -la <path>` from a bash call. /session/ paths must be created first by writing files into the container's session mount."
+  - signal: "no such file or directory"
+    remediation: "Path: alternate phrasing for path-not-found. Same remediation. May also indicate a config file (`--config <file>`) that doesn't exist in the container."
+  - signal: "Error: unknown command"
+    remediation: "Argument: typo in sub-command. Valid sub-commands: git, github, gitlab, filesystem (alias: fs), s3, gcs, docker, huggingface, postman, circleci, jenkins, syslog, stdin. Common typos: `scan` (not a subcmd), `git-history` (use `git`), `aws` (use `s3`). Check `trufflehog --help`."
+  - signal: "unknown flag"
+    remediation: "Argument: unsupported flag for the current sub-command (or trufflehog version). Flags are NOT global across sub-commands — `--bucket` only works in `s3`/`gcs`, `--repo` only in `github`/`gitlab`, etc. Run `trufflehog <subcmd> --help` to see the supported flag set."
+  - signal: "Error: required flag"
+    remediation: "Argument: a sub-command's required flag was omitted. E.g., `trufflehog s3` needs `--bucket`; `trufflehog github` needs `--repo` OR `--org`; `trufflehog docker` needs `--image`. Add the missing flag and rerun."
+  - signal: "verification failed"
+    remediation: "Verification (INFORMATIONAL — not a tool error): an individual detected secret failed live verification. With `--only-verified`, this hit is filtered out. Without it, the hit appears in output with `Verified: false`. Possible causes: cred is expired/revoked, network blocked the verifier, or detector matched a non-cred string."
+  - signal: "rate limit"
+    remediation: "Rate-limit: GitHub / GitLab / cloud API is throttling. For GitHub: an unauthenticated scan caps at 60 req/h — set GITHUB_TOKEN to lift to 5000/h. For org scans, even authenticated may hit hourly limits — split into multiple sessions or use `--concurrency 4` to slow it down."
+  - signal: "API rate limit exceeded"
+    remediation: "Rate-limit: GitHub-specific message. Same as above — set GITHUB_TOKEN, or wait for the hourly window to reset."
+  - signal: "context deadline exceeded"
+    remediation: "Timeout: a network call (clone, API request, verification) exceeded its internal timeout. Common with very slow registries / large repos. Retry with `--no-verification` to bypass verification timeouts, or reduce `--concurrency`."
+  - signal: "no secrets found"
+    remediation: "Empty-result (informational): scan completed cleanly with zero findings. Either the target genuinely has no leaked secrets OR `--only-verified` filtered out unverified candidates. Drop `--only-verified` to see unverified hits. NOT a failure."
+  - signal: "0 verified secrets"
+    remediation: "Empty-result (informational): same as above. If you want to confirm there's truly nothing, run again with `--no-verification` (you'll see all raw detector hits)."
+  - signal: "exit status 183"
+    remediation: "Exit-code 183 means findings were detected (trufflehog returns non-zero on findings to support CI gates). NOT a failure — JSON output to stdout will contain the actual findings. Confirm with `wc -l findings.ndjson`."
+
+help_commands:
+  - command: "--help"
+    purpose: "Top-level help — lists all sub-commands and global flags."
+  - command: "git --help"
+    purpose: "Git sub-command flag reference (most common — branch, since-commit, max-depth, bare, head)."
+  - command: "github --help"
+    purpose: "GitHub sub-command flag reference (--repo, --org, --token, --endpoint for GHE, --include-forks, --include-members, --include-issue-comments)."
+  - command: "filesystem --help"
+    purpose: "Filesystem sub-command flag reference (path filters, archive flags)."
+  - command: "s3 --help"
+    purpose: "S3 sub-command flag reference (--bucket, --key, --secret, --role-arn, --cloud-environment, --include-paths)."
+  - command: "docker --help"
+    purpose: "Docker sub-command flag reference (--image, layer scanning options)."
+  - command: "huggingface --help"
+    purpose: "HuggingFace sub-command flag reference (--model, --space, --user, --token)."
+  - command: "gitlab --help"
+    purpose: "GitLab sub-command flag reference (--repo, --token, --endpoint for self-hosted)."
+

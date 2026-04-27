@@ -35,10 +35,6 @@ ENV PATH="/app/venv/bin:$PATH"
 COPY packages/mcp-common /app/packages/mcp-common
 RUN pip install --no-cache-dir /app/packages/mcp-common
 
-# Install tool-specific dependencies
-COPY tools/hydra/requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
-
 # Copy MCP server code
 COPY tools/hydra/mcp-server.py .
 

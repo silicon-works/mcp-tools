@@ -7,13 +7,14 @@ LABEL org.opencontainers.image.source="https://github.com/silicon-works/mcp-tool
 LABEL org.opencontainers.image.description="nikto MCP server for OpenSploit"
 LABEL org.opencontainers.image.licenses="MIT"
 
-# Install nikto and Python
+# Install nikto + Python. Use python3-full not separate python3-pip/python3-venv —
+# Kali rolling occasionally has stale repo indexes that 404 on the discrete
+# packages but resolve python3-full cleanly. Same fix as impacket / ffuf / nuclei
+# Dockerfiles.
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
         nikto \
-        python3 \
-        python3-pip \
-        python3-venv && \
+        python3-full && \
     rm -rf /var/lib/apt/lists/* && \
     apt-get clean
 
@@ -27,10 +28,6 @@ ENV PATH="/app/venv/bin:$PATH"
 # Copy and install shared mcp-common package
 COPY packages/mcp-common /app/packages/mcp-common
 RUN pip install --no-cache-dir /app/packages/mcp-common
-
-# Install tool-specific dependencies
-COPY tools/nikto/requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy MCP server code
 COPY tools/nikto/mcp-server.py .

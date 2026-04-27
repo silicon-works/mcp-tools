@@ -15,10 +15,11 @@ RUN apt-get update && \
 
 WORKDIR /app
 
-# Download kerbrute Go binary (linux amd64)
+# Download kerbrute Go binary (linux amd64). Placed on PATH so run_cli can
+# exec it as `kerbrute` (the binary name declared in tool.yaml).
 RUN curl -fsSL https://github.com/ropnop/kerbrute/releases/download/v1.0.3/kerbrute_linux_amd64 \
-    -o /app/kerbrute && \
-    chmod +x /app/kerbrute
+    -o /usr/local/bin/kerbrute && \
+    chmod +x /usr/local/bin/kerbrute
 
 # Install mcp-common
 COPY packages/mcp-common /tmp/mcp-common

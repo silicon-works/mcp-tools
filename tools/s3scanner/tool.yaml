@@ -1,9 +1,143 @@
 name: s3scanner
+kind: cli
+binary: s3scanner
+# sa7mon/S3Scanner v3 (Go port) — confirmed via image inspection 2026-04-25.
+# Single binary (`s3scanner`) with a SIMPLE flag-based argv:
+#
+#   s3scanner -bucket <name> [flags]
+#   s3scanner -bucket-file <file> [flags]
+#   s3scanner -mq [flags]                    # token/config-scoped via RabbitMQ
+#
+# v3 dropped MANY flags from the older Python sa7mon/S3Scanner v2:
+# NO `-output-file`, `-output-format`, `-quiet`, `-region-list`, `-aws-id`,
+# `-aws-secret`, `-write-test`, `-permission-test`, `-include-empty` (those
+# all belonged to v2 Python). v3 is auth-via-config-file (config.yml in `.`,
+# `/etc/s3scanner/`, or `$HOME/.s3scanner/`) — there is no env-var-based AWS
+# auth and no argv-form AWS credential. For unauthenticated scans (the
+# default) no creds are needed; for `-provider custom` and for the optional
+# `-mq` (RabbitMQ) and `-db` (Postgres results sink) features, a YAML config
+# file is required.
+#
+# Full v3 flag set (verified `s3scanner --help` output):
+#
+#   INPUT (1 required):
+#     -bucket <string>      Single bucket name to check.
+#     -bucket-file <file>   File of bucket names to check (one per line).
+#     -mq                   Pull bucket names from RabbitMQ (config required).
+#
+#   OUTPUT:
+#     -db                   Save results to Postgres (config required).
+#     -json                 NDJSON output to stdout (one obj per bucket).
+#
+#   OPTIONS:
+#     -enumerate            Enumerate bucket objects (slow on large buckets).
+#     -provider <string>    aws | custom | digitalocean | dreamhost | gcp | linode.
+#                           `custom` requires config file.
+#     -threads <int>        Concurrent worker threads (default 4).
+#
+#   DEBUG:
+#     -verbose              Verbose logging.
+#     -version              Print version and exit.
+#
+# IMPORTANT: s3scanner uses Go's `flag` package (single-dash form),
+# `-bucket=<name>` and `-bucket <name>` both work. No `--bucket` (double-dash).
+#
+# Argv shape: `s3scanner [options] -bucket <name>` — there is NO positional
+# target. The bucket name is ALWAYS a flag value (`-bucket=<name>`).
+#
+# Output: `-json` produces one NDJSON object per bucket result, written to
+# stdout. Schema (verified live):
+#   {"bucket":{"name":<str>,"region":<str>,"exists":<int 0|1>,
+#              "date_scanned":<RFC3339>,"objects":<arr|null>,
+#              "objects_enumerated":<bool>,"provider":<str>,
+#              "num_objects":<int>,"bucket_size":<int>,
+#              "owner_id":<str>,"owner_display_name":<str>,
+#              "perm_auth_users_read":<int 0|1|2>,
+#              "perm_auth_users_write":<int 0|1|2>,
+#              "perm_auth_users_read_acl":<int 0|1|2>,
+#              "perm_auth_users_write_acl":<int 0|1|2>,
+#              "perm_auth_users_full_control":<int 0|1|2>,
+#              "perm_all_users_read":<int 0|1|2>,
+#              "perm_all_users_write":<int 0|1|2>,
+#              "perm_all_users_read_acl":<int 0|1|2>,
+#              "perm_all_users_write_acl":<int 0|1|2>,
+#              "perm_all_users_full_control":<int 0|1|2>},
+#    "level":"info|error","msg":<str>,"time":<RFC3339>}
+# `exists`: 0=does-not-exist, 1=exists.
+# `perm_*`: 0=denied, 1=allowed, 2=unknown (auth required to confirm).
+#
+# Errors are emitted as `{"level":"error","msg":"<reason>","time":...}` lines
+# in -json mode, OR as `time="..." level=error msg="..."` lines in default
+# logfmt output. Exit code 0 on success (even when bucket doesn't exist or
+# is invalid — those are informational, not tool errors). Non-zero exit on
+# argv errors (missing required flag, unknown flag) and on config errors.
+#
+# Single-binary tool. Source code path: tools/s3scanner/mcp-server.py — the
+# legacy method handlers (scan, test) auto-inherit run_cli from BaseMCPServer
+# (mcp-common 0.3.0); kind:cli is the new default. The two legacy methods
+# are preserved as the rollback path per SKILL #21.
 version: "3.0"
-description: "S3 bucket discovery and misconfiguration testing via S3Scanner 3.0. 2 methods: scan (test a list of bucket names for existence and public access — brute-force discovery via name mutations), test (test a single known bucket for misconfigurations — anonymous list/read/write permissions and object enumeration). Supports AWS, GCP, DigitalOcean, Dreamhost, Linode. For scanning bucket CONTENTS for secrets use trufflehog. For AWS API interaction use aws."
+description: >
+  S3 bucket discovery and misconfiguration testing via sa7mon/S3Scanner v3
+  (the Go port — much faster than the Python v2 it replaced). Two operating
+  modes:
+
+    s3scanner -bucket <name>          # scan one known bucket
+    s3scanner -bucket-file <file>     # scan a list of bucket-name guesses
+
+  Tests buckets for: existence (exists 0/1), ACL permissions (read /
+  write / read-acl / write-acl / full-control for both AllUsers and
+  AuthenticatedUsers), and optionally enumerates object keys + sizes
+  (`-enumerate`). Supports providers: aws (default), digitalocean, dreamhost,
+  gcp, linode, and custom (custom requires a config.yml). For bucket-name
+  brute-forcing, supply `-bucket-file` with company-name + suffix mutations
+  (e.g., `acme-backup`, `acme-dev`, `acme-prod`, `acme-staging`,
+  `acme-uploads`, `acme-logs`, `acme-assets`).
+
+  Argv form (single-dash flags, Go's flag package style):
+
+    s3scanner -bucket <name> [-provider aws|gcp|digitalocean|dreamhost|linode]
+              [-enumerate] [-threads <int>] [-json] [-verbose]
+
+  Universal flags: `-json` (NDJSON output to stdout — preferred for tooling),
+  `-enumerate` (list every object — slow on large buckets), `-threads <int>`
+  (concurrent workers, default 4), `-verbose` (debug logging), `-version`
+  (print version and exit).
+
+  Auth: v3 uses config.yml (in `.`, `/etc/s3scanner/`, or `$HOME/.s3scanner/`)
+  for `-provider custom`, the `-mq` RabbitMQ source, and the `-db` Postgres
+  results sink. There is NO env-var or argv-form AWS credential — by default
+  s3scanner runs UNAUTHENTICATED (the typical recon use-case: probing for
+  open / public buckets across organizations you do not have credentials
+  for). For authenticated bucket access (your own AWS account), use the
+  `aws` tool instead.
+
+  Permission encoding (per output JSON):
+    0 = explicitly denied
+    1 = explicitly allowed (PUBLIC for AllUsers — finding!)
+    2 = unknown (anonymous probe couldn't determine — likely requires auth)
+
+  Phase: reconnaissance (external recon — bucket-name brute force, public-
+  bucket discovery). Pair with `trufflehog s3 --bucket=<name>` afterward to
+  scan the CONTENTS of any discovered open bucket for leaked credentials.
+
+  Feature 28 dynamic recipes are RETIRED for the kind:cli path — the LLM
+  writes argv directly. Recipes still load for legacy method calls (scan,
+  test) if /session/tool_recipes/s3scanner/ exists, but they're a dead
+  branch under run_cli (REQ-TR-016).
+
 image: "ghcr.io/silicon-works/mcp-tools-s3scanner:latest"
 image_size_mb: 250
-timeout_seconds: 300
+
+# Dual-clock model — s3scanner is fast for single-bucket probes (one HEAD
+# request, ~1-2s) but can be slow for `-bucket-file` brute-force lists
+# (each bucket = one HEAD + optional enumerate, parallelized via -threads).
+# A 10000-name brute-force list with default threads=4 takes ~10-15 min.
+# `-enumerate` on a large bucket adds ListObjects pagination time
+# (multi-million-object buckets can take 30+ min).
+idle_timeout_seconds: 300       # 5 min silence == wedged S3 client
+max_runtime_seconds: 3600       # 1 h hard cap — large bucket-file scans
+timeout_seconds: 3600
 
 capabilities:
   - s3_discovery
@@ -13,6 +147,31 @@ capabilities:
 phases:
   - reconnaissance
 
+routing:
+  use_for:
+    - "discover S3 buckets by brute-forcing bucket names with mutations (company name + suffix wordlist)"
+    - "test known S3 buckets for anonymous read / write / list / acl permissions"
+    - "enumerate objects in misconfigured S3 buckets via -enumerate flag"
+    - "check for public S3 bucket access on AWS, GCP, DigitalOcean, Dreamhost, Linode"
+    - "validate a single bucket name discovered via OSINT (subdomain enum, source code, config files)"
+  never_use_for:
+    - "scanning bucket CONTENTS for leaked secrets (use trufflehog s3 --bucket=<name>)"
+    - "interacting with AWS APIs as authenticated principal (use aws — list/read/write your own buckets)"
+    - "port scanning (use nmap)"
+    - "subdomain enumeration (use amass — but feed amass output bucket-name guesses to s3scanner)"
+  triggers:
+    - "s3scanner"
+    - "S3 bucket"
+    - "bucket discovery"
+    - "public bucket"
+    - "S3 misconfiguration"
+    - "bucket brute force"
+    - "open bucket"
+    - "bucket enumeration"
+    - "S3 ACL test"
+    - "anonymous S3 access"
+  prefer_over: []
+
 requirements:
   network: true
   privileged: false
@@ -21,90 +180,204 @@ resources:
   memory_mb: 256
   cpu: 0.5
 
-routing:
-  use_for:
-    - "discover S3 buckets by brute-forcing bucket names with mutations"
-    - "test known S3 buckets for anonymous read/write/list permissions"
-    - "enumerate objects in misconfigured S3 buckets"
-    - "check for public S3 bucket access on AWS, GCP, DigitalOcean"
-  never_use_for:
-    - "scanning bucket contents for secrets (use trufflehog scan_s3)"
-    - "interacting with AWS APIs (use aws)"
-    - "port scanning (use nmap)"
-  triggers:
-    - s3scanner
-    - S3 bucket
-    - bucket discovery
-    - public bucket
-    - S3 misconfiguration
-    - bucket brute force
-    - open bucket
-  prefer_over: []
+environment:
+  # v3 has NO standard env-var-based auth. The `aws` tool's
+  # AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY env vars are NOT consumed by
+  # s3scanner v3 — the Go binary calls AWS S3 anonymously by default. For
+  # authenticated probing of YOUR OWN buckets, use the `aws` tool. For
+  # `-provider custom` and the `-mq` / `-db` features, mount a config.yml
+  # under `/session/.s3scanner/config.yml` and the tool will pick it up
+  # via the documented search path (`.` or `$HOME/.s3scanner/`).
+  HOME:
+    description: "Container HOME path. If a config.yml exists at $HOME/.s3scanner/config.yml it will be picked up automatically (used for -provider custom, -mq, -db). For default unauthenticated AWS scans no config is needed."
+    required: false
 
 see_also:
   - tool: trufflehog
-    reason: s3scanner discovers and tests bucket permissions. trufflehog scan_s3 scans bucket CONTENTS for leaked secrets. Use s3scanner first to find accessible buckets, then trufflehog to scan their contents.
+    reason: "s3scanner discovers and tests bucket permissions (existence, public ACLs). trufflehog scans bucket CONTENTS for leaked secrets. Workflow: s3scanner finds open buckets, then `trufflehog s3 --bucket=<name>` scans them for credentials inside."
   - tool: aws
-    reason: Use aws for authenticated S3 operations (listing your own buckets, reading/writing objects with credentials). Use s3scanner for unauthenticated discovery of OTHER buckets.
+    reason: "Use aws for authenticated S3 operations (listing your own buckets, downloading objects with credentials). Use s3scanner for unauthenticated discovery + ACL probing of OTHER buckets."
+  - tool: amass
+    reason: "amass passive enumeration often surfaces bucket names embedded in subdomains (e.g., assets.example.com → s3 bucket `assets-example`). Feed those guesses into s3scanner -bucket-file."
+  - tool: ffuf
+    reason: "Web fuzzing can discover bucket-name references in HTML / JS / config endpoints (e.g., `https://example.com/assets/` redirecting to S3). Capture the bucket names and feed to s3scanner."
 
-methods:
-  scan:
-    description: "Test a list of bucket names for existence and misconfigurations. Used for bucket name brute-forcing — provide a list of name guesses (company-backup, company-dev, company-prod, etc.)."
-    when_to_use: "External recon — guess target's bucket names using company name, project names, and common suffixes (backup, dev, prod, staging, assets, uploads, logs). Also useful for testing a wordlist of bucket names."
-    params:
-      buckets:
-        type: array
-        required: true
-        description: "List of bucket names to test."
-      provider:
-        type: string
-        default: "aws"
-        description: "Cloud provider: aws, gcp, digitalocean, dreamhost, linode."
-      enumerate:
-        type: boolean
-        default: false
-        description: "Enumerate bucket objects (slow for large buckets)."
-      threads:
-        type: integer
-        default: 4
-        description: "Concurrent threads."
-    returns:
-      buckets_tested:
-        type: integer
-        description: "Number of buckets tested."
-      results:
-        type: array
-        description: "Per-bucket results."
-      existing_count:
-        type: integer
-        description: "Buckets that exist."
-      public_count:
-        type: integer
-        description: "Buckets with public access."
+# ── kind:cli specific sections ──────────────────────────────────────
 
-  test:
-    description: "Test a single known bucket for misconfigurations — anonymous list, read, write permissions."
-    when_to_use: "When you know a specific bucket name (from OSINT, source code, or config files) and want to check its permissions."
-    params:
-      bucket:
-        type: string
-        required: true
-        description: "Bucket name to test."
-      provider:
-        type: string
-        default: "aws"
-        description: "Cloud provider."
-      enumerate:
-        type: boolean
-        default: true
-        description: "Enumerate bucket objects."
-    returns:
-      exists:
-        type: boolean
-        description: "Whether the bucket exists."
-      info:
-        type: object
-        description: "Bucket permissions and details."
-      object_count:
-        type: integer
-        description: "Number of objects found (if enumerated)."
+target_extraction:
+  # s3scanner v3 has a SIMPLE argv shape: the bucket name is ALWAYS the
+  # value of `-bucket` (single-dash). There is NO positional target — every
+  # invocation requires one of `-bucket`, `-bucket-file`, or `-mq`.
+  #
+  # The plugin's flag_value rule must handle Go's flag-package conventions:
+  # both `-bucket=<name>` and `-bucket <name>` work; the leading dash is
+  # SINGLE (Go's flag package) — `--bucket` is NOT recognized.
+  #
+  # `-bucket-file` and `-mq` are REJECT_FLAGS (multi-target — see below) so
+  # this rule only fires when `-bucket` is the input mode.
+  - rule: "flag_value"
+    flag: "-bucket"
+    parse_as: "raw"
+
+# `-bucket-file` and `-mq` shift the target outside argv (file contents OR
+# RabbitMQ message stream) — scope validation can't reach the actual bucket
+# names being probed without parsing the external source. The plugin's
+# reject_flags pipeline blocks both. Engagements that need to probe a
+# brute-force list should call `-bucket` per name in a loop OR emit the
+# argv with explicit targets (better for audit logging).
+#
+# `-db` writes results to a Postgres database OUTSIDE the engagement's
+# audit-logged stdout — also rejected. Use stdout (-json) and have the
+# orchestrator persist results.
+reject_flags:
+  - flag: "-bucket-file"
+    reason: "Multi-target file — bucket names live in the file, scope validator can't reach them. Use one `-bucket=<name>` invocation per target instead, or have the orchestrator iterate."
+  - flag: "-mq"
+    reason: "Multi-target via RabbitMQ — bucket names arrive over a message queue, scope validator has no view. Use explicit `-bucket` invocations."
+  - flag: "-db"
+    reason: "Side-channel results sink (Postgres) bypasses the engagement's stdout audit log. Use stdout `-json` instead — the orchestrator can persist."
+reject_flags_reason: >
+  s3scanner v3's `-bucket-file`, `-mq`, and `-db` flags shift target / output
+  outside argv. The first two move the bucket names being probed to an
+  external file or message queue (scope validator can't see them); the
+  third diverts results to Postgres bypassing the audit-logged stdout.
+  Emit explicit `-bucket=<name>` calls instead — the plugin's per-call
+  audit log captures the target cleanly.
+
+# Per-tool value-taking flags whose values must NOT be confused with
+# positional targets. Verified against `s3scanner --help` (v3 / commit `dev`).
+# v3 flag set is small (10 flags total). Single-dash form (Go's flag package).
+value_flags:
+  # ── target-bearing flag (also extracted by flag_value rule) ──
+  - "-bucket"
+  # ── input modes (REJECTED but listed for parser completeness) ──
+  - "-bucket-file"
+  # ── options ──
+  - "-provider"           # aws | custom | digitalocean | dreamhost | gcp | linode
+  - "-threads"            # int — concurrent workers
+  # ── boolean / no-arg flags listed for parser correctness (DSL skips harmlessly) ──
+  - "-json"
+  - "-enumerate"
+  - "-mq"                 # boolean (REJECTED via reject_flags)
+  - "-db"                 # boolean (REJECTED via reject_flags)
+  - "-verbose"
+  - "-version"
+
+usage_patterns:
+  # ── default / opening probes ──────────────────────────────────────
+  - name: "Single bucket scan (known name, JSON output)"
+    command: "-bucket flaws.cloud -json"
+    when: "Scan a SINGLE known bucket name (from OSINT, source code, web fuzz, or subdomain enum). Emits one NDJSON line with bucket existence and ACL permissions. Fast (~1-2s for AWS region detection + HEAD). NO auth needed for public probing — s3scanner runs anonymous. Default provider is `aws`. Use this for one-off bucket validation."
+
+  - name: "Single bucket with object enumeration"
+    command: "-bucket flaws.cloud -enumerate -json"
+    when: "Scan a single bucket AND list its objects. Use after the basic scan returns `perm_all_users_read=1` (public read) — `-enumerate` lists object keys + sizes via ListObjects API. Output JSON includes `objects: [{key, size}, ...]`. Slow on large buckets (paginates through every object). Skip `-enumerate` when you only need ACL existence/permissions."
+
+  - name: "Single bucket on non-AWS provider"
+    command: "-bucket myorg-bucket -provider digitalocean -json"
+    when: "Scan a bucket on a non-AWS provider. Supported: aws (default), digitalocean (DO Spaces), dreamhost, gcp (Google Cloud Storage), linode (Linode Object Storage). For `-provider custom` (e.g., MinIO, Wasabi, Backblaze B2 with S3 API), supply a config.yml — see Gotchas. The provider value is case-sensitive lowercase."
+
+  - name: "Single bucket with high concurrency + verbose logging"
+    command: "-bucket myorg-prod -threads 16 -verbose -json"
+    when: "Sanity-check + tune for a long brute-force run. `-threads 16` raises concurrency from default 4 (cap based on target rate-limits — DigitalOcean and AWS S3 throttle aggressively past ~32 RPS per IP). `-verbose` logs each request to stderr (useful for debugging false-negatives). Combine `-json` for machine-readable stdout."
+
+  - name: "GCP bucket probe"
+    command: "-bucket myorg-gcp-data -provider gcp -enumerate -json"
+    when: "Probe a Google Cloud Storage bucket. GCS is `-provider gcp`. ACL semantics differ from AWS: GCS uses IAM + ACL hybrid, but s3scanner reports the same `perm_*` fields by mapping GCS ACL primitives. `perm_all_users_read=1` on GCS == `allUsers:objectViewer` IAM binding (publicly listable / readable). Use sparingly — GCS rate-limits anonymous requests harder than AWS."
+
+  - name: "Quick existence check (no enumeration)"
+    command: "-bucket suspect-name-only -json"
+    when: "Cheapest possible probe — just check `exists 0/1` and ACL. No `-enumerate`, no auth needed. ~1s per bucket. Use as a dry-run before committing to a full enumeration. The output `exists` field tells you whether the name is taken (1) or available (0); `perm_all_users_read=1` flags an OPEN BUCKET — escalate to `trufflehog s3 --bucket=<name>` for content scan."
+
+  - name: "Help / version check"
+    command: "-version"
+    when: "Print the s3scanner version and exit. Verify the binary is present and the container picked up the right build. Combine with `--help` (single-dash also works) to confirm the flag set hasn't drifted from this tool.yaml."
+
+output_formats:
+  - flag: "-json"
+    format: "ndjson"
+    preferred: true
+    notes: "Newline-delimited JSON — one JSON object per bucket result, written to stdout. Each object: {bucket: {name, region, exists (0|1), date_scanned, objects (arr|null), objects_enumerated, provider, num_objects, bucket_size, owner_id, owner_display_name, perm_auth_users_read|write|read_acl|write_acl|full_control, perm_all_users_read|write|read_acl|write_acl|full_control}, level: 'info'|'error', msg, time}. Permission integers: 0=denied, 1=allowed (PUBLIC if all_users — finding!), 2=unknown (auth required). PREFERRED for tooling — pipe to `tee /session/buckets.ndjson` to persist. `exists=1` AND `perm_all_users_read=1` is the open-bucket signal. Use `jq -c .` to filter."
+  - flag: "(default — no flag)"
+    format: "logfmt"
+    preferred: false
+    notes: "Default output is logfmt: `time=\"...\" level=info msg=\"<bucket-name> | exists | <region>\"`. Human-readable on a tty but harder to parse — always use `-json` for tooling. Errors share the same logfmt format with `level=error`."
+
+common_options:
+  targeting:
+    - "INPUT MODE IS REQUIRED — every s3scanner invocation MUST have one of `-bucket <name>`, `-bucket-file <file>`, or `-mq`. Without one of these, exits with `level=error msg=\"exactly one of: -bucket, -bucket-file, -mq required\"`. The OpenSploit migration uses `-bucket` exclusively (the other two are reject_flags)."
+    - "BUCKET NAME IS THE TARGET — it lives as the value of `-bucket`. Both `-bucket=<name>` and `-bucket <name>` work (Go's flag package). Single-dash form only — `--bucket` is NOT recognized."
+    - "NO `s3://` PREFIX — `-bucket=mybucket` (NOT `-bucket=s3://mybucket`). The bucket name is bare. Region is auto-detected via HEAD."
+  filtering:
+    - "PROVIDER FILTER — `-provider aws|custom|digitalocean|dreamhost|gcp|linode`. Default is `aws`. Each provider routes the request to a different cloud endpoint. `custom` requires a config.yml that defines the endpoint URL + region."
+    - "ENUMERATION — `-enumerate` lists object keys + sizes via ListObjects API (paginates). Skip it for fast existence + ACL-only checks; add it after you've confirmed `perm_all_users_read=1`."
+    - "THREADS — `-threads <int>` (default 4). Higher = faster brute-force lists, but watch for rate-limit / IP-block (AWS S3 throttles past ~32 anonymous RPS per IP)."
+  output:
+    - "-json: NDJSON to stdout. PREFERRED for tooling. Without it, output is logfmt (still readable, harder to parse)."
+    - "(no -o / --output flag): s3scanner writes to stdout only. Use shell redirect: `s3scanner ... -json > /session/buckets.ndjson`, or `| tee /session/buckets.ndjson` to also display."
+    - "-db is REJECTED (reject_flags) — diverts results to Postgres outside the audit log."
+  perf:
+    - "-threads <int>: number of concurrent workers (default 4). Increase for big brute-force lists (8-16 is safe; 32+ risks IP-rate-limit). Decrease if hitting cloud throttle."
+    - "-enumerate adds ListObjects pagination time — large buckets (millions of objects) can take 10-30+ min. For speed, skip enumeration on the first pass."
+  auth:
+    - "v3 is anonymous by default — NO AWS credentials are needed for public-bucket probing. The Go binary does NOT honor AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY env vars (those work for the `aws` tool, not s3scanner)."
+    - "For `-provider custom`, mount a config.yml at `/session/.s3scanner/config.yml` (or set HOME so $HOME/.s3scanner/config.yml is found). YAML keys: `mq.uri` (RabbitMQ), `db.uri` (Postgres), `custom.endpoint` (custom provider URL)."
+
+gotchas:
+  - "INPUT MODE IS MANDATORY — every invocation MUST start with one of `-bucket <name>`, `-bucket-file <file>`, or `-mq`. Forgetting it errors with `exactly one of: -bucket, -bucket-file, -mq required`."
+  - "SINGLE-DASH FLAGS ONLY — s3scanner uses Go's flag package. `-bucket=mybucket` works; `--bucket=mybucket` does NOT (`flag provided but not defined: --bucket=mybucket`). LLMs trained on POSIX double-dash conventions often emit `--bucket` — review and correct."
+  - "NO `s3://` PREFIX — `-bucket=mybucket` is correct. `-bucket=s3://mybucket` will be probed as the literal name `s3://mybucket` and fail with an invalid-bucket-name signal."
+  - "v3 IS UNAUTHENTICATED BY DEFAULT — there is NO env-var or argv form for AWS credentials in v3 (unlike the older Python v2 which had `-aws-id` / `-aws-secret`). The Go binary makes anonymous S3 calls. For authenticated bucket access (your own AWS account), use the `aws` tool."
+  - "PERMISSION INTEGERS HAVE THREE VALUES — `perm_*` fields are 0 (denied), 1 (allowed), or 2 (unknown). 2 means the anonymous probe couldn't determine the permission (likely requires auth to confirm). Don't read 2 as `denied` or `allowed` — it's `inconclusive`. The open-bucket finding is `exists=1` AND `perm_all_users_read=1`."
+  - "`-bucket-file`, `-mq`, AND `-db` ARE REJECTED — `-bucket-file` (multi-target file) and `-mq` (multi-target RabbitMQ) shift target outside argv; `-db` (Postgres results sink) bypasses the audit-logged stdout. Use one `-bucket=<name>` invocation per target. The orchestrator can iterate."
+  - "PROVIDER `custom` REQUIRES CONFIG — `-provider custom` errors `config file not found` unless config.yml is mounted (search path: `.`, `/etc/s3scanner/`, `$HOME/.s3scanner/`). Same for `-mq` and `-db`. Default `-provider aws` needs no config."
+  - "EXIT CODE 0 ON `exists=0` — when the bucket doesn't exist OR the name is invalid, s3scanner exits 0 with an info-level JSON line. NOT a tool error — parse the JSON output to detect existence. Non-zero exit only on argv errors (missing required flag, unknown flag) and config errors."
+  - "RATE-LIMITS WITH HIGH `-threads` — AWS S3 throttles anonymous requests past ~32 RPS per source IP. DigitalOcean Spaces and Linode Object Storage throttle harder. Default `-threads 4` is safe; bump to 8-16 for big runs but watch for `Throttling` / `503 Slow Down` errors in stderr."
+  - "INVALID BUCKET NAMES — S3 bucket names must follow naming rules (3-63 chars, lowercase, dots/dashes only, no underscores). s3scanner emits `level=info msg=\"invalid | <name>\"` for invalid names — these aren't tool errors, just bucket validation. Check name compliance before brute-forcing."
+  - "Feature 28 dynamic recipes are RETIRED for the kind:cli path — the LLM writes argv directly. Recipes still load for legacy method calls (scan, test) if /session/tool_recipes/s3scanner/ exists, but they're a dead branch under run_cli (REQ-TR-016)."
+  - "OUTPUT CAN BE LARGE — the legacy `scan` / `test` method handlers truncated `raw_output` to 20000 chars via sanitize_output. run_cli (kind:cli path) does NOT apply that cap; full stdout+stderr lands in the engagement transcript. For `-enumerate` on huge buckets (millions of objects, NDJSON output growing into MB), redirect to a session file: `s3scanner -bucket <name> -enumerate -json > /session/buckets.ndjson` and read it back via `read` / `grep` rather than letting the LLM ingest the whole stream."
+  - "STDERR + STDOUT INTERLEAVE — s3scanner emits `level=info` (and `level=error`) lines on stderr in default logfmt; with `-json` the bucket result lines go to stdout but error/info JSON still goes to stderr. The legacy handlers concatenated them (`combined = stdout + stderr`) before parsing. run_cli surfaces both streams; the LLM should expect mixed stdout/stderr when parsing NDJSON."
+
+failure_signatures:
+  # Layer-diverse signals (SKILL #11) — at least 6 distinct verifiable layers:
+  #   1. Network / DNS — hostname doesn't resolve, network unreachable
+  #   2. AWS S3 client — exceeded retries, request send failed
+  #   3. Argument — missing required flag, unknown flag
+  #   4. Validation — invalid bucket name (informational, not an error)
+  #   5. Config — config file not found (custom provider, -mq, -db)
+  #   6. Provider — unknown provider name
+  - signal: "exactly one of: -bucket, -bucket-file, -mq required"
+    remediation: "Argument: no input mode supplied. Add `-bucket=<name>` (the OpenSploit-supported mode). `-bucket-file` and `-mq` are reject_flags — the orchestrator should iterate over target names and emit one `-bucket` call per target."
+  - signal: "flag provided but not defined"
+    remediation: "Argument: unknown flag (LLM emitted `--bucket` instead of `-bucket`, or used a v2-only flag like `-aws-id` / `-write-test` / `-permission-test` / `-region-list`). v3 dropped many v2 flags. Check `s3scanner --help` (single-dash conventions, smaller flag set: -bucket, -bucket-file, -mq, -db, -json, -enumerate, -provider, -threads, -verbose, -version)."
+  - signal: "unknown provider"
+    remediation: "Provider: `-provider <value>` is not one of aws, custom, digitalocean, dreamhost, gcp, linode. Lowercase, exact match. For non-listed S3-compatible services (MinIO, Wasabi, Backblaze B2), use `-provider custom` plus a config.yml that defines the endpoint URL."
+  - signal: "config file not found"
+    remediation: "Config: `-provider custom`, `-mq`, or `-db` was used without a config.yml. Mount config.yml at `/session/.s3scanner/config.yml` (set HOME to /session) OR use `-provider aws|gcp|digitalocean|dreamhost|linode` (none of those need config). For OpenSploit, prefer the no-config providers."
+  - signal: "open"
+    remediation: "Path/Filesystem: `-bucket-file` (REJECT — but if reached) was given a path that doesn't exist. Format is `open /path/to/file: no such file or directory`. Don't use `-bucket-file` (rejected). Use one `-bucket=<name>` per target."
+  - signal: "no such file or directory"
+    remediation: "Path: same root cause as `open ...`. Caller passed a non-existent path to a file-flag (would only reach this if reject_flags pipeline missed `-bucket-file`)."
+  - signal: "network is unreachable"
+    remediation: "Network: TCP-level error reaching the S3 endpoint. Verify outbound 443 connectivity from the container with `nc -vz s3.amazonaws.com 443`. Common in air-gapped containers — for offline testing, use `-provider custom` against MinIO mounted at /session/."
+  - signal: "no such host"
+    remediation: "DNS: bucket-region endpoint doesn't resolve. Check container DNS with `getent hosts s3.amazonaws.com`. Common when the container's /etc/resolv.conf is missing or pointed at an unreachable resolver. For a known-good check, try `-bucket=s3.amazonaws.com -json` (intentionally invalid name to force the DNS path)."
+  - signal: "request send failed"
+    remediation: "Network/HTTP: the AWS SDK Go client tried to send the HTTPS request and failed at the transport layer. Subset of network errors — same remediation as `network is unreachable` and `no such host`. The full message usually includes `dial tcp ... connect: ...` indicating the layer."
+  - signal: "exceeded maximum number of attempts"
+    remediation: "Network/Retry: AWS SDK Go gave up after the default 3 retries. Combined with `request send failed` it's a transport-layer issue. Combined with `Throttling` / `503` it's a rate-limit. Reduce `-threads` (default 4 → 2) and retry, OR check container egress."
+  - signal: "Throttling"
+    remediation: "Rate-limit: AWS S3 (or another provider) is throttling anonymous requests. Reduce `-threads` (try 2). Consider adding sleep between batches at the orchestrator level. Persistent throttling on a single IP can warrant rotating egress IPs."
+  - signal: "503 Slow Down"
+    remediation: "Rate-limit: AWS S3-specific throttling response. Same remediation as `Throttling` — reduce `-threads`."
+  - signal: "invalid"
+    remediation: "Validation (informational): the bucket name doesn't comply with S3 naming rules (3-63 chars, lowercase letters / digits / hyphens / dots, no underscores or uppercase). NOT a tool error — exit code 0. The output JSON has `level=info msg=\"invalid | <name>\"`. Filter out invalid names from your wordlist before scanning."
+
+help_commands:
+  - command: "--help"
+    purpose: "Help output (lists all 10 v3 flags grouped by INPUT/OUTPUT/OPTIONS/DEBUG)."
+  - command: "-h"
+    purpose: "Short-form help (same content as --help)."
+  - command: "-version"
+    purpose: "Print version (e.g., `dev` for the current Kali apt build) and exit."
+

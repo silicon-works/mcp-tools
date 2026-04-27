@@ -1,123 +1,310 @@
 name: searchsploit
+kind: cli
+binary: searchsploit
 version: "latest"
-description: "Offline search of the Exploit Database (exploit-db.com) using the searchsploit CLI. Contains 45,000+ public exploits, shellcodes, and security papers indexed locally — no network required. Searches exploit titles and file paths with fuzzy version range matching (e.g., '2.4' matches '2.0 < 2.5'). Supports JSON output parsing, CVE-based search (--cve), exact matching, and full exploit source code retrieval. Exploit code is stored at /usr/share/exploitdb/exploits/. Includes the full ExploitDB mirror."
+description: "Offline search of the Exploit Database (exploit-db.com) using the searchsploit CLI. Contains 45,000+ public exploits, shellcodes, and security papers indexed locally — no network required. Searches exploit titles and file paths with fuzzy version range matching (e.g., '2.4' matches '2.0 < 2.5'). Supports JSON output (`-j` is the cleanest for tooling), CVE lookup (`--cve`), EDB-ID lookup (`--id`), nmap-XML import (`--nmap`), and mirror-to-CWD (`--mirror`). Operates ENTIRELY OFFLINE on the bundled ExploitDB mirror at /usr/share/exploitdb/exploits/ — there is no network target; the positional arguments are search TERMS, not hosts. Native CLI; the LLM constructs the full searchsploit invocation. Database update via `-u` requires network access (git fetches from offline-imap-style ExploitDB git mirror)."
 image: "ghcr.io/silicon-works/mcp-tools-searchsploit:latest"
 image_size_mb: 500
-timeout_seconds: 60
+# Dual-clock model:
+#   idle_timeout_seconds — silence between MCP heartbeats. searchsploit
+#     queries are FAST (typically sub-second to a few seconds even on the
+#     full 45k-entry database). 60s silent = stuck (e.g., very large
+#     --nmap XML import on a slow filesystem, or `-u` git fetch on a slow
+#     network).
+#   max_runtime_seconds — hard wall-clock cap; never resets on heartbeat.
+#     10 min covers the worst case: a huge nmap XML import (nmap output
+#     against a /16 with thousands of services) or a slow `-u` git update.
+# Legacy `timeout_seconds` is used by older clients as the hard cap.
+idle_timeout_seconds: 60
+max_runtime_seconds: 600
+timeout_seconds: 600
 
 capabilities:
   - exploit_search
   - vulnerability_research
+  - cve_lookup
+  - nmap_integration
 
 phases:
   - exploitation
 
-requirements:
-  network: false
-  privileged: false
-
-resources:
-  memory_mb: 256
-  cpu: 0.5
-
-# Routing hints for tool selection
 routing:
   use_for:
     - "find public exploits for a software version or CVE"
     - "search ExploitDB for known vulnerabilities"
     - "find exploit code for Apache Nginx WordPress Drupal"
     - "search for privilege escalation exploits by kernel version"
-    - "look up CVE exploit availability"
+    - "look up CVE exploit availability (--cve CVE-2021-44228)"
     - "find remote code execution exploits for identified services"
-    - "retrieve exploit source code by EDB-ID"
+    - "retrieve exploit source code by EDB-ID (--id 12345)"
     - "check if a service version has known exploits"
+    - "import nmap XML output and find matching exploits (--nmap scan.xml)"
+    - "mirror an exploit file to /session/ for modification before execution"
+  never_use_for:
+    - task: "writing custom exploits"
+      use_instead: "exploit-runner"
+      reason: "searchsploit only finds public exploits; for custom-written exploits use exploit-runner"
+    - task: "payload generation (msfvenom-style shellcode)"
+      use_instead: "payload"
+      reason: "searchsploit retrieves existing exploits; payload tool generates new shellcodes / reverse shells"
+    - task: "active vulnerability scanning"
+      use_instead: "nuclei or nmap vuln scripts"
+      reason: "searchsploit is offline DB lookup, NOT a vulnerability scanner — it does not probe targets"
+    - task: "CVE detail / NVD metadata lookup"
+      use_instead: "cve-lookup"
+      reason: "searchsploit --cve returns ExploitDB matches for that CVE; cve-lookup queries NVD for full CVE description, CVSS, CPE, references"
+    - task: "live online exploit search"
+      use_instead: "WebFetch against https://www.exploit-db.com/search"
+      reason: "searchsploit uses the LOCAL mirror; for the absolute-latest exploits run `searchsploit -u` first or query exploit-db.com directly"
   triggers:
     - "CVE-\\d{4}-\\d+"
     - "exploit.*search"
     - "searchsploit"
     - "exploitdb"
+    - "exploit-db"
     - "find exploit"
     - "known exploit"
-  never_use_for:
-    - "writing custom exploits (use exploit-runner)"
-    - "payload generation (use payload tool)"
-    - "active vulnerability scanning (use nuclei or nmap vuln)"
+    - "public exploit"
+    - "EDB-ID"
+    - "edb id"
+    - "log4shell"
+    - "eternalblue"
+    - "ms17-010"
+  prefer_over: []
 
-methods:
+requirements:
+  network: false       # Search/lookup is offline. `-u` (database update) needs network but is a maintenance op, not a query.
+  privileged: false
+
+resources:
+  memory_mb: 256
+  cpu: 0.5
+
+see_also:
+  - tool: cve-lookup
+    reason: "After searchsploit --cve returns matching exploits, use cve-lookup to fetch the full NVD record (CVSS score, CPE, affected versions, references) for the same CVE — the two tools are complementary."
+  - tool: nmap
+    reason: "Standard workflow: nmap -sV -oX /session/scan.xml <target>, then `searchsploit --nmap /session/scan.xml -j` to find exploits matching the detected services. The nmap XML output is the canonical input for searchsploit's --nmap mode."
+  - tool: nuclei
+    reason: "After searchsploit identifies a CVE / exploit candidate, use nuclei to run the matching template (-id CVE-2021-44228) against the live target to confirm exploitability before running the full exploit."
+  - tool: exploit-runner
+    reason: "After mirroring an exploit with `searchsploit --mirror <id>` to /session/, use exploit-runner to execute it (Python / Ruby / Perl / shell scripts). For C exploits, compile in /session/ first."
+  - tool: metasploit
+    reason: "If searchsploit returns Ruby (.rb) exploits, those are typically Metasploit modules — use the metasploit tool to load and run them rather than exploit-runner."
+
+# ── kind:cli specific sections ──────────────────────────────────────
+
+target_extraction:
+  # searchsploit has NO network target. The "operands" of a searchsploit
+  # call are:
+  #   1. Search TERMS (positional args, e.g., `apache 2.4 rce`) — these
+  #      are exploit-title keywords, NOT hostnames or IPs.
+  #   2. CVE IDs (--cve CVE-2021-44228) — identifiers, not targets.
+  #   3. EDB-IDs (--id 12345) — local DB primary keys, not targets.
+  #   4. Local file paths (--nmap /session/scan.xml) — input file, not
+  #      a target. The IPs INSIDE the nmap XML are scan results, not new
+  #      targets for searchsploit.
+  #   5. EDB-IDs to mirror (--mirror 12345) — local file copy operation.
+  # NONE of these are network endpoints. The plugin's TargetValidation
+  # framework is designed for network targets (host/IP/URL); applying it
+  # to a search term or local file path is N/A.
+  #
+  # Decision: declare NO target_extraction rules. The plugin extracts
+  # target=null. The downstream gotcha note documents that scope-validation
+  # is N/A for searchsploit because the operation is purely local DB lookup.
+  #
+  # Same design as john / hashcat / volatility / ilspy — all five are
+  # offline tools operating on local artifacts.
+  []
+
+# searchsploit has no target-list flag analog. Search terms are positional,
+# CVE / EDB-ID lookups are scalar (--cve / --id), and the only file-path
+# input (--nmap) is an XML file from a previous nmap run — a CONSUMER of
+# scan output, not a producer of new targets. Nothing to reject.
+reject_flags: []
+reject_flags_reason: "searchsploit has no network target and no target-list flag. The operands are search terms (positional), CVE IDs (--cve), EDB-IDs (--id / --mirror), and local file paths (--nmap XML input). None are hostnames or IPs. There is no scope-validation surface to protect — the IPs that appear inside an --nmap XML file are scan-result metadata being looked up against the local exploit DB, not new targets being attacked."
+
+# Per-tool value-taking flags whose values must NOT be confused with
+# positional search terms or accidentally extracted as targets. searchsploit
+# uses single-dash short flags AND double-dash long flags; long flags
+# accept both `--flag value` and `--flag=value` forms (especially --exclude).
+# Values verified against `searchsploit --help`.
+value_flags:
+  # Lookup-by-identifier flags
+  - "--cve"                 # CVE ID (e.g., CVE-2021-44228)
+  - "--id"                  # EDB-ID lookup mode (positional becomes the ID)
+  - "--mirror"              # EDB-ID to copy the exploit file to CWD
+  - "--examine"             # EDB-ID to open in pager (X mode)
+  # Filtering / output
+  - "--exclude"             # pipe-separated terms to exclude from results
+  - "--nmap"                # path to nmap XML file (search by service banners)
+  # Boolean flags (listed for safety so the parser doesn't consume the next token)
+  - "-c"                    # case-sensitive — boolean
+  - "--case"                # long form of -c — boolean
+  - "-e"                    # exact match (title) — boolean
+  - "--exact"               # long form of -e — boolean
+  - "-j"                    # JSON output — boolean (PREFERRED for tooling)
+  - "--json"                # long form of -j — boolean
+  - "-o"                    # overflow — show full title (no truncation) — boolean
+  - "--overflow"            # long form of -o — boolean
+  - "-p"                    # show full path — boolean
+  - "--path"                # long form of -p — boolean
+  - "-s"                    # strict version match — boolean
+  - "--strict"              # long form of -s — boolean
+  - "-t"                    # search title only — boolean
+  - "--title"               # long form of -t — boolean
+  - "-u"                    # update local DB (git pull) — boolean (maintenance op)
+  - "--update"              # long form of -u — boolean
+  - "-v"                    # verbose — boolean
+  - "--verbose"             # long form of -v — boolean
+  - "-w"                    # show URL to exploit-db.com — boolean
+  - "--www"                 # long form of -w — boolean
+  - "-x"                    # examine (open file in pager) — boolean / takes ID
+  - "-h"                    # help — boolean
+  - "--help"                # long form of -h — boolean
+  - "--colour"              # force colour output — boolean
+  - "--color"               # US spelling — boolean
+  - "--no-colour"           # disable colour — boolean
+  - "--no-color"            # US spelling — boolean
+
+usage_patterns:
+  - name: "Basic text search with JSON output"
+    command: "searchsploit apache 2.4 -j"
+    when: "Standard search after nmap service detection. Pass product name + version as space-separated positional terms; `-j` requests JSON output (preferred for downstream parsing). searchsploit splits the query on spaces and matches each term independently against exploit titles and paths with fuzzy version-range matching (e.g., '2.4' matches '2.0 < 2.5'). For tighter matches add `-e` (exact title match) or `-s` (strict version). Result is a JSON object with `RESULTS_EXPLOIT`, `RESULTS_SHELLCODE`, `RESULTS_PAPER` arrays — each entry has EDB-ID, Title, Path, Date."
+
+  - name: "CVE lookup"
+    command: "searchsploit --cve CVE-2021-44228 -j"
+    when: "Look up exploits for a known CVE. Most precise search — `--cve` matches the CVE field directly rather than free-text. Use this when you have a CVE from a vulnerability scan (nuclei, nessus, OpenVAS) or from cve-lookup. Results are typically smaller and more relevant than free-text search. Example CVEs: CVE-2021-44228 (Log4Shell), CVE-2017-5638 (Struts2 RCE), CVE-2014-6271 (Shellshock), CVE-2017-0144 (EternalBlue)."
+
+  - name: "EDB-ID lookup (retrieve specific exploit metadata)"
+    command: "searchsploit --id 50383 -j"
+    when: "Fetch metadata for a specific exploit by its EDB-ID. Useful when you've seen an EDB-ID referenced elsewhere (write-up, blog post, advisory) and want to confirm the exploit is in the local mirror and get its file path. Returns the matching record with Title, Path, Date. Combine with `-p` (show full path) to print the local file path explicitly. To READ the exploit source code after locating it, run `cat <path>` via run_cli."
+
+  - name: "Search by nmap XML output (service-driven exploit discovery)"
+    command: "searchsploit --nmap /session/scan.xml -j"
+    when: "POWERFUL integration — feed nmap's XML output to searchsploit and get exploits matching ALL detected services in one call. Workflow: `nmap -sV -oX /session/scan.xml <target>` (note the -oX for XML output, not -oN for nmap normal output), then `searchsploit --nmap /session/scan.xml -j`. searchsploit parses the XML, extracts each `<service>` banner (product, version, extrainfo), and runs an exploit search per service. Output is grouped per host:port. Best when you've already enumerated a target and want a one-shot exploit-candidate list."
+
+  - name: "Mirror exploit to /session/ for modification"
+    command: "cd /session && searchsploit --mirror 50383"
+    when: "Copy an exploit file from /usr/share/exploitdb/exploits/<...>/50383.py to the current working directory for editing. searchsploit copies to CWD — pre-cd into /session/ via the wrapper or use a multi-step run_cli (mkdir + cd; the wrapper runs each command in its own shell, so `cd /session && searchsploit --mirror 50383` is the safe pattern). After mirroring, edit the exploit (target IP, port, payload) in /session/ and run via exploit-runner. Use --mirror over manual `cp` because searchsploit auto-resolves the EDB-ID to the correct file path."
+
+  - name: "Update local ExploitDB mirror"
+    command: "searchsploit -u"
+    when: "Refresh the local ExploitDB mirror via git pull. REQUIRES NETWORK — the only searchsploit command that does. Run before a fresh engagement if the container is older than ~1 month and you want the latest exploits. The mirror is at /usr/share/exploitdb/ and updates pull from https://gitlab.com/exploit-database/exploitdb (or the configured upstream). Idempotent — re-running fast-paths if no updates. Skip in air-gapped environments."
+
+  - name: "Search with exclusion (filter out PoCs and DoS)"
+    command: "searchsploit wordpress -j --exclude='(PoC)|/dos/'"
+    when: "Filter out non-actionable results. `--exclude` takes a pipe-separated regex of terms — common useful patterns: `(PoC)` (proof-of-concept stubs that don't actually exploit), `/dos/` (denial-of-service exploits, useless for RCE/access), `/windows/` or `/linux/` (wrong-platform results). Combine with title-only `-t` for tighter results: `searchsploit -t apache --exclude='(PoC)|/dos/'`."
+
+  - name: "Show full path to exploit file"
+    command: "searchsploit --id 50383 -p"
+    when: "Print the absolute filesystem path to an exploit. searchsploit normally shows relative paths (e.g., `linux/remote/50383.py`) under /usr/share/exploitdb/exploits/. `-p` prints the absolute path AND on X11 systems copies it to clipboard (no clipboard inside container — falls back to print-only). CAVEAT: `-p` internally calls the `rev` utility; if the container image lacks `rev` the command errors. Safer alternative: `searchsploit --json --id 50383` and read `RESULTS_EXPLOIT[0].Path` (relative); the absolute path is `/usr/share/exploitdb/` + that. Use to construct `cat <full-path>` calls or to verify the exploit file exists before mirroring."
+
+output_formats:
+  - flag: "-j"
+    format: "json"
+    preferred: true   # cleanest for tooling / downstream parsing
+  - flag: "--json"
+    format: "json"
+    preferred: true   # long form of -j
+  - flag: "(default)"
+    format: "table"
+    preferred: false  # human-readable two-column table (Title | Path) with header
+  - flag: "-o"
+    format: "table_overflow"
+    preferred: false  # table without title truncation — wider output
+  - flag: "-w"
+    format: "table_with_url"
+    preferred: false  # adds URL column pointing to exploit-db.com
+
+common_options:
   search:
-    description: "Search the local ExploitDB mirror (45,000+ entries) for exploits matching query terms. Uses searchsploit with --json output. By default, performs case-insensitive AND matching across all terms with fuzzy version range detection (e.g., searching '2.4' will match entries for '2.0 < 2.5'). Parses JSON output into structured results with EDB-ID, title, path, date, and type (exploit/shellcode/paper). Search terms are split on spaces and matched independently — word order doesn't matter."
-    when_to_use: "After service_scan identifies service versions (e.g., 'Apache httpd 2.4.49', 'OpenSSH 7.2p2', 'ProFTPD 1.3.5'). The standard workflow is: nmap service_scan → searchsploit with the product and version. Search tips: (1) Use product name + version: 'apache 2.4.49', not 'Apache httpd 2.4.49 Ubuntu'. (2) Start broad, then narrow: first 'apache 2.4', then 'apache 2.4.49' if too many results. (3) For Windows: search by MS bulletin 'ms17-010' or KB number. (4) For kernels: 'linux kernel 5.4' or 'linux privilege escalation'. (5) Use exact=true for precise version matching when fuzzy results are too broad. (6) Filter by type='exploit' to exclude papers and shellcodes. After finding relevant results, use get_exploit to retrieve the exploit source code."
-    params:
-      query:
-        type: string
-        description: "Space-separated search terms. Each term must appear in the exploit title or path. Examples: 'apache 2.4.49' (product + version), 'wordpress 5.0' (CMS + version), 'linux kernel 5.4 privilege' (kernel + version + type), 'ms17-010' (MS bulletin), 'eternalblue' (exploit name), 'ssh' (service). Fewer, more specific terms give better results. Mutually exclusive with cve."
-      cve:
-        type: string
-        description: "Search by CVE ID (e.g., '2021-44228' for Log4Shell, '2021-41773' for Apache path traversal). Omit the 'CVE-' prefix. More precise than free-text search because it searches the CVE field specifically. Mutually exclusive with query."
-      exact:
-        type: boolean
-        default: false
-        description: "Exact order match on exploit title (searchsploit --exact). With exact=false (default), terms are matched independently in any order with fuzzy version ranges. With exact=true, the query string must appear exactly as-is in the title. Use exact=true when default search returns too many irrelevant results. Only applies to text search (query), not CVE search."
-      type:
-        type: enum
-        values: [all, exploit, shellcode, paper]
-        default: all
-        description: "Filter by result type. 'exploit' = working exploit code (Python, C, Ruby, etc.), 'shellcode' = standalone shellcode (assembly, machine code), 'paper' = writeups and advisories (no exploit code). Use 'exploit' for actionable results. Only applies to text search (query), not CVE search."
-      strict:
-        type: boolean
-        default: false
-        description: "Strict version matching — '1.1' only matches '1.1', not '1.0 < 1.3'. Use when the default fuzzy matching returns too many irrelevant version results. Only applies to text search (query), not CVE search."
-      exclude:
-        type: string
-        description: "Exclude results matching these terms (pipe-separated). Examples: '(PoC)|/dos/' (exclude proof-of-concepts and DoS), '/windows/' (exclude Windows exploits), '/linux/' (exclude Linux exploits). Useful for filtering out irrelevant platforms or non-functional PoCs. Only applies to text search (query), not CVE search."
-    returns:
-      results:
-        type: array
-        description: "Matching entries, each with: id (EDB-ID number), title (exploit description), path (local file path under /usr/share/exploitdb/), date (publication date), type ('exploit', 'shellcode', or 'paper')"
-      count:
-        type: integer
-        description: "Number of matching results"
-      query:
-        type: string
-        description: "The search query or CVE ID that was used"
-      search_type:
-        type: string
-        description: "'text' for query-based search, 'cve' for CVE-based search"
-
-  get_exploit:
-    description: "Retrieve the full source code of an exploit by its EDB-ID number or file path. Resolves the exploit ID to a local file path (/usr/share/exploitdb/exploits/...) via JSON search, then reads the file. Exploit code can be Python, C, Ruby, PHP, Perl, shell script, or text. The full content is returned for review before use."
-    when_to_use: "After search identifies a relevant exploit, use this to retrieve its source code. Review the code to understand: (1) what it does, (2) what parameters it needs (target IP, port, paths), (3) whether it needs compilation or modification, (4) any dependencies. For Python exploits: may need to be adapted and run via exploit-runner. For C exploits: need compilation (gcc). For Metasploit modules (Ruby): use the metasploit tool instead. Always review exploit code before execution — public exploits may contain backdoors or be unreliable."
-    params:
-      exploit_id:
-        type: string
-        required: true
-        description: "Either the EDB-ID number (e.g., '50383', '39446') from search results, or the full file path (e.g., '/usr/share/exploitdb/exploits/linux/remote/50383.py'). EDB-ID is preferred — the tool resolves it to the full path automatically."
-    returns:
-      exploit_id:
-        type: string
-        description: "The exploit ID that was requested"
-      path:
-        type: string
-        description: "Full local path to the exploit file"
-      content:
-        type: string
-        description: "Complete exploit source code as text"
-
+    - "POSITIONAL TERMS: space-separated search keywords. Each term must appear in the exploit title or path. Order doesn't matter. Examples: `apache 2.4.49`, `wordpress 5.0`, `linux kernel 5.4 privilege`, `ms17-010`, `eternalblue`, `ssh`. Fewer, more specific terms give better results."
+    - "-c / --case: case-sensitive matching. Default is case-insensitive. Useful when 'Apache' and 'apache' should not be conflated (rare)."
+    - "-e / --exact: exact-order title match. Default matches each term independently in any order with fuzzy version ranges. With -e the entire query string must appear as-is in the title. Use when default returns too many irrelevant results."
+    - "-s / --strict: strict version matching. '1.1' only matches '1.1', not '1.0 < 1.3'. Default fuzzy mode is usually wanted; use -s for precise version targeting."
+    - "-t / --title: search only the title field, not the path. Path-search can pull in unrelated platform-named files (e.g., 'apache' matching '/linux/local/apache_*'); -t restricts to the title text only."
+  output:
+    - "-j / --json: JSON output. PREFERRED for tooling. Returns a JSON object with RESULTS_EXPLOIT, RESULTS_SHELLCODE, RESULTS_PAPER arrays."
+    - "-o / --overflow: don't truncate the title column. Default table truncates titles to fit the terminal width."
+    - "-p / --path: show absolute filesystem path. On X11 systems also copies to clipboard (no-op inside container)."
+    - "-v / --verbose: extra diagnostic output (rare; mostly silent on simple queries)."
+    - "-w / --www: include a URL column pointing to https://www.exploit-db.com/exploits/<id>."
+    - "--colour / --no-colour: force / disable ANSI colour. Default auto-detects TTY (no colour in non-interactive runs)."
+  cve_lookup:
+    - "--cve <CVE-ID>: search by CVE. Accepts forms 'CVE-2021-44228' or '2021-44228'. Searches the CVE field directly (more precise than free-text)."
+    - "--id <EDB-ID>: lookup mode keyed on EDB-ID. The positional becomes the ID."
   mirror:
-    description: "Copy an exploit file to the session working directory for modification. Resolves the EDB-ID to a local file path, then copies the exploit source to the current working directory. Useful when you need to modify exploit code before execution — e.g., changing hardcoded IPs, adjusting payloads, or adapting the exploit for the target environment."
-    when_to_use: "After reviewing an exploit with get_exploit and determining it needs modification before use. Common modifications: (1) changing target IP/port, (2) adjusting payload (reverse shell callback IP), (3) adding missing dependencies or imports, (4) fixing Python 2 vs 3 compatibility issues, (5) adapting for the specific target version. After mirroring, the exploit can be edited and run via exploit-runner."
-    params:
-      exploit_id:
-        type: string
-        required: true
-        description: "EDB-ID of the exploit to copy (e.g., '50383' from search results). The exploit file will be copied to the current working directory with its original filename."
-    returns:
-      exploit_id:
-        type: string
-        description: "The exploit ID that was copied"
-      source_path:
-        type: string
-        description: "Original file path in the ExploitDB mirror"
-      filename:
-        type: string
-        description: "Name of the copied file in the working directory"
+    - "--mirror <EDB-ID>: copy the matching exploit file to the current working directory. Use `cd /session && searchsploit --mirror <id>` to land in /session/. Auto-resolves EDB-ID → file path."
+    - "--examine <EDB-ID> / -x <EDB-ID>: open the matching exploit in $PAGER (no pager inside container — falls back to cat-like behavior or fails silently). Prefer mirror + cat for inspection inside container."
+  nmap_import:
+    - "--nmap <XML-PATH>: parse an nmap XML scan file and search for exploits matching each detected service. Powerful one-shot service-to-exploit pipeline. The nmap input MUST be XML format (`-oX`), not normal output (`-oN`)."
+  maintenance:
+    - "-u / --update: update the local ExploitDB mirror via git pull. REQUIRES network. Idempotent; fast-paths if no updates."
+    - "-h / --help: print usage."
+    - "--exclude=<TERMS>: exclude results matching pipe-separated regex terms. Common: `(PoC)|/dos/`, `/windows/`, `/linux/`."
+
+gotchas:
+  - "searchsploit has NO NETWORK TARGET. The positional arguments are SEARCH TERMS (e.g., `apache 2.4`), not hostnames. target_extraction returns null; scope-validation does NOT apply because there is no remote host to validate. Same design as john / hashcat / volatility / ilspy — all offline tools operating on local artifacts."
+  - "JSON output (`-j`) is the cleanest format for tooling. The default tabular output uses pipe-separated columns with header lines that break naive parsers. Always prefer `-j` for downstream consumption; the JSON has top-level keys `SEARCH`, `DB_PATH`, `RESULTS_EXPLOIT`, `RESULTS_SHELLCODE`, `RESULTS_PAPER`."
+  - "`--cve` is the most useful when you have a known CVE — it searches the CVE field directly rather than scanning titles, so it returns precise results. Accepts both `CVE-2021-44228` and `2021-44228` forms; the `CVE-` prefix is optional but recommended for clarity."
+  - "`--nmap <xml-file>` is a powerful integration — feed nmap's XML output (-oX, NOT -oN) to find exploits matching ALL detected services in a single call. Standard workflow: `nmap -sV -oX /session/scan.xml <target>` then `searchsploit --nmap /session/scan.xml -j`. Skips services without product/version banners. Output groups results per service."
+  - "`--mirror <id>` copies the exploit file to the CURRENT WORKING DIRECTORY (CWD), not /session/ by default. Use `cd /session && searchsploit --mirror 12345` to land in /session/. The wrapper runs each call in its own shell, so the cd MUST be in the same command. Alternative: chain `searchsploit --mirror 12345 && mv 12345.* /session/` (less clean)."
+  - "Empty results are NOT a failure — searchsploit exits 0 even when zero exploits match. The default table renderer prints `Exploits: No Result` / `Shellcodes: No Result`; in `-j` mode the arrays are empty (`{\"RESULTS_EXPLOIT\": [], ...}`). The agent must inspect the result count, not just the exit code."
+  - "Database needs to be up-to-date for new CVEs. `searchsploit -u` updates from the ExploitDB git mirror — REQUIRES NETWORK. The image bundles a snapshot at build time; for engagements requiring the absolute-latest exploits run `-u` first. Skip in air-gapped environments — the bundled mirror is still useful (45k+ entries)."
+  - "Search-term order doesn't matter (default fuzzy mode). `apache 2.4 rce` and `rce apache 2.4` return the same results. Use `-e` (exact match) when order matters or when the default returns too many irrelevant results."
+  - "Fuzzy version matching can be SURPRISING: `2.4` matches `2.0 < 2.5`, `2.4.0`, `2.4.49`, `2.4-alpha`, etc. — the version-range parser is permissive. For precise version targeting use `-s` (strict): `searchsploit apache 2.4.49 -s`. Otherwise expect adjacent-version results."
+  - "Path-based search can pull in unrelated platform files. Searching `apache` matches `/linux/remote/apache_<...>.py` (intended) AND `/windows/local/<...>.py` if 'apache' appears in the path for some other reason. Use `-t` (title-only) to restrict to the title field."
+  - "The bundled mirror lives at `/usr/share/exploitdb/exploits/` (exploits) and `/usr/share/exploitdb/shellcodes/` (shellcodes) and `/usr/share/exploitdb/papers/` (papers). Paths in search results are RELATIVE to /usr/share/exploitdb/. Use `-p` to print the absolute path."
+  - "Ruby (.rb) exploits are typically Metasploit modules — not standalone scripts. Loading them requires the Metasploit framework (`use exploit/<path>` in msfconsole). Don't try to run .rb files directly via exploit-runner; use the metasploit tool."
+  - "Many exploits are STALE or NON-FUNCTIONAL. Public PoCs frequently target specific OS builds, library versions, or environmental conditions that don't match the live target. The `--exclude='(PoC)'` filter removes proof-of-concept stubs but cannot detect bit-rot. Always review exploit code before execution."
+  - "Exit codes: searchsploit exits 0 for both 'matches found' and 'no matches' (informational, not a failure). Non-zero exit means an actual error: invalid args, file-not-found (--nmap), database not initialized (rare; rebuild image), update failure (--u with no network)."
+  - "`searchsploit -p <EDB-ID>` (print absolute path) depends on the `rev` utility being present in the container. The legacy MCP wrapper deliberately AVOIDED `-p` and resolved EDB-ID → path via `searchsploit --json <id>` + parsing the `Path` field, prefixed with `/usr/share/exploitdb/`. If `-p` errors with `rev: command not found` or similar, fall back to `searchsploit --json <id>` and read the `RESULTS_EXPLOIT[0].Path` field; the absolute path is `/usr/share/exploitdb/` + that relative path."
+  - "`--exclude` accepts both `--exclude=<terms>` and `--exclude <terms>` forms; the `=` form is safer in argv-only invocations (no shell) because it avoids any chance of the value being mis-parsed as a positional search term. Prefer `--exclude='(PoC)|/dos/'` over `--exclude '(PoC)|/dos/'`."
+  - "JSON output mixes three top-level arrays — `RESULTS_EXPLOIT`, `RESULTS_SHELLCODE`, `RESULTS_PAPER`. searchsploit has NO server-side `--type=exploit|shellcode|paper` filter; if you want only exploits, parse the JSON and ignore the other two arrays. (The legacy MCP wrapper added a client-side `type` filter parameter; that synthetic filter is gone in kind:cli — the agent does the filtering itself.)"
+  - "`--examine` / `-x <EDB-ID>` opens the exploit in `$PAGER` (typically `less`). Inside the container `$PAGER` is usually unset and there's no interactive terminal, so the call may hang waiting for input or fail with `pager not found`. Prefer `--mirror <id>` + `cat` for inspection. Avoid `--examine` in non-interactive container runs."
+
+failure_signatures:
+  # Layer-diverse signals (SKILL #11):
+  #   - File / I/O layer (--nmap path open, --mirror destination write)
+  #   - Argument / argparse layer (unknown flag, malformed --cve, missing positional)
+  #   - DB / data layer (database not initialized, corrupt index)
+  #   - Network layer (-u git fetch failure)
+  #   - Mirror / output layer (write permission, disk full)
+  #   - Empty-result layer (Exploits: No Result — informational, NOT a true failure)
+  - signal: "Exploits: No Result"
+    remediation: "INFORMATIONAL, not a failure. searchsploit completed successfully but found zero matching exploits. Try broader terms (drop version: `apache` instead of `apache 2.4.49`), drop `-e` (exact match), drop `-s` (strict version), or try `--cve` if you have a CVE. Also check spelling — `wordpress` not `word press`."
+  - signal: "Shellcodes: No Result"
+    remediation: "Same as 'Exploits: No Result' — informational. The shellcode database is smaller than the exploit DB; absence of shellcode matches is normal."
+  - signal: "No Result"
+    remediation: "Generic empty-result signal (matches both Exploits and Shellcodes No Result lines). Try broader terms or `--cve` lookup."
+  - signal: "unrecognized option"
+    remediation: "argparse rejected an unknown flag. Check spelling against `searchsploit --help` — common typos: `--cve-id` (correct: `--cve`), `--EDB-ID` (correct: `--id`), `--nmap-xml` (correct: `--nmap`)."
+  - signal: "invalid argument"
+    remediation: "Argument value rejected. For --cve: must be CVE-YYYY-NNNN or YYYY-NNNN format. For --id: must be a numeric EDB-ID. For --nmap: must be a path to a parseable XML file."
+  - signal: "Cannot read"
+    remediation: "File-open failure on the --nmap XML path. Check the file exists and is readable (`ls -l <path>`). The path must be inside the container (typically /session/<file>); paths outside the mount may not be reachable."
+  - signal: "nmap XML file not found"
+    remediation: "--nmap path doesn't exist or isn't a valid XML file. Verify with `ls /session/` and confirm the nmap was run with `-oX` (XML output), not `-oN` (normal output) or `-oG` (grepable). Re-run nmap if needed."
+  - signal: "not a valid XML"
+    remediation: "--nmap input parsed-but-malformed. Confirm the file is true nmap XML (starts with `<?xml ... <nmaprun>` ... `</nmaprun>`). If the nmap run was interrupted the XML may be truncated — re-run nmap to completion."
+  - signal: "searchsploit-db not found"
+    remediation: "Local ExploitDB mirror is missing or corrupt. Check `/usr/share/exploitdb/` exists and contains files_exploits.csv, files_shellcodes.csv, exploits/, shellcodes/, papers/. If empty, the image build is incomplete — rebuild. If file_*.csv missing, rebuild the index with `searchsploit -u` (requires network)."
+  - signal: "Database not initialized"
+    remediation: "Same family as 'searchsploit-db not found' — the CSV index is missing. Run `searchsploit -u` to rebuild from the upstream git mirror (requires network), or rebuild the container image."
+  - signal: "git fetch failed"
+    remediation: "`-u` update operation failed because the git fetch from the upstream ExploitDB mirror couldn't connect. Confirm the container has network egress (`curl -I https://gitlab.com`); check for proxy issues. If air-gapped, skip `-u` — the bundled mirror is still functional."
+  - signal: "Failed to copy"
+    remediation: "--mirror destination write failed. Check the current working directory is writable (`pwd && touch .testwrite`). Use `cd /session && searchsploit --mirror <id>` since /session/ is always writable."
+  - signal: "Permission denied"
+    remediation: "File-write failure during --mirror or --update. For --mirror: ensure CWD is writable (cd /session). For --update: ensure /usr/share/exploitdb/ is writable (it is by default in the container image; if read-only, the image is mounted differently than expected)."
+  - signal: "No such file or directory"
+    remediation: "Generic file-open failure. Most often --nmap path doesn't exist, --mirror EDB-ID resolves to a missing file (mirror desync — run `-u`), or the wrapper's CWD is invalid. Check `ls <path>` for the offending path."
+
+help_commands:
+  - command: "searchsploit -h"
+    purpose: "Print usage including all flags (-c, -e, -j, -o, -p, -s, -t, -u, -v, -w, -x) and long-form equivalents (--exclude, --id, --cve, --mirror, --nmap, --colour, --no-colour). Use to verify flag spelling before constructing complex queries."
+  - command: "searchsploit --help"
+    purpose: "Long form of -h — same output."
+  - command: "searchsploit"
+    purpose: "Bare invocation prints usage / examples and exits non-zero (no positional terms supplied). Useful smoke test that the binary is on PATH."

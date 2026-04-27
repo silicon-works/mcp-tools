@@ -1,13 +1,31 @@
 name: john
+kind: cli
+binary: john
 version: "1.9.0-jumbo-1"
-description: "Password hash cracking tool — John the Ripper 1.9.0-jumbo-1 (community-enhanced version) with AVX2 acceleration. Supports 300+ hash formats including md5crypt, sha512crypt, bcrypt, NTLM, LM, MySQL, MSSQL, Oracle, PostgreSQL, Kerberos, WPA, SSH keys, ZIP/RAR/PDF/Office. Includes ~300 *2john converter scripts (ssh2john, zip2john, pdf2john, office2john, etc.) for extracting crackable hashes from encrypted files. Cracking modes: wordlist (with mangling rules), incremental (brute-force), mask (pattern-based), single (username-derived), PRINCE (combination). Ships with rockyou.txt (14M passwords) and john's built-in password.lst wordlist."
+description: "Password hash cracking tool — John the Ripper 1.9.0-jumbo-1 (community-enhanced version) with AVX2 acceleration. Supports 300+ hash formats including md5crypt, sha512crypt, bcrypt, NTLM, LM, MySQL, MSSQL, Oracle, PostgreSQL, Kerberos, WPA, SSH keys, ZIP/RAR/PDF/Office. Includes ~300 *2john converter scripts (ssh2john, zip2john, pdf2john, office2john, etc.) for extracting crackable hashes from encrypted files. Cracking modes: wordlist (with mangling rules), incremental (brute-force), mask (pattern-based), single (username-derived), PRINCE (combination). Ships with rockyou.txt (14M passwords) and john's built-in password.lst wordlist. Operates ENTIRELY OFFLINE on local hash files — there is no network target; the positional argument is a hash file path, not a host. Native CLI; LLM constructs the full john invocation. Use hashcat for GPU-accelerated cracking, hydra for online brute-force."
 image: "ghcr.io/silicon-works/mcp-tools-john:latest"
 image_size_mb: 200
-timeout_seconds: 900
+# Dual-clock model:
+#   idle_timeout_seconds — silence between MCP heartbeats. john prints status
+#     updates (progress lines, candidate counts, c/s rates) periodically — the
+#     default is once every few minutes, more frequent on session save (-save).
+#     10 min silent = stuck (e.g., infinite-loop on malformed hash, deadlocked
+#     external mode).
+#   max_runtime_seconds  — hard wall-clock cap; never resets on heartbeat.
+#     24 h covers slow-hash cracking on CPU (bcrypt, sha512crypt) over the
+#     full rockyou wordlist with rules. Faster hashes finish in seconds.
+# Legacy `timeout_seconds` is used by older clients as the hard cap.
+idle_timeout_seconds: 600
+max_runtime_seconds: 86400
+timeout_seconds: 86400
 
 capabilities:
   - password_cracking
   - hash_identification
+  - offline_password_recovery
+
+phases:
+  - post-exploitation
 
 routing:
   use_for:
@@ -15,6 +33,7 @@ routing:
     - "crack Windows NTLM LM hashes from SAM or secretsdump"
     - "crack MD5 SHA1 SHA256 SHA512 bcrypt hashes"
     - "crack Kerberos TGS tickets (kerberoasting)"
+    - "crack Kerberos AS-REP responses (asreproast)"
     - "crack SSH private key passphrases"
     - "crack ZIP RAR PDF Office encrypted file passwords"
     - "identify unknown hash format type"
@@ -30,6 +49,7 @@ routing:
       reason: "IKE PSK hashes require psk-crack, not John the Ripper"
     - "online brute-forcing (use hydra)"
     - "network authentication testing (use hydra)"
+    - "GPU-accelerated cracking on large wordlists (use hashcat)"
   triggers:
     - "crack password"
     - "hash crack"
@@ -39,17 +59,10 @@ routing:
     - "john the ripper"
     - "rockyou"
     - "kerberoast"
-    - "hashcat"
+    - "asreproast"
+    - "*2john"
+    - "ssh key passphrase"
   prefer_over: []
-
-see_also:
-  - tool: responder
-    reason: "Use responder to capture NTLMv2 hashes via LLMNR/NBT-NS poisoning — feed captured hashes to john for cracking."
-  - tool: hashcat
-    reason: "Use hashcat for advanced cracking modes: combinator attacks (-a 1), hybrid attacks (-a 6/-a 7), custom charsets, and GPU acceleration."
-
-phases:
-  - post-exploitation
 
 requirements:
   network: false
@@ -59,117 +72,305 @@ resources:
   memory_mb: 1024
   cpu: 2.0
 
-methods:
-  crack:
-    description: "Crack password hashes using john's wordlist mode with optional mangling rules. Writes hashes to a temp file, runs john with the specified wordlist and format, then runs john --show to collect cracked results. Uses AVX2 acceleration when available. The 'rockyou' wordlist (14M passwords) is the default and cracks most weak passwords. With rules enabled (default), john applies word mangling transformations (capitalization, number appending, leet speak, etc.) which dramatically increases coverage. John stores cracked passwords in ~/.john/john.pot — subsequent calls for the same hash return instantly from the pot file."
-    when_to_use: "After extracting password hashes from any source: /etc/shadow (Linux), SAM/NTDS.dit/secretsdump (Windows), database dumps (MySQL, PostgreSQL, MSSQL), web application databases, Kerberos tickets (kerberoasting). Always specify the format if you know it — auto-detection works but can be slow or wrong with ambiguous hashes. Common workflow: (1) Extract hashes (e.g., from /etc/shadow, sqlmap dump, impacket secretsdump), (2) Identify format if unsure, (3) Crack with rockyou, (4) If no results, try 'common' wordlist (john's password.lst) with rules for faster iteration. For bcrypt/scrypt hashes, expect very slow cracking (minutes per password) — reduce timeout expectations. For simple MD5/SHA hashes, rockyou with rules cracks most weak passwords in under a minute."
-    params:
-      hashes:
-        type: string
-        required: true
-        description: "Hash(es) to crack, one per line. Supports multiple formats: bare hash ('5f4dcc3b5aa765d61d8327deb882cf99'), user:hash ('admin:$6$rounds=5000$...'), /etc/shadow format ('root:$6$salt$hash:...'). For multiple hashes, separate with newlines. John auto-detects the format from the hash structure."
-      format:
-        type: string
-        default: "auto"
-        description: "Hash format name. 'auto' attempts detection (may fail for raw/ambiguous hashes). Common formats: 'raw-md5' (unsalted MD5), 'raw-sha1', 'raw-sha256', 'raw-sha512', 'md5crypt' ($1$), 'sha256crypt' ($5$), 'sha512crypt' ($6$, Linux /etc/shadow), 'bcrypt' ($2a$/$2b$), 'ntlm' (Windows), 'lm' (legacy Windows), 'mysql' (MySQL 4.1+), 'mssql' (SQL Server), 'descrypt' (DES crypt), 'ssh' (SSH key passphrase via ssh2john), 'zip'/'rar'/'pdf' (encrypted files via *2john). John supports 300+ formats total — use identify method to determine the correct format."
-      wordlist:
-        type: string
-        default: "rockyou"
-        description: "Wordlist name or path. Built-in: 'rockyou' (/usr/share/wordlists/rockyou.txt, ~14M passwords — comprehensive, default), 'common' (/usr/share/john/password.lst, ~3K passwords — fast). Or provide an absolute path to a custom wordlist."
-      rules:
-        type: boolean
-        default: true
-        description: "Apply john's word mangling rules (--rules). Transforms each wordlist entry through ~100 rules: capitalize, append numbers (password1, password123), leet speak (p@ssw0rd), reverse, etc. Increases effective wordlist size by ~100x. Enabled by default. Disable for raw wordlist-only testing (faster but less coverage)."
-      timeout:
-        type: integer
-        default: 300
-        description: "Maximum cracking time in seconds. Default 300s (5 min). For MD5/SHA with rockyou: 1-2 minutes is usually enough. For bcrypt ($2a$, cost 10+): each hash takes ~0.01s to test, so 14M wordlist takes ~40 hours — use 'common' wordlist instead. For NTLM: very fast, 300s is more than enough for rockyou."
-      mask:
-        type: string
-        description: "Mask pattern for targeted cracking (alternative to wordlist). Placeholders: ?l=lowercase, ?u=uppercase, ?d=digit, ?s=special, ?a=all printable. Examples: '?u?l?l?l?d?d?d?d' (Name1234), 'Company?d?d?d?d' (Company + 4 digits), '?d?d?d?d' (4-digit PIN). Overrides wordlist if provided. Much faster than wordlist for known password patterns."
-      incremental:
-        type: boolean
-        default: false
-        description: "Use incremental (brute-force) mode — tries all character combinations. Very slow but guaranteed to find the password eventually. Only practical for short passwords (8 chars or less). Overrides both wordlist and mask."
-      fork:
-        type: integer
-        description: "Number of processes to fork for parallel cracking (--fork=N). Set to number of CPU cores for maximum speed. Most useful for slow hash types like bcrypt and scrypt where each attempt is expensive."
-    returns:
-      cracked:
-        type: array
-        description: "Cracked results. Each entry: {user: 'username', password: 'plaintext'}. Empty array if nothing cracked."
-      count:
-        type: integer
-        description: "Number of passwords cracked"
-      format:
-        type: string
-        description: "Hash format used"
-      mode:
-        type: string
-        description: "Cracking mode used: 'wordlist', 'mask', or 'incremental'"
-      wordlist:
-        type: string
-        description: "Full path to wordlist used (only present in wordlist mode)"
-      mask:
-        type: string
-        description: "Mask pattern used (only present in mask mode)"
+see_also:
+  - tool: hashcat
+    reason: "Use hashcat for GPU-accelerated cracking, advanced hybrid attacks (-a 6 / -a 7), combinator mode (-a 1), and custom charsets. Hashcat is faster on modern hardware; john is more flexible on hash formats and *2john converters."
+  - tool: responder
+    reason: "Use responder to capture NTLMv2 hashes via LLMNR/NBT-NS poisoning — feed captured hashes to john (--format=netntlmv2) for cracking."
+  - tool: impacket
+    reason: "Use impacket-secretsdump to extract NTDS.dit hashes, secretsdump output feeds directly to john (--format=nt). Use impacket-GetUserSPNs / GetNPUsers for kerberoast/asreproast hashes (--format=krb5tgs / krb5asrep)."
+  - tool: hashid
+    reason: "Standalone hash identifier for cases where john's --format=? listing is too noisy. Returns ranked format guesses."
 
-  show:
-    description: "Show previously cracked passwords from john's pot file (~/.john/john.pot). John caches all cracked passwords persistently — this retrieves results without re-cracking. Writes the hashes to a temp file, runs john --show, and parses the output. Useful for: (1) checking if hashes were already cracked in a previous crack call, (2) retrieving results after a timeout, (3) checking the pot file after manual cracking."
-    when_to_use: "After a crack attempt (especially one that timed out) to check what was cracked. Also use when you have the same hashes and want to see if they were cracked in a previous session. John's pot file persists across calls within the same container session, so all previously cracked passwords are retrievable. If crack returns 0 results but you suspect it worked (e.g., you saw progress in raw_output), call show to check the pot file."
-    params:
-      hashes:
-        type: string
-        required: true
-        description: "Hash(es) to check, same format as the crack method. Must match what was originally passed to crack (john matches by hash value in the pot file)."
-      format:
-        type: string
-        default: "auto"
-        description: "Hash format. Should match the format used in the crack call. If 'auto' was used for cracking, use 'auto' here too."
-    returns:
-      cracked:
-        type: array
-        description: "Previously cracked results from the pot file. Each entry: {user: 'username', password: 'plaintext'}"
-      count:
-        type: integer
-        description: "Number of cracked passwords found in pot file"
+# ── kind:cli specific sections ──────────────────────────────────────
 
-  identify:
-    description: "Identify the format of an unknown hash using pattern matching and john format probing. First checks against 16 common hash patterns (md5crypt, sha256crypt, sha512crypt, bcrypt, phpass, argon2, SSHA, raw-MD5/NTLM, raw-SHA1, raw-SHA256, raw-SHA512, MySQL, etc.). If no pattern matches, falls back to probing 8 john formats. Returns a list of possible format names."
-    when_to_use: "When you have a hash but don't know its format — e.g., found a hash in a config file, database, or web application and need to determine the correct john format name before cracking. Pattern matching handles most common formats instantly. If this method returns 'unknown', try the hash-lookup tool or check hash format references online. For hashes from specific sources (MySQL, PostgreSQL, etc.), the format is usually known from context."
-    params:
-      hash:
-        type: string
-        required: true
-        description: "Single hash to identify. Can be a bare hash ('5f4dcc3b5aa765d61d8327deb882cf99') or in user:hash format ('admin:$6$salt$hash'). Only provide ONE hash — multiple hashes may confuse the detection."
-    returns:
-      possible_formats:
-        type: array
-        description: "List of john format names that accepted the hash (e.g., ['raw-md5', 'ntlm']). 'unknown' if no format matched. Multiple matches are common for ambiguous hashes (e.g., 32 hex chars matches both raw-md5 and ntlm)."
+target_extraction:
+  # john has NO network target. Its positional argument is a HASH FILE PATH
+  # on local disk (e.g., /session/hashes.txt). A file path is NOT a hostname,
+  # IP, or URL — TargetValidation can't classify it as in-scope/out-of-scope
+  # because it's not a network endpoint at all. The plugin's scope-validation
+  # framework is designed for network targets; running it against a file path
+  # would either (a) always reject (wrong) or (b) always accept (also wrong).
+  #
+  # Decision: declare NO target_extraction rules. The plugin extracts
+  # target=null. The downstream gotcha note documents that scope-validation
+  # is N/A for john because the operation is purely local hash cracking.
+  #
+  # If a future feature adds "session-internal artifact scope" (e.g., only
+  # allow hashes under /session/), that could be a separate validator.
+  []
 
-  convert:
-    description: "Extract a crackable hash from an encrypted file using john's *2john converter scripts. Supports 24 file types including SSH keys, ZIP/RAR/7z archives, PDF/Office documents, password managers (KeePass, Bitwarden, LastPass, 1Password), crypto wallets (Bitcoin, Ethereum), disk encryption (TrueCrypt, LUKS, BitLocker, DMG), and more. The output hash can be passed directly to the crack method."
-    when_to_use: "When you have an encrypted file and need to crack its password. Common scenarios: (1) Found an encrypted SSH private key — use file_type='ssh' to extract the hash, then crack it. (2) Found a password-protected ZIP file — use file_type='zip'. (3) Found a KeePass database — use file_type='keepass'. (4) Found an Ansible vault — use file_type='ansible'. The workflow is always: convert → crack. The file must be accessible inside the container (mount via session directory)."
-    params:
-      file_path:
-        type: string
-        required: true
-        description: "Path to the encrypted file inside the container. Files from the session working directory are mounted at /session/. Examples: '/session/id_rsa', '/session/backup.zip', '/session/vault.kdbx'."
-      file_type:
-        type: enum
-        required: true
-        values: [ssh, zip, rar, pdf, office, 7z, keepass, gpg, bitcoin, ethereum, truecrypt, luks, ansible, bitwarden, lastpass, 1password, keychain, pfx, mozilla, telegram, signal, dmg, bitlocker]
-        description: "Type of encrypted file — determines which *2john converter to use. ssh=SSH private key, zip=ZIP archive, rar=RAR archive, pdf=PDF document, office=MS Office (Word/Excel/PowerPoint), 7z=7-Zip archive, keepass=KeePass database (.kdbx), gpg=GPG encrypted file, bitcoin/ethereum=crypto wallets, truecrypt/luks/bitlocker/dmg=disk encryption, ansible=Ansible vault, bitwarden/lastpass/1password=password manager exports, keychain=macOS keychain, pfx=PKCS#12 certificate, mozilla=Firefox/Thunderbird profiles, telegram/signal=messaging app data."
-    returns:
-      hash:
-        type: string
-        description: "Extracted hash in john-compatible format. Pass this directly to crack method's 'hashes' parameter."
-      file:
-        type: string
-        description: "Original file path"
-      converter:
-        type: string
-        description: "Name of the *2john converter script used (e.g., 'ssh2john.py', 'zip2john')"
-      file_type:
-        type: string
-        description: "File type that was converted"
+# john reads hash data from a local file (positional argument). There is no
+# target-list flag analog. Wordlists, rules, masks, sessions, and pot files
+# are all local artifacts inside the container. Nothing to reject.
+reject_flags: []
+reject_flags_reason: "john has no network target and no target-list flag. The positional argument is a local hash-file path; wordlists, rules, masks, sessions, and pot files are all local container artifacts. There is no scope-validation surface to protect."
+
+# Per-tool value-taking flags whose values must NOT be confused with anything
+# else (no targets to confuse with — but flags must be parsed correctly so
+# the DSL doesn't trip on flag values that look like file paths). john uses
+# DOUBLE-DASH long flags — verified against `john --help` and john docs.
+# Many flags accept --flag=value or --flag value forms.
+value_flags:
+  # Wordlist / rules / external
+  - "--wordlist"            # wordlist file path (--wordlist=PATH or --wordlist PATH)
+  - "-w"                    # short alias for --wordlist
+  - "--rules"               # rule set name (--rules=NAME) — also valid as boolean (default ruleset)
+  - "--rules-stack"         # comma-separated rule chain (--rules-stack=Single,Wordlist,KoreLogic)
+  - "--external"            # external mode filter name (--external=Filter:Name)
+  # Mode selection
+  - "--mask"                # mask pattern (--mask=?l?l?l?l?d?d?d?d)
+  - "--incremental"         # incremental mode name (--incremental=ASCII) — also valid as boolean
+  - "--single"              # single mode rules (--single=Single) — also valid as boolean
+  - "--single-wordlist"     # single-mode wordlist
+  - "--single-pair-max"     # int
+  - "--single-retest-guess" # boolean / param
+  - "--prince"              # PRINCE wordlist (jumbo only)
+  - "--prince-loopback"     # boolean
+  - "--prince-elem-cnt-min" # int
+  - "--prince-elem-cnt-max" # int
+  - "--prince-skip"         # int
+  - "--prince-limit"        # int
+  - "--prince-wl-dist-len"  # boolean
+  - "--prince-wl-max"       # int
+  - "--prince-case-permute" # boolean
+  - "--prince-mmap"         # boolean
+  - "--prince-keyspace"     # boolean
+  - "--subsets"             # subset attack (jumbo)
+  - "--regex"               # regex mode pattern
+  - "--mkv"                 # Markov mode params
+  - "--markov"              # Markov mode params (alias)
+  # Format / encoding
+  - "--format"              # hash format (--format=raw-md5, --format=nt, --format=bcrypt)
+  - "--encoding"            # internal encoding (--encoding=utf-8)
+  - "--input-encoding"      # input file encoding
+  - "--target-encoding"     # output encoding
+  - "--internal-codepage"   # internal codepage for non-ASCII charsets
+  # Session / restore / status
+  - "--session"             # session name (--session=mysession)
+  - "--restore"             # restore session (--restore=mysession or --restore alone)
+  - "--status"              # show status (--status=mysession or --status alone)
+  - "--config"              # config file path (--config=/path/john.conf)
+  # Output / logging / pot
+  - "--pot"                 # pot file override (--pot=/session/john.pot)
+  - "--logfile"             # log file path
+  - "--output"              # alternate output file (some jumbo builds)
+  - "--show"                # show cracked (--show=left for uncracked, --show alone)
+  - "--make-charset"        # generate charset file (--make-charset=file)
+  # Filtering / scoping which hashes to load
+  - "--users"               # user filter (--users=root,admin)
+  - "--groups"              # group filter
+  - "--shells"              # shell filter (--shells=/bin/bash)
+  - "--salts"               # salt count filter (--salts=2 or --salts=-3)
+  - "--field-separator-char" # CSV separator override
+  - "--no-loader-dupecheck" # boolean — speeds load on huge files
+  # Performance / parallelism
+  - "--fork"                # process fork count (--fork=4)
+  - "--node"                # cluster node id (--node=N/M)
+  - "--devices"             # GPU device list for OpenCL builds (--devices=0,1)
+  - "--platform"            # OpenCL platform id
+  - "--save-memory"         # 1-3, memory-saving level
+  - "--mem-file-size"       # int (bytes), wordlist mmap threshold
+  - "--max-length"          # int, max candidate length
+  - "--min-length"          # int, min candidate length
+  - "--max-candidates"      # int, cap candidate count (jumbo)
+  - "--max-run-time"        # int, soft runtime cap (seconds)
+  - "--progress-every"      # int, progress interval (seconds)
+  - "--crack-status"        # boolean — print status on each crack
+  - "--reload-every"        # int, hashes reload interval
+  # Misc / behaviour
+  - "--verbosity"           # 1-5
+  - "--no-log"              # boolean
+  - "--keep-guessing"       # boolean — keep cracking after first match per hash
+  - "--regen-lost-salts"    # mode (jumbo)
+  - "--bare-always-valid"   # boolean
+  - "--length"              # alias for --max-length in some builds
+  - "--stdout"              # boolean — print candidates instead of cracking
+  - "--list"                # introspection list (--list=formats, --list=help, --list=hidden-options)
+  - "--test"                # benchmark mode (--test=N seconds, or --test alone)
+  - "--test-full"           # extended benchmark mode
+  - "--tune"                # tuning hint
+  - "--costs"               # cost-filter (--costs=0,1)
+  # Stdin
+  - "--stdin"               # boolean — read candidates from stdin
+  - "--pipe"                # boolean — read candidates from a pipe (jumbo, like --stdin but with rules)
+
+usage_patterns:
+  - name: "Default mode auto-detect on a hash file"
+    command: "john /session/hashes.txt"
+    when: "Quick first-pass crack with john's default mode chain (single → wordlist → incremental). Uses john's built-in password.lst wordlist by default. Auto-detects format from hash structure (slow on ambiguous hashes — prefer specifying --format=). Best for small hash sets where you want the fastest path to results without tuning."
+
+  - name: "Wordlist + rules attack with explicit format"
+    command: "john --wordlist=/usr/share/wordlists/rockyou.txt --rules --format=nt /session/ntlm-hashes.txt"
+    when: "The most common cracking workflow. rockyou.txt (14M passwords) + default ruleset (~100 mangling rules: capitalize, append digits, leet speak) covers the bulk of weak passwords. Always specify --format= for known hashes — auto-detect is much slower on ambiguous formats. For Linux /etc/shadow use --format=sha512crypt; for Windows NTLM dumps use --format=nt; for raw MD5 use --format=raw-md5."
+
+  - name: "Mask attack against NTLM"
+    command: "john --mask='?u?l?l?l?l?d?d?d?d' --format=nt /session/ntlm-hashes.txt"
+    when: "Pattern-based attack when you know the password structure (e.g., corporate naming conventions: 'Name1234'). Mask placeholders: ?l=lowercase, ?u=uppercase, ?d=digit, ?s=symbol, ?a=all printable. Faster than wordlist when the keyspace is bounded. Combine with --min-length / --max-length to bound the search."
+
+  - name: "Show already-cracked passwords from pot file"
+    command: "john --show --format=nt /session/ntlm-hashes.txt"
+    when: "Inspect the pot file (~/.john/john.pot or --pot override) for previously cracked passwords without re-running the attack. Use after a long crack run to harvest results, after a timeout to see partial progress, or to confirm hashes were cracked in a previous session. Format MUST match the original crack call (john matches by hash structure)."
+
+  - name: "Stdin candidate input via run_cli stdin_data"
+    command: "john --stdin --format=raw-md5 /session/hashes.txt"
+    when: "Feed a candidate stream (e.g., from crunch, hashcat --stdout, or a custom Python generator) to john. CRITICAL: cli_in_container has NO shell — `crunch | john --stdin` will NOT work as a single command string. Pipe data must be passed via tool_runner's `stdin_data` field; the plugin pipes to subprocess stdin. Useful for keyspace generation patterns john's mask mode can't express (e.g., dictionary-based hybrids or external Python rules)."
+
+  - name: "Kerberoast TGS hash crack"
+    command: "john --wordlist=/usr/share/wordlists/rockyou.txt --rules --format=krb5tgs /session/kerberoast.txt"
+    when: "Crack TGS-REP hashes captured by impacket-GetUserSPNs. --format=krb5tgs handles the encrypted-portion-of-TGS encoding. Same workflow as raw NTLM but with the Kerberos format. Slow per-attempt; use --fork=N (where N=cpu cores) to parallelize."
+
+  - name: "Resumable session with named state"
+    command: "john --session=client-engagement-1 --wordlist=/usr/share/wordlists/rockyou.txt --rules --format=sha512crypt --pot=/session/john.pot /session/shadow.txt"
+    when: "Long-running crack on slow hashes (bcrypt, sha512crypt). --session=NAME writes resume state to ~/.john/NAME.rec; if the run is interrupted (container killed, hard timeout), resume with `john --restore=client-engagement-1`. Pin --pot=/session/john.pot so cracked passwords survive container restart."
+
+  - name: "Parallel crack with --fork"
+    command: "john --fork=4 --wordlist=/usr/share/wordlists/rockyou.txt --rules --format=bcrypt /session/hashes.txt"
+    when: "Slow-hash formats (bcrypt at cost 10+, scrypt, sha512crypt) are CPU-bound per attempt. --fork=N spawns N worker processes that share the wordlist via candidate splitting. Set N to the container's CPU allocation (resources.cpu in tool.yaml — typically 2). --fork=4 on a 2-CPU container is SLOWER than --fork=2 because of context-switching overhead."
+
+  - name: "Incremental brute-force (short keyspace)"
+    command: "john --incremental=Digits --max-length=8 --format=raw-md5 /session/hashes.txt"
+    when: "Last-resort brute-force when wordlist+mask have failed. Tries every combination from john's incremental.chr file. ALWAYS bound with --max-length= or you'll never finish. --incremental=Digits restricts to digit-only characters; --incremental=Alpha uses A-Za-z. Practical only for length ≤ 8 with restricted charsets."
+
+  - name: "Hash identification (sanity-check unknown hash)"
+    command: "john --list=formats /session/hashes.txt"
+    when: "List all hash formats john knows. Pipe through grep to filter (but cli_in_container can't shell-pipe — call --list=formats then read stdout client-side). For active format detection, use a tiny test: `john --format=raw-md5 --show /session/test.txt` returns 'No password hashes loaded' if format mismatches."
+
+output_formats:
+  # john has no JSON / XML / SARIF output. Its 'output' is the pot file
+  # (cracked-password store). Everything else is human-readable stdout.
+  - flag: "--pot={path}"
+    format: "potfile"
+    preferred: true   # john.pot — colon-separated lines: hash:password
+  - flag: "--show --pot={path}"
+    format: "show_text"
+    preferred: false  # human-readable user:password pairs from pot
+  - flag: "--logfile={path}"
+    format: "log"
+    preferred: false  # progress / event log (timestamps, stage transitions)
+  - flag: "--output={path}"
+    format: "session_output"
+    preferred: false  # alternate cracked-output (jumbo only); semantics differ by build
+
+common_options:
+  input:
+    - "POSITIONAL FILE: hash file path (e.g., /session/hashes.txt). REQUIRED unless using --restore or --status. The hash file format is one hash per line, optionally with user: prefix (user:hash, /etc/shadow lines, or bare hashes). Multiple files allowed (positional list)."
+    - "--wordlist=PATH / -w PATH: wordlist file. Built-in: /usr/share/wordlists/rockyou.txt (~14M passwords), /usr/share/john/password.lst (~3.5K). Or custom /session/*.txt."
+    - "--rules[=NAME]: apply mangling rules. No NAME = default 'Wordlist' ruleset (~100 rules). Named: 'Single', 'Extra', 'OneRule' (combined ~10K rules), 'KoreLogic' (high-coverage), 'NT' (Windows-aware). Boost wordlist coverage 100-1000x at the cost of speed."
+    - "--rules-stack=A,B,C: chain rule sets in order — each candidate goes through every set sequentially. Multiplies keyspace; use sparingly."
+    - "--mask=PATTERN: mask attack. Placeholders: ?l (lowercase), ?u (uppercase), ?d (digit), ?s (symbol), ?a (all printable), ?h (hex lower), ?H (hex upper), ?b (binary 0x00-0xFF). Combine: '?u?l?l?l?d?d?d?d' = 'Name1234' shape. Custom placeholder via --custom-mask."
+    - "--single[=RULES]: single mode — try variations of the username as password. Combined with --rules=Single by default."
+    - "--incremental[=NAME]: incremental brute-force. NAME picks .chr file: ASCII (default), Digits, Alpha, Alnum, LM_ASCII (Windows-aware), AllJumbo. ALWAYS bound with --max-length."
+    - "--external=FILTER: external mode (custom C-like rule scripts in john.conf). Examples: 'Filter_Alpha', 'Filter_LanMan'. Advanced; rarely needed."
+    - "--prince=WORDLIST: PRINCE combinator attack (jumbo). Generates candidates by combining wordlist entries pairwise."
+  format:
+    - "--format=NAME: REQUIRED for known hashes. Common names: raw-md5, raw-sha1, raw-sha256, raw-sha512, md5crypt ($1$), sha256crypt ($5$), sha512crypt ($6$, Linux /etc/shadow), bcrypt ($2a$/$2b$), descrypt (DES crypt), nt (Windows NT), netntlmv2 (responder), krb5tgs (kerberoast), krb5asrep (asreproast), mysql, mysql-sha1, mssql, oracle, oracle11, ssh (via ssh2john), zip, rar, pdf, office. Use --list=formats for the full ~300-format set."
+    - "--list=formats: print all supported format names"
+  session:
+    - "--session=NAME: name the cracking session (writes ~/.john/NAME.rec). Use NAMED sessions when running concurrent crack jobs in the same container."
+    - "--restore[=NAME]: resume a previous session. NAME matches --session= used originally. No NAME resumes the most recent session."
+    - "--status[=NAME]: print status of a running session (candidate count, c/s rate, ETA). NAME selects a specific session."
+  output:
+    - "--show[=left]: print cracked passwords from the pot file. --show=left lists UNCRACKED hashes. Format MUST match the original crack."
+    - "--pot=PATH: override the pot file location. Default: ~/.john/john.pot. ALWAYS pin to /session/john.pot to preserve cracks across container restarts."
+    - "--logfile=PATH: progress log file. Default: ~/.john/john.log."
+    - "--output=PATH: alternate cracked-output file (jumbo)."
+  performance:
+    - "--fork=N: spawn N worker processes (CPU parallelism). Set N to the container's CPU count — overshooting hurts."
+    - "--node=N/M: cluster mode. Worker N of M total nodes. For multi-host distributed runs (rare in MCP)."
+    - "--devices=0,1: GPU device list (OpenCL builds only — Kali's john-jumbo CPU build does NOT support OpenCL by default)."
+    - "--save-memory=N: 1-3, reduces memory at cost of speed. Use on huge wordlists where RAM is tight."
+    - "--max-length=N / --min-length=N: bound candidate length (CRITICAL for incremental and mask)."
+    - "--max-run-time=SEC: soft runtime cap inside john (separate from the dual-clock max_runtime_seconds wrapper)."
+  filtering:
+    - "--users=USER1,USER2: only load hashes for matching users (when input is /etc/shadow style)"
+    - "--groups=GID1,GID2: only load hashes for matching groups"
+    - "--shells=/bin/bash,/bin/sh: only load hashes for users with matching shell"
+    - "--salts=N or --salts=-N: filter by salt count (saves time on heavily-salted sets)"
+    - "--keep-guessing: don't stop at first match per hash (useful for collision-prone formats)"
+  noise_control:
+    - "--no-log: suppress logfile (useful for ephemeral runs)"
+    - "--verbosity=N: 1 (quiet) - 5 (debug)"
+    - "--progress-every=SEC: print progress every SEC seconds (default ~1-3 minutes)"
+    - "--no-loader-dupecheck: skip duplicate-hash check on load (faster on huge files)"
+
+gotchas:
+  - "john has NO NETWORK TARGET. The positional argument is a HASH FILE PATH on local disk (e.g., /session/hashes.txt). target_extraction returns null; scope-validation does NOT apply because there's no remote host to validate against. The plugin's TargetValidation framework is for network targets only."
+  - "The pot file (~/.john/john.pot by default) PERSISTS in the container's home dir. To preserve cracked passwords across container restarts (or across sessions on the same engagement), ALWAYS use --pot=/session/john.pot. Without it, cracks are lost when the container is recreated."
+  - "--show checks the pot file. If the same hashes were cracked in a previous run, --show returns instantly without re-cracking. This is the fast path: always run --show first before launching a fresh crack."
+  - "Auto-detect (no --format=) tries every applicable format and is slow. ALWAYS specify --format= for known hashes. Use --list=formats to find the right name. Wrong format produces 'No password hashes loaded' (silent failure for the user — pattern-match required)."
+  - "STDIN PIPES DON'T WORK in cli_in_container. The plugin uses subprocess spawn with NO shell. A command like `crunch 6 6 abc | john --stdin --format=raw-md5 hashes.txt` will fail: john reads its file argument as the candidate list (wrong) or hangs waiting for stdin that never arrives. Pass candidate data via tool_runner's `stdin_data` field; the plugin pipes it to john's stdin."
+  - "--fork=N requires N CPU cores. The container's resources.cpu (tool.yaml) is 2.0 — set --fork=2 max. --fork=4 on a 2-CPU container is SLOWER than --fork=2 due to context-switching."
+  - "--rules with no name applies the default 'Wordlist' ruleset (~100 mangling rules). Other named sets: --rules=Single (single-mode rules), --rules=Extra (more aggressive), --rules=OneRule (the legendary 'OneRuleToRuleThemAll' ~10K rules — best general-purpose), --rules=KoreLogic (KoreLogic Defcon 2010 set), --rules=NT (Windows-aware)."
+  - "Mask syntax: ?l=lowercase, ?u=uppercase, ?d=digit, ?s=symbol, ?a=all printable, ?h=hex lower, ?H=hex upper, ?b=any byte. Combine: '?l?l?l?l?d?d?d?d' = 4 lowercase + 4 digits. Custom placeholders via --custom-mask=1=ABC123 lets ?1 mean A|B|C|1|2|3."
+  - "Resume: john saves session state to ~/.john/<session>.rec. Use --session=NAME to label the session; --restore=NAME (or --restore alone for the most recent) resumes from the last checkpoint. Long crack jobs MUST use --session= or you can't resume cleanly."
+  - "john --incremental ALWAYS run-bounded. Without --max-length= it will literally try every keyspace combination forever. --max-length=8 is a sane upper bound for CPU cracking; --max-length=10+ becomes computationally infeasible for sha512crypt or bcrypt."
+  - "--format=krb5tgs (kerberoast) and --format=krb5asrep (asreproast) operate on the impacket-output hash text directly. Don't reformat the hash; pass impacket's output as-is to /session/<hashes>.txt."
+  - "john's exit code is 0 on a successful run AND on 'No password hashes loaded' (wrong format / empty file). ALWAYS pattern-match output for failure_signatures regardless of exit code — same anti-pattern as ffuf, sqlmap, nuclei, nikto."
+  - "Kali's john-jumbo build is CPU-only by default (no --devices= / --platform= support). For GPU-accelerated cracking use hashcat instead. john's strength is format coverage and *2john converters, not GPU throughput."
+  - "Auto-detection (no --format=) on common hash families (32-hex strings) returns ambiguous matches: a 32-character hex string could be raw-md5, ntlm, lm, or one of ~20 other formats. john runs all of them serially — extremely slow. ALWAYS specify --format= up front."
+  - "rockyou.txt at /usr/share/wordlists/rockyou.txt is 14M passwords. Combined with --rules (default 100 rules) the effective candidate count is ~1.4B. On bcrypt-12 that's ~3 hours of CPU; on raw-md5 it's ~30 seconds. Plan timeouts accordingly."
+  - "Wordlist paths: john does NOT accept shortname aliases (the legacy MCP wrapper resolved 'rockyou' → '/usr/share/wordlists/rockyou.txt' and 'common' → '/usr/share/john/password.lst' client-side). In kind:cli the LLM must pass full paths: --wordlist=/usr/share/wordlists/rockyou.txt or --wordlist=/usr/share/john/password.lst. A bare --wordlist=rockyou will fail with 'Cannot read wordlist'."
+  - "Mode precedence when multiple cracking modes are requested: john evaluates them as INDEPENDENT modes — combining --incremental with --mask, or --wordlist with --incremental, will either error or silently pick the first parsed. Pick ONE mode per invocation: --wordlist (with optional --rules), OR --mask, OR --incremental, OR --single. To run multiple modes in sequence, use --rules-stack or invoke john multiple times with --session= so the pot file accumulates results."
+  - "--show requires a HASH FILE PATH on disk, not a hash string. The legacy MCP wrapper accepted a hash string and wrote a temp file before calling john --show; in kind:cli the LLM must write the hash(es) to /session/<name>.txt first (use the write tool), THEN run --show against that path. Same applies to --crack and all positional-file forms."
+  - "*2john converters (extract crackable hashes from encrypted files) are NOT exposed as john subcommands — they're separate scripts shipped alongside john. Compiled binaries: /usr/sbin/zip2john, /usr/sbin/rar2john, /usr/sbin/keepass2john, /usr/sbin/gpg2john, /usr/sbin/bitlocker2john (call directly: zip2john /session/locked.zip > /session/zip.hash). Python/Perl scripts in /usr/share/john/: ssh2john.py, pdf2john.pl, office2john.py, 7z2john.pl, bitcoin2john.py, ethereum2john.py, truecrypt2john.py, luks2john.py, ansible2john.py, bitwarden2john.py, lastpass2john.py, 1password2john.py, keychain2john.py, pfx2john.py, mozilla2john.py, telegram2john.py, signal2john.py, dmg2john.py — invoke with `python3 /usr/share/john/ssh2john.py /session/id_rsa > /session/sshkey.hash` or `perl /usr/share/john/pdf2john.pl /session/doc.pdf > /session/pdf.hash`. Output goes to stdout — redirect to a hash file, then crack with `john --format=<type> /session/<file>.hash`."
+  - "Hash identification (legacy `identify` method): john has no built-in hash-identification command. Workflows: (1) pattern-match the hash prefix client-side ($1$=md5crypt, $5$=sha256crypt, $6$=sha512crypt, $2a$/$2b$/$2y$=bcrypt, $P$/$H$=phpass, $apr1$=md5apr1, {SSHA}=SSHA, *<40hex>=mysql-sha1); (2) length heuristics for raw hashes (32 hex = raw-md5 or nt or lm; 40 hex = raw-sha1; 64 hex = raw-sha256; 128 hex = raw-sha512); (3) probe with --show under several --format= candidates (e.g., `john --format=raw-md5 --show /session/h.txt` — no error means structurally valid). For higher-confidence identification use the standalone `hashid` tool (see see_also)."
+
+failure_signatures:
+  # Layer-diverse signals (SKILL #11):
+  #   - File / I/O layer (libc fopen / john's file readers)
+  #   - Hash-format / loader layer (john's hash-loader rejects malformed input)
+  #   - Mask / argument-validation layer (john's mask parser)
+  #   - Wordlist layer (john's wordlist mode)
+  #   - Output / disk layer (pot file / logfile / output write failures)
+  #   - Resource layer (memory / fork)
+  - signal: "No such file or directory"
+    remediation: "File path doesn't exist (hash file, wordlist, rules file, or pot file). Verify the path and that /session/ is mounted. Most common cause is mistyped filename or hash file written to wrong location."
+  - signal: "fopen:"
+    remediation: "Generic fopen() failure — usually 'No such file or directory' but can also indicate permission denied. Read the next line for the specific cause."
+  - signal: "No password hashes loaded"
+    remediation: "The hash file is empty, malformed, OR --format= mismatches the hash structure. Verify with `head /session/hashes.txt` and run `john --list=formats` to find the correct format name. A 32-hex string might be raw-md5 OR nt — pick based on context (Windows dump = nt; web app dump = raw-md5)."
+  - signal: "No password hashes left to crack"
+    remediation: "All hashes in the file have already been cracked (pot file already contains them). Use --show to display them, or use --pot=/dev/null to force re-crack."
+  - signal: "Mask error"
+    remediation: "Invalid mask syntax in --mask=. Common errors: unclosed character class, unknown placeholder. Valid placeholders: ?l ?u ?d ?s ?a ?h ?H ?b. Custom placeholders need --custom-mask=1=CHARSET. Run `john --list=mask` for help."
+  - signal: "Invalid character class"
+    remediation: "Custom mask placeholder references a charset that wasn't defined. Define with --custom-mask=N=CHARSET, then reference as ?N in --mask=."
+  - signal: "Bad wordlist file"
+    remediation: "Wordlist file is corrupted, has invalid encoding, or is binary. Verify with `file /path/to/wordlist`. john expects newline-delimited UTF-8 text. Use --input-encoding=cp1252 (or similar) for legacy charsets."
+  - signal: "Cannot read wordlist"
+    remediation: "Wordlist path doesn't exist or isn't readable. Verify with `ls -l /usr/share/wordlists/rockyou.txt`. On the kali base image rockyou is pre-decompressed; if you see rockyou.txt.gz instead, decompress first."
+  - signal: "Disk full"
+    remediation: "Output file (pot, logfile, --output=) couldn't be written. Free space in the container (especially /session/ and ~/.john/) or pin --pot= to a path with available space."
+  - signal: "Cannot write to"
+    remediation: "Permission or disk-full error on output file. Verify directory exists and is writable. /session/ should always be writable; ~/.john/ requires the user to have a homedir."
+  - signal: "Unknown ciphertext format name"
+    remediation: "--format= value is invalid. Run `john --list=formats` for the full list. Common typos: 'ntlm' is correct; 'NT' is correct; 'NT-LM' is wrong — use 'lm' or 'nt' separately. 'sha512' is wrong — use 'raw-sha512' (no salt) or 'sha512crypt' ($6$ Linux shadow)."
+  - signal: "Could not open"
+    remediation: "Generic file-open failure. Read the next line for which file (config, hash, wordlist). Same root cause as fopen: errors."
+  - signal: "Unknown option"
+    remediation: "john's option parser rejected a flag. Verify spelling (john uses double-dash long flags: --format= not -format=). Run `john --list=hidden-options` for advanced flags not in --help."
+  - signal: "Session aborted"
+    remediation: "Crack session was interrupted (Ctrl-C, signal, container killed). State saved to ~/.john/<session>.rec — resume with `john --restore=<session>`. If --session= was not used, the most recent session is the default."
+  - signal: "fork()"
+    remediation: "fork() syscall failed — usually resource limit (RLIMIT_NPROC) hit. Reduce --fork=N or check container resource caps."
+  - signal: "Out of memory"
+    remediation: "Wordlist + rules expansion exceeded available RAM. Use --save-memory=1 (or 2/3 for more aggressive savings), reduce --rules-stack, or use a smaller wordlist."
+  - signal: "Maximum running time"
+    remediation: "Hard runtime cap reached (rare — comes from --max-run-time= flag or the dual-clock max_runtime_seconds wrapper). Resume with --restore=<session> if the session was named."
+  - signal: "Crash recovery file is locked"
+    remediation: "Another john instance is already using this session name. Pick a different --session=NAME or wait for the other instance to finish."
+
+help_commands:
+  - command: "john --help"
+    purpose: "Top-level flag reference (mode selection, format, performance, output)"
+  - command: "john --list=help"
+    purpose: "Full --list= introspection menu — sub-lists for formats, modes, rules, externals, etc."
+  - command: "john --list=formats"
+    purpose: "Print all ~300 supported hash format names"
+  - command: "john --list=hidden-options"
+    purpose: "Advanced/expert flags not in --help (jumbo build)"
+  - command: "john --list=build-info"
+    purpose: "Build configuration: AVX2 / SSE / OpenCL / OpenMP support, version string"
+  - command: "john --test"
+    purpose: "Benchmark mode — measure c/s rate for each format on this CPU"

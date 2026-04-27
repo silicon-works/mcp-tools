@@ -45,29 +45,39 @@ def compute_sha256(content: bytes) -> str:
     return hashlib.sha256(content).hexdigest()
 
 
-def build_method_search_text(tool: dict, method_name: str, method: dict) -> str:
+def build_method_search_text(tool: dict, action_name: str, action: dict) -> str:
     """
-    Build focused per-method search text for FTS indexing.
+    Build focused per-action search text for FTS indexing.
 
-    ~100-300 chars per method vs ~1200 chars per tool. BM25 naturally
-    weights routing signals higher because there's less dilution.
+    Kind-agnostic by design. The agent's matching process treats kind:mcp
+    methods and kind:cli usage_patterns identically — both are "things the
+    tool can do". ``kind`` only affects how the agent invokes the tool
+    after matching, not how rows are indexed or scored.
+
+    The ``action`` dict is the per-action documentation. Callers shape it
+    so it works for either kind:
+      * kind:mcp methods pass the method dict directly (description +
+        when_to_use are separate fields).
+      * kind:cli usage_patterns are converted via
+        ``cli_usage_patterns_as_methods`` so their ``when`` text lands in
+        both ``description`` and ``when_to_use``.
 
     IMPORTANT: This logic is duplicated in the TypeScript client at
-    packages/opencode/src/memory/tools.ts:buildMethodSearchText().
-    Both must stay in sync for consistent FTS results between
-    CI-built indexes and YAML-fallback client-built indexes.
+    packages/opencode/src/memory/tools.ts:buildMethodSearchText(). Both
+    must stay in sync for consistent FTS results between CI-built indexes
+    and YAML-fallback client-built indexes.
     """
     parts: list[str] = []
 
-    # Tool name for context
+    # Tool identity
     parts.append(tool.get("name", ""))
 
-    # Method identity
-    parts.append(method_name)
+    # Action identity
+    parts.append(action_name)
 
-    # Method-specific documentation
-    parts.append(method.get("description", ""))
-    if wtu := method.get("when_to_use"):
+    # Action-specific documentation
+    parts.append(action.get("description", ""))
+    if wtu := action.get("when_to_use"):
         parts.append(wtu)
 
     # Tool description (brief context)
@@ -78,7 +88,37 @@ def build_method_search_text(tool: dict, method_name: str, method: dict) -> str:
     for phrase in routing.get("use_for", []):
         parts.append(phrase)
 
+    # Tool-level capabilities (high-signal — same across all rows for a tool,
+    # but lets a phase agent's capability-flavored query rank the tool's
+    # actions over a tool that doesn't share that capability).
+    for cap in tool.get("capabilities", []):
+        parts.append(cap)
+
     return " ".join(p for p in parts if p)
+
+
+def cli_usage_patterns_as_actions(usage_patterns: list[dict]) -> dict:
+    """Convert kind:cli usage_patterns into action-shaped entries.
+
+    Each pattern's ``when`` text becomes both ``description`` and
+    ``when_to_use``; ``command`` becomes ``command_template``. This shape
+    is what ``build_method_search_text`` expects for the action dict, and
+    is also what ``methods_json`` carries for kind:cli rows so the agent
+    can read the templates after a match.
+
+    Mirrors packages/opencode/src/memory/tools.ts:cliUsagePatternsAsMethods().
+    """
+    actions: dict = {}
+    for pattern in usage_patterns or []:
+        name = pattern.get("name")
+        if not name:
+            continue
+        actions[name] = {
+            "description": pattern.get("when", ""),
+            "when_to_use": pattern.get("when", ""),
+            "command_template": pattern.get("command", ""),
+        }
+    return actions
 
 
 def load_embedding_model():
@@ -146,18 +186,28 @@ def build_method_rows(tools: dict, registry_hash: str) -> list[dict]:
     rows = []
 
     for tool_id, tool in tools.items():
-        methods = tool.get("methods", {})
+        kind = tool.get("kind", "mcp")
+
+        # Resolve the per-action map uniformly: methods for kind:mcp, usage_patterns
+        # converted to action-shape for kind:cli. From here on the row-building
+        # logic is identical regardless of kind — matching is kind-agnostic.
+        if kind == "cli":
+            actions = cli_usage_patterns_as_actions(tool.get("usage_patterns", []) or [])
+        else:
+            actions = tool.get("methods", {}) or {}
+
         tool_json = json.dumps(tool)
         phases_json = json.dumps(tool.get("phases", []))
         capabilities_json = json.dumps(tool.get("capabilities", []))
         routing_json = json.dumps(tool.get("routing", {}))
-        methods_json = json.dumps(methods)
+        actions_json = json.dumps(actions)
         requirements_json = json.dumps(tool.get("requirements", {}))
         resources_json = json.dumps(tool.get("resources", {}))
         see_also_json = json.dumps(tool.get("see_also", []))
 
-        if not methods:
-            # Tool with no methods — create a single "default" row
+        if not actions:
+            # Defensive: schema validator forbids this state. Emit a single
+            # default row so the tool still surfaces in search.
             search_text = build_method_search_text(
                 tool, "default", {"description": tool.get("description", "")}
             )
@@ -174,7 +224,7 @@ def build_method_rows(tools: dict, registry_hash: str) -> list[dict]:
                     "phases_json": phases_json,
                     "capabilities_json": capabilities_json,
                     "routing_json": routing_json,
-                    "methods_json": methods_json,
+                    "methods_json": actions_json,
                     "requirements_json": requirements_json,
                     "resources_json": resources_json,
                     "raw_json": tool_json,
@@ -184,32 +234,33 @@ def build_method_rows(tools: dict, registry_hash: str) -> list[dict]:
                     "registry_hash": registry_hash,
                 }
             )
-        else:
-            for method_name, method in methods.items():
-                search_text = build_method_search_text(tool, method_name, method)
-                rows.append(
-                    {
-                        "id": f"{tool_id}:{method_name}",
-                        "tool_id": tool_id,
-                        "method_name": method_name,
-                        "tool_name": tool.get("name", tool_id),
-                        "tool_description": tool.get("description", ""),
-                        "method_description": method.get("description", ""),
-                        "when_to_use": method.get("when_to_use", ""),
-                        "search_text": search_text,
-                        "phases_json": phases_json,
-                        "capabilities_json": capabilities_json,
-                        "routing_json": routing_json,
-                        "methods_json": methods_json,
-                        "requirements_json": requirements_json,
-                        "resources_json": resources_json,
-                        "raw_json": tool_json,
-                        "see_also_json": see_also_json,
-                        "required_ports_json": json.dumps(method.get("required_ports", [])),
-                        "timeout_seconds": method.get("timeout_seconds", tool.get("timeout_seconds")),
-                        "registry_hash": registry_hash,
-                    }
-                )
+            continue
+
+        for action_name, action in actions.items():
+            search_text = build_method_search_text(tool, action_name, action)
+            rows.append(
+                {
+                    "id": f"{tool_id}:{action_name}",
+                    "tool_id": tool_id,
+                    "method_name": action_name,
+                    "tool_name": tool.get("name", tool_id),
+                    "tool_description": tool.get("description", ""),
+                    "method_description": action.get("description", ""),
+                    "when_to_use": action.get("when_to_use", ""),
+                    "search_text": search_text,
+                    "phases_json": phases_json,
+                    "capabilities_json": capabilities_json,
+                    "routing_json": routing_json,
+                    "methods_json": actions_json,
+                    "requirements_json": requirements_json,
+                    "resources_json": resources_json,
+                    "raw_json": tool_json,
+                    "see_also_json": see_also_json,
+                    "required_ports_json": json.dumps(action.get("required_ports", [])),
+                    "timeout_seconds": action.get("timeout_seconds", tool.get("timeout_seconds")),
+                    "registry_hash": registry_hash,
+                }
+            )
 
     return rows
 

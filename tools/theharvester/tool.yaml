@@ -1,15 +1,105 @@
 name: theharvester
+kind: cli
+binary: theHarvester
+# theHarvester v4.10 — single-binary OSINT email + subdomain harvester. The
+# upstream binary is named `theHarvester` with a capital H — case-sensitive on
+# Linux filesystems. There is no `theharvester` lowercase symlink in the
+# laramies/theHarvester pip install (verified against Dockerfile @4.10.1).
+#
+# Argv form (no sub-commands; flags only):
+#
+#   theHarvester
+#       -d <domain>                      # REQUIRED — target domain
+#       -b <source[,source,...]>         # data source(s) — see list below
+#       -l <limit>                       # results per source
+#       -S <start>                       # paginated source start point (rare)
+#       -e <DNS resolver>                # custom resolver IP for DNS verify
+#       -r <count>                       # perform reverse DNS on N IPs
+#       -p                               # use proxies from proxies.yaml
+#       -s                               # enrich with Shodan host info
+#       -v                               # verify discovered hosts via DNS
+#       -n                               # DNS forced enumeration
+#       -c                               # DNS brute-force
+#       -t                               # DNS TLD discovery
+#       -f <output-prefix>               # write prefix.html, .xml, .json
+#       -h / --help                      # help
+#
+# Output: `-f <prefix>` writes THREE files: <prefix>.html (visual report),
+# <prefix>.xml (legacy XML), <prefix>.json (structured — preferred for
+# tooling). The mcp-server.py legacy harvest method consumes <prefix>.json.
+#
+# Single-binary tool — there is no theharvester-cli or theharvester-server
+# entry point. Source code path: tools/theharvester/mcp-server.py — the
+# legacy method handlers (harvest, list_sources) auto-inherit run_cli from
+# BaseMCPServer (mcp-common 0.3.0); kind:cli is the new default. The two
+# legacy methods are preserved as the rollback path per SKILL #21.
 version: "4.10.1"
-description: "Email and subdomain OSINT harvesting — theHarvester v4.10.1 with 51 data sources across 6 categories (certificate, DNS, search engine, threat intel, code repo, email) for discovering emails, subdomains, IPs, and URLs. Two methods: harvest (query certificate databases, search engines, DNS aggregators, breach databases, and threat intelligence platforms for a target domain), list_sources (enumerate all 51 available data sources with API key requirements). 11 free sources work without API keys (crtsh, hackertarget, rapiddns, urlscan, certspotter, otx, robtex, yahoo, duckduckgo, baidu, subdomaincenter). dnsdumpster now requires an API key. ~40 paid sources need API keys (shodan, virustotal, censys, hunter, intelx, dnsdumpster, etc.). For deeper subdomain enumeration with DNS brute-force use amass. For email verification or phishing use separate tools."
+description: >
+  Email and subdomain OSINT via theHarvester v4.10.1 — passive reconnaissance
+  for emails, subdomains, IPs, ASNs, and interesting URLs from 50+ data
+  sources spanning certificate transparency logs, DNS aggregators, search
+  engines, threat-intel platforms, and code repositories.
+
+  Argv form is binary-canonical:
+
+    theHarvester
+        -d <domain>                          # target (REQUIRED)
+        -b <source[,source,...] | all>       # data sources, comma-separated
+        -l <int>                             # max results per source
+        -S <int>                             # paginated start point (rare)
+        -e <DNS resolver IP>                 # custom resolver for verification
+        -r <int>                             # reverse-DNS lookup on N IPs
+        [-p]                                 # use proxies from proxies.yaml
+        [-s]                                 # Shodan host enrichment
+        [-v]                                 # DNS-verify discovered hosts
+        [-n]                                 # DNS forced enumeration
+        [-c]                                 # DNS brute-force
+        [-t]                                 # DNS TLD discovery
+        -f <output-prefix>                   # write prefix.html, .xml, .json
+
+  Free sources (no API key required, work out of the box): crtsh, otx,
+  hackertarget, rapiddns, urlscan, certspotter, duckduckgo, baidu, yahoo,
+  subdomaincenter, robtex.
+
+  API-key sources (silently fail without keys in ~/.theHarvester/api-keys.yaml):
+  shodan, censys, virustotal, hunter, intelx, securitytrails, github-code,
+  bevigil, brave, dnsdumpster, fullhunt, hunterhow, netlas, onyphe,
+  projectdiscovery, subdomainfinderc99, zoomeye.
+
+  `-b all` runs every source (slow, hits rate limits, requires API keys for
+  the paid set). Recommended free quick subset:
+  `crtsh,hackertarget,rapiddns,urlscan,certspotter`.
+
+  Output: `-f <prefix>` produces three files. The .json file is the
+  preferred structured output for tooling; the parsed JSON contains
+  `emails`, `hosts`, `ips`, `asns`, `interesting_urls` keys.
+
+  Feature 28 dynamic recipes are RETIRED for the kind:cli path — the LLM
+  writes argv directly. Recipes still load for legacy method calls (harvest,
+  list_sources) if /session/tool_recipes/theharvester/ exists, but they're
+  a dead branch under run_cli (REQ-TR-016).
+
 image: "ghcr.io/silicon-works/mcp-tools-theharvester:latest"
 image_size_mb: 689
-timeout_seconds: 300
+
+# Dual-clock model — a comprehensive `-b all` run can take 20+ minutes
+# (multiple sources, DNS verify, reverse lookups). Single-source `-b crtsh`
+# is sub-minute. Idle timeout covers the longest reasonable silence between
+# sources (some APIs are slow; CT-log paging can stall mid-run).
+idle_timeout_seconds: 300       # 5 min silence == wedged source / hung HTTP
+max_runtime_seconds: 3600       # 1 h hard cap — `-b all` with verify + reverse
+timeout_seconds: 3600
 
 capabilities:
   - email_harvesting
   - subdomain_discovery
   - osint
   - attack_surface_mapping
+  - certificate_transparency
+  - dns_enumeration
+
+phases:
+  - reconnaissance
 
 routing:
   use_for:
@@ -21,12 +111,16 @@ routing:
     - "passive reconnaissance on a domain using public sources"
     - "collect email addresses before phishing assessment"
     - "enumerate subdomains from DNS databases and certificate transparency"
+    - "lightweight subdomain discovery without active probing"
+    - "identify ASNs and netblocks associated with a domain"
   never_use_for:
     - "deep subdomain brute-force enumeration (use amass)"
     - "port scanning (use nmap)"
     - "web vulnerability scanning (use nuclei)"
-    - "active DNS zone transfers (use amass enum_active)"
+    - "active DNS zone transfers (use the dns tool / dig)"
     - "social media profiling (not supported)"
+    - "credential stuffing or password spray (use hydra / kerbrute / netexec)"
+    - "live email-address verification / SMTP probing (use the smtp tool)"
   triggers:
     - "theharvester"
     - "the harvester"
@@ -36,9 +130,10 @@ routing:
     - "harvest emails"
     - "find emails"
     - "OSINT emails"
-
-phases:
-  - reconnaissance
+    - "passive subdomain"
+    - "OSINT recon"
+    - "employee emails"
+    - "phishing recon"
 
 requirements:
   network: true
@@ -50,73 +145,228 @@ resources:
 
 see_also:
   - tool: amass
-    reason: "Use amass for deeper subdomain enumeration with DNS brute-force and active probing. theHarvester focuses on emails + lightweight subdomain discovery."
+    reason: "Use amass for deeper subdomain enumeration with DNS brute-force, active probing, and certificate crawling. theHarvester focuses on emails + lightweight subdomain discovery."
   - tool: nmap
-    reason: "After discovering hosts with theHarvester, use nmap to port scan them."
+    reason: "After discovering hosts with theHarvester, use nmap to port-scan the resolved IPs."
   - tool: nuclei
-    reason: "After discovering subdomains, use nuclei to scan for web vulnerabilities."
+    reason: "After discovering subdomains, use nuclei to scan for known CVEs and misconfigurations."
   - tool: web-fingerprint
     reason: "After discovering hosts and subdomains, use web-fingerprint to identify the technology stack (CMS, frameworks, servers) running on each."
   - tool: hydra
     reason: "After harvesting email addresses, use hydra for credential brute-forcing against web logins, OWA, or SSH using discovered email addresses as usernames."
+  - tool: dns
+    reason: "Use dig (the dns tool) for one-shot DNS lookups, zone transfer attempts, and specific record-type queries against discovered nameservers — theHarvester gathers OSINT, dig interrogates DNS directly."
 
-methods:
-  harvest:
-    description: "Harvest emails, subdomains, IPs, and URLs for a target domain. Runs `theHarvester -d <domain> -b <sources> -l <limit> -f /session/output`. Queries multiple OSINT sources in parallel. Output saved as JSON file under /session/. Free sources (no API key): crtsh, hackertarget, rapiddns, urlscan, certspotter, otx, robtex, yahoo, duckduckgo, baidu. Note: dnsdumpster now requires an API key."
-    when_to_use: "(1) Early reconnaissance — gather email addresses for phishing assessment or social engineering. (2) Discover subdomains and IPs as supplement to amass. (3) Quick OSINT scan before deeper enumeration. (4) Use free sources first (crtsh,hackertarget,rapiddns,urlscan,certspotter), add paid sources if API keys available."
-    required_ports: []
-    params:
-      domain:
-        type: string
-        required: true
-        description: "Target domain (e.g., 'example.com'). Can also be a company name for some sources."
-      sources:
-        type: string
-        default: "crtsh,hackertarget,rapiddns,urlscan,certspotter"
-        description: "Comma-separated data sources. Use 'all' for all sources (slow, some need API keys). Recommended free: 'crtsh,hackertarget,rapiddns,urlscan,certspotter'. Use list_sources to see all available."
-      limit:
-        type: integer
-        default: 500
-        description: "Maximum results per source. Default 500. Increase for thorough harvesting."
-      dns_lookup:
-        type: boolean
-        default: false
-        description: "Resolve discovered hosts to IPs. Default false (faster). Enable for IP enumeration."
-    returns:
-      emails:
-        type: array
-        description: "Discovered email addresses (capped at 100). Deduplicated."
-      total_emails:
-        type: integer
-        description: "Total unique emails found."
-      hosts:
-        type: array
-        description: "Discovered hostnames/subdomains (capped at 200). Deduplicated."
-      total_hosts:
-        type: integer
-        description: "Total unique hosts found."
-      ips:
-        type: array
-        description: "Discovered IP addresses (capped at 100)."
-      sources_used:
-        type: array
-        description: "Data sources that were queried."
-      output_file:
-        type: string
-        description: "Path to full JSON output file under /session/."
+# ── kind:cli specific sections ──────────────────────────────────────
 
-  list_sources:
-    description: "List all 51 available theHarvester data sources with API key requirements."
-    when_to_use: "Before harvesting — check which sources are available and which need API keys."
-    required_ports: []
-    params: {}
-    returns:
-      sources:
-        type: array
-        description: "All sources. Each: {name, type, api_key: bool}."
-      free_sources:
-        type: array
-        description: "Sources that work without API keys."
-      recommended_free:
-        type: string
-        description: "Comma-separated recommended free sources for quick scans."
+target_extraction:
+  # theHarvester takes a target DOMAIN via `-d <domain>`. There are no
+  # sub-commands and no positional target. The DSL captures via flag_value.
+  #
+  # Trap values that must NOT be confused with the target:
+  #   - `-b <sources>` — comma-separated source names (e.g.,
+  #     `crtsh,otx,hackertarget`). These are SOURCE LABELS, not domains.
+  #     A source named `crtsh` has no dot; `subdomaincenter` has no dot;
+  #     `subdomainfinderc99` has no dot — domain-shape regex would not
+  #     match, but `-b` is in value_flags so the value is consumed.
+  #   - `-e <DNS resolver IP>` — IP literal, looks IP-shaped but is the
+  #     RESOLVER, not target. Listed in value_flags.
+  #   - `-f <output-prefix>` — file path under /session/. Not a target.
+  #   - `-r <int>`, `-l <int>`, `-S <int>` — integer values. Not targets.
+  #
+  # `-d` is REQUIRED — a call without -d fails at theHarvester argparse
+  # before reaching scope validation. Plugin's empty-target handling
+  # surfaces this as `target=null` and the CLI itself returns the
+  # `error: argument -d/--domain is required` failure.
+  - rule: "flag_value"
+    flag: "-d"
+    parse_as: "raw"
+
+# Flags that put the target outside the command line where scope validation
+# can't reach. theHarvester has no batch/file-list intake mode upstream
+# (no `-iL` / `-df` analogue), so reject_flags is empty for now.
+reject_flags: []
+reject_flags_reason: ""
+
+# Per-tool value-taking flags whose values must NOT be confused with targets.
+# Verified against `theHarvester -h` on v4.10.1.
+value_flags:
+  # ── targeting ──
+  - "-d"             # target domain (extracted)
+  # ── data sources ──
+  - "-b"             # source list (e.g., crtsh,otx,hackertarget) — NOT targets
+  # ── result limits / pagination ──
+  - "-l"             # results per source (int)
+  - "-S"             # paginated source start point (int)
+  # ── enrichment ──
+  - "-r"             # reverse-DNS on N IPs (int) — value is count, not IP
+  - "-e"             # DNS resolver IP — infrastructure, NOT target
+  # ── output ──
+  - "-f"             # output-prefix (path) — NOT a target
+  # ── boolean flags listed for parser correctness (DSL skips harmlessly) ──
+  - "-p"             # boolean — use proxies
+  - "-s"             # boolean — Shodan enrichment
+  - "-v"             # boolean — DNS-verify discovered hosts
+  - "-n"             # boolean — DNS forced enumeration
+  - "-c"             # boolean — DNS brute-force
+  - "-t"             # boolean — DNS TLD discovery
+  - "-h"             # boolean — help
+  - "--help"         # boolean — help (long form)
+
+usage_patterns:
+  # ── quick / single-source recon ──────────────────────────────────────
+  - name: "Quick OSINT (free certificate-transparency + threat-intel sources)"
+    command: "-d {domain} -b crtsh,otx -l 100 -f /session/theharvester-{domain}-quick"
+    when: "First-pass OSINT — crtsh (CT logs) and otx (AlienVault OTX) are free, fast, and high signal-to-noise. Use this as the default opening probe before deciding whether to run the full source set. Output: /session/theharvester-<domain>-quick.json (structured, preferred) plus .html and .xml siblings."
+
+  - name: "Comprehensive (all sources, slow, may need API keys)"
+    command: "-d {domain} -b all -l 500 -f /session/theharvester-{domain}-full"
+    when: "Run every available source — exhaustive coverage when the engagement budget allows 10-30 minutes per domain. WARNING: paid sources without API keys silently fail; rate limits trip on heavy use. The fast subset (crtsh,otx,hackertarget,rapiddns,urlscan,certspotter) covers ~80% of findings without API keys."
+
+  - name: "Single source (targeted query)"
+    command: "-d {domain} -b github-code -l 50 -f /session/theharvester-{domain}-github"
+    when: "Drill into a specific source — useful when you know which OSINT vector matters. github-code (requires API key) finds emails leaked in commit messages and source code. Other useful single-source runs: `-b crtsh` (CT logs only), `-b hackertarget` (DNS aggregator), `-b urlscan` (web crawl)."
+
+  # ── enrichment paths ──────────────────────────────────────
+  - name: "With DNS verification (slower, higher accuracy)"
+    command: "-d {domain} -b crtsh,otx,hackertarget -l 200 -v -f /session/theharvester-{domain}-verified"
+    when: "After harvesting hosts, perform a DNS lookup against each to confirm the host actually resolves. Filters out historical / decommissioned subdomains from CT logs. Use when you need a cleaned hostlist for downstream nmap / nuclei runs. -v adds wall-clock time proportional to result count (one DNS query each)."
+
+  - name: "Reverse-DNS sweep on discovered IPs"
+    command: "-d {domain} -b crtsh,hackertarget -l 100 -r 100 -f /session/theharvester-{domain}-reverse"
+    when: "After resolving hosts to IPs, reverse-DNS the first N IPs to discover sibling hostnames in the same netblock. Useful for: finding sister-services on shared infrastructure, identifying CDN vs origin IPs, mapping internal vs external naming. -r N caps the reverse lookups (default behaviour without this flag is no reverse)."
+
+  - name: "Custom DNS resolver (engagement-specific resolver)"
+    command: "-d {domain} -b crtsh,hackertarget -l 200 -v -e 1.1.1.1 -f /session/theharvester-{domain}-cf"
+    when: "Override the system resolver — useful when: the container's /etc/resolv.conf points at the engagement's split-horizon DNS (which would only know internal subdomains), you want to verify against a known-good public resolver (Cloudflare 1.1.1.1, Google 8.8.8.8), or you're comparing answers across resolvers."
+
+  # ── advanced DNS modes ──────────────────────────────────────
+  - name: "DNS forced enumeration (brute + verify)"
+    command: "-d {domain} -b crtsh,hackertarget -l 200 -n -f /session/theharvester-{domain}-dns"
+    when: "-n triggers DNS forced enumeration on the harvested hosts — verifies and tries common subdomain alterations. Lighter than amass brute-force but adds a layer of active DNS probing on top of pure passive OSINT."
+
+  - name: "Shodan enrichment (requires API key)"
+    command: "-d {domain} -b crtsh,otx -l 100 -s -f /session/theharvester-{domain}-shodan"
+    when: "After harvesting hosts, query Shodan for each IP to add open-port and banner data. Requires a valid Shodan API key in ~/.theHarvester/api-keys.yaml. Useful for getting a quick attack-surface preview before running nmap. Without an API key Shodan enrichment silently no-ops."
+
+  - name: "Help / version"
+    command: "-h"
+    when: "Print the full theHarvester flag reference. Useful when verifying a less-common flag's exact spelling or checking which sources are bundled in the installed version."
+
+output_formats:
+  - flag: "-f {prefix}"
+    format: "json"
+    preferred: true
+    notes: "Writes <prefix>.json — structured output with `emails`, `hosts`, `ips`, `asns`, `interesting_urls` keys. PREFERRED for tooling. Note: the SAME `-f <prefix>` flag also writes <prefix>.html and <prefix>.xml as siblings — there is no JSON-only flag upstream."
+  - flag: "-f {prefix}"
+    format: "html"
+    preferred: false
+    notes: "Writes <prefix>.html — visual report with charts. Useful for engagement deliverables but awkward for parsing."
+  - flag: "-f {prefix}"
+    format: "xml"
+    preferred: false
+    notes: "Writes <prefix>.xml — legacy XML output. Mostly for backwards compatibility; prefer the JSON sibling."
+
+common_options:
+  targeting:
+    - "-d DOMAIN: target domain (REQUIRED). Single domain only — repeating -d does NOT work upstream (only the last value sticks). Examples: -d example.com, -d target.htb."
+  sources:
+    - "-b LIST: comma-separated data sources. Free + reliable subset: crtsh,otx,hackertarget,rapiddns,urlscan,certspotter,duckduckgo. `-b all` runs every source. `-b SOURCE` for single-source runs."
+  enrichment:
+    - "-v: DNS-verify discovered hosts. Filters out historical / dead subdomains. Adds wall-clock time."
+    - "-s: Shodan enrichment — adds host port/banner data. Requires API key."
+    - "-r N: reverse-DNS lookup on the first N IPs. Discovers sibling hostnames in shared netblocks."
+    - "-e RESOLVER: override DNS resolver IP. Use when system /etc/resolv.conf is split-horizon."
+  dns_modes:
+    - "-n: DNS forced enumeration on discovered hosts."
+    - "-c: DNS brute-force (lightweight wordlist-driven probe)."
+    - "-t: DNS TLD discovery — find sister domains on adjacent TLDs (com → net, org, etc.)."
+  output:
+    - "-f PREFIX: output-prefix path (e.g., /session/theharvester-example.com). Writes prefix.html, prefix.xml, prefix.json. JSON is the preferred structured form."
+    - "-l N: results per source cap (default 500). Lower for fast triage; higher for thorough harvesting."
+    - "-S N: paginated source start point (rare in modern usage; some sources don't honour it)."
+  proxy:
+    - "-p: route requests through proxies from ~/.theHarvester/proxies.yaml. Useful for rate-limit dodging or attribution control."
+
+gotchas:
+  - "BINARY IS CASE-SENSITIVE: `theHarvester` (capital H), NOT `theharvester`. The Linux filesystem is case-sensitive — `theharvester` will not be found in $PATH. Verified against the laramies/theHarvester pip install in the Dockerfile @4.10.1."
+  - "`-d` IS REQUIRED — a call without -d fails fast with `error: argument -d/--domain is required`. Plugin extracts target via flag_value `-d`; without -d, target=null and scope validation can't fire either."
+  - "`-b all` IS LONG AND FRAGILE — running every source can take 20+ minutes, hits rate limits, and the paid sources silently fail without API keys in ~/.theHarvester/api-keys.yaml. Prefer the free subset (crtsh,otx,hackertarget,rapiddns,urlscan,certspotter,duckduckgo) for production work."
+  - "MANY SOURCES NEED API KEYS — shodan, censys, virustotal, hunter, intelx, securitytrails, github-code, bevigil, brave, dnsdumpster, fullhunt, hunterhow, netlas, onyphe, projectdiscovery, subdomainfinderc99, zoomeye. Without keys these sources return zero results and no error — `theHarvester` does not warn the user about missing keys."
+  - "FREE SOURCES (no key needed): crtsh, otx, hackertarget, rapiddns, urlscan, certspotter, duckduckgo, baidu, yahoo, subdomaincenter, robtex. dnsdumpster MOVED to API-key-required as of 2024 — old guides may be wrong."
+  - "`-v` IS DNS-VERIFY, NOT THE -v VERBOSE FLAG you'd expect — theHarvester flips the convention. -v reverse-resolves discovered hosts to verify they're live. Slow on large result sets (one DNS query per host)."
+  - "`-f <prefix>` ALWAYS WRITES THREE FILES — prefix.html, prefix.xml, prefix.json. There is no JSON-only flag. The mcp-server.py legacy harvest method consumes <prefix>.json."
+  - "`-b` SOURCE NAMES ARE LOWERCASE — `crtsh` (NOT `CRTsh` or `CrtSh`). The CLI is case-sensitive on source names too. `theHarvester -b BING -d example.com` will silently no-op (BING is not a valid source label; bing IS)."
+  - "`-r N` IS REVERSE-DNS COUNT, NOT A BOOLEAN — `-r` alone fails argparse. Pass `-r 100` to reverse-resolve up to 100 IPs."
+  - "EXIT CODE 0 ON ZERO RESULTS — theHarvester exits 0 even when no emails / hosts are found. Pattern-match output for `No emails found` / `No hosts found` to detect, regardless of exit code."
+  - "`-S` PAGINATION IS LARGELY DEFUNCT IN MODERN SOURCES — most upstream APIs no longer honour client-side pagination. -S survives in the CLI but rarely affects output. Don't tune -S unless the source documents it."
+  - "`-e <resolver>` SETS THE RESOLVER GLOBALLY — affects all DNS lookups during the run, including the verification (-v) and forced-enum (-n) passes. If pointing at an internal resolver, only internal subdomains will resolve cleanly."
+  - "PROXIES (-p) NEED ~/.theHarvester/proxies.yaml — flag alone without the config file errors with `proxies.yaml not found` or silently disables. Pre-stage the config in /session/ and copy at run time, or skip -p."
+  - "GITHUB-CODE SOURCE IS HIGH-NOISE BUT HIGH-SIGNAL — finds emails leaked in commit messages, code, secrets in repos. Often reveals employee email addresses for phishing recon. Requires GitHub API key."
+  - "Feature 28 dynamic recipes are RETIRED for the kind:cli path — the LLM writes argv directly. Recipes still load for legacy method calls (harvest, list_sources) if /session/tool_recipes/theharvester/ exists, but they're a dead branch under run_cli (REQ-TR-016)."
+  - "DOMAIN VALUE MUST BE BARE — `-d <domain>` accepts ONLY a hostname/FQDN, not a URL. theHarvester argparse will accept `-d https://example.com/path` but most sources then silently zero-result because they expect a bare DNS label. Strip protocol prefix (`https?://`) and any trailing path/query/fragment before passing to -d. Legacy mcp-server.py auto-stripped these (see _clean_domain helper); kind:cli passes argv through raw — the LLM is responsible for emitting `-d example.com` not `-d https://example.com/`."
+  - "API KEYS LIVE IN ~/.theHarvester/api-keys.yaml — the container image does NOT pre-stage this file. To use paid sources (shodan, censys, virustotal, etc.), drop the YAML at /session/api-keys.yaml and copy into ~/.theHarvester/ at run time, or accept silent zero-results from those sources. theHarvester does NOT warn the user about missing keys; the only signal is empty result arrays."
+
+failure_signatures:
+  # Layer-diverse signals (SKILL #11) — at least 5 distinct verifiable layers:
+  #   1. Argument-validation (argparse — missing -d, unknown source)
+  #   2. Network (DNS / TCP timeout, connection refused)
+  #   3. API (rate limit, quota, forbidden, 4xx)
+  #   4. Source (module load error, missing dependency, source crash)
+  #   5. Empty-result (no emails / hosts — semantic, not crash)
+  #   6. Auth (API key invalid / unauthorized)
+  - signal: "error: argument -d"
+    remediation: "Argument: missing required `-d <domain>` flag. theHarvester argparse rejects the call. Add `-d example.com` to specify the target domain."
+  - signal: "the following arguments are required"
+    remediation: "Argument: argparse phrasing for missing required args (Python argparse standard). Read the rest of the line for the missing flag (usually `-d`)."
+  - signal: "unrecognized arguments"
+    remediation: "Argument: argparse rejected an unknown flag. theHarvester v4.10 dropped some legacy flags (e.g., `-g` Google was renamed). Run `theHarvester -h` to see the current flag set."
+  - signal: "invalid choice"
+    remediation: "Argument: argparse rejected a value not in the allowed set — usually `-b <unknown-source>`. Run `theHarvester -h` and check the source list. Source names are lowercase."
+  - signal: "Could not run"
+    remediation: "Source: theHarvester couldn't load a particular source module — usually a missing optional Python dependency or upstream API change. Skip the source via `-b <other-sources>`. Common with sources that require recent API key formats."
+  - signal: "module .* not found"
+    remediation: "Source: a source module is missing. Indicates the theHarvester install is incomplete or out of sync with the source catalogue. Skip the source via `-b <other-sources>` or rebuild the container with the current laramies/theHarvester @4.10.x branch."
+  - signal: "Connection error"
+    remediation: "Network: TCP / TLS connection to a source API failed. Check container egress (corporate firewall blocking crt.sh / api.virustotal.com / api.shodan.io). Use `-exclude` semantics manually by switching to `-b <other-source>`."
+  - signal: "timeout"
+    remediation: "Network: HTTP timeout from an upstream source. Some sources are flaky — re-run the same call once, or skip the slow source via `-b <subset>`."
+  - signal: "Read timed out"
+    remediation: "Network: requests/urllib3 timeout reading a slow source response. Same root cause as `timeout`."
+  - signal: "Name or service not known"
+    remediation: "Network: DNS resolution for a source endpoint failed. Indicates broken DNS in the container — verify /etc/resolv.conf, then test with `dig api.shodan.io @8.8.8.8`."
+  - signal: "API quota exceeded"
+    remediation: "API: a source's API rate limit was hit. Wait (limits typically reset hourly or daily) or switch to free sources (`-b crtsh,otx,hackertarget,rapiddns,urlscan,certspotter`)."
+  - signal: "Rate limit"
+    remediation: "API: generic rate-limit phrasing. Same remediation as `API quota exceeded` — wait or switch sources."
+  - signal: "429"
+    remediation: "API: HTTP 429 Too Many Requests from a source API. Equivalent to `Rate limit` / `API quota exceeded`."
+  - signal: "Forbidden"
+    remediation: "API: HTTP 403 — usually missing or invalid API key. Verify the key in ~/.theHarvester/api-keys.yaml or skip the source."
+  - signal: "401"
+    remediation: "API: HTTP 401 Unauthorized — API key missing, expired, or wrong format. Compare against the upstream api-keys.yaml.sample."
+  - signal: "Unauthorized"
+    remediation: "Auth: API key authentication failed. Verify the key in ~/.theHarvester/api-keys.yaml is current and has the correct scope. Some sources (Censys) need both API ID and secret."
+  - signal: "Invalid API key"
+    remediation: "Auth: source rejected the API key. Re-issue or correct the key in ~/.theHarvester/api-keys.yaml."
+  - signal: "No emails found"
+    remediation: "Empty-result: theHarvester completed cleanly but no email addresses were discovered. Try expanding sources (`-b all` if API keys are available), or accept that the domain doesn't leak email addresses to the queried sources. emails harvest is the LOWER signal-to-noise output of the two — many domains genuinely return zero emails."
+  - signal: "No hosts found"
+    remediation: "Empty-result: theHarvester completed cleanly but no subdomains were discovered. Try `-b all`, switch to amass for deeper enumeration, or verify the domain is correctly spelled. crtsh + hackertarget should always return at least the apex domain if it has any HTTPS history."
+  - signal: "No IPs found"
+    remediation: "Empty-result: zero IP addresses harvested — usually because no source returned hosts to resolve. Combine with `-v` to add DNS verification and harvest IPs from successful resolutions."
+  - signal: "missing dependency"
+    remediation: "Source: a Python dependency required by a specific source is missing. Indicates the container build did not pip-install the optional set. Skip the source or rebuild."
+  - signal: "Traceback"
+    remediation: "Source: a Python exception leaked from a source module — indicates an upstream API change broke the source. Skip the source via `-b <subset>` and report the broken source upstream at github.com/laramies/theHarvester/issues."
+  - signal: "AttributeError"
+    remediation: "Source: a Python AttributeError, typically from an upstream API response that changed shape. Skip the source via `-b <subset>` until laramies/theHarvester ships a fix."
+  - signal: "JSONDecodeError"
+    remediation: "Source: a source returned non-JSON when JSON was expected (often an HTML error page or rate-limit text). Skip the source or wait and retry."
+
+help_commands:
+  - command: "-h"
+    purpose: "theHarvester full flag reference + bundled-sources list."
+  - command: "--help"
+    purpose: "Long-form flag reference (alias for -h)."
+

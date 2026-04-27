@@ -8,15 +8,18 @@ LABEL org.opencontainers.image.source="https://github.com/silicon-works/mcp-tool
 LABEL org.opencontainers.image.description="Hashcat MCP server for OpenSploit"
 LABEL org.opencontainers.image.licenses="MIT"
 
-# Install hashcat and wordlists
+# Install hashcat and wordlists. Use python3-full not separate python3-pip/python3-venv —
+# Kali rolling occasionally has stale repo indexes that 404 on the discrete packages
+# but resolve python3-full cleanly. Same fix as nuclei / impacket / john Dockerfiles.
 RUN apt-get update && \
     DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
         hashcat \
         mesa-opencl-icd \
         ocl-icd-libopencl1 \
         wordlists \
-        python3 python3-pip python3-venv && \
-    rm -rf /var/lib/apt/lists/*
+        python3-full && \
+    rm -rf /var/lib/apt/lists/* && \
+    apt-get clean
 
 # Decompress rockyou if needed
 RUN if [ -f /usr/share/wordlists/rockyou.txt.gz ]; then \

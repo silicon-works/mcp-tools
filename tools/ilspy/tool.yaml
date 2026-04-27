@@ -1,9 +1,22 @@
 name: ilspy
-version: "9.1"
-description: ".NET assembly decompilation to readable C# source code via ILSpy CLI (ilspycmd 9.1). 4 methods: decompile (entire assembly to C# — single file or project with one file per type), decompile_type (specific class/struct by fully qualified name), list_types (list all classes, interfaces, structs, delegates, enums), list_resources (list embedded resources). Produces clean C# source code far superior to Ghidra's .NET output. For native binary analysis use ghidra. For .NET deserialization payloads use ysoserial."
+kind: cli
+binary: ilspycmd
+version: "9.1.0"
+description: ".NET assembly decompilation to readable C# source code via ILSpy CLI (ilspycmd 9.1.0). Operates ENTIRELY OFFLINE on local .NET assemblies (.dll, .exe, .winmd, .netmodule) inside the container — there is no network target. The positional argument is the ASSEMBLY PATH (e.g., `/session/ClientsBackup.dll`); flags like `-o`, `-t`, `--project`, `--ilcode`, `-l`, `-r` control output format, type filtering, project layout, and reference resolution. Native CLI; the LLM constructs the full ilspycmd invocation. Produces clean C# source code far superior to Ghidra's .NET output. For native binary analysis use ghidra. For .NET deserialization payloads use ysoserial."
 image: "ghcr.io/silicon-works/mcp-tools-ilspy:latest"
 image_size_mb: 500
-timeout_seconds: 120
+# Dual-clock model:
+#   idle_timeout_seconds — silence between MCP heartbeats. ilspycmd prints
+#     little during long decompiles (no built-in progress flag); 10 min idle
+#     is the conservative "stuck" threshold. Most assemblies decompile in
+#     seconds; very large assemblies (multi-MB DLLs from full applications,
+#     or aggregated framework DLLs) can run quietly for minutes.
+#   max_runtime_seconds — hard wall-clock cap; never resets on heartbeat.
+#     1h covers `--dump` against very large assemblies with many references.
+# Legacy `timeout_seconds` is used by older clients as the hard cap.
+idle_timeout_seconds: 600
+max_runtime_seconds: 3600
+timeout_seconds: 3600
 
 capabilities:
   - dotnet_decompilation
@@ -15,6 +28,44 @@ phases:
   - enumeration
   - post-exploitation
 
+routing:
+  use_for:
+    - "decompile .NET DLL or EXE to readable C# source code"
+    - "analyze .NET assemblies extracted from MSSQL CLR, Windows services, or compromised hosts"
+    - "find hardcoded credentials, encryption keys, or logic flaws in .NET binaries"
+    - "list classes and methods in a .NET binary before targeted decompilation"
+    - "understand custom .NET services, protocols, or authentication logic"
+    - "decompile a single type (class/struct/interface) from a large .NET assembly"
+    - "produce a compilable .csproj from a .NET binary for offline study and modification"
+    - "extract raw IL (intermediate language) from a .NET assembly"
+  never_use_for:
+    - "native binary analysis (x86/ARM ELF/PE — use ghidra)"
+    - task: "generating .NET deserialization payloads"
+      use_instead: "ysoserial"
+      reason: "ilspy READS .NET binaries to recover source; it does not generate exploit payloads. After decompiling with ilspy to identify which formatter/gadget the target uses, hand off to ysoserial for payload generation."
+    - task: "Java decompilation (.jar / .class)"
+      use_instead: "exploit-runner with jadx or procyon"
+      reason: "ilspy is .NET-only — Java bytecode is a different format with different decompilers."
+    - task: "live .NET process inspection / runtime debugging"
+      use_instead: "dnSpy or windbg out-of-band"
+      reason: "ilspycmd is a static decompiler — it operates on assembly files at rest, not on a running .NET process."
+  triggers:
+    - "decompile .NET"
+    - "ilspy"
+    - "ilspycmd"
+    - "dnSpy"
+    - ".NET decompile"
+    - "DLL decompile"
+    - "C# decompile"
+    - "assembly decompile"
+    - ".NET binary"
+    - ".NET reverse engineering"
+    - "CLR assembly"
+    - "MSIL"
+    - "managed assembly"
+  prefer_over:
+    - ghidra  # For .NET assemblies specifically — ILSpy produces far better C# than Ghidra
+
 requirements:
   network: false
   privileged: false
@@ -23,114 +74,229 @@ resources:
   memory_mb: 512
   cpu: 0.5
 
-routing:
-  use_for:
-    - "decompile .NET DLL or EXE to readable C# source code"
-    - "analyze .NET assemblies extracted from MSSQL, Windows services, or compromised hosts"
-    - "find hardcoded credentials, encryption keys, or logic flaws in .NET binaries"
-    - "list classes and methods in a .NET binary before targeted decompilation"
-    - "understand custom .NET services, protocols, or authentication logic"
-  never_use_for:
-    - "native binary analysis (x86/ARM — use ghidra)"
-    - "generating .NET deserialization payloads (use ysoserial)"
-    - "Java decompilation (use exploit-runner with jadx/procyon)"
-  triggers:
-    - decompile .NET
-    - ilspy
-    - dnSpy
-    - .NET decompile
-    - DLL decompile
-    - C# decompile
-    - assembly decompile
-    - .NET binary
-    - .NET reverse engineering
-  prefer_over:
-    - ghidra  # For .NET assemblies specifically — ILSpy produces far better C# than Ghidra
-
 see_also:
   - tool: ghidra
-    reason: Use ghidra for native binary analysis (ELF, PE x86/ARM). Use ilspy for .NET assemblies — it produces clean C# source code.
+    reason: "Use ghidra for native binary analysis (ELF, PE x86/ARM). Use ilspy for .NET assemblies — it produces clean C# source code superior to Ghidra's .NET output."
   - tool: ysoserial
-    reason: After decompiling with ilspy to understand which formatter/gadget the target uses, use ysoserial to generate the deserialization payload.
+    reason: "After decompiling with ilspy to understand which formatter/gadget the target uses, run ysoserial to generate the deserialization payload."
   - tool: mssql
-    reason: Use mssql extract_assembly to retrieve .NET DLLs from MSSQL CLR assemblies, then decompile with ilspy.
+    reason: "Use mssql extract_assembly to retrieve .NET DLLs from MSSQL CLR assemblies, then decompile with ilspy to recover source and find credentials / logic flaws."
+  - tool: exploit-runner
+    reason: "For Java decompilation use exploit-runner with jadx or procyon; for native binaries pair with ghidra. ilspy handles only .NET assemblies."
 
-methods:
-  decompile:
-    description: "Decompile an entire .NET assembly (DLL or EXE) to C# source code. Can output as a single concatenated file (default) or as a project with one source file per type."
-    when_to_use: "When you have a .NET binary and need to understand its logic — find hardcoded credentials, understand authentication mechanisms, discover protocol details, or identify vulnerabilities. Common sources: MSSQL CLR assemblies (via mssql extract_assembly), Windows services found during post-exploitation, custom .NET applications."
-    params:
-      assembly_path:
-        type: string
-        required: true
-        description: "Path to the .NET DLL or EXE file (e.g., '/session/ClientsBackup.dll')."
-      as_project:
-        type: boolean
-        default: false
-        description: "Decompile as project (one file per type with .csproj). More organized but larger output."
-    returns:
-      source:
-        type: string
-        description: "Decompiled C# source code (when as_project=false)."
-      output_dir:
-        type: string
-        description: "Output directory path (when as_project=true)."
-      class_count:
-        type: integer
-        description: "Number of classes found."
-      method_count:
-        type: integer
-        description: "Number of methods found."
+# ── kind:cli specific sections ──────────────────────────────────────
 
-  decompile_type:
-    description: "Decompile a specific type (class/struct/enum) from a .NET assembly. Faster and less output than full decompilation."
-    when_to_use: "When you know which class to examine (from list_types or error messages). Faster than decompiling the entire assembly."
-    params:
-      assembly_path:
-        type: string
-        required: true
-        description: "Path to the .NET DLL or EXE file."
-      type_name:
-        type: string
-        required: true
-        description: "Fully qualified type name (e.g., 'BackupService.BackupClients', 'WindowsService.TcpServer')."
-    returns:
-      source:
-        type: string
-        description: "Decompiled C# source code for the specified type."
+target_extraction:
+  # ilspy has NO network target. Its operation is purely local .NET assembly
+  # decompilation. The "operands" of an ilspycmd call are:
+  #   1. The assembly path positional (e.g., /session/sample.dll)
+  #   2. The output dir via -o (e.g., /session/decompiled)
+  #   3. The type name filter via -t (e.g., Namespace.ClassName)
+  #   4. Reference search paths via -r (e.g., /session/refs/)
+  #   5. Optional language / project / IL flags
+  # NONE of these are network endpoints. The plugin's TargetValidation
+  # framework is designed for network targets (host/IP/URL); applying it to
+  # a file path or .NET type name would either always reject (wrong) or
+  # always accept (also wrong) — the right answer is N/A.
+  #
+  # Decision: declare NO target_extraction rules. The plugin extracts
+  # target=null. The downstream gotcha note documents that scope-validation
+  # is N/A for ilspy because the operation is purely local .NET decompilation.
+  #
+  # Same design as volatility / john / hashcat — all are offline analysis
+  # tools operating on local files.
+  []
 
-  list_types:
-    description: "List all types in a .NET assembly — classes, interfaces, structs, delegates, and enums."
-    when_to_use: "First step when analyzing an unknown .NET binary — survey what's inside before decompiling. Identifies the interesting classes to focus on."
-    params:
-      assembly_path:
-        type: string
-        required: true
-        description: "Path to the .NET DLL or EXE file."
-      entity_type:
-        type: string
-        default: "all"
-        description: "Filter by entity type: all, class, interface, struct, delegate, enum."
-    returns:
-      types:
-        type: array
-        description: "Fully qualified type names."
-      type_count:
-        type: integer
-        description: "Number of types found."
+# ilspy has no target-list flag analog. The operands are local file paths
+# (positional assembly, -o output dir, -r reference dirs) and .NET type
+# names. Nothing to reject.
+reject_flags: []
+reject_flags_reason: "ilspycmd has no network target and no target-list flag. The operands are a local .NET assembly file path (positional), an output directory (-o), reference search paths (-r), an optional type-name filter (-t), and language/format selectors (-l, --project, --ilcode). All values are local artifacts inside the container; there is no scope-validation surface to protect."
 
-  list_resources:
-    description: "List embedded resources in a .NET assembly (icons, config files, embedded data)."
-    when_to_use: "Check for embedded configuration files, certificates, or data that might contain credentials or secrets."
-    params:
-      assembly_path:
-        type: string
-        required: true
-        description: "Path to the .NET DLL or EXE file."
-    returns:
-      resources:
-        type: array
-        description: "List of embedded resource names."
-      resource_count:
-        type: integer
-        description: "Number of resources found."
+# Per-tool value-taking flags whose values must NOT be confused with
+# positional assembly paths or accidentally extracted as targets. ilspycmd
+# uses BOTH single-dash short flags (-o, -p, -t, -l, -r, -d) AND
+# double-dash long forms. Values verified against `ilspycmd --help`.
+value_flags:
+  # Output directory
+  - "-o"                           # output dir for decompiled source
+  - "--outputdir"                  # long form of -o
+  # Type filter (single-type decompilation)
+  - "-t"                           # decompile a single type by fully qualified name
+  - "--type"                       # long form of -t
+  # Language / output format
+  - "-l"                           # output language (csharp | il | csharp-2010 etc.)
+  - "--language"                   # long form of -l
+  # Reference search paths
+  - "-r"                           # additional reference search path (repeatable)
+  - "--referencepath"              # long form of -r
+  # IL output controls
+  - "-il-sequence-points"          # boolean — emit sequence-point comments in IL output
+  # Boolean flags — listed for safety so they are NOT mis-parsed as taking
+  # the next argv as a value.
+  - "-p"                           # --project shorthand (boolean)
+  - "--project"                    # decompile as project (one file per type + .csproj)
+  - "-il"                          # boolean — emit raw IL instead of C#
+  - "--ilcode"                     # long form of -il
+  - "-genpdb"                      # boolean — generate PDB alongside decompiled source
+  - "-d"                           # --dump shorthand (boolean)
+  - "--dump"                       # boolean — decompile EVERYTHING (entire assembly)
+  - "--lzma"                       # boolean — compress output (used with --project)
+  - "--no-symbols"                 # boolean — suppress debug-symbol use
+  - "-h"                           # help (boolean)
+  - "--help"                       # long form of -h
+  - "-V"                           # version (boolean)
+  - "--version"                    # long form of -V
+
+usage_patterns:
+  - name: "Decompile entire assembly to a directory (--dump)"
+    command: "ilspycmd /session/sample.dll -o /session/decompiled --dump"
+    when: "Recover the full assembly to C# source. --dump (or -d) walks every type in the assembly. Output dir MUST exist beforehand — pre-create with `mkdir -p /session/decompiled` via a separate run_cli call. EXPENSIVE on large assemblies (multi-MB DLLs from full applications); for targeted analysis prefer `-t <type>` instead. Output is ONE concatenated `.cs` file (or many files if `--project` is added)."
+
+  - name: "Decompile a single type (-t)"
+    command: "ilspycmd /session/sample.dll -t BackupService.BackupClients"
+    when: "Decompile only ONE type (class, struct, interface, enum) by fully qualified name. Much faster than --dump on large assemblies. Use after `list_types`-style enumeration (or after seeing a type name in error messages / stack traces) to focus on a single class. Output goes to stdout; pipe or redirect via the run_cli `output_path` arg. The type name must MATCH EXACTLY (case-sensitive, fully qualified — `Namespace.SubNs.ClassName`)."
+
+  - name: "Decompile as a compilable project (--project)"
+    command: "ilspycmd /session/sample.dll --project -o /session/csproj/"
+    when: "Produce a navigable .csproj layout — one source file per type, plus a generated .csproj that lists all sources and references. Easier to navigate than `--dump`'s single-file output. Useful for offline study, IDE-loading the project, or rebuilding a modified version. Output dir MUST exist; pre-create with mkdir."
+
+  - name: "Raw IL output (--ilcode / -il)"
+    command: "ilspycmd /session/sample.dll --ilcode"
+    when: "Emit raw IL (intermediate language) instead of C#. Useful when the C# decompiler can't reconstruct an obfuscated method or when you specifically need the IL (e.g., to spot non-trivial control flow, reflection emit calls, or obfuscator artifacts that the C# pass would erase). Pair with `-il-sequence-points` to include source-line annotations. Output goes to stdout."
+
+  - name: "Decompile with custom reference paths (-r)"
+    command: "ilspycmd /session/sample.dll -r /session/refs/ -o /session/out/"
+    when: "If the assembly references DLLs that are NOT in the same directory or in the standard .NET reference assemblies, the decompiler cannot resolve them and emits 'Could not resolve assembly' errors. Pre-stage the missing references in `/session/refs/` (or wherever) and pass `-r /path/to/refs/`. The flag is repeatable (-r /a/ -r /b/) for multiple search paths. Output dir MUST exist."
+
+  - name: "Decompile a specific type as part of a project (-t with --project)"
+    command: "ilspycmd /session/sample.dll -t MyApp.Auth.LoginService --project -o /session/auth/"
+    when: "Generate a project containing only the specified type. Combines the targeted-decompilation speed of `-t` with the navigable layout of `--project`. Output dir MUST exist. Useful when only one class is interesting but you want it in a structured form for IDE viewing."
+
+  - name: "Generate a PDB alongside the decompile (-genpdb)"
+    command: "ilspycmd /session/sample.dll -genpdb -o /session/out/"
+    when: "Emit a PDB symbol file alongside the decompiled output. Useful for symbolic debugging of the decompiled source (e.g., setting breakpoints in a re-compiled version that matches the original). Output dir MUST exist."
+
+  - name: "Print version and verify ilspycmd is functional"
+    command: "ilspycmd --version"
+    when: "Smoke test that the dotnet tool is on PATH and the runtime can start it. Output is just the version string (e.g., '9.1.0'). Run before a long decompile to confirm the container is healthy. Fast — exits in <1s."
+
+  - name: "Print help (--help)"
+    command: "ilspycmd --help"
+    when: "Print the full ilspycmd usage and flag list. Use to discover available flags, language values for `-l`, project format options. ALSO use as a targetless smoke test that the binary is functional."
+
+  - name: "Enumerate types in an assembly (-l <kinds>)"
+    command: "ilspycmd /session/sample.dll -l cisde"
+    when: "List every type (classes, interfaces, structs, delegates, enums) in the assembly without decompiling bodies. Pass a single concatenated string of entity-kind letters (NO commas): `c`=class, `i`=interface, `s`=struct, `d`=delegate, `e`=enum; `cisde` = all. Use this BEFORE `-t <type>` to discover the exact fully-qualified type names available, especially when a type-not-found error fires. Output is one type per line, format `Class Namespace.ClassName` / `Interface Namespace.IName`. FAST — runs in seconds even on framework DLLs."
+
+  - name: "Enumerate embedded resources (--ilcode + grep recipe)"
+    command: "ilspycmd /session/sample.dll --ilcode"
+    when: "Two-step pattern to list embedded resources (.mresource entries) in a .NET assembly — ilspycmd has NO dedicated resource-list flag. Step 1: emit IL via `--ilcode` (capture via run_cli output_path or pipe). Step 2: grep the IL output for `.mresource` lines — each declaration names one embedded resource. Pattern: `\\.mresource\\s+(?:public|private)?\\s*'?([^']+)'?`. Useful for finding embedded credentials, encrypted blobs, config files, or unmanaged DLL bundles inside a .NET binary."
+
+output_formats:
+  - flag: ""
+    format: "csharp"
+    preferred: true   # default — clean C# source code (the whole point of ilspy)
+  - flag: "--ilcode"
+    format: "il"
+    preferred: false  # raw IL — needed when C# reconstruction fails or for obfuscation analysis
+  - flag: "-il"
+    format: "il"
+    preferred: false  # short form of --ilcode
+  - flag: "--project"
+    format: "csproj"
+    preferred: false  # full project layout — one .cs per type plus .csproj manifest
+  - flag: "-p"
+    format: "csproj"
+    preferred: false  # short form of --project
+  - flag: "-l csharp"
+    format: "csharp"
+    preferred: true   # explicit modern C# (default)
+  - flag: "-l il"
+    format: "il"
+    preferred: false  # alternate way to request IL output
+  - flag: "-l csharp-2010"
+    format: "csharp"
+    preferred: false  # legacy C# 4.0 dialect — use only if compatibility with older tooling matters
+
+common_options:
+  input:
+    - "POSITIONAL ASSEMBLY PATH: REQUIRED for all decompile runs. Path to the .NET DLL, EXE, .winmd, or .netmodule (e.g., /session/sample.dll). Pre-stage in /session/. The positional MAY appear before or after flags (argparse-style permissive), but conventional order is `ilspycmd <path> <flags>`."
+  output:
+    - "-o DIR / --outputdir DIR: directory for decompiled output. REQUIRED for `--dump`, `--project`, `-genpdb`. Directory MUST EXIST beforehand — ilspycmd does NOT auto-create. Pre-create with `mkdir -p /session/<dir>` via a separate run_cli call."
+    - "--project / -p: emit a compilable project layout (one .cs file per type plus .csproj). Requires -o. Larger output but easier to navigate."
+    - "stdout (default): when neither --dump nor --project is set and -o is omitted, decompiled C# (or IL) is written to stdout. Capture via run_cli's `output_path` for redirection."
+  language:
+    - "-l NAME / --language NAME: output language. Common values: `csharp` (default — modern C#), `il` (raw IL — equivalent to --ilcode), `csharp-2010` (legacy C# 4.0 dialect). Run `ilspycmd --help` for the full list."
+    - "--ilcode / -il: shortcut for `-l il` — emit raw IL instead of C#."
+  filter:
+    - "-t NAME / --type NAME: decompile only the specified type. NAME must be fully qualified and case-sensitive (e.g., `Namespace.SubNs.ClassName`). Faster than `--dump` for targeted analysis."
+  references:
+    - "-r PATH / --referencepath PATH: additional reference search path. Repeatable (`-r /a/ -r /b/`). Required when an assembly references DLLs not in the same directory or in the bundled .NET reference assemblies; without it the decompiler cannot resolve external types."
+  debug:
+    - "-genpdb: generate a PDB symbol file alongside the decompile. Useful for symbolic debugging of a re-compiled version."
+    - "-il-sequence-points: emit sequence-point comments in IL output (only meaningful with `--ilcode`)."
+    - "--no-symbols: suppress debug-symbol use during decompilation."
+
+gotchas:
+  - "ilspy has NO NETWORK TARGET — it operates on local .NET assemblies only. The positional argument is an assembly file PATH (e.g., `/session/sample.dll`), NOT a host or URL. target_extraction returns null; scope-validation does NOT apply because there is no remote endpoint to validate against. Same design as volatility / john / hashcat — all four are offline analysis tools operating on local artifacts."
+  - "First positional MUST be the assembly path: `ilspycmd /session/sample.dll <flags>`. Flags can come before or after the positional (argparse is permissive), but conventional order is path-first. Common error: forgetting the path entirely → 'Missing required argument' or 'no input file'."
+  - "`-t <type>` extracts only ONE type. The type name must be FULLY QUALIFIED and CASE-SENSITIVE (e.g., `BackupService.BackupClients`, NOT `BackupClients` or `backupservice.backupclients`). Useful for targeted analysis on large assemblies where `--dump` would be slow."
+  - "`--dump` (or `-d`) decompiles the ENTIRE assembly. SLOW on large assemblies (multi-MB DLLs from full applications, or aggregated framework DLLs); single-MB tool DLLs typically finish in seconds. For focused analysis prefer `-t <type>` instead."
+  - ".NET assemblies REFERENCE OTHER assemblies. If the references aren't in the same directory as the input or in the bundled .NET reference assemblies, the decompiler emits 'Could not resolve assembly' errors and may produce incomplete output. Stage the references alongside the input (or pass `-r /path/to/refs/` — repeatable) so resolution succeeds."
+  - "Output directory MUST EXIST when using `-o`, `--project`, `--dump`, or `-genpdb`. ilspycmd does NOT auto-create. Two-call pattern: first `mkdir -p /session/<dir>`, then `ilspycmd ... -o /session/<dir>/`."
+  - "ilspycmd is the dotnet tool (Microsoft's official ILSpy CLI), available via `dotnet tool install ilspycmd -g`. It depends on the .NET runtime; this image bundles the SDK so ilspycmd starts immediately. The binary lives under `/root/.dotnet/tools/ilspycmd` and is added to PATH via the Dockerfile."
+  - "Default output (no --dump / --project / -o) goes to STDOUT — pipe or redirect via run_cli `output_path` if you need to capture it. Without redirection it joins the MCP response payload (which sanitize_output truncates at 50 KB)."
+  - "`-l csharp-2010` requests legacy C# 4.0 dialect — only use if downstream tooling can't handle modern C# features (pattern matching, default interface methods, switch expressions). Prefer the default (modern C#) for analysis."
+  - "`-l` is OVERLOADED in ilspycmd: in the language role it accepts `csharp` / `il` / `csharp-2010`, but it ALSO doubles as a TYPE-LIST flag where the value is a single concatenated entity-kind string (NO COMMAS): `c`=class, `i`=interface, `s`=struct, `d`=delegate, `e`=enum. Pass `cisde` for ALL kinds. Example: `ilspycmd /session/sample.dll -l cisde` lists every type in the assembly. This is the canonical type-enumeration pattern (the legacy mcp-server.py used it under `list_types`). Do NOT pass `c,i,s,d,e` — ilspycmd parses this as one literal token and rejects it."
+  - "Embedded-resource enumeration is a TWO-STEP recipe (no dedicated flag): (1) `ilspycmd /session/sample.dll --ilcode > /session/<dump>.il` (or capture via run_cli output_path), (2) grep the IL for lines starting with `.mresource` — each line names one embedded resource. Pattern: `\\.mresource\\s+(?:public|private)?\\s*'?([^']+)'?`. The legacy mcp-server.py inlined this; under kind:cli the agent assembles the two calls."
+  - "Obfuscated assemblies often defeat the C# decompiler — output may be syntactically valid but semantically wrong, missing methods, or full of `goto` labels. Fall back to `--ilcode` to inspect raw IL when C# output looks suspect."
+  - "ilspy is .NET-ONLY. For Java (.jar/.class) use jadx or procyon (via exploit-runner). For native binaries (ELF, PE x86/ARM) use ghidra. Trying to decompile a non-.NET file emits 'BadImageFormatException' or 'not a valid PE file' — see failure_signatures."
+  - "Output is STATIC C# — re-compiling it does NOT necessarily produce a bit-identical assembly (some decompiler output is approximate, especially for compiler-generated state machines, anonymous types, and lambdas). Treat the output as a READ-ONLY analysis artifact unless you explicitly need a working rebuild."
+
+failure_signatures:
+  # Layer-diverse signals (SKILL #11):
+  #   - File / I/O layer (assembly path open, output dir create, reference path access)
+  #   - PE / format layer (input is not a valid PE file, BadImageFormatException)
+  #   - Reference-resolution layer (Could not resolve assembly)
+  #   - Type-resolution layer (Type X not found — for -t)
+  #   - Argument / argparse layer (Unrecognized command or argument, missing positional)
+  #   - Output / I/O layer (output directory does not exist, Cannot create file)
+  - signal: "Could not find file"
+    remediation: "Assembly path positional points at a file that does not exist. Verify with `ls /session/` and re-check the filename. /session/ is the standard mount; paths outside /session/ may not be reachable from the container."
+  - signal: "not found"
+    remediation: "Generic file-not-found message (often combined with the offending path). Same root cause as 'Could not find file' — verify the path with `ls -l /session/<name>`."
+  - signal: "not a valid PE file"
+    remediation: "Input file is not a Portable Executable (.dll / .exe / .winmd / .netmodule). ilspy only handles .NET assemblies. Confirm the file type with `file /session/<name>` — for Java use jadx, for native binaries use ghidra."
+  - signal: "BadImageFormatException"
+    remediation: "PE-loader exception — the file looks like a PE but isn't a valid managed (.NET) assembly. Could be a native PE (use ghidra), a corrupted file, or a 32-vs-64-bit mismatch. Confirm with `file <path>` and check whether the file actually is .NET (managed assemblies usually have `.NET assembly` in the file output, or a CLI Header in the PE)."
+  - signal: "Could not resolve assembly"
+    remediation: "Decompile referenced an external assembly that's not in the same directory and not in the bundled .NET reference assemblies. Stage the missing references alongside the input or pass `-r /path/to/refs/` (repeatable). Run `--help` to see -r usage."
+  - signal: "Reference not found"
+    remediation: "Same family as 'Could not resolve assembly' — a referenced assembly couldn't be located. Same fix: pre-stage the references and pass `-r /path/`."
+  - signal: "Type .* not found"
+    remediation: "`-t <type>` was passed a fully qualified name that doesn't exist in the assembly. Verify the exact spelling (case-sensitive, fully qualified). Run `ilspycmd <path>` (no -t) and grep the output for the type, or use a `list_types` flow to enumerate available types first."
+  - signal: "No such type"
+    remediation: "Same family as 'Type .* not found' — same fix."
+  - signal: "Unrecognized command or argument"
+    remediation: "Argparse rejected an unknown flag. Check `ilspycmd --help` for the full flag list. Common errors: typing `--output` instead of `--outputdir`, `--lang` instead of `--language`, or vol-style `-r json` (volatility flag, not ilspy)."
+  - signal: "Required argument"
+    remediation: "Missing required argument — usually the assembly path positional. ilspycmd needs at minimum a path to a .NET assembly. Exception: `--help` and `--version` don't require a path."
+  - signal: "directory does not exist"
+    remediation: "Output directory passed via `-o` doesn't exist. ilspycmd does NOT auto-create. Pre-create with `mkdir -p /session/<dir>` via a separate run_cli call, then re-run."
+  - signal: "Cannot create file"
+    remediation: "Filesystem error writing output — typically because the parent directory doesn't exist or is not writable. /session/ should always be writable; verify the parent dir exists with `ls -l /session/`."
+  - signal: "Permission denied"
+    remediation: "File or directory permission error — typically on the input file (read) or `-o` output dir (write). Verify with `ls -l <path>`. /session/ should always be readable and writable."
+  - signal: "is not a valid managed image"
+    remediation: "Variant of 'BadImageFormatException' / 'not a valid PE file' — the file is not a managed (.NET) assembly. Same fix: confirm the file type with `file <path>`; route to ghidra (native) or jadx (Java)."
+
+help_commands:
+  - command: "ilspycmd --help"
+    purpose: "Top-level help — full flag list, language values, project options, IL flags. Use to discover the right flag for an unfamiliar workflow. ALSO a targetless smoke test that the binary is functional."
+  - command: "ilspycmd -h"
+    purpose: "Short form of --help — same output."
+  - command: "ilspycmd --version"
+    purpose: "Print ilspycmd version (e.g., '9.1.0'). Confirms the dotnet tool is on PATH and the runtime can start it. Fast smoke test — runs in <1s."
+  - command: "ilspycmd -V"
+    purpose: "Short form of --version — same output."

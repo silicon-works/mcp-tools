@@ -1,31 +1,52 @@
 name: amass
-version: "5.0.0"
-description: "Subdomain discovery and external attack surface mapping — OWASP Amass v5.0 with passive and active enumeration modes. Two methods: enum_passive (certificate transparency, DNS databases, web archives, search engines — no target contact; passive is the v5 default), enum_active (passive sources plus DNS brute-force, zone transfers, certificate crawling — touches target DNS). Outputs text format (one subdomain per line) parsed into structured data with subdomain names and parent domain. For email harvesting alongside subdomain discovery use theharvester. For web technology fingerprinting on discovered subdomains use web-fingerprint. For port scanning discovered hosts use nmap."
+kind: cli
+binary: amass
+version: "5.0.1"
+description: "OWASP Amass v5.0 — DNS subdomain enumeration and external attack-surface mapping. Single Go binary with a sub-command architecture: `amass <subcmd> [flags]`. Sub-commands are `enum` (primary subdomain enumeration: passive/active/brute), `intel` (organisation intel — ASNs, IP ranges, registered domains), `viz` (visualise results into D3/GEXF/Graphistry), `track` (diff successive enumeration runs), `db` (manage the local result graph database). Passive enum is the v5 default — it queries certificate transparency logs, passive-DNS aggregators, web archives, and search-engine APIs without contacting the target. Active enum (`-active`) layers in DNS brute-force, attempted zone transfers, certificate crawling — directly hits the target's resolvers. Output: text (`-o`, one subdomain per line), JSON (`-json`, structured records preferred for tooling), or all formats with a prefix (`-oA`). Native CLI; the LLM constructs the full amass invocation including the required sub-command. For port scanning of discovered hosts use nmap; for tech fingerprinting use web-fingerprint; for email/people OSINT use theharvester."
 image: "ghcr.io/silicon-works/mcp-tools-amass:latest"
 image_size_mb: 226
-timeout_seconds: 900
+# Dual-clock model:
+#   idle_timeout_seconds — silence between MCP heartbeats. Passive enum may
+#     be quiet between OSINT API calls (CT log batches, web-archive paging),
+#     and active brute-force can stall on slow resolvers. 10 min silent ≈
+#     dead loop / hung HTTP request to a CT log.
+#   max_runtime_seconds  — hard wall-clock cap; never resets on heartbeat.
+#     6 h covers a full enum on a large org with brute-force enabled.
+# Legacy `timeout_seconds` is used by older clients as the hard cap.
+idle_timeout_seconds: 600
+max_runtime_seconds: 21600
+timeout_seconds: 21600
 
 capabilities:
   - subdomain_discovery
   - dns_enumeration
   - attack_surface_mapping
   - osint
+  - asn_lookup
+  - certificate_transparency
+
+phases:
+  - reconnaissance
 
 routing:
   use_for:
     - "discover subdomains for a target domain"
-    - "enumerate subdomains using passive OSINT sources"
+    - "passive subdomain enumeration via certificate transparency and OSINT"
     - "find all subdomains of a website without touching it"
     - "active DNS brute-force subdomain enumeration"
-    - "map the external attack surface of an organization"
+    - "map the external attack surface of an organisation"
     - "discover hidden subdomains before port scanning"
     - "certificate transparency log subdomain discovery"
+    - "ASN and IP range intel for an organisation (intel sub-command)"
+    - "find related domains owned by the same organisation"
+    - "track changes in subdomain inventory across engagements"
   never_use_for:
     - "port scanning discovered hosts (use nmap)"
     - "web technology fingerprinting (use web-fingerprint)"
     - "web vulnerability scanning (use nuclei or nikto)"
     - "email harvesting (use theharvester)"
-    - "DNS record lookups for known hosts (use nmap or dig via bash)"
+    - "DNS record lookup for known hosts (use the dns tool, dig, or nmap)"
+    - "screenshotting discovered subdomains (use playwright)"
   triggers:
     - "amass"
     - "subdomain"
@@ -34,11 +55,11 @@ routing:
     - "attack surface"
     - "DNS brute force"
     - "certificate transparency"
+    - "ct log"
     - "find subdomains"
     - "domain enumeration"
-
-phases:
-  - reconnaissance
+    - "asn lookup"
+    - "owasp amass"
 
 requirements:
   network: true
@@ -50,65 +71,278 @@ resources:
 
 see_also:
   - tool: nmap
-    reason: "After discovering subdomains with amass, use nmap to port scan the discovered hosts."
+    reason: "After discovering subdomains with amass, use nmap to port-scan the resolved hosts."
   - tool: web-fingerprint
     reason: "Use web-fingerprint to identify technologies running on discovered subdomains."
   - tool: theharvester
-    reason: "Use theharvester for email/employee harvesting. Amass focuses on subdomains, theharvester on emails and people."
+    reason: "Use theharvester for email/employee/people harvesting — amass focuses on subdomains, theharvester on identities."
   - tool: nuclei
-    reason: "After discovering subdomains, use nuclei to scan them for web vulnerabilities."
+    reason: "After discovering subdomains, scan them with nuclei for known CVEs and misconfigurations."
   - tool: ffuf
-    reason: "After discovering subdomains, use ffuf for directory brute-forcing and content discovery on each subdomain."
+    reason: "After discovering subdomains, use ffuf for directory and content discovery on each."
+  - tool: dns
+    reason: "For one-shot DNS record lookups (A/AAAA/MX/NS/TXT) on a known host — amass is heavy machinery for full subdomain enumeration."
 
-methods:
-  enum_passive:
-    description: "Passive subdomain enumeration — runs `amass enum -d <domain> -o <output> -nocolor -timeout <min>` (passive is the v5 default). Queries certificate transparency logs, DNS aggregators, web archives, and search engines. Does NOT touch the target's infrastructure directly — all data comes from third-party sources. Returns deduplicated subdomain list parsed from text output (one subdomain per line). Progress info and OWASP banner on stderr are filtered out."
-    when_to_use: "(1) First step in reconnaissance — discover subdomains without alerting the target. (2) Bug bounty scope expansion — find all related subdomains. (3) Before active scanning — build target list for nmap, nuclei, web-fingerprint. (4) When stealth is required — passive mode leaves no trace on target infrastructure."
-    required_ports: []
-    params:
-      domain:
-        type: string
-        required: true
-        description: "Target domain (e.g., 'example.com', 'target.htb'). Must be a valid domain name, not an IP."
-      timeout:
-        type: integer
-        default: 5
-        description: "Timeout in minutes. Default 5. Increase to 30+ for large domains with many subdomains. Partial results returned on timeout."
-    returns:
-      subdomains:
-        type: array
-        description: "Discovered subdomains (capped at 200). Each: {name: str, domain: str}."
-      total_found:
-        type: integer
-        description: "Total unique subdomains discovered."
-      mode:
-        type: string
-        description: "Enumeration mode used ('passive' or 'active')."
-      output_file:
-        type: string
-        description: "Path to text output file under /session/ (one subdomain per line)."
+# ── kind:cli specific sections ──────────────────────────────────────
 
-  enum_active:
-    description: "Active subdomain enumeration — runs `amass enum -active -brute -d <domain> -o <output> -nocolor -timeout <min>`. Includes all passive sources PLUS DNS brute-force with built-in wordlist, attempted zone transfers, and certificate crawling. Directly queries the target's DNS servers."
-    when_to_use: "(1) When passive enum is not finding enough subdomains. (2) When you have authorization to actively probe the target. (3) HTB/CTF — always use active mode since targets are authorized. (4) After passive enum — active adds brute-force results to passive findings."
-    required_ports: []
-    params:
-      domain:
-        type: string
-        required: true
-        description: "Target domain."
-      brute:
-        type: boolean
-        default: true
-        description: "Enable DNS brute-force. Default true. Disable with false if only want zone transfer and cert crawling."
-      timeout:
-        type: integer
-        default: 10
-        description: "Timeout in minutes. Default 10. Active+brute takes longer than passive."
-    returns:
-      subdomains:
-        type: array
-        description: "Discovered subdomains with IPs and sources."
-      total_found:
-        type: integer
-        description: "Total unique subdomains discovered."
+target_extraction:
+  # amass takes a target DOMAIN via `-d <domain>`. The sub-command (enum /
+  # intel / viz / track / db) comes FIRST as a positional and is NOT a flag
+  # — it does not affect target extraction.
+  #
+  # Trap values that must NOT be confused with the target:
+  #   - `-include WHITELIST` / `-exclude BLACKLIST` — comma-separated lists
+  #     of source/data-source names (e.g., `crtsh,virustotal`), they are
+  #     filter labels NOT targets. Listed in value_flags.
+  #   - `-bl <domain>` / `-blf <file>` — DOMAIN BLACKLIST (filter, not target).
+  #     Even though the value has FQDN shape, it must NOT be picked.
+  #   - `-r <RESOLVERS>` / `-rf <file>` — DNS resolver IPs (e.g.,
+  #     `1.1.1.1,8.8.8.8`). Infrastructure, not target.
+  #   - `-iface <eth0>` — network interface name.
+  #   - `-config <file>` — config YAML path (may contain API keys).
+  #   - `-w <wordlist>` — brute-force wordlist path.
+  #   - `-o <file>` / `-oA <prefix>` / `-json <file>` / `-dir <dir>` —
+  #     output paths.
+  #   - `-p <ports>` — port list for cert-grab (e.g., `443,8443`).
+  #
+  # `-df <file>` (domains-from-file) is REJECTED — see reject_flags. The
+  # target list lives in the file body where scope validation can't reach.
+  - rule: "flag_value"
+    flag: "-d"
+    parse_as: "raw"
+
+# Flags that put the target outside the command line where scope validation
+# can't reach it. Plugin's cli_in_container rejects the call before container
+# spawn when any of these appear.
+reject_flags:
+  - "-df"            # domains from file (target list inside file body)
+reject_flags_reason: "Domain-list file ingestion (-df) puts the target domains inside the file body, outside the command line where scope validation can reach. Use one or more `-d <domain>` flags so the plugin can validate each target against engagement scope."
+
+# Per-tool value-taking flags whose values must NOT be confused with targets.
+# amass uses single-dash long flags (e.g., -active, -passive, -brute,
+# -min-for-recursive) — verified against `amass enum -h`. The DSL merges
+# these with its built-in defaults.
+value_flags:
+  # Targeting / scope (boolean flags listed for parser correctness)
+  - "-d"                       # target domain (extracted)
+  - "-df"                      # rejected, listed for parser correctness
+  - "-include"                 # include data sources (comma-separated names — NOT a target)
+  - "-exclude"                 # exclude data sources (comma-separated names — NOT a target)
+  - "-bl"                      # domain BLACKLIST (filter, looks FQDN-shape — NOT a target)
+  - "-blf"                     # domain blacklist file
+  - "-tr"                      # transitive enumeration depth (int)
+  - "-min-for-recursive"       # recursion threshold (int)
+  # Modes (boolean — listed for safety)
+  - "-active"                  # boolean — active enum (zone transfers, cert crawl)
+  - "-passive"                 # boolean — passive only (default in v5)
+  - "-brute"                   # boolean — DNS brute-force
+  - "-norecursive"             # boolean — disable recursive resolution
+  - "-noalts"                  # boolean — disable alteration scheme
+  - "-nolocaldb"               # boolean — disable local graph database
+  - "-list"                    # boolean — list all data sources
+  - "-resolved"                # boolean — only output resolved subdomains
+  # Wordlists / resolvers / interface
+  - "-w"                       # brute-force wordlist (path) — NOT a target
+  - "-r"                       # DNS resolvers (IP list) — NOT targets
+  - "-rf"                      # DNS resolvers file — NOT targets
+  - "-iface"                   # network interface (e.g., eth0, tun0)
+  - "-p"                       # alternative port list (cert grab)
+  - "-trf"                     # transitive resolvers file
+  # Config
+  - "-config"                  # config YAML file path
+  - "-aw"                      # alternative wordlist
+  - "-awm"                     # alternative wordlist mask
+  # Output
+  - "-o"                       # text output file path
+  - "-oA"                      # output prefix (multi-format)
+  - "-json"                    # JSON output file path
+  - "-dir"                     # output directory
+  - "-log"                     # log file path
+  # Performance / behaviour
+  - "-timeout"                 # max runtime in MINUTES
+  - "-max-dns-queries"         # cap on DNS queries
+  - "-rqps"                    # resolver queries per second (int)
+  - "-trqps"                   # trusted resolvers QPS (int)
+  - "-dns-qps"                 # global DNS QPS (int)
+  # Verbosity
+  - "-silent"                  # boolean — minimal output
+  - "-v"                       # boolean — verbose
+  - "-verbose"                 # boolean — verbose (long form)
+  - "-nocolor"                 # boolean
+  - "-share"                   # boolean — anonymous result sharing
+  # intel sub-command extras
+  - "-org"                     # organisation name search (intel)
+  - "-asn"                     # ASN number(s) (intel)
+  - "-cidr"                    # CIDR range(s) (intel)
+  - "-addr"                    # IP/range to look up (intel)
+  - "-whois"                   # boolean — include whois (intel)
+  - "-demo"                    # boolean — demo mode
+  # viz sub-command extras
+  - "-d3"                      # boolean — D3 visualisation output
+  - "-gexf"                    # boolean — GEXF output
+  - "-graphistry"              # boolean — Graphistry output
+  - "-i"                       # input file (some sub-commands)
+
+usage_patterns:
+  - name: "Passive subdomain enum (stealth, OSINT-only — recommended pre-engagement)"
+    command: "amass enum -passive -d {domain} -json /session/amass-{domain}.json -nocolor"
+    when: "First step in reconnaissance — discover subdomains without alerting the target. All data comes from third-party sources (CT logs, passive DNS, web archives), so the target sees zero traffic. Safe to run before formal engagement kick-off. Always prefer -json for tooling; the JSON record includes source attribution per finding."
+
+  - name: "Active enum with DNS brute-force (loud, full coverage)"
+    command: "amass enum -active -brute -d {domain} -w /usr/share/seclists/Discovery/DNS/subdomains-top1million-5000.txt -json /session/amass-{domain}.json -nocolor"
+    when: "When passive enum is not finding enough subdomains and you have authorisation to actively probe. Performs DNS brute-force with the supplied wordlist plus zone-transfer attempts and cert crawling. Generates noticeable DNS traffic to the target's resolvers — only use after sign-off. The seclists path is a Kali-standard wordlist; substitute /session/custom.txt for engagement-specific lists."
+
+  - name: "Intel mode — organisation ASN / domain / netblock discovery"
+    command: "amass intel -d {domain} -whois -json /session/amass-intel-{domain}.json"
+    when: "Discover organisation-level intel — ASNs, registered netblocks, related (sister) domains via WHOIS reverse lookup — before subdomain enum. Output feeds into nmap (scan ASN ranges) or back into another `amass enum` run for newly-discovered sister domains. Pair with `-org` or `-asn` for ASN-based searches."
+
+  - name: "Quick passive sweep with timeout (CI / fast triage)"
+    command: "amass enum -passive -d {domain} -timeout 5 -silent -o /session/amass-quick.txt"
+    when: "Time-boxed (5-minute) passive sweep for a quick subdomain inventory. Use `-silent` to suppress the ASCII-art banner and progress lines. Plain text output (one subdomain per line) for shell pipelines — `cat /session/amass-quick.txt | xargs -I{} curl -sI http://{}` patterns. For tooling prefer `-json`."
+
+  - name: "Custom config + custom resolvers (engagement-specific OSINT)"
+    command: "amass enum -config /session/amass.yaml -d {domain} -rf /session/resolvers.txt -json /session/amass-{domain}.json"
+    when: "When the engagement supplies its own API keys (Censys, SecurityTrails, VirusTotal etc.) via /session/amass.yaml — overrides the default ~/.amass/config.yaml which is empty / has stale keys in the container. `-rf` points at a file of trusted DNS resolvers (e.g., from trickest/resolvers) for higher-quality brute-force results."
+
+  - name: "Brute-force only (no passive sources, no API keys needed)"
+    command: "amass enum -brute -norecursive -d {domain} -w /usr/share/seclists/Discovery/DNS/subdomains-top1million-5000.txt -r 1.1.1.1,8.8.8.8 -json /session/amass-brute.json"
+    when: "Pure DNS brute-force without any passive OSINT — useful when API keys are unavailable and you only want wordlist-driven subdomain discovery. `-norecursive` keeps the brute-force flat (no recursion into discovered subdomains). `-r` overrides the resolver list with public resolvers."
+
+  - name: "Track changes across engagement runs (diff mode)"
+    command: "amass track -d {domain} -dir /session/amass-db"
+    when: "After running `amass enum` two or more times against the same domain (with shared `-dir`), `amass track` prints additions / removals between successive runs. Useful for long-running engagements or red-team retainers to spot newly-added attack surface."
+
+output_formats:
+  - flag: "-json {path}"
+    format: "json"
+    preferred: true   # JSON Lines per-record output — best for tooling
+  - flag: "-oA {prefix}"
+    format: "all"
+    preferred: false  # Writes prefix.txt, prefix.json, prefix.zone — useful but verbose
+  - flag: "-o {path}"
+    format: "text"
+    preferred: false  # Plain text, one subdomain per line — fine for shell pipelines
+
+common_options:
+  targeting:
+    - "-d DOMAIN: target domain (single, repeatable). FQDN only — IPs are not valid. Examples: -d example.com -d target.htb"
+    - "-df FILE: REJECTED — see reject_flags. Use multiple -d flags (one per domain) instead."
+    - "-include LIST: comma-separated data-source names to include (e.g., crtsh,virustotal). Filter, not target."
+    - "-exclude LIST: comma-separated data-source names to exclude. Filter, not target."
+    - "-bl DOMAIN[,DOMAIN...]: blacklist domains/subdomains from results. Filter — value LOOKS FQDN-shape but must NOT be confused with target."
+    - "-blf FILE: blacklist file (one domain per line)."
+  mode:
+    - "-active: enable active enumeration (zone transfers, cert crawl). Sends traffic TO the target."
+    - "-passive: passive-only mode (default in v5). OSINT sources only — no target contact."
+    - "-brute: enable DNS brute-force (use with -w wordlist). Generates DNS query load."
+    - "-norecursive: disable recursive brute-force into discovered subdomains."
+    - "-noalts: disable alteration scheme (e.g., dev1, dev2 permutations)."
+    - "-min-for-recursive N: minimum subdomains found before recursing (default 1)."
+    - "-tr N: transitive enumeration depth (chase CNAMEs / NS records N hops)."
+  wordlist_resolvers:
+    - "-w PATH: brute-force wordlist (newline-separated subdomain candidates)."
+    - "-aw PATH: alternative wordlist (for alteration scheme)."
+    - "-awm PATTERN: alternative wordlist mask (for alteration scheme permutations)."
+    - "-r RESOLVERS: DNS resolvers (comma-separated IPs, e.g., 1.1.1.1,8.8.8.8)."
+    - "-rf PATH: DNS resolvers file (one IP per line)."
+    - "-trf PATH: trusted resolvers file (used for verification)."
+  output:
+    - "-json PATH: PREFERRED — JSON-lines per-record output."
+    - "-o PATH: plain text, one subdomain per line."
+    - "-oA PREFIX: write all formats (.txt, .json, .zone) with given prefix."
+    - "-dir PATH: output / database directory (default ~/.amass)."
+    - "-log PATH: log file path."
+    - "-silent: suppress banner / progress lines."
+    - "-v / -verbose: verbose output."
+    - "-nocolor: disable ANSI colours."
+  performance:
+    - "-timeout MIN: max runtime in MINUTES (NOT seconds)."
+    - "-max-dns-queries N: cap on total DNS queries."
+    - "-rqps N: resolver queries-per-second."
+    - "-dns-qps N: global DNS QPS limit."
+    - "-iface IFACE: bind to specific network interface (e.g., eth0, tun0)."
+    - "-p PORTS: alternative port list for cert grab (default 443; useful: 443,8443,8080)."
+  config:
+    - "-config PATH: config YAML path. Contains API keys for Censys, SecurityTrails, VirusTotal, etc. Default ~/.amass/config.yaml."
+  intel_mode:
+    - "intel -d DOMAIN: discover related domains via WHOIS / ASN / cert."
+    - "intel -org NAME: search by organisation name (e.g., 'Acme Corp')."
+    - "intel -asn N: search by ASN (e.g., -asn 13335 for Cloudflare)."
+    - "intel -cidr CIDR: search by netblock (e.g., -cidr 1.1.1.0/24)."
+    - "intel -addr IP: reverse-lookup an IP for hosted domains."
+    - "intel -whois: include WHOIS-derived related domains."
+
+gotchas:
+  - "Sub-command is REQUIRED. `amass -d target.com` will fail — must be `amass enum -d target.com` (or intel / viz / track / db). The plugin does NOT auto-insert the sub-command; the LLM must include it as the first positional."
+  - "`-passive` mode is OSINT-only — no direct queries to the target. Use this in pre-engagement reconnaissance to avoid tipping off the target. Passive is the v5 DEFAULT, so omitting both -active and -passive gets passive behaviour."
+  - "`-active -brute` is LOUD — generates measurable DNS query traffic to the target's resolvers, plus AXFR (zone transfer) attempts. Only run after engagement sign-off."
+  - "Default config at ~/.amass/config.yaml may have stale or empty API keys in the container image. Use `-config /session/amass.yaml` for explicit config paths with engagement-specific keys (Censys, SecurityTrails, VirusTotal, etc.)."
+  - "Output to `-json` is PREFERRED for tooling — structured records include source attribution per subdomain. `-o` is plain text (one subdomain per line, no metadata). `-oA <prefix>` writes both plus a .zone file."
+  - "`-timeout N` is in MINUTES, not seconds. Setting `-timeout 5` means cap at 5 minutes. Common mistake: copying `-timeout` semantics from nuclei / nmap (which use seconds) and ending up with absurdly short or long runs."
+  - "`-include` / `-exclude` filter DATA SOURCES (e.g., crtsh, virustotal, securitytrails), NOT subdomains. Use `-bl` / `-blf` to blacklist subdomains from results."
+  - "`-d` is repeatable — `amass enum -d a.com -d b.com -d c.com` runs against multiple domains in one invocation. Each is validated independently against engagement scope."
+  - "v5 dropped several v3-era flags (e.g., `-script`, `-ipv4`, `-ipv6` on enum). When users ask for v3 flags, point them at the v5 equivalents."
+  - "Active enum can hang on resolvers that don't respond. Set `-rqps` (resolver QPS) or `-dns-qps` to keep load predictable, and use `-rf` with a curated trusted-resolvers list (e.g., trickest/resolvers) instead of the OS resolver."
+  - "amass exits 0 even when zero subdomains are found — that's a SUCCESS state, not a failure. Pattern-match output for failure_signatures regardless of exit code."
+  - "Active mode will attempt AXFR (DNS zone transfers) to NS records for the target — most modern resolvers refuse, but it's a noisy probe and shows up in DNS logs."
+  - "Progress output (the OWASP ASCII banner, `X / Y [===... p/s` progress bars, and version line `v5.x`) goes to STDERR, not stdout. failure_signatures match against stderr, so a progress line never resembles a signal phrase, but operators tailing stderr should expect noise even on healthy runs. Pass `-silent` to suppress the banner and progress."
+  - "When `-o <path>` is given, amass also prints subdomains to stdout — but with banner/progress noise mixed in if `-silent` is omitted. Prefer `-json <path>` (machine-readable, one record per line, no banner) over `-o` for any tooling that ingests amass output."
+  - "On timeout (`-timeout` minutes exceeded, OR client-side max_runtime hit), the `-o`/`-json` output file is NOT atomically written — amass appends as it discovers. Partial results survive in /session/<file> even if the run is killed. Read the file directly to recover what was found before the cut-off; do not assume an empty file means 'no results' if the run was killed."
+  - "amass writes ANSI colour escapes to stdout/stderr by default. Always pass `-nocolor` for log capture and downstream parsing — escape sequences will break `-o` text-output consumers and produce false matches against failure_signatures."
+
+failure_signatures:
+  # Layer-diverse signals (SKILL #11):
+  #   - DNS layer (Go net resolver)
+  #   - TCP layer (Go net connect)
+  #   - Config-parsing layer (YAML unmarshalling)
+  #   - API layer (third-party rate limits / forbidden)
+  #   - Argument-validation layer (missing flag, unknown sub-command)
+  #   - Empty-result layer (no targets / no results — semantic, not crash)
+  - signal: "Could not resolve"
+    remediation: "DNS resolution failed. Verify domain spelling, /etc/resolv.conf inside the container, or pass `-r 1.1.1.1,8.8.8.8` to override resolvers."
+  - signal: "no such host"
+    remediation: "Go net resolver phrasing — 'lookup HOST: no such host'. Same root cause as 'Could not resolve'. The target domain doesn't have an authoritative DNS record."
+  - signal: "lookup"
+    remediation: "Go net.Lookup error — DNS resolution failed. Check resolver config or use `-r` to override."
+  - signal: "dial tcp"
+    remediation: "TCP connection failure — usually a CT log or API endpoint refused / unreachable. Check container egress (corporate firewall blocking crt.sh / virustotal API)."
+  - signal: "connection refused"
+    remediation: "TCP refused — same as 'dial tcp'. Likely a data-source endpoint is down or blocked. Use `-exclude <source>` to skip the failing source."
+  - signal: "i/o timeout"
+    remediation: "Network timeout — slow OSINT API or unreachable resolver. Reduce `-rqps` / `-dns-qps`, raise `-timeout`, or check VPN egress."
+  - signal: "unmarshalling config file"
+    remediation: "Config YAML parse error. Validate /session/amass.yaml syntax — common cause: tab indentation (YAML wants spaces), missing key, or wrong section header."
+  - signal: "Invalid config"
+    remediation: "Config file rejected by amass. Compare against the upstream sample at https://github.com/owasp-amass/amass/blob/master/examples/config.yaml — schema changed between v3 and v5."
+  - signal: "API quota exceeded"
+    remediation: "A data-source API rate-limited the run. Wait, or `-exclude <source>` to skip it. For VirusTotal / SecurityTrails consider upgrading the API tier or using paid keys."
+  - signal: "Forbidden"
+    remediation: "API rejected the key (usually 403). Verify the key in `-config` is current and has the required scope. Some sources (Censys) need both API ID and secret."
+  - signal: "rate limit"
+    remediation: "Generic rate-limit phrasing from any of the OSINT APIs amass talks to. Same remediation as 'API quota exceeded'."
+  - signal: "the required flag"
+    remediation: "amass enum / intel needs `-d` (or intel needs `-org` / `-asn` / `-cidr` / `-addr`). Add the appropriate target-selection flag."
+  - signal: "unknown flag"
+    remediation: "Flag not recognised. Common cause: copying v3 syntax (e.g., `-script`, `-ipv4`) into v5. Run `amass enum -h` to see the v5 flag set."
+  - signal: "no targets found"
+    remediation: "amass parsed argv but found no domain to enumerate — usually missing `-d` or empty `-df` file. Add `-d <domain>`."
+  - signal: "no results"
+    remediation: "amass ran successfully but found zero subdomains. Try `-active -brute` with a wordlist, add API keys via `-config`, or verify the domain has DNS records at all."
+  - signal: "must provide"
+    remediation: "Sub-command argument missing. e.g., `intel` without `-d`/`-asn`/`-cidr`/`-org`. Read the failure line for the specific missing flag."
+  - signal: "Subcommand"
+    remediation: "Top-level help printed because no sub-command was given. Add one: `enum`, `intel`, `viz`, `track`, or `db`."
+
+help_commands:
+  - command: "amass -h"
+    purpose: "Top-level help — lists sub-commands (enum, intel, viz, track, db) and global flags."
+  - command: "amass enum -h"
+    purpose: "Subdomain enumeration flags (passive/active/brute, wordlist, resolvers, output, config)."
+  - command: "amass intel -h"
+    purpose: "Organisation intel flags (-org, -asn, -cidr, -addr, -whois)."
+  - command: "amass viz -h"
+    purpose: "Visualisation flags (-d3, -gexf, -graphistry) — converts the local graph DB to a renderable format."
+  - command: "amass track -h"
+    purpose: "Diff-mode flags — show additions/removals between successive enumeration runs sharing the same -dir."
+  - command: "amass db -h"
+    purpose: "Local graph database management (list, show, list events, etc.)."

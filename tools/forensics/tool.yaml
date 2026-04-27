@@ -1,9 +1,130 @@
 name: forensics
+kind: cli
+# binary: omitted intentionally — this tool wraps a MULTI-binary forensics
+# bundle (mirror of snmp / impacket / smtp / ike-scan pattern):
+#
+#   binwalk  v2.4.3 — embedded-file extraction & signature scanning
+#                     binwalk [flags] <file>
+#                     -e   extract automatically
+#                     -B   signature scan (default mode)
+#                     -M   matryoshka (recursive extract)
+#                     -d N max recursion depth
+#                     --dd=TYPE:EXT  custom dd (file-type:ext rules)
+#                     -D MIME:EXT    direct extract by MIME / magic
+#                     -C DIR         output directory
+#                     --run-as=USER  run extractors as USER
+#
+#   foremost v1.5.7  — header/footer file carving
+#                     foremost -i INPUT -o OUTDIR [-t TYPES] [-c CONFIG]
+#                     -i FILE   input image / blob (REQUIRED)
+#                     -o DIR    output directory (REQUIRED, MUST NOT exist)
+#                     -t LIST   types: jpg,gif,png,bmp,avi,exe,mpg,wav,riff,
+#                               wmv,mov,pdf,ole,doc,zip,rar,htm,cpp,all
+#                     -T        timestamped output dir (auto-suffix)
+#                     -c FILE   custom foremost.conf
+#                     -d        indirect (deep) carve — fragment reconstruction
+#                     -q        quick-scan (header at sector boundaries only)
+#                     -Q        quiet
+#                     -v        verbose
+#
+#   steghide v0.5.1  — JPEG/BMP/WAV/AU steganography
+#                     steghide <subcommand> [flags]
+#                     embed   -cf cover -ef embed-file [-sf stego] [-p pass]
+#                     extract -sf stego-file [-xf out] [-p pass] [-f]
+#                     info    [-p pass] <file>
+#                     -p PASS    passphrase (use -p '' for none)
+#                     -K         disable cover (steghide info)
+#                     -N         do NOT embed file name
+#                     -z N       compression level (1-9)
+#                     -e ALGO    encryption: none, blowfish, rijndael-128, ...
+#                     -f         force overwrite
+#
+#   exiftool v13.50  — universal metadata extractor (400+ formats)
+#                     exiftool [flags] <file-or-dir> ...
+#                     -j         JSON output (PREFERRED for parsing)
+#                     -X         XML / RDF output
+#                     -c FMT     coordinate format (-c "%+.6f" for raw)
+#                     -d FMT     date/time format
+#                     -fast / -fast2 / -fast3   skip slow scans
+#                     -r         recurse into directories
+#                     -s         short tag names (no spaces)
+#                     -S         very short (no padding)
+#                     -q         quiet (suppress info messages)
+#                     -w EXT     write per-file output (.txt, .xml, etc.)
+#                     -Y         YAML-like output (jumbo / dev builds)
+#
+# Each usage_pattern below declares its own `binary:` field, mirror of the
+# snmp / impacket / smtp / ike-scan multi-sub-binary pattern. cli_in_container
+# forwards the chosen binary explicitly; there is NO top-level binary.
+#
+# The legacy method handlers (extract, analyze, carve, stego_extract,
+# stego_info, metadata) auto-inherit run_cli from BaseMCPServer (mcp-common
+# 0.3.0); kind:cli is the new default. Legacy methods preserved as the
+# rollback path per SKILL #21.
 version: "1.0.0"
-description: "File analysis bundle — binwalk v2.4.3 (firmware extraction, signature scanning), foremost v1.5.7 (file carving from disk images), steghide v0.5.1 (steganography extraction from JPEG/BMP/WAV/AU), exiftool v13.50 (metadata extraction for 400+ file formats). Six methods: extract (binwalk recursive extraction with matryoshka depth control), analyze (binwalk signature scan without extraction), carve (foremost header/footer carving for 15+ file types), stego_extract (steghide hidden data extraction with passphrase), stego_info (steghide format/capacity/embedded detection), metadata (exiftool JSON output with EXIF/XMP/IPTC/GPS fields). All operations on files in /session/ directory. No network access required."
+description: >
+  File analysis bundle wrapping FOUR independent forensics binaries:
+  binwalk 2.4.3 (firmware / embedded-file extraction & signature scanning),
+  foremost 1.5.7 (header/footer file carving from disk images),
+  steghide 0.5.1 (JPEG/BMP/WAV/AU steganography embed / extract / info),
+  exiftool 13.50 (EXIF / XMP / IPTC / GPS / PDF / Office metadata for 400+
+  file formats).
+
+  Argv form per binary:
+
+    binwalk  [-e | -B] [-M] [-d N] [-C OUTDIR] [--run-as=USER]
+             [--dd=TYPE:EXT[:CMD]] [-D MIME:EXT] [-y INCLUDE]
+             [-Y FILTER] [-x EXCLUDE] [-l LEN] [-p OFFSET] [-r]
+             [-a] [-A] [-J] [-K] [-N] [-Q] [-W] [-z] <file>
+
+    foremost -i <input> -o <outdir> [-t TYPES] [-c CONFIG] [-T]
+             [-d] [-q] [-Q] [-v] [-V]
+
+    steghide extract -sf <stego> [-xf <out>] [-p <pass>] [-f]
+    steghide info    [-p <pass>] <file>
+    steghide embed   -cf <cover> -ef <secret> [-sf <out>]
+                     [-p <pass>] [-N] [-K] [-z N] [-e ALGO]
+
+    exiftool [-j | -X | -Y] [-c FMT] [-d FMT] [-fast[2|3]] [-r]
+             [-s] [-S] [-q] [-w EXT] <file-or-dir> ...
+
+  All operations are PURELY LOCAL — NO network egress, NO remote target.
+  The tool's "operand" is one or more local file paths (typically under
+  /session/). Scope-validation is N/A; target_extraction is empty.
+
+  Output is mostly text:
+    - binwalk default: signature table (DECIMAL HEX DESCRIPTION columns).
+                       With -e: also creates `_<file>.extracted/` directory
+                       in CWD with extracted artifacts.
+    - foremost: writes audit.txt + per-type subdirs (jpg/, png/, ...) under
+                the -o directory; stdout is brief progress.
+    - steghide: text — info prints "format:", "capacity:", "embedded file";
+                extract writes the extracted file to -xf path.
+    - exiftool: -j produces JSON (a list with one object per file); default
+                is human-readable "TagName : Value" lines.
+
+  Feature 28 dynamic recipes are RETIRED for the kind:cli path — the LLM
+  writes argv directly. Recipes still load for legacy method calls (extract,
+  analyze, carve, stego_extract, stego_info, metadata) if
+  /session/tool_recipes/forensics/ exists, but they're a dead branch under
+  run_cli (REQ-TR-016).
+
 image: "ghcr.io/silicon-works/mcp-tools-forensics:latest"
 image_size_mb: 309
-timeout_seconds: 600
+
+# Dual-clock model:
+#   idle_timeout_seconds — silence between MCP heartbeats. binwalk and
+#     foremost are file-IO-bound and emit progress; steghide / exiftool
+#     are sub-second. 10 min silent = wedged extractor (binwalk's signature
+#     extractors fork external utils like 7z, unsquashfs — those can hang
+#     on malformed input).
+#   max_runtime_seconds — hard wall-clock cap. 1 h covers worst-case full
+#     carve of a multi-GB disk image with all types enabled. Most calls
+#     finish in seconds.
+idle_timeout_seconds: 600
+max_runtime_seconds: 3600
+timeout_seconds: 3600
+allow_multi_target: false       # one file per call (or one input/output dir for foremost)
 
 capabilities:
   - firmware_analysis
@@ -12,41 +133,6 @@ capabilities:
   - steganography
   - metadata_extraction
   - signature_scanning
-
-routing:
-  use_for:
-    - "extract embedded files from a firmware binary or archive"
-    - "scan a binary file for embedded signatures like zip headers, filesystem images, certificates"
-    - "carve deleted files from a disk image or raw partition dump"
-    - "recover JPEG PNG PDF files from a forensic disk image"
-    - "extract hidden data from a steganographic image using steghide"
-    - "check if an image file has steganographic data embedded"
-    - "extract EXIF metadata GPS coordinates camera info from a photo"
-    - "extract metadata from a PDF document including author creation date"
-    - "analyze a firmware update file for embedded filesystems and compression"
-    - "extract files embedded inside a PNG or JPEG using binwalk"
-    - "perform file carving on a dd disk image to recover deleted files"
-    - "check steganographic capacity of an image file"
-    - "extract XMP IPTC metadata from media files"
-  never_use_for:
-    - "reverse engineering binary executables (use ghidra — forensics extracts files, ghidra analyzes code)"
-    - "memory forensics or RAM dump analysis (use volatility)"
-    - "network packet capture analysis (use wireshark or tshark)"
-    - "malware analysis or sandboxing (use dedicated malware tools)"
-    - "password-protected zip/rar extraction (use john.convert for hash extraction, then john/hashcat to crack)"
-  triggers:
-    - "binwalk"
-    - "foremost"
-    - "steghide"
-    - "exiftool"
-    - "firmware extract"
-    - "file carve"
-    - "steganography"
-    - "stego"
-    - "metadata"
-    - "EXIF"
-    - "embedded files"
-    - "disk image recovery"
 
 phases:
   - post-exploitation
@@ -59,142 +145,545 @@ resources:
   memory_mb: 512
   cpu: 1.0
 
+routing:
+  use_for:
+    - "Extract embedded files / filesystems / certificates from a firmware binary or archive (binwalk -e -M)"
+    - "Scan a binary for embedded signatures (zip headers, squashfs, jffs2, certificates) without extraction (binwalk -B)"
+    - "Carve deleted JPEG/PNG/PDF/Office files from a dd disk image or raw partition dump (foremost)"
+    - "Recover specific file types from a forensic disk image (`foremost -t jpg,png,pdf`)"
+    - "Extract hidden data from a steghide stego file when passphrase is known or empty (steghide extract)"
+    - "Check whether a JPEG/BMP/WAV/AU file has steghide-embedded data (steghide info)"
+    - "Embed data into a cover file for stego-cover proof-of-concept (steghide embed)"
+    - "Extract EXIF / GPS / camera-info / XMP / IPTC / PDF / Office metadata as JSON (exiftool -j)"
+    - "Recursively walk a directory for metadata enumeration (exiftool -r -j)"
+    - "Locate hidden flags in EXIF Comment / Maker-Note / XMP description fields during a CTF"
+    - "OSINT pivot — extract GPS coordinates, camera serial, software-used from a photo"
+    - "Verify file timestamps, creation tools, and PDF author/creator metadata during reconnaissance"
+  never_use_for:
+    - "Reverse-engineering binary executables (use ghidra — forensics extracts files; ghidra analyzes code)"
+    - "Memory forensics on RAM dumps (use volatility)"
+    - "Network packet capture analysis (use wireshark / tshark)"
+    - "Malware sandboxing / dynamic analysis (use dedicated malware tools)"
+    - "Password-protected ZIP/RAR/PDF/Office cracking (use john's *2john converters → john/hashcat)"
+    - "Steganography on PNG / GIF / TIFF (steghide does NOT support these — use stegoVeritas, zsteg, or LSB tools)"
+  triggers:
+    - "binwalk"
+    - "foremost"
+    - "steghide"
+    - "exiftool"
+    - "firmware extract"
+    - "file carve"
+    - "file carving"
+    - "steganography"
+    - "stego"
+    - "metadata"
+    - "EXIF"
+    - "XMP"
+    - "IPTC"
+    - "GPS coordinates"
+    - "embedded files"
+    - "disk image recovery"
+    - "deleted file recovery"
+    - "hidden data"
+    - "matryoshka"
+  prefer_over: []
+
 see_also:
   - tool: ghidra
-    reason: "Use ghidra for reverse engineering extracted binaries. Forensics extracts files; ghidra analyzes code."
+    reason: "Use ghidra for reverse-engineering EXTRACTED binaries (e.g., a firmware ELF that binwalk pulled out of a router image). Forensics extracts files; ghidra analyzes the code inside them."
   - tool: volatility
-    reason: "Use volatility for memory dump analysis (pslist, hashdump, filescan). Forensics handles file-level analysis."
+    reason: "Use volatility for RAM-dump analysis (process listing, hashdump, filescan, registry hives). Forensics handles file-level / disk-level analysis. Memory dumps need volatility's address-space layer; foremost can carve PROCESS-MEMORY images for files but won't reconstruct kernel structures."
   - tool: john
-    reason: "Use john's *2john converters to extract hashes from password-protected archives, then crack."
+    reason: "Use john's *2john converters (zip2john, pdf2john, office2john, ssh2john, rar2john) to extract crackable hashes from password-protected archives that binwalk / foremost surface. Then crack with john or hashcat."
+  - tool: hashcat
+    reason: "GPU-accelerated cracking for password-protected files surfaced via forensics (encrypted ZIP, RAR, PDF, Office docs). Use john for hash extraction → hashcat for cracking."
+  - tool: searchsploit
+    reason: "After binwalk extracts firmware components and exiftool surfaces version / build metadata, use searchsploit to look up known exploits for the discovered software versions."
 
-methods:
-  extract:
-    description: "Extract embedded files using binwalk's recursive extraction mode. Runs `binwalk -e -M -d <depth> -C /session/extracted_<basename>/ <file>`. The -e flag enables extraction, -M enables matryoshka (recursive) extraction of files found within extracted files, -d limits recursion depth (default 8). Detects and extracts 100+ file types including compressed archives, filesystems (squashfs, cramfs, jffs2), certificates, firmware headers, and raw compression streams. Output directory created under /session/ for retrieval."
-    when_to_use: "(1) First step in CTF forensics challenges — extract hidden files from images, binaries, or archives. (2) Firmware analysis — extract filesystem from router/IoT firmware updates. (3) After downloading suspicious files during an engagement — check for embedded payloads. (4) When a file is larger than expected for its type (might contain embedded data). (5) Use 'analyze' first to see what's embedded, then 'extract' to pull it out."
-    required_ports: []
-    params:
-      file:
-        type: string
-        required: true
-        description: "Path to file to extract from (must be accessible in container, typically under /session/)."
-      depth:
-        type: integer
-        default: 8
-        description: "Max matryoshka recursion depth (-d flag). Default 8. Reduce to 2-3 for large files to prevent long runtimes. Increase for deeply nested archives."
-    returns:
-      signatures_found:
-        type: array
-        description: "Signatures detected in the file. Each entry: {offset_decimal, offset_hex, description}."
-      extracted_files:
-        type: array
-        description: "Paths to extracted files under /session/extracted_<basename>/."
-      extracted_count:
-        type: integer
-        description: "Number of files extracted."
-      extract_directory:
-        type: string
-        description: "Root directory containing extracted files."
+# ── kind:cli specific sections ──────────────────────────────────────
 
-  analyze:
-    description: "Scan file for embedded signatures without extracting (binwalk -B). Quick read-only operation that identifies file types embedded at various offsets."
-    when_to_use: "(1) Before extraction — see what's inside without modifying anything. (2) Quick triage of unknown files. (3) Verify a file contains expected embedded content."
-    required_ports: []
-    params:
-      file:
-        type: string
-        required: true
-        description: "Path to file to scan."
-    returns:
-      signatures:
-        type: array
-        description: "Signatures found. Each entry: {offset_decimal, offset_hex, description}."
-      signature_count:
-        type: integer
-        description: "Number of signatures found."
+target_extraction:
+  # forensics has NO network target. Each binary's positional argument is a
+  # LOCAL FILE PATH (or directory, for foremost -o / exiftool -r). The
+  # plugin's TargetValidation framework is for network endpoints
+  # (hostnames / IPs / URLs) — running it against a file path would either
+  # always reject (wrong) or always accept (also wrong).
+  #
+  # Decision: declare NO target_extraction rules. The plugin extracts
+  # target=null. The downstream gotchas note documents that scope-
+  # validation is N/A for forensics because the operation is purely local
+  # file analysis.
+  #
+  # Same shape as john / hashcat / volatility / ilspy / searchsploit /
+  # ysoserial / phpggc — those have already been migrated.
+  []
 
-  carve:
-    description: "Carve files from disk image or binary using foremost. Runs `foremost -o /session/carved_<basename>/ -i <file>` with optional type filter (-t). Foremost searches for file headers and footers to recover intact files from raw data, disk images, or partially overwritten media. Supports 15+ file types: jpg, gif, png, bmp, avi, exe, mpg, wav, riff, wmv, mov, pdf, ole, doc, zip, rar, htm, cpp. Creates subdirectories by file type in the output directory."
-    when_to_use: "(1) Recover deleted files from a dd disk image or raw partition. (2) CTF challenges involving disk forensics or file recovery. (3) After obtaining a disk image via dd or similar tool during post-exploitation. (4) When binwalk extract doesn't recover the files you need (foremost uses different carving heuristics). (5) Use '-t jpg,png,pdf' to target specific file types and reduce noise."
-    required_ports: []
-    params:
-      file:
-        type: string
-        required: true
-        description: "Path to file/image to carve from."
-      types:
-        type: string
-        description: "Comma-separated file types to carve: jpg, gif, png, bmp, avi, exe, mpg, wav, riff, wmv, mov, pdf, ole, doc, zip, rar, htm, cpp. Omit for all types."
-    returns:
-      carved_files:
-        type: array
-        description: "Paths to carved files under /session/carved_<basename>/ (excludes audit.txt)."
-      carved_count:
-        type: integer
-        description: "Number of files carved."
-      carve_directory:
-        type: string
-        description: "Root output directory."
-      audit_summary:
-        type: string
-        description: "Foremost audit log summary (first 2000 chars)."
+# Nothing to reject — there is no target-list flag analog and no
+# multi-target bulk-input flag in any of the four binaries. (binwalk has
+# no -i / -L / file-list mode; foremost takes one -i input only; steghide
+# is one-stego-file-per-call; exiftool can recurse via -r but the recursion
+# root is still a single positional path under /session/.)
+reject_flags: []
+reject_flags_reason: >
+  forensics has no network target and no target-list flag in any of the
+  four binaries (binwalk, foremost, steghide, exiftool). All inputs are
+  local file paths; outputs are local files / directories. There is no
+  scope-validation surface to protect.
 
-  stego_extract:
-    description: "Extract hidden data from a steganographic file using steghide. Runs `steghide extract -sf <file> -xf /session/stego_out_<basename> -p <passphrase> -f`. Supports JPEG, BMP, WAV, and AU formats. If the extracted data is text and under 4KB, the content is included directly in the response. Otherwise, returns the output file path for retrieval."
-    when_to_use: "(1) CTF steganography challenges where steghide was used to embed data. (2) When 'stego_info' confirms data is embedded. (3) Try empty passphrase first, then common passwords, then crack with stegcracker if needed. (4) After finding a suspicious image file during an engagement."
-    required_ports: []
-    params:
-      file:
-        type: string
-        required: true
-        description: "Path to stego file (JPEG, BMP, WAV, or AU format)."
-      passphrase:
-        type: string
-        default: ""
-        description: "Passphrase for extraction. Empty string for no passphrase. Try common passwords if empty fails."
-    returns:
-      output_path:
-        type: string
-        description: "Path to extracted data file under /session/."
-      size_bytes:
-        type: integer
-        description: "Size of extracted data in bytes."
-      content:
-        type: string
-        description: "Text content of extracted data (if under 4KB and readable). '(binary data)' otherwise."
+# Per-tool value-taking flags whose values must NOT be confused with the
+# positional file argument. Verified against `binwalk -h`, `foremost -h`,
+# `steghide --help`, `exiftool -ver` / `exiftool -listx` on the Kali base
+# image (forensics container build, 2026-04).
+#
+# NB: each binary has its own flag namespace; the same letter can mean
+# different things across binaries (e.g., -e is "extract" for binwalk
+# but "encryption-algo" for steghide). The DSL invokes ONE binary per call
+# via usage_pattern's binary: field, so cross-binary collision is not an
+# issue at parse time — but the value_flags list below covers the union
+# so the argv parser knows every value-taking flag across all four.
+value_flags:
+  # ── binwalk: extraction & scan tuning ──
+  - "-e"                 # binwalk: extract automatically (boolean — listed because aliased
+                         #   in usage_patterns; safe to list)
+  - "-B"                 # binwalk: signature scan mode (boolean)
+  - "-M"                 # binwalk: matryoshka recursive extract (boolean)
+  - "-d"                 # binwalk: max matryoshka depth (int)
+  - "-D"                 # binwalk: direct extract — MIME:EXT[:CMD] tuple
+  - "--dd"               # binwalk: custom dd rule — TYPE:EXT[:CMD]
+  - "-y"                 # binwalk: include filter (regex over signature names)
+  - "-Y"                 # binwalk: filter chain (signature/opcode/entropy/heuristic)
+  - "-x"                 # binwalk: exclude filter (regex)
+  - "-l"                 # binwalk: scan length (bytes)
+  - "-p"                 # binwalk: scan offset (bytes from start)
+  - "-r"                 # binwalk: rm-on-extract (boolean — listed for clarity)
+  - "-a"                 # binwalk: ascii-strings scan (boolean)
+  - "-A"                 # binwalk: opcode scan (boolean)
+  - "-C"                 # binwalk: extract directory root (path)
+  - "-f"                 # binwalk: log file (path) — NB collides with foremost has no -f
+  - "-J"                 # binwalk: save plot data as JSON (boolean — entropy plot)
+  - "-K"                 # binwalk: skip-known-blocks (boolean)
+  - "-N"                 # binwalk: don't create directory for extracted files (boolean)
+  - "-Q"                 # binwalk: suppress entropy plot legend (boolean)
+  - "-W"                 # binwalk: hexdump diff (boolean)
+  - "-z"                 # binwalk: don't decompress signature data (boolean)
+  - "-v"                 # binwalk: verbose (boolean)
+  - "--include"          # binwalk: long form of -y
+  - "--exclude"          # binwalk: long form of -x
+  - "--length"           # binwalk: long form of -l
+  - "--offset"           # binwalk: long form of -p
+  - "--directory"        # binwalk: long form of -C
+  - "--run-as"           # binwalk: extractor user (--run-as=USER)
+  - "--dd"               # binwalk: custom dd (already listed; here for long-form clarity)
+  - "--depth"            # binwalk: long form of -d
+  # ── foremost: input / output / type ──
+  - "-i"                 # foremost: input file (REQUIRED) — NOT -i for onesixtyone-style targets
+  - "-o"                 # foremost: output directory (REQUIRED, must NOT exist)
+  - "-t"                 # foremost: type list (jpg,gif,png,bmp,avi,exe,mpg,wav,riff,wmv,mov,pdf,ole,doc,zip,rar,htm,cpp,all)
+  - "-T"                 # foremost: timestamped output (boolean)
+  - "-c"                 # foremost: custom config file (foremost.conf)
+  - "-d"                 # foremost: indirect-block detection (boolean) — NB collides with binwalk's -d
+  - "-q"                 # foremost: quick-scan (boolean) — NB collides with steghide -q (none) / exiftool -q (also boolean)
+  - "-Q"                 # foremost: quiet (boolean)
+  - "-w"                 # foremost: write audit only, no actual carve (boolean) — NB exiftool -w takes ext value
+  - "-V"                 # foremost: version (boolean) — NB net-snmp -V also boolean version
+  # ── steghide: subcommands & flags ──
+  - "-cf"                # steghide: cover file path (embed mode)
+  - "-ef"                # steghide: embed-file path (file to hide, embed mode)
+  - "-sf"                # steghide: stego file path (extract / output mode)
+  - "-xf"                # steghide: extracted-output file path (extract mode)
+  - "-p"                 # steghide: passphrase (use '' for empty) — NB collides w/ binwalk -p offset
+  - "-z"                 # steghide: compression level 1-9 (also accepts 0 for none) — NB collides w/ binwalk -z
+  - "-e"                 # steghide: encryption algo (none|blowfish|rijndael-128|...) — NB collides w/ binwalk -e
+  - "-K"                 # steghide: don't compress (boolean) — NB collides w/ binwalk -K
+  - "-N"                 # steghide: don't embed file name (boolean) — NB collides w/ binwalk -N
+  - "-f"                 # steghide: force overwrite (boolean)
+  - "-q"                 # steghide: quiet (boolean — short form not in all builds)
+  - "-v"                 # steghide: verbose (boolean) — NB collides w/ binwalk -v
+  - "-Z"                 # steghide: don't compress (alias)
+  # ── exiftool: output formatting & traversal ──
+  - "-j"                 # exiftool: JSON output (boolean — but listed because the standard form `-j` toggles JSON mode)
+  - "-X"                 # exiftool: XML/RDF output (boolean)
+  - "-Y"                 # exiftool: YAML-like (boolean — dev builds)
+  - "-c"                 # exiftool: coordinate format (e.g., "%+.6f") — NB collides w/ foremost -c
+  - "-d"                 # exiftool: date/time format (e.g., "%Y-%m-%d") — NB collides w/ binwalk -d / foremost -d
+  - "-fast"              # exiftool: skip slow scans (boolean)
+  - "-fast2"             # exiftool: more aggressive skip (boolean)
+  - "-fast3"             # exiftool: skip MakerNote (boolean)
+  - "-r"                 # exiftool: recurse directories (boolean) — NB collides w/ binwalk -r
+  - "-s"                 # exiftool: short tag names (boolean — also accepts -s2/-s3 numeric variants)
+  - "-S"                 # exiftool: very short, no padding (boolean)
+  - "-q"                 # exiftool: quiet (boolean) — NB collides w/ foremost -q
+  - "-w"                 # exiftool: per-file output extension (-w txt → file.txt) — NB collides w/ foremost -w
+  - "-ext"               # exiftool: extension filter (-ext jpg)
+  - "-if"                # exiftool: conditional expression
+  - "-tagsFromFile"      # exiftool: copy tags from another file
+  - "-api"               # exiftool: API option (-api LargeFileSupport=1)
+  - "-charset"           # exiftool: character-set (-charset UTF8)
+  - "-csv"               # exiftool: CSV output mode
+  - "-csvDelim"          # exiftool: CSV delimiter
+  - "-htmldump"          # exiftool: HTML hex-dump (offset value optional)
+  - "-listx"             # exiftool: detailed XML tag list (boolean)
+  - "-overwrite_original" # exiftool: in-place overwrite (boolean)
+  - "-P"                 # exiftool: preserve modification date (boolean)
+  - "-T"                 # exiftool: tab-separated output (boolean) — NB collides w/ foremost -T
+  - "-G"                 # exiftool: print group names (boolean)
+  - "-n"                 # exiftool: numeric values (boolean)
+  - "-progress"          # exiftool: print progress (boolean / threshold)
+  - "-stay_open"         # exiftool: persistent stdin mode (boolean — DO NOT use under cli_in_container, no shell)
+  # ── universal help / version (boolean) ──
+  - "-h"                 # universal help
+  - "-V"                 # binwalk verbose / foremost version (already above; here for clarity)
+  - "-ver"               # exiftool version
+  - "-version"           # exiftool long form
 
-  stego_info:
-    description: "Display info about a potential steganographic file using steghide info. Shows file format, steganographic capacity, and whether data appears to be embedded. Quick read-only check before attempting extraction."
-    when_to_use: "(1) Before stego_extract — check if data is embedded and what format is used. (2) Triage multiple image files to find the one with hidden data. (3) Check steganographic capacity of a cover file."
-    required_ports: []
-    params:
-      file:
-        type: string
-        required: true
-        description: "Path to file to inspect."
-    returns:
-      format:
-        type: string
-        description: "File format detected by steghide (e.g., 'jpeg', 'bmp', 'wav')."
-      capacity:
-        type: string
-        description: "Steganographic capacity (e.g., '12.5 KB')."
-      embedded:
-        type: boolean
-        description: "True if steghide detects embedded data."
+usage_patterns:
+  # ── binwalk: signature scan + extraction ──
+  - name: "Binwalk signature scan (no extraction)"
+    binary: "binwalk"
+    command: "-B /session/sample.bin"
+    when: "First-pass triage of an unknown binary or firmware. -B (signature scan) is the default mode — emits a table of DECIMAL / HEX OFFSET / DESCRIPTION for every magic-number match in the file. Read-only; nothing extracted. Use this BEFORE -e to preview what's inside (squashfs filesystems, JFFS2 partitions, gzip blobs, certificates, RSA keys, U-Boot headers, kernel images)."
 
-  metadata:
-    description: "Extract all metadata from a file using exiftool -j (JSON output). Returns structured metadata including EXIF (camera, lens, settings), GPS coordinates, XMP (editing software, history), IPTC (caption, keywords), PDF properties (author, creator, pages), Office document properties, and file system metadata (dates, permissions). Supports 400+ file formats."
-    when_to_use: "(1) CTF challenges involving metadata analysis (hidden flags in EXIF comments, GPS coordinates). (2) OSINT — extract GPS coordinates, camera model, software used from photos. (3) Check PDF metadata for author/creator info during reconnaissance. (4) Verify file timestamps and creation tools. (5) Look for steganographic hints in metadata comments."
-    required_ports: []
-    params:
-      file:
-        type: string
-        required: true
-        description: "Path to file to extract metadata from."
-    returns:
-      metadata:
-        type: object
-        description: "Full metadata as key-value pairs. Keys vary by file type (e.g., 'Make', 'Model', 'GPSLatitude' for photos; 'Author', 'Creator', 'PageCount' for PDFs)."
-      field_count:
-        type: integer
-        description: "Number of metadata fields extracted."
+  - name: "Binwalk extract embedded files"
+    binary: "binwalk"
+    command: "-e /session/firmware.bin"
+    when: "Single-level extraction. -e auto-extracts every file binwalk can identify (gzip, zlib, squashfs, JFFS2, cpio, tar, zip, certificates, ...). Output goes to `_<basename>.extracted/` in CWD by default. Use `cd /session && binwalk -e file` (but cli_in_container has NO shell — use -C /session/extracted/ instead). Skip -M (matryoshka) for one-level; add -M for recursive."
+
+  - name: "Binwalk recursive extract with depth limit"
+    binary: "binwalk"
+    command: "-e -M -d 4 -C /session/extracted /session/firmware.bin"
+    when: "Recursive (matryoshka) extraction — when an extracted file itself contains more embedded data, binwalk re-extracts it. -d 4 limits depth (default is unlimited, which on a deeply-nested firmware can recurse for hours). -C /session/extracted forces output dir to /session/extracted/ (not the cli_in_container CWD which is unpredictable). Standard pattern for router firmware blobs (uImage → kernel + squashfs → /etc/passwd, /etc/shadow, certs)."
+
+  - name: "Binwalk include-filter (only extract specific signatures)"
+    binary: "binwalk"
+    command: "-e -y 'private key' -C /session/keys /session/firmware.bin"
+    when: "Targeted extraction — -y SIGNATURE_NAME (regex) limits extraction to matches whose description contains the regex. Examples: 'private key', 'certificate', 'squashfs', 'gzip'. Faster than full extract and avoids irrelevant noise files. -x is the inverse (exclude)."
+
+  - name: "Binwalk entropy analysis"
+    binary: "binwalk"
+    command: "-J /session/sample.bin"
+    when: "Entropy plot data emitted as JSON (rather than gnuplot). Useful for detecting encrypted / compressed regions in firmware (high entropy ~= 0.95+) vs structured data (low entropy). Combine with binwalk -B to map signatures onto entropy regions and identify which embedded blobs are encrypted."
+
+  - name: "Binwalk help"
+    binary: "binwalk"
+    command: "-h"
+    when: "Print binwalk's full flag set (~80 flags across signature, extract, entropy, plotting, hexdump, raw scan modes). target=null. Useful when an agent isn't sure of a less-common flag like --dd, -Y, or -A."
+
+  # ── foremost: file carving ──
+  - name: "Foremost carve all types from disk image"
+    binary: "foremost"
+    command: "-i /session/dump.raw -o /session/carved"
+    when: "Default-config carve — recovers jpg, gif, png, bmp, avi, exe, mpg, wav, riff, wmv, mov, pdf, ole, doc, zip, rar from header/footer signatures. -i specifies INPUT (file or device); -o specifies OUTPUT directory (MUST NOT EXIST — foremost refuses to overwrite). Output structure: /session/carved/audit.txt + per-type subdirs (jpg/, png/, ...). Standard CTF disk-image workflow."
+
+  - name: "Foremost carve specific file types"
+    binary: "foremost"
+    command: "-i /session/dump.raw -o /session/carved -t jpg,png,pdf"
+    when: "Targeted carve when you know what you're looking for (e.g., 'find PDFs deleted from this disk'). -t accepts comma-separated types: jpg, gif, png, bmp, avi, exe, mpg, wav, riff, wmv, mov, pdf, ole, doc, zip, rar, htm, cpp, all. Faster + cleaner output than carving everything. 'all' is the same as omitting -t."
+
+  - name: "Foremost quick scan (sector-aligned headers)"
+    binary: "foremost"
+    command: "-q -i /session/disk.img -o /session/carved-quick"
+    when: "-q skips non-sector-aligned positions — much faster on large disk images but misses files whose headers don't align to 512-byte sectors. Good for first-pass triage; follow with full -d (deep) carve if -q yields zero results. Trade-off: speed vs completeness."
+
+  - name: "Foremost timestamped output (re-runnable)"
+    binary: "foremost"
+    command: "-T -i /session/dump.raw -o /session/carved"
+    when: "-T appends a timestamp to the output dir name (e.g., /session/carved_Wed_Mar_05_12_34_56_2026/). Avoids the 'output directory exists' error when re-running; each run gets its own dir. Useful in iterative workflows or when comparing -t filtered runs."
+
+  - name: "Foremost help"
+    binary: "foremost"
+    command: "-h"
+    when: "Print foremost usage. Tiny tool — ~12 flags. target=null. Confirms version (1.5.7) and flag set."
+
+  # ── steghide: stego embed / extract / info ──
+  - name: "Steghide info — check for embedded data (no passphrase)"
+    binary: "steghide"
+    command: "info /session/cover.jpg -p ''"
+    when: "Read-only inspection. `info` subcommand prints the file's format (jpeg/bmp/wav/au), capacity (max embeddable bytes), and — if `-p PASS` matches the embed passphrase — the embedded file name + size. `-p ''` (empty) tries the no-passphrase case. Without `-p` flag, steghide prompts interactively (HANGS under cli_in_container — NO TTY); ALWAYS pass `-p ''` even for the no-pass case."
+
+  - name: "Steghide info — with passphrase"
+    binary: "steghide"
+    command: "info /session/cover.jpg -p 'CorrectHorseBatteryStaple'"
+    when: "Same as above but with a known passphrase. If the passphrase matches, the output includes the embedded file's name and size (e.g., 'embedded file \"flag.txt\": size: 42 bytes, encrypted: rijndael-128, compressed: yes'). If wrong, steghide prints 'could not extract any data with that passphrase!'. Try common passwords: '', 'password', '123456', the cover file's filename, the CTF challenge name."
+
+  - name: "Steghide extract — empty passphrase"
+    binary: "steghide"
+    command: "extract -sf /session/cover.jpg -p '' -xf /session/secret.bin"
+    when: "Extraction with no passphrase. -sf (stego file) names the cover; -xf (extract file) names the output path. -p '' is REQUIRED to suppress the interactive passphrase prompt (which hangs under cli_in_container). If extraction succeeds, /session/secret.bin contains the hidden data. If wrong passphrase, stderr says 'could not extract any data with that passphrase!'."
+
+  - name: "Steghide extract — known passphrase"
+    binary: "steghide"
+    command: "extract -sf /session/cover.jpg -p 'sekret' -xf /session/secret.bin -f"
+    when: "Extraction with passphrase. -f (force) overwrites -xf path if it exists (omit -f if you want to fail-safe on existing output)."
+
+  - name: "Steghide embed — proof-of-concept"
+    binary: "steghide"
+    command: "embed -cf /session/photo.jpg -ef /session/payload.txt -sf /session/stego.jpg -p 'sekret' -N -e rijndael-128"
+    when: "Embed a payload into a cover file (post-exploitation pivot or stego CTF artifact). -cf (cover); -ef (embed-file); -sf (output stego file); -p (passphrase); -N (don't embed the original filename — opsec); -e (encryption algo: rijndael-128 = AES). Output stego.jpg looks identical to photo.jpg byte-for-byte except in the LSBs of selected DCT coefficients."
+
+  - name: "Steghide help"
+    binary: "steghide"
+    command: "--help"
+    when: "Print steghide's flag set. target=null. NB: steghide uses single-dash for short flags AND for some long-name flags (`-sf`, `-cf`, `-ef`, `-xf`, `-p`); `--help` is the long form, `-h` ALSO works."
+
+  # ── exiftool: metadata extraction ──
+  - name: "Exiftool JSON metadata — single file"
+    binary: "exiftool"
+    command: "-j /session/photo.jpg"
+    when: "Default JSON-output metadata dump. Output is a JSON array containing one object whose keys are tag names (Make, Model, GPSLatitude, ExifVersion, FileSize, ...) and values are tag values. PARSER-FRIENDLY — preferred for downstream consumption. Without -j, output is human-readable 'Tag : Value' lines."
+
+  - name: "Exiftool JSON metadata — recurse directory"
+    binary: "exiftool"
+    command: "-j -r /session/photos"
+    when: "Recursive metadata extraction. -r walks subdirectories; output is a JSON array with one object per file. Useful for OSINT — e.g., extract GPS coordinates from a directory of photos. Combine with -if 'GPSLatitude' to filter to only files with GPS data."
+
+  - name: "Exiftool human-readable — quick triage"
+    binary: "exiftool"
+    command: "/session/document.pdf"
+    when: "Default text output (no -j). Prints 'Tag : Value' lines, one per metadata field. Good for human triage; bad for parsing. PDF metadata includes Author, Creator, Producer, Title, CreationDate, ModDate, Pages, PDFVersion, plus any embedded XMP. Often surfaces creator-software fingerprints and authoring identities."
+
+  - name: "Exiftool short tag names + GPS in raw decimal"
+    binary: "exiftool"
+    command: "-s -c '%+.6f' /session/photo.jpg"
+    when: "-s uses short (no-spaces) tag names — easier to grep; -c '%+.6f' formats GPS coordinates as raw signed decimals (e.g., +37.7749 instead of '37 deg 46\\' 29.6\" N'). Combine with -j for parser-friendly machine-readable GPS extraction."
+
+  - name: "Exiftool extension filter"
+    binary: "exiftool"
+    command: "-j -r -ext jpg -ext png /session/dump"
+    when: "-ext FILTER restricts processing to specific file extensions. Combine multiple -ext flags for OR logic. Useful when -r would otherwise traverse a huge dir of mixed types — e.g., focus on images only, ignore .docx and .exe."
+
+  - name: "Exiftool conditional filter"
+    binary: "exiftool"
+    command: "-j -r -if '$GPSLatitude' /session/photos"
+    when: "-if accepts a Perl-like expression evaluated per file; only files where the expression is true are output. Example: extract metadata only from files that have GPS data. Other useful conditionals: '$Author', '$Make eq \"Canon\"', '$DateTimeOriginal lt \"2020:01:01\"'."
+
+  - name: "Exiftool fast mode"
+    binary: "exiftool"
+    command: "-j -fast2 /session/large-video.mp4"
+    when: "-fast / -fast2 / -fast3 progressively skip slower scans. -fast skips trailers; -fast2 also skips MakerNote details; -fast3 skips files entirely if no metadata in the first MB. Useful on huge files (videos, disk images) where full scan is overkill."
+
+  - name: "Exiftool version"
+    binary: "exiftool"
+    command: "-ver"
+    when: "Print exiftool version (e.g., '13.50'). target=null. Single-shot sanity check that the binary is on PATH and the build supports the flags the agent wants."
+
+output_formats:
+  # binwalk has TWO useful structured outputs (JSON entropy via -J, and the
+  # default text signature table). foremost emits text + creates a per-type
+  # directory tree on disk. steghide is text-only. exiftool's -j (JSON) is
+  # the parser-friendly form; -X (XML), -Y (YAML-like jumbo), and -csv are
+  # also available. Default text is human-readable but harder to parse.
+  - flag: ""
+    format: "text"
+    preferred: false
+    notes: "Default — binwalk emits a 3-column signature table (DECIMAL / HEXADECIMAL / DESCRIPTION); foremost emits brief progress and writes audit.txt; steghide emits subcommand-specific lines (`format:`, `capacity:`, `embedded file`); exiftool emits 'Tag : Value' lines."
+  - flag: "-J"
+    format: "binwalk_json_entropy"
+    preferred: false
+    notes: "binwalk only — entropy plot data as JSON (offsets + entropy floats). Doesn't change the signature-scan output format; -J is plot-data-only."
+  - flag: "-j"
+    format: "exiftool_json"
+    preferred: true
+    notes: "exiftool only — JSON array with one object per file. PARSER-FRIENDLY; preferred form for downstream consumption."
+  - flag: "-X"
+    format: "exiftool_xml"
+    preferred: false
+    notes: "exiftool only — XML/RDF output. More verbose than -j; useful for tools that prefer XML."
+  - flag: "-csv"
+    format: "exiftool_csv"
+    preferred: false
+    notes: "exiftool only — CSV output (one row per file). Tag names in header row. Useful for spreadsheet ingestion."
+  - flag: "audit.txt"
+    format: "foremost_audit"
+    preferred: false
+    notes: "foremost only — written to <output-dir>/audit.txt. Contains carve summary (per-type counts, byte ranges, fragment notes). Plain text; parse line-by-line."
+  - flag: "_<file>.extracted/"
+    format: "binwalk_extracted_tree"
+    preferred: false
+    notes: "binwalk -e mode — directory tree under CWD (or under -C path) named `_<basename>.extracted/`. Contains the extracted artifacts; consume with the read tool / further binwalk passes."
+
+common_options:
+  binwalk:
+    - "POSITIONAL FILE: target file to scan or extract from. REQUIRED. Typically /session/<file>."
+    - "-B: signature scan (default). Read-only; emits the DECIMAL/HEX/DESCRIPTION signature table."
+    - "-e: extract automatically — pulls every recognized embedded file into `_<basename>.extracted/`."
+    - "-M: matryoshka (recursive) extract — walks into extracted files and re-extracts. ALWAYS pair with -d to bound depth."
+    - "-d N: max matryoshka depth (default unlimited). Use -d 2 or -d 4 for tractable runtimes on real firmware."
+    - "-C DIR: output directory root for extracted files (otherwise CWD). Pin to /session/extracted/ for predictable paths."
+    - "-y REGEX: include filter — only extract signatures whose description matches REGEX."
+    - "-x REGEX: exclude filter — skip signatures whose description matches REGEX."
+    - "-l N: scan length in bytes (default = file size)."
+    - "-p N: scan offset in bytes from start (default 0)."
+    - "-J: emit entropy plot data as JSON (rather than gnuplot script)."
+    - "--run-as=USER: run extractors as USER (default 'nobody'; in container, may need 'root' to extract setuid/owned files)."
+    - "--dd=TYPE:EXT[:CMD]: custom extraction rule. Used to add/override binwalk's built-in extractors."
+  foremost:
+    - "-i FILE: INPUT (file or device). REQUIRED."
+    - "-o DIR: OUTPUT directory. REQUIRED. MUST NOT exist (foremost refuses to overwrite)."
+    - "-t LIST: file types to carve. Comma-separated. Available: jpg, gif, png, bmp, avi, exe, mpg, wav, riff, wmv, mov, pdf, ole, doc, zip, rar, htm, cpp, all. Default: 'all'."
+    - "-T: timestamped output dir suffix (avoids 'directory exists' error)."
+    - "-c FILE: custom foremost.conf (override default carving config)."
+    - "-d: indirect-block detection (deeper, slower carve — for fragmented files)."
+    - "-q: quick-scan — only check sector boundaries (faster, may miss unaligned files)."
+    - "-Q: quiet (suppress progress)."
+    - "-v: verbose."
+  steghide:
+    - "SUBCOMMAND: embed | extract | info — REQUIRED first arg."
+    - "-cf FILE: cover file (embed mode). Original media file."
+    - "-ef FILE: embed file (embed mode). The secret to hide."
+    - "-sf FILE: stego file. In embed mode, output path; in extract mode, input path."
+    - "-xf FILE: extract file (extract mode). Output path for the recovered secret."
+    - "-p PASS: passphrase. ALWAYS pass `-p ''` for the no-passphrase case (otherwise steghide prompts interactively, which hangs under cli_in_container)."
+    - "-z N: compression level 1-9 (1 = fast, 9 = best). 0 disables compression."
+    - "-e ALGO: encryption algorithm. Default: rijndael-128. Others: blowfish, twofish, rijndael-192, rijndael-256, etc. List with `steghide encinfo`."
+    - "-N: don't embed the original file name (embed mode opsec)."
+    - "-K: don't compress (alias for -z 0 in some builds)."
+    - "-f: force overwrite of -xf / -sf if they exist."
+  exiftool:
+    - "POSITIONAL FILE OR DIR: target. REQUIRED. Multiple positionals allowed."
+    - "-j: JSON output (PREFERRED for parsing). Array of objects."
+    - "-X: XML/RDF output."
+    - "-csv: CSV output (header row + one row per file)."
+    - "-r: recurse into directories."
+    - "-ext EXT: extension filter (-ext jpg -ext png — multiple OK)."
+    - "-if EXPR: conditional filter (Perl-like). Only output files where EXPR is true."
+    - "-c FMT: GPS coordinate format (e.g., '%+.6f' for raw signed decimal)."
+    - "-d FMT: date/time format (strftime-like)."
+    - "-s / -S: short / very-short tag names (no spaces, less padding)."
+    - "-G: print group names (helpful for tag-namespace disambiguation)."
+    - "-n: numeric values (raw, not human-readable conversions)."
+    - "-fast / -fast2 / -fast3: skip slow scans (progressively more aggressive)."
+    - "-q: quiet (suppress info messages)."
+    - "-w EXT: write per-file output to <basename>.<EXT>."
+    - "-overwrite_original: in-place metadata overwrite (rarely used in offensive flow — would modify evidence)."
+
+gotchas:
+  - "MULTI-BINARY toolkit — choose the right binary per task. binwalk (extract / signature scan), foremost (file carving from disk images), steghide (steganography on JPEG/BMP/WAV/AU), exiftool (metadata for 400+ formats). Each usage_pattern declares `binary:` explicitly. cli_in_container forwards the chosen binary; there is NO top-level binary."
+  - "NO NETWORK TARGET — forensics is purely local. target_extraction is empty; the plugin extracts target=null. Scope-validation does NOT apply; the operation never reaches a remote host. Same shape as john / hashcat / volatility / ilspy / searchsploit."
+  - "BINWALK -e EXTRACTS TO CWD BY DEFAULT — output goes to `_<basename>.extracted/` in the cli_in_container CWD, which is unpredictable across plugin versions. ALWAYS pass `-C /session/extracted/` to pin output under the persistent /session/ mount, OR use binwalk's `-r` (auto-cleanup) sparingly. Without -C, the extracted tree may be lost when the container exits."
+  - "BINWALK -M (matryoshka) IS UNBOUNDED — without -d N, binwalk recursively extracts everything inside everything inside everything. On a real firmware blob that has nested squashfs / tar / gzip, this can recurse for HOURS and produce gigabytes. ALWAYS bound with -d 2 or -d 4. The mcp-server.py default was -d 8; for run_cli, pin -d explicitly."
+  - "FOREMOST OUTPUT DIR MUST NOT EXIST — foremost refuses to overwrite. Either (a) pick a fresh dir name per call (e.g., /session/carved-2026-04-25/), (b) use -T for timestamped auto-suffix, or (c) delete the prior dir via the read tool's sibling write tool BEFORE invoking foremost. The mcp-server.py wrapper handled (c) automatically; under run_cli the LLM must do it explicitly."
+  - "FOREMOST WORKS ON IMAGES, NOT ON LIVE DISKS UNDER A CONTAINER — passing /dev/sda to foremost inside cli_in_container will fail (no /dev access by default). Always operate on a saved disk-image file (dd output, .img, .raw, .e01 if libewf is installed)."
+  - "STEGHIDE PROMPTS INTERACTIVELY without -p — under cli_in_container there is NO TTY, so steghide hangs forever waiting for a passphrase. ALWAYS pass `-p '<password>'` or `-p ''` (empty string for the no-pass case). Without it, the call will idle-timeout."
+  - "STEGHIDE ONLY SUPPORTS JPEG / BMP / WAV / AU — pass any other format (PNG, GIF, TIFF, MP3, MP4) and steghide returns 'unsupported file format' (or similar). Use stegoVeritas, zsteg (LSB), or steg-detection tools for those formats. (PNG steg = zsteg; TIFF / GIF = LSB tools.)"
+  - "STEGHIDE CASE-SENSITIVE PASSPHRASE — `Password` ≠ `password`. The 'could not extract any data with that passphrase!' error is the same for wrong-pass and no-data-embedded; you can't tell them apart from output alone."
+  - "EXIFTOOL `-j` IS JSON ARRAY — even for a single file, exiftool emits `[{...}]` (array with one object). Parsers must handle the array layer. Use `jq '.[0]'` to unwrap (but cli_in_container has no shell — pipe must be expressed via tool_runner stdin_data or processed client-side after run_cli returns)."
+  - "EXIFTOOL CAN MODIFY FILES — flags like -overwrite_original, `-Tag=Value`, `-tagsFromFile`, and `-delete_original` REWRITE metadata in place. For OFFENSIVE / FORENSIC analysis you almost always want READ-ONLY mode (no `=` flags, no `-overwrite_original`). The default `exiftool <file>` is safe (read-only); be careful with `-w` writing per-file outputs (those go to a SEPARATE file, not the original)."
+  - "EXIFTOOL `-r` RECURSE CAN BE EXPENSIVE — recursing /session/dump on a multi-GB extracted firmware tree can take minutes. Combine `-r` with `-ext` filtering to scope. Use `-fast2` or `-fast3` to skip slow scans."
+  - "BINWALK / FOREMOST OFTEN OVERLAP — both do file recovery. Rule of thumb: binwalk for STRUCTURED firmware / archives where signatures are expected at known offsets; foremost for UNSTRUCTURED disk images / partition dumps where files are scattered. binwalk tells you WHAT'S there; foremost extracts WHAT'S RECOVERABLE. Try both on uncertain inputs."
+  - "BINWALK EXTERNAL EXTRACTORS CAN HANG — binwalk forks `7z`, `unsquashfs`, `jefferson`, `cramfsswap`, etc. for actual extraction. A malformed input that crashes one of those externals can leave a zombie or hang indefinitely. The idle_timeout_seconds (10 min) catches this; if you see a binwalk call go silent for 10+ minutes, that's the symptom."
+  - "FILE PATHS MUST BE INSIDE /session/ — cli_in_container only mounts /session/ from the host. Files under /tmp, /root, /home are container-local and disappear at container restart. Always stage inputs into /session/ via the write tool BEFORE invoking forensics."
+  - "Feature 28 dynamic recipes are RETIRED for the kind:cli path — the LLM writes argv directly. Recipes still load for legacy method calls (extract, analyze, carve, stego_extract, stego_info, metadata) if /session/tool_recipes/forensics/ exists, but they're a dead branch under run_cli (REQ-TR-016)."
+  - "BINWALK EXTRACTOR USER (--run-as) — by default binwalk runs the external extractors (7z, unsquashfs, jefferson, ...) as the unprivileged `nobody` user, which can fail on certain artifacts (setuid binaries, owned-by-other-user files inside extracted filesystems). The legacy mcp-server.py wrapper hardcoded `--run-as=root`. Under run_cli, when invoking `binwalk -e` you may need to add `--run-as=root` explicitly if the extraction silently produces empty subdirectories or stderr complains about extractor permissions."
+  - "STEGHIDE SILENT-NO-OUTPUT — on rare inputs steghide's extract returns exit-0 with NO stderr error but ALSO does not produce the -xf output file (e.g., truncated stego data, format-detection edge case). The legacy wrapper checked `os.path.exists(output_path)` after the call. Under run_cli, after `steghide extract -sf ... -xf /session/secret.bin -p '...'`, always verify /session/secret.bin actually exists before assuming success — exit code alone is insufficient."
+  - "STEGHIDE EXTRACT -f (FORCE OVERWRITE) — without -f, steghide refuses to overwrite the -xf output if it already exists from a prior run. The legacy wrapper always added -f and unlinked the prior file. Under run_cli, either include -f in the argv (matches legacy behavior) or pick a fresh -xf path per call. Without -f and with an existing output file, steghide will error rather than overwrite."
+
+failure_signatures:
+  # Layer-diverse signals (SKILL #11) — at least 6 distinct verifiable layers:
+  #   1. File / I/O           (libc fopen / open / stat across all four binaries)
+  #   2. Format / parser      (binwalk / steghide / exiftool reject malformed input)
+  #   3. Output / disk        (foremost output-dir-exists, binwalk -C unwritable)
+  #   4. Auth / passphrase    (steghide wrong passphrase)
+  #   5. Argument / argparse  (each binary's own argparse layer)
+  #   6. Empty / zero-result  (no signatures found, no files carved, no metadata)
+  #   7. Resource             (extractor hang, OOM on huge file)
+  #
+  # Verified against:
+  #   - binwalk 2.4.3 source / man pages (Kali rolling 2026-04)
+  #   - foremost 1.5.7 man page
+  #   - steghide 0.5.1 source
+  #   - exiftool 13.50 docs
+
+  # ── 1. File / I/O layer ──
+  - signal: "does not exist"
+    remediation: "File path passed to a positional argument or to -i / -sf / -cf / -ef / -xf / -C doesn't exist. Verify with `ls /session/`. Most common cause is mistyped filename or the file written to the wrong location."
+  - signal: "Cannot open"
+    remediation: "Generic open() failure — file doesn't exist, isn't readable, or is a directory when a file was expected. binwalk emits `Cannot open file: ...`. Also seen from foremost when -i or -c paths are unreadable."
+  - signal: "No such file or directory"
+    remediation: "libc / kernel ENOENT — same root cause as 'does not exist'. Verify path; if /session/, ensure the file was created by the write tool before invoking forensics."
+  - signal: "Permission denied"
+    remediation: "EACCES — file or output dir is not readable / writable by the container user. /session/ should always be writable; ~/.steghide/ requires the user to have a homedir. binwalk extractors may fail on files owned by another container user."
+  - signal: "Error opening"
+    remediation: "exiftool's open-failure phrasing — `Error opening file: <path>`. Same root cause as 'Cannot open'."
+
+  # ── 2. Format / parser layer ──
+  - signal: "not a valid"
+    remediation: "Format detection failed. binwalk: `not a valid <type>` for malformed inputs. exiftool: `File format error`. Verify the file with `file <path>` (the 'file' utility). Wrong file extension is a common cause."
+  - signal: "unrecognized format"
+    remediation: "Generic parser rejection. exiftool can't identify the file type; steghide rejects non-JPEG/BMP/WAV/AU. Use exiftool first to identify the actual format, then pick the right binary."
+  - signal: "the file format of the file"
+    remediation: "steghide's full phrasing: 'the file format of the file <path> is not supported.' steghide ONLY supports JPEG, BMP, WAV, AU. For PNG/GIF/TIFF use zsteg / stegoVeritas (different tools, not in this image)."
+  - signal: "is not supported"
+    remediation: "Same as above (steghide unsupported-format). Confirms the file isn't JPEG/BMP/WAV/AU. Try `exiftool -s -G:File:FileType <file>` to identify the actual format."
+  - signal: "File format error"
+    remediation: "exiftool's malformed-file error — file claims to be format X but parser fails on the structure. Often happens with truncated downloads or files-renamed-by-extension."
+  - signal: "no signatures found"
+    remediation: "binwalk found zero embedded signatures. The file is either (a) genuinely just one type with no embedded data, (b) encrypted / compressed with no signatures visible, (c) too small for any signature to match. NOT a true failure — the file may simply be uninteresting."
+
+  # ── 3. Output / disk layer ──
+  - signal: "directory exists"
+    remediation: "foremost's output-dir-exists error. foremost REFUSES to overwrite. Either (a) pick a fresh dir name, (b) use -T for timestamped auto-suffix, or (c) delete the prior dir via the read tool's sibling tools BEFORE invoking foremost."
+  - signal: "ERROR: foremost: output directory"
+    remediation: "Full foremost output-dir error phrasing. Same fix as above."
+  - signal: "Error: directory"
+    remediation: "Foremost / binwalk output-directory error. Either the dir already exists (foremost), or the parent dir doesn't exist (-C path)."
+  - signal: "could not create"
+    remediation: "Failed to create output directory or file. Disk full, parent dir doesn't exist, or permission denied. Verify /session/ has space; /session/ should always be writable."
+  - signal: "No space left on device"
+    remediation: "ENOSPC — extracted/carved files exceeded the container's writable layer (or /session/ if pinned there). Free space, or reduce the scope (binwalk -y filter, foremost -t specific types, exiftool -fast2)."
+
+  # ── 4. Auth / passphrase layer (steghide) ──
+  - signal: "could not extract any data with that passphrase"
+    remediation: "steghide's wrong-passphrase OR no-data-embedded error (the two cases are INDISTINGUISHABLE from the message). Try common passwords first: '', 'password', '123456', the cover file's filename, the CTF challenge name, the engagement codename. If `info` returns the same error, try cracking with stegcracker (separate tool, not in this image)."
+  - signal: "wrong passphrase"
+    remediation: "Earlier-version phrasing. Same as 'could not extract any data with that passphrase'."
+  - signal: "the file exists"
+    remediation: "steghide refusing to overwrite -xf output. Add `-f` (force overwrite) to the argv, or pick a fresh -xf path. The legacy wrapper unlinked the prior file before the call; under run_cli the LLM must use -f or a new path."
+
+  # ── 5. Argument / argparse layer ──
+  - signal: "unrecognized option"
+    remediation: "Argparse rejected a flag. Run the appropriate `<binary> -h` (or `--help` for steghide). Common typos: `--Cve` instead of `--cve` (case sensitive); `-fastest` (not a real flag) instead of `-fast3`; `--extract` (not a binwalk long form) — binwalk uses `-e` short form."
+  - signal: "invalid argument"
+    remediation: "Argparse value-validation rejection. e.g., binwalk `-d notanumber` (must be int), foremost `-t notatype` (must be in the type list), exiftool `-c notaformat` (must be a printf format string)."
+  - signal: "expected one argument"
+    remediation: "argparse missing-value error — flag requires a value but none was given. e.g., `--cve` with nothing after it, `-p` (steghide passphrase) without a value (use `-p ''` for empty)."
+  - signal: "missing argument"
+    remediation: "Same as above — argparse missing-value error. Common with foremost when `-i` or `-o` is given without a path."
+  - signal: "Unable to read foremost.conf"
+    remediation: "foremost couldn't load the config file (default /etc/foremost.conf or `-c FILE` override). On Kali rolling the default is shipped; if missing, reinstall the foremost package."
+  - signal: "argument of type"
+    remediation: "Type-mismatch error in argparse. Pass the right kind (int, string, regex, file-path) for the flag. Run `<binary> -h` for the flag's expected type."
+
+  # ── 6. Empty / zero-result layer ──
+  - signal: "no files extracted"
+    remediation: "binwalk -e found no files to extract. Either no signatures matched, or all matches were skipped due to filters (-y / -x). NOT a true failure — try -B alone first to see what's actually there."
+  - signal: "0 FILES EXTRACTED"
+    remediation: "foremost reports zero files carved. Either the input has no recoverable headers/footers, or -t filter excluded everything. Re-run with -t all or -d (deep carve)."
+  - signal: "Files Extracted: 0"
+    remediation: "foremost's audit.txt zero-line. INFORMATIONAL — not a true failure; the input may genuinely be carve-resistant (encrypted disk, fully overwritten partition)."
+  - signal: "no metadata"
+    remediation: "exiftool found no readable metadata. The file may be a plain binary, a stripped image (metadata removed), or in a format exiftool doesn't fully support. Try `exiftool -G -s -a <file>` for a more verbose listing."
+
+  # ── 7. Resource layer ──
+  - signal: "Out of memory"
+    remediation: "binwalk's signature scan keeps state for the entire file in memory; on multi-GB inputs it can OOM. Use `-l N` to limit scan length, or split the file with dd and scan in chunks."
+  - signal: "Killed"
+    remediation: "OOM killer terminated the process — same root cause as 'Out of memory'. Container's resources.memory_mb cap was hit. Use -l (binwalk) or scope to specific types (foremost -t, exiftool -ext)."
+  - signal: "extractor"
+    remediation: "binwalk's external-extractor failure (7z, unsquashfs, jefferson). Read stderr for the specific extractor name. Some extractors aren't installed in the image (jefferson is sometimes missing); fall back to manual dd + analysis."
+
+help_commands:
+  - command: "binwalk -h"
+    purpose: "binwalk full flag reference (~80 flags across signature, extract, entropy, plotting, hexdump, raw scan modes)."
+  - command: "foremost -h"
+    purpose: "foremost usage. Tiny tool — ~12 flags. Confirms version (1.5.7) and supported types."
+  - command: "steghide --help"
+    purpose: "steghide top-level help — lists subcommands (embed, extract, info, encinfo, version, license, help). For subcommand-specific help: `steghide embed --help`, `steghide extract --help`, etc."
+  - command: "steghide encinfo"
+    purpose: "List encryption algorithms steghide supports (rijndael-128 / rijndael-192 / rijndael-256 / blowfish / twofish / cast-128 / cast-256 / ...)."
+  - command: "exiftool -ver"
+    purpose: "exiftool version (e.g., '13.50'). Single-line output; cheapest sanity check."
+  - command: "exiftool -listx"
+    purpose: "exiftool detailed XML tag list (~25K tags across 400+ formats). Huge output — useful for tag-name lookup."
+  - command: "exiftool -h"
+    purpose: "exiftool flag reference. NB: exiftool's flags are CASE-SENSITIVE; -j ≠ -J."
+

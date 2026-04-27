@@ -8,14 +8,14 @@ LABEL org.opencontainers.image.description="enum4linux-ng MCP server for OpenSpl
 LABEL org.opencontainers.image.licenses="MIT"
 
 # Install enum4linux-ng and dependencies
+# python3-full bundles pip + venv on Kali rolling (replaces python3-pip / python3-venv
+# which are gated on Kali rolling 2026+ per Wave 6 migration convention).
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
         enum4linux-ng \
         smbclient \
         libfaketime \
-        python3 \
-        python3-pip \
-        python3-venv && \
+        python3-full && \
     rm -rf /var/lib/apt/lists/* && \
     apt-get clean
 
@@ -29,10 +29,6 @@ ENV PATH="/app/venv/bin:$PATH"
 # Copy and install shared mcp-common package
 COPY packages/mcp-common /app/packages/mcp-common
 RUN pip install --no-cache-dir /app/packages/mcp-common
-
-# Install tool-specific dependencies
-COPY tools/enum4linux-ng/requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy MCP server code
 COPY tools/enum4linux-ng/mcp-server.py .

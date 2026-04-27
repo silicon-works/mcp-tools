@@ -1,19 +1,194 @@
 name: cloudfox
+kind: cli
+binary: cloudfox
+# BishopFox/cloudfox v1.x — confirmed via `cloudfox --help` and the mcp-server.py
+# command list. Single binary (`cloudfox`) with a COBRA-STYLE SUB-COMMAND
+# ARCHITECTURE (similar to trivy/trufflehog):
+#
+#   cloudfox <provider> <subcmd> [flags]
+#   cloudfox aws inventory --profile=default
+#   cloudfox aws all-checks --profile=default
+#   cloudfox azure inventory --subscription=<id>
+#   cloudfox gcp inventory --project=<id>
+#   cloudfox k8s pods --kubeconfig=<path>
+#
+# PROVIDERS (top-level cobra group):
+#   aws       — Bishop Fox's flagship; ~30+ sub-commands for cross-service
+#               attack-path enumeration. Wraps the AWS Go SDK; honors
+#               ~/.aws/credentials profiles + AWS_* env vars.
+#   azure     — Azure post-exploitation enumeration. Honors `az login` session
+#               or AZURE_* env vars.
+#   gcp       — GCP post-exploitation enumeration. Honors `gcloud auth` session
+#               or GOOGLE_APPLICATION_CREDENTIALS env var pointing at a
+#               service-account JSON.
+#   k8s       — Kubernetes post-exploitation enumeration. Honors KUBECONFIG.
+#
+# AWS SUB-COMMANDS (most commonly used — full list below):
+#   access-keys, api-gw, buckets, cloudformation, codebuild, databases,
+#   ecr, ecs-tasks, eks, elastic-network-interfaces, endpoints, env-vars,
+#   filesystems, iam-simulator, instances, inventory, lambda, network-ports,
+#   orgs, outbound-assumed-roles, permissions, pmapper, principals, ram,
+#   resource-trusts, role-trusts, route53, secrets, sns, sqs, sso, tags,
+#   workloads, all-checks
+#
+# COMMON FLAGS (per `cloudfox aws --help`):
+#   -p, --profile <name>           AWS profile from ~/.aws/credentials
+#   -r, --region <region>          AWS region (default us-east-1)
+#       --all-regions              Query ALL enabled AWS regions
+#   -o, --output-format <fmt>      table | csv | json | brief (default table)
+#       --output-directory <dir>   Where to write loot/output files (default
+#                                  ~/.cloudfox/cloudfox-output/<account>/<service>)
+#   -v, --verbosity <int>          1=control only, 2=+module output (default),
+#                                  3=+loot files inline
+#   -y, --yes                      Auto-answer "yes" — non-interactive
+#       --skip-adminonly           Skip admin-only resources
+#       --version                  Print version and exit
+#   -h, --help                     Help
+#
+# AZURE SUB-COMMANDS (smaller surface): inventory, rbac, storage, vms, whoami
+# GCP SUB-COMMANDS (smaller surface): inventory, instances, secrets, buckets,
+#                                      iam, all-checks
+# K8S SUB-COMMANDS (smaller surface): pods, secrets, roles, all-checks
+#
+# Argv shape: COBRA double-dash long flags + single-dash short forms
+# (`--profile=<name>` AND `-p <name>` AND `--profile <name>` all work).
+#
+# Output: cloudfox writes BOTH to stdout (table/csv/json depending on
+# `--output-format`) AND to `--output-directory` as filesystem artifacts
+# ("loot files" — text/CSV per service). The default output directory is
+# `~/.cloudfox/cloudfox-output/<account-id>/<service>/` — for OpenSploit, set
+# `--output-directory=/session/cloudfox/` to keep everything under the
+# engagement working dir.
+#
+# Auth: cloudfox does NOT take credentials in argv. AWS auth is via:
+#   1. `--profile <name>` referencing ~/.aws/credentials, OR
+#   2. AWS_ACCESS_KEY_ID + AWS_SECRET_ACCESS_KEY (+ AWS_SESSION_TOKEN) env
+#      vars (set by orchestrator before invocation), OR
+#   3. EC2 instance metadata (when running ON an EC2 instance — N/A in
+#      Docker container unless explicitly configured).
+# Azure auth via `az login` cached session (mount ~/.azure) or AZURE_*
+# env vars. GCP auth via GOOGLE_APPLICATION_CREDENTIALS pointing at a
+# service-account JSON. K8s auth via KUBECONFIG / mounted kubeconfig.
+#
+# Single-binary tool. Source code path: tools/cloudfox/mcp-server.py — the
+# legacy method handlers (run, list_commands) auto-inherit run_cli from
+# BaseMCPServer (mcp-common 0.3.0); kind:cli is the new default. Two legacy
+# methods are preserved as the rollback path per SKILL #21.
 version: "1.0"
-description: "AWS attack path enumeration via Bishop Fox CloudFox. 2 methods: run (execute any of 30+ CloudFox AWS modules for cross-service attack path analysis — principals, permissions, role-trusts, env-vars, endpoints, instances, workloads, secrets, etc.), list_commands (show available modules). Read-only enumeration that cross-references data across services to find exploitable paths. For raw AWS API access use aws. For exploitation use pacu."
+description: >
+  AWS / Azure / GCP / Kubernetes post-exploitation enumeration via Bishop Fox
+  CloudFox. Cross-service attack-path analysis: IAM principals + permissions,
+  role-trust relationships, env-var secret leakage across compute (Lambda,
+  ECS, CodeBuild), endpoint discovery, instance enumeration with user-data,
+  SSO + Identity Center, S3 buckets, RDS databases, secrets-manager + SSM
+  parameters, workloads-with-admin-or-path-to-admin discovery, and full
+  account inventory.
+
+  Cobra-style sub-command architecture:
+
+    cloudfox <provider> <subcmd> [flags]
+    cloudfox aws inventory --profile=default
+    cloudfox aws all-checks --profile=default --all-regions
+    cloudfox aws principals --profile=default --output-format=json
+    cloudfox aws workloads --profile=default --verbosity=2
+    cloudfox azure inventory --subscription=<sub-id>
+    cloudfox gcp inventory --project=<project-id>
+    cloudfox k8s pods --kubeconfig=<path>
+
+  Providers:
+    aws    — flagship, ~30+ sub-commands (use this 95% of the time)
+    azure  — inventory, rbac, storage, vms, whoami
+    gcp    — inventory, instances, secrets, buckets, iam, all-checks
+    k8s    — pods, secrets, roles, all-checks
+
+  Key AWS sub-commands (start here):
+    inventory      — account size + preferred regions (FIRST scan, ~30s)
+    all-checks     — run EVERY module sequentially (slow, ~5-30 min)
+    principals     — IAM users + roles
+    permissions    — per-principal permission map
+    role-trusts    — role trust-policy analysis
+    resource-trusts — cross-account resource sharing
+    workloads      — workloads with admin or path to admin (THE attack-path
+                     finding — most actionable output)
+    env-vars       — secrets leaked in compute env (Lambda/ECS/CodeBuild)
+    secrets        — Secrets Manager + SSM Parameter Store enumeration
+    instances      — EC2 with public IPs, profiles, user-data
+    endpoints      — discoverable API endpoints across services
+    iam-simulator  — IAM policy evaluation (what CAN this principal do?)
+
+  Auth: NO credentials in argv. cloudfox honors:
+    1. `--profile <name>` from ~/.aws/credentials (mount ~/.aws/ or write to
+       /session/.aws/credentials and set HOME=/session before invocation)
+    2. AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY / AWS_SESSION_TOKEN env vars
+    3. AZURE_*, GOOGLE_APPLICATION_CREDENTIALS, KUBECONFIG env vars
+
+  Output: BOTH stdout (table/csv/json per `--output-format`) AND filesystem
+  artifacts to `--output-directory` ("loot files" — text/CSV per service).
+  Default output dir is ~/.cloudfox/cloudfox-output/<account-id>/<service>/.
+  For OpenSploit, ALWAYS pass `--output-directory=/session/cloudfox/` to keep
+  loot under the engagement working dir.
+
+  Phase: enumeration / post-exploitation (after AWS credentials obtained).
+  Read-only — cloudfox does NOT modify any AWS resource. For exploitation
+  use pacu. For raw AWS API access use the aws CLI.
+
+  Feature 28 dynamic recipes are RETIRED for the kind:cli path — the LLM
+  writes argv directly. Recipes still load for legacy method calls (run,
+  list_commands) if /session/tool_recipes/cloudfox/ exists, but they're a
+  dead branch under run_cli (REQ-TR-016).
+
 image: "ghcr.io/silicon-works/mcp-tools-cloudfox:latest"
 image_size_mb: 350
-timeout_seconds: 600
+
+# Dual-clock model — cloudfox runs are mostly bound by AWS API rate limits,
+# not local CPU. `inventory` returns in ~30s for a small account. Single
+# sub-commands (`principals`, `permissions`) typically 30s-2min. `all-checks`
+# runs every module sequentially and takes 5-30 min for a moderately-populated
+# account; can be 1-2h for a large enterprise account with many regions.
+# Idle timeout is 10 min (cloudfox is genuinely silent during long AWS API
+# pagination — anything less risks killing a healthy long scan).
+idle_timeout_seconds: 600       # 10 min silence == wedged AWS client
+max_runtime_seconds: 7200       # 2 h hard cap — `all-checks --all-regions` on
+                                # a large enterprise account
+timeout_seconds: 7200
 
 capabilities:
   - aws_attack_path_analysis
   - iam_enumeration
   - cross_service_correlation
   - trust_analysis
+  - cloud_post_exploitation
 
 phases:
-  - reconnaissance
   - enumeration
+  - post-exploitation
+
+routing:
+  use_for:
+    - "enumerate IAM principals, permissions, and role-trust relationships in AWS post-exploitation"
+    - "find AWS attack paths (workloads with admin or path-to-admin) — the `workloads` sub-command"
+    - "discover secrets in environment variables across Lambda, ECS, CodeBuild via the `env-vars` sub-command"
+    - "full AWS account inventory + cross-service enumeration via `inventory` (start here) and `all-checks` (full sweep)"
+    - "Azure / GCP / Kubernetes post-exploitation enumeration (smaller sub-command surface)"
+    - "analyze cross-account trust relationships and resource sharing for lateral movement opportunities"
+  never_use_for:
+    - "executing AWS API write operations or exploitation (use the aws CLI or pacu)"
+    - "exploiting AWS misconfigurations (privesc, persistence, evasion — use pacu)"
+    - "S3 bucket brute-force from outside (use s3scanner)"
+    - "secret scanning in source code or filesystems (use trufflehog)"
+    - "AWS compliance / CIS-benchmark checks (use prowler)"
+  triggers:
+    - "cloudfox"
+    - "AWS attack path"
+    - "cloud attack surface"
+    - "IAM analysis"
+    - "role trust"
+    - "AWS post-exploitation"
+    - "AWS enumeration"
+    - "cloud enumeration"
+    - "Azure enumeration"
+    - "GCP enumeration"
+  prefer_over: []
 
 requirements:
   network: true
@@ -23,80 +198,311 @@ resources:
   memory_mb: 512
   cpu: 1.0
 
-routing:
-  use_for:
-    - "enumerate IAM principals, permissions, and role trust relationships"
-    - "find AWS attack paths (workloads with admin or path to admin)"
-    - "discover secrets in environment variables across Lambda, ECS, CodeBuild"
-    - "enumerate API endpoints, instances, databases, and network exposure"
-    - "analyze cross-account trust relationships and resource sharing"
-    - "find outbound assumed roles for lateral movement"
-  never_use_for:
-    - "executing AWS API commands (use aws)"
-    - "exploiting AWS misconfigurations (use pacu)"
-    - "S3 bucket brute-force (use s3scanner)"
-    - "secret scanning in files (use trufflehog)"
-  triggers:
-    - cloudfox
-    - AWS attack path
-    - cloud attack surface
-    - IAM analysis
-    - role trust
-    - AWS enumeration
-    - cloud enumeration
-  prefer_over: []
+environment:
+  # cloudfox honors standard AWS / Azure / GCP / k8s auth env vars — set them
+  # before invocation OR mount the credential files at standard paths.
+  AWS_ACCESS_KEY_ID:
+    description: "AWS access key ID. Used when no --profile is set. Pair with AWS_SECRET_ACCESS_KEY (+ AWS_SESSION_TOKEN for STS creds)."
+    required: false
+  AWS_SECRET_ACCESS_KEY:
+    description: "AWS secret access key. Pair with AWS_ACCESS_KEY_ID."
+    required: false
+  AWS_SESSION_TOKEN:
+    description: "AWS session token (for STS / federated / assume-role creds)."
+    required: false
+  AWS_DEFAULT_REGION:
+    description: "Default AWS region. Overridden by --region or --all-regions."
+    required: false
+  HOME:
+    description: "Container HOME path. cloudfox reads ~/.aws/credentials (AWS profiles), ~/.azure/ (Azure session), ~/.config/gcloud/ (GCP). For per-engagement creds, set HOME=/session and mount /session/.aws/credentials."
+    required: false
+  AZURE_CLIENT_ID:
+    description: "Azure service-principal client ID (for `cloudfox azure ...`). Pair with AZURE_CLIENT_SECRET + AZURE_TENANT_ID."
+    required: false
+  AZURE_CLIENT_SECRET:
+    description: "Azure service-principal client secret."
+    required: false
+  AZURE_TENANT_ID:
+    description: "Azure tenant ID."
+    required: false
+  GOOGLE_APPLICATION_CREDENTIALS:
+    description: "Path to GCP service-account JSON key file (for `cloudfox gcp ...`). e.g., /session/.gcp/sa-key.json"
+    required: false
+  KUBECONFIG:
+    description: "Path to Kubernetes kubeconfig (for `cloudfox k8s ...`). e.g., /session/.kube/config"
+    required: false
 
 see_also:
   - tool: aws
-    reason: cloudfox does read-only cross-service analysis. aws provides interactive API access for exploitation.
+    reason: "cloudfox does READ-ONLY cross-service attack-path enumeration. The aws CLI provides interactive AWS API access for exploitation, write operations, and arbitrary calls. Workflow: cloudfox enumerates → aws CLI exploits."
   - tool: pacu
-    reason: cloudfox identifies attack paths. pacu exploits them (privesc, persistence, evasion).
+    reason: "cloudfox identifies attack paths (workloads with admin, exposed env-var secrets, trust relationships). pacu EXPLOITS them (privesc modules, persistence, evasion). Sequential pairing."
   - tool: prowler
-    reason: Both do AWS analysis but prowler checks compliance. CloudFox finds offensive attack paths.
+    reason: "Both analyze AWS but with different goals: prowler runs CIS/PCI/NIST compliance checks (defensive). cloudfox finds OFFENSIVE attack paths (post-exploitation perspective). For pentest reports, run BOTH — prowler frames the defensive posture, cloudfox shows what an attacker can do."
+  - tool: s3scanner
+    reason: "s3scanner discovers + tests bucket permissions from OUTSIDE the account (anonymous probing of public buckets). cloudfox enumerates the buckets the AUTHENTICATED principal can see (`cloudfox aws buckets`). Different threat models — both useful."
+  - tool: trufflehog
+    reason: "cloudfox `env-vars` finds secrets in compute env-vars (Lambda/ECS/CodeBuild). trufflehog scans bucket CONTENTS, git history, filesystems for secrets. Pair: cloudfox surfaces a public S3 bucket → trufflehog scans the bucket contents."
 
-methods:
-  run:
-    description: "Run a CloudFox AWS module. 30+ modules available for cross-service attack path analysis."
-    when_to_use: "After obtaining AWS credentials — use CloudFox for situational awareness. Start with 'inventory' for account overview, then 'principals' + 'permissions' for IAM analysis, 'role-trusts' for trust relationships, 'env-vars' for leaked secrets, 'workloads' for admin paths."
-    params:
-      command:
-        type: string
-        required: true
-        description: "CloudFox module name (e.g., 'principals', 'permissions', 'role-trusts', 'env-vars', 'workloads')."
-      access_key_id:
-        type: string
-        description: "AWS access key ID."
-      secret_access_key:
-        type: string
-        description: "AWS secret access key."
-      session_token:
-        type: string
-        description: "AWS session token."
-      region:
-        type: string
-        default: "us-east-1"
-        description: "AWS region."
-      output:
-        type: string
-        default: "wide"
-        description: "Output format: brief or wide."
-      timeout:
-        type: integer
-        default: 300
-        description: "Timeout in seconds."
-    returns:
-      command:
-        type: string
-        description: "Module that was executed."
+# ── kind:cli specific sections ──────────────────────────────────────
 
-  list_commands:
-    description: "List all available CloudFox AWS modules with descriptions."
-    when_to_use: "Reference — see which modules are available."
-    params: {}
-    returns:
-      commands:
-        type: array
-        description: "Available modules with descriptions."
-      command_count:
-        type: integer
-        description: "Total modules."
+target_extraction:
+  # cloudfox is unusual — it's not a NETWORK tool, it's a CLOUD-account
+  # post-exploitation tool. The "target" is an AWS / Azure / GCP / k8s
+  # ACCOUNT, scoped via `--profile <name>` (most common), `--subscription`
+  # (Azure), `--project` (GCP), or `--kubeconfig` (k8s). There's no IP /
+  # hostname / URL involved — the engagement scope is the cloud account /
+  # subscription / project identifier.
+  #
+  # The target value is the PROFILE NAME (or subscription / project /
+  # kubeconfig path). It's an ENGAGEMENT-SCOPE IDENTIFIER, not a network
+  # host. Scope validation should compare the profile name against an
+  # engagement-state allowlist of authorized cloud accounts.
+  #
+  # If `--profile` is absent (env-var-based auth), no extractable target —
+  # the orchestrator must validate that AWS_ACCESS_KEY_ID / AWS_SESSION_TOKEN
+  # in the environment is in-scope BEFORE invocation. The plugin's
+  # null-target path applies (treated as informational / non-network call).
+  - rule: "flag_value"
+    flag: "--profile"
+    parse_as: "raw"
+  - rule: "flag_value"
+    flag: "-p"
+    parse_as: "raw"
+  - rule: "flag_value"
+    flag: "--subscription"
+    parse_as: "raw"
+  - rule: "flag_value"
+    flag: "--project"
+    parse_as: "raw"
+  - rule: "flag_value"
+    flag: "--kubeconfig"
+    parse_as: "raw"
+
+# No reject_flags — cloudfox is read-only and every flag value is in argv
+# (no flag shifts target outside the call). The credential side-channels
+# (AWS_*, AZURE_*, GOOGLE_APPLICATION_CREDENTIALS env vars) are the
+# scope-validation responsibility of the orchestrator, not the tool plugin.
+reject_flags: []
+reject_flags_reason: >
+  cloudfox has no flags that shift the target outside argv. Profile /
+  subscription / project / kubeconfig values are all flag values (extracted
+  by target_extraction). When env-var auth is used (no `--profile`), target
+  is null — the orchestrator must validate env credentials are in-scope
+  BEFORE invocation. The plugin's null-target informational-call path
+  applies cleanly.
+
+# Per-tool value-taking flags whose values must NOT be confused with
+# positional targets. cloudfox is COBRA-STYLE — most flags use long-form
+# `--flag` and short-form `-f`. The provider + sub-command are POSITIONALS
+# (consumed by the cobra dispatcher), NOT value-flags.
+value_flags:
+  # ── target-bearing flags (also extracted by flag_value rules) ──
+  - "--profile"
+  - "-p"
+  - "--subscription"
+  - "--project"
+  - "--kubeconfig"
+  # ── region / scope ──
+  - "--region"
+  - "-r"
+  # ── output / formatting ──
+  - "--output-format"
+  - "-o"
+  - "--output-directory"
+  - "--verbosity"
+  - "-v"
+  # ── filtering ──
+  - "--skip-adminonly"            # boolean — listed for parser correctness
+  - "--all-regions"               # boolean
+  - "-y"                          # boolean (yes / non-interactive)
+  - "--yes"                       # boolean
+  # ── AWS-specific sub-command flags ──
+  - "--principal"                 # iam-simulator: principal ARN
+  - "--action"                    # iam-simulator: API action to simulate
+  - "--resource"                  # iam-simulator: resource ARN
+  - "--user-data-search-term"     # instances: regex to search user-data
+  - "--admin-only"                # workloads: only admin-with-path
+  # ── Azure / GCP / k8s ──
+  - "--tenant-id"                 # azure
+  - "--namespace"                 # k8s
+  # ── boolean / no-arg flags listed for parser completeness ──
+  - "-h"
+  - "--help"
+  - "--version"
+
+usage_patterns:
+  # ── opening / inventory ──────────────────────────────────────────
+  - name: "AWS account inventory (FIRST scan after creds obtained)"
+    command: "aws inventory --profile=default --output-format=json --output-directory=/session/cloudfox/"
+    when: "First run after obtaining AWS credentials. `inventory` is fast (~30s) and reports account size + preferred regions — orienting data BEFORE running heavy modules. Always emit `--output-format=json` for machine parsing and `--output-directory=/session/cloudfox/` to keep loot under the engagement working dir (default is ~/.cloudfox/cloudfox-output/ which is ephemeral). The `--profile=default` value is the engagement-scope identifier (validated by target_extraction)."
+
+  - name: "AWS full sweep (all-checks across all regions)"
+    command: "aws all-checks --profile=default --all-regions --output-format=json --output-directory=/session/cloudfox/ --verbosity=2 -y"
+    when: "Run EVERY AWS sub-command sequentially across ALL enabled regions. Slow (5-30 min for moderate accounts; up to 2h for large enterprise accounts). Use after `inventory` confirms account scope. `--all-regions` triggers per-region pagination for region-scoped services. `-y` auto-answers prompts for non-interactive mode. CHECK idle_timeout=600 covers the longest API pagination — cloudfox is silent during AWS rate-limit waits."
+
+  - name: "AWS attack-path discovery (workloads with admin)"
+    command: "aws workloads --profile=default --admin-only --output-format=json --output-directory=/session/cloudfox/"
+    when: "THE high-value cloudfox sub-command. `workloads` finds compute resources (EC2, Lambda, ECS, CodeBuild) whose attached IAM role HAS admin permissions OR has a policy path TO admin. `--admin-only` filters to confirmed admin-with-path. Output is the set of compute targets where compromising the workload yields admin AWS access. Pair with `cloudfox aws principals` and `cloudfox aws permissions` for full attack-path context."
+
+  - name: "AWS IAM principal + permission enumeration"
+    command: "aws principals --profile=default --output-format=json --output-directory=/session/cloudfox/"
+    when: "Enumerate IAM users + roles (NOT permissions — that's a separate sub-command). Fast (~1-2 min). Run BEFORE `permissions` to know which principals to map. Output JSON includes ARN, type (User/Role), creation date, attached policy count. For permissions per principal, follow with `cloudfox aws permissions --profile=default`."
+
+  - name: "AWS env-var secret discovery (Lambda/ECS/CodeBuild)"
+    command: "aws env-vars --profile=default --all-regions --output-format=json --output-directory=/session/cloudfox/"
+    when: "Discover secrets leaked into env vars across compute services. Lambda function configurations, ECS task definitions, and CodeBuild project envs frequently contain DB passwords, API keys, internal-service tokens. `--all-regions` is critical — env-var leaks are often region-localized. Output JSON has `Service`, `Resource`, `Region`, `EnvVarName`, `EnvVarValue`. Filter for `password|secret|key|token|api` after."
+
+  - name: "AWS secrets-manager + SSM enumeration"
+    command: "aws secrets --profile=default --all-regions --output-format=json --output-directory=/session/cloudfox/"
+    when: "Enumerate AWS Secrets Manager secrets + SSM Parameter Store parameters. Reports secret NAMES + ARNs (not values — values require an explicit `aws secretsmanager get-secret-value` call). Use the output to identify high-value secrets for follow-up extraction via the `aws` CLI tool."
+
+  - name: "AWS IAM permission simulation (what can this principal do?)"
+    command: "aws iam-simulator --profile=default --principal=arn:aws:iam::123456789012:user/alice --action=s3:GetObject --output-format=json"
+    when: "Evaluate whether a specific principal CAN perform a specific action on a specific resource. Wraps the AWS IAM SimulatePrincipalPolicy API. Use after `permissions` identifies a candidate principal — `iam-simulator` confirms whether a SPECIFIC API call would succeed (handles policy boundaries, SCPs, condition keys). NOTE: principal ARN is NOT a target_extraction value — it's auth-context, not engagement scope."
+
+  - name: "AWS instance enumeration (with user-data + IAM profile)"
+    command: "aws instances --profile=default --all-regions --output-format=json --output-directory=/session/cloudfox/"
+    when: "Enumerate EC2 instances with public/private IPs, attached IAM instance-profile, AND user-data scripts. User-data often contains seeded credentials, install-time secrets, or bootstrapping logic exploitable for privesc. Always pass `--all-regions` for full account view."
+
+  - name: "AWS custom region scan (no all-regions)"
+    command: "aws principals --profile=default --region=us-west-2 --output-format=table --verbosity=3"
+    when: "Scan a single AWS region (skip `--all-regions`). Useful when targeting a known production region. `--verbosity=3` includes loot files inline in stdout (otherwise loot files only land in `--output-directory`). `--output-format=table` is the default human-readable form for terminal viewing."
+
+  - name: "Azure inventory"
+    command: "azure inventory --subscription=<subscription-id> --output-format=json --output-directory=/session/cloudfox/"
+    when: "Azure-side enumeration. Auth via `az login` cached session (mount ~/.azure/) OR via AZURE_CLIENT_ID + AZURE_CLIENT_SECRET + AZURE_TENANT_ID env vars. Subscription ID is the engagement-scope identifier (validated by target_extraction). Fewer sub-commands than AWS — `azure rbac`, `azure storage`, `azure vms`, `azure whoami` are the others."
+
+  - name: "GCP inventory"
+    command: "gcp inventory --project=<project-id> --output-format=json --output-directory=/session/cloudfox/"
+    when: "GCP-side enumeration. Auth via `gcloud auth` cached session OR GOOGLE_APPLICATION_CREDENTIALS pointing at a service-account JSON. Project ID is engagement-scope. Sub-commands: `gcp inventory`, `gcp instances`, `gcp secrets`, `gcp buckets`, `gcp iam`, `gcp all-checks`."
+
+  - name: "Kubernetes pod enumeration"
+    command: "k8s pods --kubeconfig=/session/.kube/config --namespace=default --output-format=json --output-directory=/session/cloudfox/"
+    when: "K8s post-exploitation enumeration. KUBECONFIG path is the engagement-scope identifier (validated by target_extraction). Sub-commands: `k8s pods`, `k8s secrets`, `k8s roles`, `k8s all-checks`. NOTE: also useful via env: `KUBECONFIG=/session/.kube/config cloudfox k8s pods --namespace=default`."
+
+  - name: "Help / version probe"
+    command: "--help"
+    when: "Print top-level help (lists provider sub-commands). Combine with `aws --help`, `azure --help`, `gcp --help`, `k8s --help` for per-provider sub-command listings. `--version` prints the cloudfox build. All bypass scope validation (no profile / project context)."
+
+output_formats:
+  - flag: "--output-format=table"
+    format: "ansi-table"
+    preferred: false
+    notes: "Default. Human-readable colored table to stdout. Each module emits its own table layout. Best for terminal review; harder to parse programmatically. Use for ad-hoc inspection during live engagement."
+  - flag: "--output-format=csv"
+    format: "csv"
+    preferred: false
+    notes: "CSV to stdout AND to loot file in --output-directory. Wide rows (many columns per service). Easier to grep / awk than table; harder than json for nested values. OK for quick filtering."
+  - flag: "--output-format=json"
+    format: "json"
+    preferred: true
+    notes: "JSON to stdout AND to loot file in --output-directory. PREFERRED for OpenSploit tooling — clean parse, nested fields preserved, jq-friendly. Top-level structure varies per sub-command. Pair with `--output-directory=/session/cloudfox/` to persist loot to engagement working dir."
+  - flag: "--output-format=brief"
+    format: "ansi-summary"
+    preferred: false
+    notes: "Short human-readable summary (count + key highlights). Use as a smoke test or preview before committing to a full table/json scan."
+
+common_options:
+  targeting:
+    - "PROFILE IS THE TARGET — `--profile <name>` (or `-p <name>`) identifies the AWS account scope. Maps to a profile in ~/.aws/credentials (mount or write to /session/.aws/credentials with HOME=/session). The profile NAME is the engagement-scope identifier — extracted by target_extraction and validated against authorized cloud accounts."
+    - "SUBSCRIPTION (Azure) — `--subscription <subscription-id>` for `cloudfox azure ...`. Engagement-scope identifier."
+    - "PROJECT (GCP) — `--project <project-id>` for `cloudfox gcp ...`. Engagement-scope identifier."
+    - "KUBECONFIG (k8s) — `--kubeconfig <path>` for `cloudfox k8s ...`. The KUBECONFIG path identifies the cluster context."
+    - "ENV-VAR AUTH (no --profile) — when AWS_ACCESS_KEY_ID + AWS_SECRET_ACCESS_KEY (+ AWS_SESSION_TOKEN) are set in env, no --profile is needed. target_extraction returns null — the orchestrator MUST validate env creds are in-scope BEFORE invocation."
+    - "REGION — `--region <region>` (or `-r <region>`) scopes to one AWS region. `--all-regions` queries every enabled region (longer runtime, full account view). Default region is us-east-1 (per cloudfox default; AWS_DEFAULT_REGION env var overrides)."
+  filtering:
+    - "SUB-COMMAND DISPATCH — first positional after the provider is the sub-command (e.g., `cloudfox aws inventory`). For AWS: ~30 sub-commands. For Azure/GCP/k8s: smaller surfaces. `--help` after a provider lists its sub-commands."
+    - "ALL-REGIONS — `--all-regions` (boolean) iterates every enabled AWS region. Adds significant runtime (each region = additional API rounds). Required for env-vars / instances / secrets sweeps where leaks are region-localized."
+    - "ADMIN-ONLY — `--admin-only` (workloads sub-command) filters to admin-with-path-to-admin only. Drops the noise of read-only workloads."
+    - "SKIP-ADMINONLY — `--skip-adminonly` skips resources only admins can see (used when scanning as a low-priv principal to avoid AccessDenied errors)."
+  output:
+    - "--output-format json — PREFERRED for tooling. Clean nested JSON to stdout AND loot files."
+    - "--output-format table | csv | brief — alternates."
+    - "--output-directory <path> — where loot files land (text/CSV per service). DEFAULT is ~/.cloudfox/cloudfox-output/<account-id>/<service>/ (ephemeral inside container). For OpenSploit ALWAYS pass `/session/cloudfox/` for engagement persistence."
+    - "--verbosity 1|2|3 — 1=control only, 2=+module output (default), 3=+loot files inline in stdout."
+  perf:
+    - "AWS API rate limits dominate runtime. cloudfox internally backs off on throttle. `inventory` is ~30s. `principals`/`permissions` ~1-2 min. `all-checks` is 5-30 min for moderate accounts; up to 2h for large enterprise accounts with many regions."
+    - "`--all-regions` multiplies runtime by enabled-region count (typical accounts have 5-15 enabled regions)."
+    - "Long silent stretches during AWS pagination — idle_timeout=600s (10 min) is calibrated for this. Reducing it risks killing healthy long scans."
+  auth:
+    - "NO credentials in argv — cloudfox honors ~/.aws/credentials profiles + AWS_* env vars. For per-engagement isolation, write creds to /session/.aws/credentials and set HOME=/session before invocation, OR pass AWS_* env vars."
+    - "STS session creds — set AWS_ACCESS_KEY_ID + AWS_SECRET_ACCESS_KEY + AWS_SESSION_TOKEN (the session token is required for STS / federated / assume-role creds)."
+    - "Azure auth: `az login` cached session (mount ~/.azure/) OR AZURE_CLIENT_ID + AZURE_CLIENT_SECRET + AZURE_TENANT_ID env vars."
+    - "GCP auth: `gcloud auth` cached session OR GOOGLE_APPLICATION_CREDENTIALS pointing at a service-account JSON file."
+    - "K8s auth: KUBECONFIG env var OR `--kubeconfig <path>` flag."
+
+gotchas:
+  - "PROVIDER + SUB-COMMAND ARE POSITIONALS — cobra-style `cloudfox <provider> <subcmd> [flags]`. Forgetting the provider errors with `Error: unknown command \"<flag-or-subcmd>\" for \"cloudfox\"`. Forgetting the sub-command (just `cloudfox aws --profile=...`) prints the aws-help instead of running anything (silent no-op for a tool runner — verify output)."
+  - "DEFAULT OUTPUT DIRECTORY IS EPHEMERAL — `~/.cloudfox/cloudfox-output/<account-id>/<service>/` lives INSIDE the container and is lost when the container exits. ALWAYS pass `--output-directory=/session/cloudfox/` to persist loot to the engagement working dir. The engagement audit log only captures stdout, NOT loot files — without --output-directory, loot is unrecoverable."
+  - "`--all-regions` MULTIPLIES RUNTIME — each enabled region is a separate API round. A typical account has 5-15 enabled regions; `all-checks --all-regions` on a moderate account is 30+ min. Use `--region <one-region>` for targeted scans; reserve `--all-regions` for full sweeps."
+  - "PROFILE VS ENV-VAR AUTH — `--profile=<name>` is the engagement-scope identifier (target_extraction matches it). When you skip `--profile` and rely on AWS_ACCESS_KEY_ID env var, target_extraction returns null and the orchestrator's null-target informational-call path applies. Either way works, but `--profile` is auditable and reproducible."
+  - "NO CREDENTIALS IN ARGV — cloudfox does NOT take `--access-key` / `--secret-key` flags (the legacy mcp-server.py wraps env-var injection, not argv). All auth flows via env vars or ~/.aws/credentials profile files."
+  - "EXIT CODE 0 ON AccessDenied (PARTIAL) — when one sub-call within `all-checks` fails with AccessDenied, cloudfox logs the error and CONTINUES with the next service. Exit code is still 0. Parse stderr / loot files for `AccessDenied` to know which services were skipped. Don't read exit code as a success signal — read the loot."
+  - "RATE-LIMIT BACKOFF IS SILENT — when AWS throttles, cloudfox waits silently (no progress output). Long silent stretches during a `--all-regions` sweep are NORMAL — don't kill the call. `idle_timeout=600s` (10 min) accommodates this."
+  - "SUB-COMMAND DRIFT BETWEEN VERSIONS — Bishop Fox adds new sub-commands periodically. The list in this tool.yaml is verified for the current release; if a sub-command name changes upstream, `Error: unknown command \"<subcmd>\" for \"cloudfox aws\"` is the signal. Run `cloudfox aws --help` for current authoritative list."
+  - "`-y` / `--yes` IS NOT NOOP — without it, cloudfox prompts for confirmation on some sub-commands (notably `all-checks`). For non-interactive runs, ALWAYS pass `-y`. The mcp-server.py wraps this implicitly; the new kind:cli path requires it explicitly."
+  - "AZURE / GCP / K8S COVERAGE IS SMALLER — the AWS sub-command surface is ~30+; Azure is ~5; GCP is ~6; k8s is ~4. For deep cloud-platform analysis on non-AWS, the relevant native CLIs (az, gcloud, kubectl) plus pacu-equivalents may be more thorough. cloudfox is BEST for AWS."
+  - "Feature 28 dynamic recipes are RETIRED for the kind:cli path — the LLM writes argv directly. Recipes still load for legacy method calls (run, list_commands) if /session/tool_recipes/cloudfox/ exists, but they're a dead branch under run_cli (REQ-TR-016)."
+  - "LEGACY `output=wide` IS NOT A VALID `--output-format` VALUE — the legacy mcp-server.py defaulted to `output=\"wide\"` and translated it to `-o wide`, which upstream cloudfox does NOT accept (valid values are `table | csv | json | brief`). Older cloudfox builds silently fell back to table; current builds may error with `unknown output format \"wide\"`. The kind:cli path bypasses this — pass `--output-format=json` (preferred) or one of the four documented values. Do NOT emit `--output-format=wide`."
+  - "AWS_DEFAULT_REGION VS `--region` PRECEDENCE — `--region`/`-r` on the command line overrides AWS_DEFAULT_REGION env var. `--all-regions` (boolean) supersedes BOTH. The legacy mcp-server.py set AWS_DEFAULT_REGION from the `region` param AND emitted `-r` — the env var was effectively dead-code. Under kind:cli, pick ONE: pass `--region` flag OR set AWS_DEFAULT_REGION env, not both."
+  - "NO CLIENT-SIDE SUB-COMMAND ALLOWLIST — the legacy mcp-server.py kept a hardcoded `CLOUDFOX_COMMANDS` list and rejected unknown values BEFORE invoking cloudfox. The kind:cli path has no such pre-flight gate; an LLM typo surfaces as cobra's `Error: unknown command \"<typo>\" for \"cloudfox aws\"` (caught by failure_signatures). Trade-off: lose pre-flight rejection, gain support for new upstream sub-commands (e.g., `all-checks`, `sso`) without recompiling the wrapper."
+
+failure_signatures:
+  # Layer-diverse signals (SKILL #11) — at least 6 distinct verifiable layers:
+  #   1. AWS API — AccessDenied, ExpiredToken, InvalidClientTokenId
+  #   2. Auth — no valid credentials, profile-not-found
+  #   3. Argument — unknown command (sub-command typo / missing provider)
+  #   4. Argument — unknown flag (cobra)
+  #   5. Quota / rate-limit — Throttling, RequestLimitExceeded
+  #   6. Region — InvalidRegion, region-not-enabled
+  #   7. Network — no such host, connection refused
+  - signal: "AccessDenied"
+    remediation: "AWS API: principal lacks IAM permission for one or more API calls cloudfox attempted. NOT a tool failure — cloudfox logs and continues with the next sub-call. Filter loot files / stderr for `AccessDenied` to know which services were skipped. To minimize noise, pass `--skip-adminonly` if scanning as a low-priv principal."
+  - signal: "no valid credential"
+    remediation: "Auth: no AWS credentials found. Either pass `--profile <name>` (where the profile exists in ~/.aws/credentials), OR set AWS_ACCESS_KEY_ID + AWS_SECRET_ACCESS_KEY env vars. If using STS / assume-role creds, also set AWS_SESSION_TOKEN. Verify with `aws sts get-caller-identity` (uses the same creds resolution chain)."
+  - signal: "InvalidClientTokenId"
+    remediation: "Auth: AWS_ACCESS_KEY_ID is malformed or revoked. Verify the access key ID format (starts with `AKIA` for long-term, `ASIA` for STS session). Re-issue or re-mint creds. Common after STS session expiration."
+  - signal: "ExpiredToken"
+    remediation: "Auth: AWS_SESSION_TOKEN has expired (STS session creds have 15min-12h TTL depending on policy). Re-mint creds via `aws sts get-session-token` or `aws sts assume-role` and re-export the new AWS_ACCESS_KEY_ID + AWS_SECRET_ACCESS_KEY + AWS_SESSION_TOKEN."
+  - signal: "SignatureDoesNotMatch"
+    remediation: "Auth: AWS_SECRET_ACCESS_KEY is wrong (typo, leading/trailing whitespace, or wrong account's secret paired with another account's key). Re-export correct secret. Also fires on clock skew >5min between container and AWS — verify container time with `date`."
+  - signal: "NoCredentialProviders"
+    remediation: "Auth: AWS SDK Go credential chain found no source. Same root cause as `no valid credential`. Set env vars OR --profile."
+  - signal: "could not load profile"
+    remediation: "Profile: `--profile <name>` references a profile that doesn't exist in ~/.aws/credentials or ~/.aws/config. Verify with `cat ~/.aws/credentials` (or /session/.aws/credentials with HOME=/session). Add the profile section: `[<name>]\\naws_access_key_id = AKIA...\\naws_secret_access_key = ...`."
+  - signal: "Error: unknown command"
+    remediation: "Argument: cobra dispatcher saw a sub-command (or provider) that doesn't exist. Either misspelled or removed in this release. Run `cloudfox --help` (top-level), `cloudfox aws --help`, `cloudfox azure --help`, `cloudfox gcp --help`, or `cloudfox k8s --help` for current authoritative sub-command lists."
+  - signal: "unknown flag"
+    remediation: "Argument: cobra didn't recognize a flag. Common LLM errors: (1) using `-output` instead of `-o`/`--output-format`, (2) using `--access-key=AKIA...` (cloudfox has no such flag — use env vars), (3) using a sub-command-specific flag in the wrong sub-command. Run `cloudfox aws <subcmd> --help` for per-sub-command flags."
+  - signal: "Throttling"
+    remediation: "Rate-limit: AWS is throttling cloudfox's API calls. cloudfox internally backs off and retries — the tool will recover. If THROTTLE persists for >10 min, idle_timeout will fire. Reduce scope: drop `--all-regions`, scan one region at a time. For huge accounts, run sub-commands sequentially rather than `all-checks`."
+  - signal: "RequestLimitExceeded"
+    remediation: "Rate-limit: AWS hard quota hit (e.g., per-second API call cap on a service). Same remediation as `Throttling`. Some services have stricter quotas — reducing concurrency at the orchestrator level (one cloudfox call at a time) helps."
+  - signal: "InvalidRegion"
+    remediation: "Region: `--region <region>` value is not a valid AWS region code. Use lowercase format like `us-east-1`, `eu-west-2`, `ap-northeast-1`. Run `aws ec2 describe-regions` for the current valid set."
+  - signal: "OptInRequired"
+    remediation: "Region: the region is not enabled for this AWS account (some regions require explicit opt-in: af-south-1, ap-east-1, ap-southeast-3, eu-south-1, me-south-1). Enable in AWS Console → Account → AWS Regions, OR drop `--all-regions` and scope to enabled regions only."
+  - signal: "no such host"
+    remediation: "DNS/Network: AWS endpoint hostname doesn't resolve. Check container DNS with `getent hosts sts.amazonaws.com`. Common when /etc/resolv.conf is misconfigured or the container has no network."
+  - signal: "connection refused"
+    remediation: "Network: TCP-level error reaching AWS endpoint. Verify outbound 443 connectivity with `nc -vz sts.amazonaws.com 443`. Common in air-gapped containers — cloudfox requires real AWS API access."
+  - signal: "context deadline exceeded"
+    remediation: "Network/Timeout: AWS SDK Go gave up waiting for a response. Subset of network errors. Same remediation as `connection refused` and `no such host`. Also fires on extreme latency from the container to AWS — check `traceroute -p 443 sts.amazonaws.com`."
+
+help_commands:
+  - command: "--help"
+    purpose: "Top-level help — lists provider sub-commands (aws, azure, gcp, k8s) and global flags."
+  - command: "aws --help"
+    purpose: "AWS provider help — lists ~30+ AWS sub-commands and AWS-specific flags."
+  - command: "azure --help"
+    purpose: "Azure provider help — lists Azure sub-commands (inventory, rbac, storage, vms, whoami) and Azure-specific flags."
+  - command: "gcp --help"
+    purpose: "GCP provider help — lists GCP sub-commands (inventory, instances, secrets, buckets, iam, all-checks) and GCP-specific flags."
+  - command: "k8s --help"
+    purpose: "Kubernetes provider help — lists k8s sub-commands (pods, secrets, roles, all-checks) and k8s-specific flags."
+  - command: "aws inventory --help"
+    purpose: "Per-sub-command help — flags and behavior for a specific AWS module. Use the same pattern for any sub-command (e.g., `aws workloads --help`, `aws principals --help`)."
+  - command: "--version"
+    purpose: "Print cloudfox version and exit. Verify the binary build + version drift against this tool.yaml."
+

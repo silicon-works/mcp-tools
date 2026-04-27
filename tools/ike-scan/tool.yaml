@@ -1,9 +1,87 @@
 name: ike-scan
-version: "1.1.0"
-description: "IKE/IPsec VPN enumeration and exploitation tool (wraps ike-scan and psk-crack). 6 methods: scan (detect IKE service on UDP 500), aggressive_mode (test group name + capture PSK hash), enumerate_transforms (discover encryption/auth methods), brute_group_names (parallel group name brute force with built-in wordlists), get_psk_hash (capture PSK hash for offline cracking), crack_psk (dictionary or brute force PSK cracking via psk-crack — john does NOT support IKE PSK format). Full IKEv1 main mode and aggressive mode support."
+kind: cli
+# binary: omitted intentionally — this tool wraps a MULTI-binary toolkit:
+#
+#   ike-scan 1.9 family (Debian/Kali `ike-scan` package):
+#     - ike-scan      — IKE/IPsec scanner / fingerprinter (UDP/500, NAT-T UDP/4500)
+#     - psk-crack     — offline cracker for IKE Aggressive-Mode PSK hashes
+#                       captured by `ike-scan -P <file>`
+#
+# Each usage_pattern below declares its own `binary:` field — mirror of the
+# snmp / impacket / smtp / forensics multi-sub-binary pattern. cli_in_container
+# forwards the chosen binary explicitly; there is NO top-level binary.
+#
+# The legacy method handlers (scan, aggressive_mode, enumerate_transforms,
+# brute_group_names, get_psk_hash, crack_psk) auto-inherit run_cli from
+# BaseMCPServer (mcp-common 0.3.0); kind:cli is the new default. The six
+# legacy methods are preserved as the rollback path per SKILL #21.
+version: "1.9"
+description: >
+  IKE/IPsec VPN enumeration and PSK-cracking toolkit wrapping ike-scan 1.9
+  (`ike-scan` for endpoint discovery, transform enumeration, vendor-ID
+  fingerprinting via backoff, Aggressive-Mode PSK hash capture; `psk-crack`
+  for offline cracking of captured Aggressive-Mode hashes).
+
+  Argv form is binary-canonical for each:
+
+    ike-scan
+        [-M | --multiline]                       # one attribute per line
+        [-A | --aggressive]                      # IKE Aggressive Mode
+        [-2 | --ikev2]                           # IKEv2 (default is IKEv1)
+        [-d <id> | --id=<id>]                    # Aggressive-Mode ID (group name)
+        [-n <id> | --inititator-id=<id>]         # Aggressive-Mode initiator ID
+        [-r <retries> | --retry=<retries>]       # retry count (default 3)
+        [-t <ms> | --timeout=<ms>]               # per-host timeout (ms)
+        [-p <port> | --dport=<port>]             # destination UDP port (default 500)
+        [-s <port> | --sport=<port>]             # source UDP port (default 500)
+        [--trans=<spec>]                         # transform spec: enc,hash,auth,group
+        [--vendor=<hex>]                         # vendor-ID payload (hex)
+        [-P <file> | --pskcrack=<file>]          # save PSK hash for psk-crack
+        [-S <int> | --scrambler=<int>]           # nonce scrambler
+        [--showbackoff[=<seconds>]]              # backoff fingerprinting (slow, precise)
+        [--showbackofftime[=<seconds>]]          # show timing data
+        [-N | --nodns]                           # don't resolve hostnames in output
+        [-v | --verbose]                         # verbose (repeatable: -vv -vvv)
+        [-q | --quiet]                           # quiet
+        [--id-type=<type>]                       # ID type (1-11): default ID_USER_FQDN
+        <host> [<host> ...]                      # one or more targets (positional)
+
+    psk-crack
+        [-d <dict> | --dictionary=<dict>]        # dictionary file
+        [-B <charset> | --bruteforce=<charset>]  # brute-force charset
+        [-l <int> | --bruteflen=<int>]           # brute-force length
+        [-c <int> | --charset=<charset>]         # custom charset (alnum/alpha/numeric/...)
+        [-v | --verbose]                         # verbose
+        <hashfile>                               # PSK hash file (from ike-scan -P)
+
+  Default ports are UDP/500 (Main / Aggressive Mode) and UDP/4500 (NAT-T).
+  ike-scan accepts ONE OR MORE positionals (hosts) — the DSL takes the LAST
+  non-flag positional as the canonical scope target (matches the
+  ike-scan-from-the-command-line convention of "host last"). A flag value
+  like `-P /session/file.txt` does NOT count as a positional.
+
+  Output is line-oriented text — ike-scan emits one summary line per host
+  plus optional multi-line detail (`-M`). psk-crack emits a single
+  `Key found "<password>"` line on success.
+
+  Feature 28 dynamic recipes are RETIRED for the kind:cli path — the LLM
+  writes argv directly. Recipes still load for legacy method calls (scan,
+  aggressive_mode, enumerate_transforms, brute_group_names, get_psk_hash,
+  crack_psk) if /session/tool_recipes/ike-scan/ exists, but they're a dead
+  branch under run_cli (REQ-TR-016).
+
 image: "ghcr.io/silicon-works/mcp-tools-ike-scan:latest"
 image_size_mb: 150
-timeout_seconds: 120
+
+# Dual-clock model — basic IKE probes are sub-second, but `--showbackoff`
+# fingerprinting requires multiple round-trips spread over 60-120 seconds,
+# and PSK cracking with a sizeable dictionary or brute-force runs from
+# minutes to hours. idle_timeout covers the longest reasonable silence
+# (DNS lookup + retransmits + NAT-T failure path).
+idle_timeout_seconds: 300       # 5 min silence == wedged (target dropped UDP, retries hung)
+max_runtime_seconds: 7200       # 2 h hard cap — covers backoff fingerprint + dict crack
+timeout_seconds: 7200
+allow_multi_target: true        # ike-scan natively supports multiple hosts on argv
 
 capabilities:
   - ike_enumeration
@@ -12,26 +90,8 @@ capabilities:
   - psk_capture
   - psk_cracking
   - transform_enumeration
-  - group_name_bruteforce
-
-routing:
-  use_for:
-    - "detect IKE VPN service on UDP port 500 and identify vendor"
-    - "test IKE aggressive mode with group name to capture PSK hash"
-    - "brute force IKE VPN group names with built-in or custom wordlists"
-    - "capture IKE PSK hash for offline cracking from aggressive mode handshake"
-    - "crack captured IKE PSK hash with psk-crack dictionary or brute force"
-    - "enumerate IKE transforms to discover supported encryption and auth methods"
-    - "IPsec VPN penetration testing workflow from detection to credential recovery"
-  never_use_for:
-    - "SSL VPN testing"
-    - "OpenVPN testing"
-  triggers:
-    - "ike"
-    - "ipsec"
-    - "vpn port 500"
-    - "psk crack"
-  prefer_over: []
+  - vendor_fingerprinting
+  - backoff_fingerprinting
 
 phases:
   - reconnaissance
@@ -40,195 +100,470 @@ phases:
 
 requirements:
   network: true
-  privileged: false
+  privileged: false        # ike-scan uses datagram sockets — no CAP_NET_RAW
+                           #   needed when listening on the high-source-port
+                           #   default. With --sport=500 it would need raw,
+                           #   but the DSL leaves --sport unset.
 
 resources:
   memory_mb: 128
   cpu: 0.25
 
-methods:
-  scan:
-    description: "Basic IKE scan to detect VPN endpoints"
-    when_to_use: "To check if port 500 has an IKE service"
-    params:
-      target:
-        type: string
-        required: true
-        description: "Target IP address or hostname"
-      sport:
-        type: integer
-        default: 500
-        description: "Source port"
-      dport:
-        type: integer
-        default: 500
-        description: "Destination port"
-    returns:
-      detected:
-        type: boolean
-        description: "Whether IKE service was detected"
-      hosts:
-        type: array
-        description: "Responding hosts"
-      vendor_id:
-        type: string
-        description: "Vendor ID if detected"
+routing:
+  use_for:
+    - "detect IKEv1/IKEv2 VPN endpoints on UDP/500 (and NAT-T on UDP/4500)"
+    - "fingerprint VPN vendor via Vendor-ID payloads and backoff timing"
+    - "enumerate supported IKE transforms (encryption, hash, auth, DH group)"
+    - "test IKE Aggressive Mode with a group name to capture the PSK hash"
+    - "capture Aggressive-Mode PSK hash to a file (-P) for offline cracking with psk-crack"
+    - "crack a captured IKE PSK hash with dictionary or brute-force (psk-crack)"
+    - "discover IPsec VPN endpoint behind a firewall using NAT-T port (4500)"
+    - "verify if a host responds to IKE at all before deeper VPN testing"
+  never_use_for:
+    - "SSL VPN testing (use sslscan / curl)"
+    - "OpenVPN testing (use openvpn directly)"
+    - "WireGuard testing (use wg / wg-quick)"
+    - "L2TP-over-IPsec NEGOTIATION (this is just the IKE phase — L2TP is separate)"
+    - "running L4 portscans (use nmap -sU --top-ports for IKE discovery first)"
+    - "brute-forcing v3 SNMP / SSH / etc. (use the matching tool)"
+  triggers:
+    - "ike"
+    - "ike-scan"
+    - "ipsec"
+    - "vpn port 500"
+    - "vpn UDP 500"
+    - "isakmp"
+    - "isakmp port 500"
+    - "aggressive mode"
+    - "ike aggressive"
+    - "psk crack"
+    - "psk-crack"
+    - "ike psk"
+    - "vendor id"
+    - "showbackoff"
+    - "transform enumeration"
+    - "ikev1"
+    - "ikev2"
+    - "nat-t"
+    - "natt"
+    - "udp 4500"
+    - "vpn fingerprint"
+    - "ike transform"
+  prefer_over: []
 
-  aggressive_mode:
-    description: "Test IKE aggressive mode with group name enumeration"
-    when_to_use: "To test if VPN accepts a specific group name and capture PSK hash"
-    params:
-      target:
-        type: string
-        required: true
-        description: "Target IP"
-      group_name:
-        type: string
-        required: true
-        description: "IKE group name (VPN ID) to test"
-      dport:
-        type: integer
-        default: 500
-        description: "Destination port"
-    returns:
-      valid_group:
-        type: boolean
-        description: "Whether group name is valid"
-      psk_vulnerable:
-        type: boolean
-        description: "Whether PSK can be captured"
-      transforms:
-        type: array
-        description: "Supported transforms"
+see_also:
+  - tool: nmap
+    reason: "Use `nmap -sU -p 500,4500` (or --top-ports 200 -sU) to discover IKE before invoking ike-scan. nmap's NSE has `ike-version` script that calls ike-scan-style probes on port 500. Discover with nmap, deep-dive with ike-scan."
+  - tool: john
+    reason: "WARNING: john does NOT support IKE PSK hash format (the Aggressive-Mode hash captured via `-P` is non-standard — IKEv1 PSK with DH-derived skeyid). Use the bundled `psk-crack` binary instead. john only handles IKE PSK in v3 of jumbo with a custom format and even then it's slower than psk-crack."
+  - tool: hashcat
+    reason: "hashcat mode `-m 5300` cracks IKE PSK SHA1 hashes (mode `-m 5400` for MD5). Faster than psk-crack on GPU. Hash format conversion may be required — the file produced by `ike-scan -P` is the right shape but the metadata header may need stripping. Use psk-crack first; switch to hashcat for big wordlists."
+  - tool: nuclei
+    reason: "nuclei has `cves/2018/CVE-2018-13379-fortinet.yaml` and similar templates that fingerprint vendor VPN appliances over HTTPS/SSL. Complementary to ike-scan's IKE-layer fingerprinting — different transport, often same target."
+  - tool: tunnel
+    reason: "Once an IPsec VPN credential pair is recovered (group name + PSK), the tunnel tool can establish the actual VPN connection (strongSwan / Libreswan) for follow-up internal recon. ike-scan only discovers / cracks; tunnel sets up the live tunnel."
 
-  enumerate_transforms:
-    description: "Enumerate supported IKE transforms/proposals"
-    when_to_use: "To discover encryption and authentication methods supported"
-    params:
-      target:
-        type: string
-        required: true
-        description: "Target IP"
-      dport:
-        type: integer
-        default: 500
-        description: "Destination port"
-    returns:
-      transforms:
-        type: array
-        description: "Supported transforms"
-      vendor_id:
-        type: string
-        description: "Vendor identification"
+# ── kind:cli specific sections ──────────────────────────────────────
 
-  brute_group_names:
-    description: "Brute force IKE group names with parallel scanning support"
-    when_to_use: "To discover valid VPN group names for further exploitation"
-    params:
-      target:
-        type: string
-        required: true
-        description: "Target IP"
-      wordlist:
-        type: string
-        default: "common"
-        description: "Wordlist: 'common', 'company', 'extensive', or file path"
-      names:
-        type: array
-        description: "Inline list of group names to test (overrides wordlist)"
-      dport:
-        type: integer
-        default: 500
-        description: "Destination port"
-      concurrency:
-        type: integer
-        default: 5
-        description: "Number of parallel requests (max 10)"
-      delay:
-        type: number
-        default: 0.1
-        description: "Delay between requests in seconds"
-      stop_on_first:
-        type: boolean
-        default: false
-        description: "Stop when first valid group found"
-    returns:
-      valid_groups:
-        type: array
-        description: "Valid group names found"
-      found_count:
-        type: integer
-        description: "Number of valid groups"
-      tested_count:
-        type: integer
-        description: "Number of names tested"
-      concurrency_used:
-        type: integer
-        description: "Concurrency level used"
+target_extraction:
+  # ike-scan target convention:
+  #
+  #   ike-scan accepts ONE OR MORE positionals (hosts). The TARGET (for
+  #   scope validation) is the LAST non-flag positional. This matches the
+  #   typical command form:
+  #
+  #       ike-scan -M -A -d test 10.10.10.5
+  #       ike-scan -M -A -d test -P /session/hash.txt 10.10.10.5
+  #
+  #   In both cases the host is `10.10.10.5`. Critically, when `-P
+  #   /session/hash.txt` is used, the hash-file path is a FLAG VALUE
+  #   (consumed by `-P`), not a positional, and must NOT be confused with
+  #   a target. Same for `-d <id>` (Aggressive-Mode group name) and `-n`
+  #   (initiator ID).
+  #
+  #   psk-crack target convention:
+  #
+  #   psk-crack takes a SINGLE positional — the hashfile. There is no
+  #   network target for psk-crack (it's offline). Scope validation is
+  #   irrelevant for psk-crack; the binary is local-only.
+  #
+  # Precedence (first match wins):
+  #   1. last_non_flag_positional — ike-scan's host (or psk-crack's hashfile)
+  #   2. positional_match — strip optional :port (rare, ike-scan uses -p)
+  - rule: "last_non_flag_positional"
+    parse_as: "raw"
+  - rule: "positional_match"
+    pattern: '^\[?([^\]:/?#\s]+|[0-9a-fA-F:]+)\]?(?::\d+)?$'
+    group: 1
+    parse_as: "raw"
 
-  get_psk_hash:
-    description: "Capture PSK hash for offline cracking"
-    when_to_use: "After finding valid group name via brute_group_names or aggressive_mode"
-    next_step: "Use ike-scan.crack_psk with the captured hash_data. Do NOT use john - it doesn't support IKE PSK format."
-    params:
-      target:
-        type: string
-        required: true
-        description: "Target IP"
-      group_name:
-        type: string
-        required: true
-        description: "Valid IKE group name"
-      dport:
-        type: integer
-        default: 500
-        description: "Destination port"
-    returns:
-      psk_hash:
-        type: string
-        description: "PSK hash for cracking - pass this to crack_psk method"
-      crackable:
-        type: boolean
-        description: "Whether hash was captured"
+# Flags whose presence makes target scope un-validatable. The plugin's
+# cli_in_container rejects the call before docker spawn when any of these
+# appear, with the reason below.
+reject_flags:
+  - "--inputfile"      # ike-scan: read hosts from file — multi-target, off-argv
+  - "-f"               # ike-scan: short form of --inputfile (some builds)
+reject_flags_reason: >
+  ike-scan's `--inputfile <hostfile>` (and the `-f` short form on some builds)
+  reads the target list from disk, putting the hosts outside argv where
+  scope validation cannot reach. Iterate yourself via the read tool + a
+  per-host call with the target as positional. psk-crack has no equivalent
+  multi-target flag (it's offline / single-hashfile by design).
 
-  crack_psk:
-    description: "Crack a captured PSK hash using psk-crack (dictionary or brute force)"
-    when_to_use: "After capturing PSK hash with get_psk_hash. This is the ONLY way to crack IKE PSK hashes - john does not support this format."
-    params:
-      hash_data:
-        type: string
-        required: true
-        description: "PSK hash data from get_psk_hash"
-      wordlist:
-        type: string
-        default: "common"
-        description: "Built-in wordlist: 'common', 'rockyou_sample', or file path"
-      passwords:
-        type: array
-        description: "Inline list of passwords to try (overrides wordlist)"
-      bruteforce:
-        type: boolean
-        default: false
-        description: "Use brute force instead of dictionary"
-      charset:
-        type: string
-        default: "alnum"
-        description: "Charset for brute force: 'alnum', 'alpha', 'numeric', 'special'"
-      min_length:
-        type: integer
-        default: 1
-        description: "Min password length for brute force"
-      max_length:
-        type: integer
-        default: 6
-        description: "Max password length for brute force"
-    returns:
-      cracked:
-        type: boolean
-        description: "Whether password was cracked"
-      password:
-        type: string
-        description: "Cracked password if successful"
-      method:
-        type: string
-        description: "Method used (dictionary or bruteforce)"
+# Per-tool value-taking flags whose values must NOT be confused with targets.
+# Verified against `ike-scan --help` and `psk-crack --help` on Kali rolling
+# 2026-04 (ike-scan 1.9.5).
+value_flags:
+  # ── ike-scan: targeting / port / timing ──
+  - "-r"                    # retry count (default 3)
+  - "--retry"
+  - "-t"                    # per-host timeout (ms, default 500)
+  - "--timeout"
+  - "-i"                    # interval between packets (ms)
+  - "--interval"
+  - "-p"                    # destination UDP port (default 500)
+  - "--dport"
+  - "-s"                    # source UDP port (default 500 — uses raw socket if 500)
+  - "--sport"
+  - "-w"                    # source IP / interface bind
+  - "--bandwidth"
+  - "--mbps"                # bandwidth ceiling (Mbps)
+  # ── ike-scan: Aggressive-Mode identity ──
+  - "-d"                    # Aggressive-Mode ID (group name)
+  - "--id"
+  - "-n"                    # Aggressive-Mode initiator ID
+  - "--inititator-id"       # NB: ike-scan upstream really has this typo
+  - "--id-type"             # numeric ID type 1..11 (FQDN, USER_FQDN, KEY_ID, ...)
+  # ── ike-scan: PSK capture ──
+  - "-P"                    # save PSK hash to file (used WITH -A)
+  - "--pskcrack"
+  # ── ike-scan: transform / vendor ──
+  - "--trans"               # transform spec: enc,hash,auth,group (e.g., 5,2,1,2)
+  - "--vendor"              # vendor-ID payload (hex)
+  - "-S"                    # scrambler (random nonce seed)
+  - "--scrambler"
+  # ── ike-scan: NAT-T (modern builds) ──
+  - "--natt"                # NAT-T transforms (with value)
+  - "--nat-t"
+  - "--natt-port"           # NAT-T destination port (default 4500)
+  - "--natt-spi"
+  # ── ike-scan: backoff fingerprinting (value optional but DSL safest as value) ──
+  - "--showbackoff"         # backoff fingerprint — accepts optional seconds value
+  - "--showbackofftime"     # backoff timing data
+  # ── ike-scan: lifetime / size ──
+  - "--lifetime"            # SA lifetime (seconds)
+  - "--lifesize"            # SA lifesize (kbytes)
+  - "--auth"                # authentication method (numeric)
+  - "--gssid"               # GSS-API ID (hex)
+  - "--idtype"              # alias for --id-type on some builds
+  # ── ike-scan: random / spi ──
+  - "--cookie"              # cookie value (hex)
+  - "--spisize"             # SPI size in bytes
+  - "--headerver"           # ISAKMP header version
+  - "--mbz"                 # MBZ (must-be-zero) value
+  - "--headerlen"           # header length override
+  # ── ike-scan: protocol selection ──
+  - "--protocol"            # protocol number
+  - "--exchange"            # exchange type number
+  - "--nextpayload"         # next payload type
+  - "--rcookie"             # responder cookie (hex)
+  # ── ike-scan: input/output flags whose values aren't targets ──
+  - "--inputfile"           # REJECTED above
+  - "-f"                    # REJECTED above
+  # ── ike-scan: random / output ──
+  - "--random"              # random source seed
+  - "-T"                    # ICookie / I-flag selector
+  - "--tcp"                 # TCP encapsulation (with optional value)
+  - "--tcpport"             # TCP encapsulation port
+  # ── ike-scan: boolean / no-value flags listed for safety (DSL skips harmlessly) ──
+  - "-h"                    # universal help — boolean
+  - "--help"
+  - "-V"                    # version — boolean
+  - "--version"
+  - "-M"                    # multiline output — boolean
+  - "--multiline"
+  - "-A"                    # Aggressive Mode — boolean
+  - "--aggressive"
+  - "-2"                    # IKEv2 — boolean
+  - "--ikev2"
+  - "-N"                    # no-DNS / no-output filter — boolean (verify per-build)
+  - "--nodns"
+  - "-v"                    # verbose — boolean (repeatable)
+  - "--verbose"
+  - "-q"                    # quiet — boolean
+  - "--quiet"
+  # ── psk-crack ──
+  - "-d"                    # dictionary file (psk-crack)  — same letter as ike-scan's -d (id);
+                            #                                BINARY-DEPENDENT — DSL only invokes one
+                            #                                binary per call (chosen by usage_pattern's
+                            #                                binary: field), so there's no cross-binary collision.
+  - "--dictionary"
+  - "-B"                    # bruteforce charset (psk-crack)
+  - "--bruteforce"
+  - "-l"                    # bruteforce length (psk-crack)
+  - "--bruteflen"
+  - "-c"                    # charset selector (psk-crack)  — same letter as net-snmp's -c but
+                            #                                this is a DIFFERENT binary; not a collision.
+  - "--charset"
+  - "-n"                    # nortel charset (psk-crack alt mode)
+  - "--nortel"
+  - "-N"                    # number of threads (psk-crack)
+  - "--threads"
+  - "-s"                    # SHA1 mode (psk-crack)
+  - "--sha1"
+  - "-m"                    # MD5 mode (psk-crack)
+  - "--md5"
+  - "-H"                    # SHA mode selector (psk-crack)
+  - "--hash"
+
+usage_patterns:
+  # ── ike-scan: basic discovery ──────────────────────────────
+  - name: "Basic IKE Main-Mode probe (lowest-noise first contact)"
+    binary: "ike-scan"
+    command: "-M {host}"
+    when: "First-contact IKE probe after nmap finds UDP/500 open. Default IKEv1 Main Mode with the default transform set (8 transforms tried). `-M` produces one attribute per line for easy parsing. Returns Vendor-ID, accepted transform, and lifetime. ~1-2 second response on a live target. NO PSK leak (Main Mode hides PSK behind DH); for PSK extraction, see Aggressive Mode."
+
+  - name: "Multi-host IKE probe (CIDR-style sweep is NOT supported — list hosts)"
+    binary: "ike-scan"
+    command: "-M {host1} {host2} {host3}"
+    when: "ike-scan accepts multiple positionals, one per host. NO CIDR / range syntax — for that, drive a wrapper. Only useful when you have a small list and want a single-pass scan. The DSL extracts the LAST positional as the canonical scope target; the others must individually pass scope validation (driven via target_extraction's last_non_flag_positional precedence + per-arg validate)."
+
+  - name: "Aggressive Mode PSK extraction (the hash-capture move)"
+    binary: "ike-scan"
+    command: "-M -A -d {group_name} -P /session/ike-hash.txt {host}"
+    when: "Aggressive Mode (`-A`) + group ID (`-d <name>`) + save-hash flag (`-P /session/<file>`). If the responder accepts Aggressive Mode (most pre-2010 IPsec vendors do, many post-2010 also if not patched), the response includes a PSK hash that ike-scan saves to the file. Then feed that file to psk-crack. CRITICAL: this is the canonical Aggressive-Mode misconfig exploitation move."
+
+  - name: "Aggressive Mode test WITHOUT capture (just check if accepted)"
+    binary: "ike-scan"
+    command: "-M -A -d {group_name} {host}"
+    when: "Same as above but no `-P` — just confirms whether the group name is accepted. Useful when bruting group names and you don't want to waste disk on every attempt. Once a valid group is found, repeat with `-P` to capture the hash."
+
+  - name: "Custom transform spec (when default 8 transforms don't elicit response)"
+    binary: "ike-scan"
+    command: "-M --trans=5,2,1,2 {host}"
+    when: "Override the transform set with a single explicit `enc,hash,auth,group` quad. Numbers per RFC 2409 / IANA: enc (1=DES, 5=3DES, 7=AES), hash (1=MD5, 2=SHA1, 4=SHA-256), auth (1=PSK, 3=RSA-Sig, 64221=Hybrid), group (1=MODP768, 2=MODP1024, 5=MODP1536, 14=MODP2048). 5,2,1,2 = 3DES/SHA1/PSK/Group2 — the 'classic enterprise' default for Cisco/Juniper. Try this when the default set returns NO-PROPOSAL-CHOSEN."
+
+  - name: "Backoff-pattern vendor fingerprint (slow but precise)"
+    binary: "ike-scan"
+    command: "-M --showbackoff {host}"
+    when: "Sends multiple ISAKMP packets over ~60 seconds and analyses the response timing pattern. Different vendors have different retransmission backoff curves; matching the pattern to a known vendor (Cisco PIX, Juniper, Watchguard, etc.) gives high-confidence vendor identification even when Vendor-ID payloads are stripped/spoofed. SLOW: budget ~120 s per host. Use when Vendor-ID is missing or suspicious."
+
+  - name: "NAT-T probe on UDP/4500"
+    binary: "ike-scan"
+    command: "-M -p 4500 {host}"
+    when: "NAT-Traversal (NAT-T) IKE on UDP/4500. Many enterprise VPNs run on 4500 instead of (or alongside) 500 because their endpoints are behind NAT. Always probe both 500 AND 4500 in early recon; the absence on 500 doesn't mean there's no IPsec endpoint. Some implementations only respond to NAT-T after the floating-from-500 negotiation, so this can fail even on a real responder — combine with --natt where supported."
+
+  - name: "IKEv2 probe (newer protocol, different syntax)"
+    binary: "ike-scan"
+    command: "-2 -M {host}"
+    when: "IKEv2 (`-2` or `--ikev2`) — the modern (RFC 7296) protocol. Most post-2015 commercial VPNs use IKEv2 by default. Many of the IKEv1 flags (-A aggressive, --trans transform-spec) DON'T apply to IKEv2 — different message types and key derivation. Use this for endpoint discovery; deeper IKEv2 attack work falls to other tools."
+
+  - name: "Verbose probe (debugging an unresponsive target)"
+    binary: "ike-scan"
+    command: "-M -v -v {host}"
+    when: "Doubled `-v` shows every sent packet and every retransmit, useful when the responder is borderline (filtered? slow? wrong port?). Single `-v` shows the transform proposal each retry uses; `-vv` adds wire-level dumps; `-vvv` is full hex. ALWAYS use multi-line with verbose so the output is parseable."
+
+  - name: "Tight-budget probe (fail fast for large host lists)"
+    binary: "ike-scan"
+    command: "-M -r 1 -t 250 {host}"
+    when: "Default is 3 retries × 500ms = 1.5s budget per non-responsive host. For sweeping a /24 of suspected IPsec endpoints, drop to 1 retry × 250ms = 250ms per dead host. The trade-off: real-but-slow responders (saturated WAN link) get classified as dead. Use only on confirmed-fast networks."
+
+  # ── ike-scan: discovery edge cases ──────────────────────────
+  - name: "Custom vendor-ID injection (probe vendor-specific behavior)"
+    binary: "ike-scan"
+    command: "-M --vendor=4048b7d56ebce88525e7de7f00d6c2d3 {host}"
+    when: "Inject a specific Vendor-ID payload (hex). Used to elicit vendor-conditional responses — some endpoints only emit certain proposals if a specific Vendor-ID is in the request. The example here is the Cisco Unity Vendor-ID; others: Microsoft (1e2b516905991c7d7c96fcbfb587e461), strongSwan (882fe56d6fd20dbc2251613b2ebe5beb), Juniper (699369228741c6d4ca094c93e242c9de). Niche but powerful for vendor-specific recon."
+
+  - name: "Aggressive Mode group-name brute (single name attempt)"
+    binary: "ike-scan"
+    command: "-M -A -d {candidate_name} {host}"
+    when: "One probe per candidate group name. Drive in a loop from the wordlist (read tool → for each line → call ike-scan). Common candidate names: vpn, default, group, cisco, ipsec, admin, test, lab, prod, corp, internal, remote, branch, hq, vpn1, vpn2, sitevpn, corpvpn, employees, staff. Stop on first response with `Aggressive Mode handshake returned` line."
+
+  - name: "ID-type variant (numeric ID rather than FQDN)"
+    binary: "ike-scan"
+    command: "-M -A -d {numeric_id} --id-type=2 {host}"
+    when: "ID type 2 = ID_FQDN (default is ID_USER_FQDN, type 3). Some endpoints reject the user-FQDN form and require plain FQDN. Other types: 1=ID_IPV4_ADDR, 2=ID_FQDN, 3=ID_USER_FQDN, 4=ID_IPV4_ADDR_SUBNET, 5=ID_IPV6_ADDR, 9=ID_DER_ASN1_DN, 10=ID_DER_ASN1_GN, 11=ID_KEY_ID. Try id-type=11 (KEY_ID) when 3 fails — common Cisco config."
+
+  # ── ike-scan: help / version ────────────────────────────────
+  - name: "ike-scan help (full flag reference)"
+    binary: "ike-scan"
+    command: "--help"
+    when: "Print ike-scan's full flag set (~80 flags across mode/transform/timing/output). Useful when verifying a less-common flag's exact spelling or value type. NOTE: ike-scan prints help to stdout. The `-h` short form also works."
+
+  - name: "ike-scan version"
+    binary: "ike-scan"
+    command: "--version"
+    when: "Print ike-scan version (e.g., `ike-scan 1.9.5`). Useful to verify that the image's ike-scan supports a flag the agent wants to use — some flags are post-1.9.4 (`--natt`, `--ikev2`)."
+
+  # ── psk-crack: dictionary attack ────────────────────────────
+  - name: "psk-crack with bundled rockyou wordlist (default attack)"
+    binary: "psk-crack"
+    command: "-d /usr/share/wordlists/rockyou.txt /session/ike-hash.txt"
+    when: "Dictionary attack with the rockyou wordlist (~14M passwords). Hash file is the file produced by `ike-scan -P`. psk-crack runs single-threaded by default; use `-N <threads>` if available in the build (some Debian builds have a thread-count option). Expect 100k-500k attempts/sec single-thread; ~30 s for top-10k passwords, ~10 min for the full rockyou."
+
+  - name: "psk-crack with custom wordlist (engagement-specific candidates)"
+    binary: "psk-crack"
+    command: "-d /session/{custom_wordlist} /session/ike-hash.txt"
+    when: "Custom wordlist (write to /session via the `write` tool first). Each line is one candidate. Use targeted lists when the engagement context suggests specific PSKs — company name + year, project codename, vendor defaults (cisco123, juniper, watchguard), department names. Often vastly more effective than rockyou for enterprise VPNs."
+
+  - name: "psk-crack brute-force alphanumeric, 1-6 chars"
+    binary: "psk-crack"
+    command: "-B abcdefghijklmnopqrstuvwxyz0123456789 -l 6 /session/ike-hash.txt"
+    when: "Brute force with explicit charset and length. `-B <charset>` defines the alphabet; `-l <int>` is fixed length (some builds support range via `-l <min>:<max>`). 36-char alphabet × 6-char length = 2.2 billion candidates — ~6 hours single-thread. Drop length to 5 for ~10 min. Length 7+ is impractical without GPU (use hashcat -m 5300 instead)."
+
+  - name: "psk-crack brute-force numeric only (PIN-style PSKs)"
+    binary: "psk-crack"
+    command: "-B 0123456789 -l 8 /session/ike-hash.txt"
+    when: "Numeric-only charset for PIN-style PSKs (common on consumer VPN routers and small business gateways). 10^8 = 100M candidates — ~3-5 minutes single-thread. Try this BEFORE rockyou when the target is a SOHO / consumer device — many ISP-provisioned gateways use a numeric default like '12345678' or '00000000'."
+
+  - name: "psk-crack help"
+    binary: "psk-crack"
+    command: "--help"
+    when: "Print psk-crack's flag set (~10 flags). Useful when verifying a build's specific brute / dictionary syntax — Debian and Kali ship the same upstream 1.9.5 but flag aliases differ."
+
+output_formats:
+  # ike-scan output is text-only. There is no JSON option upstream. The
+  # `-M` flag changes the layout to one attribute per line (much more
+  # parseable than the default condensed form). psk-crack output is also
+  # text-only; success is detected by a `key found` / `Key found` line.
+  - flag: ""
+    format: "text_condensed"
+    preferred: false
+    notes: "Default — ike-scan emits one summary line per host with `Main Mode handshake returned` / `Aggressive Mode handshake returned` / `0 returned` plus inline SA / Vendor-ID. Hard to parse beyond a regex grep."
+  - flag: "-M"
+    format: "text_multiline"
+    preferred: true
+    notes: "Multi-line output — one attribute per line. SA=(Enc=3DES Hash=SHA1 Auth=PSK Group=2:modp1024 LifeType=Seconds LifeDuration=28800). Vendor-ID and KeyExchange on their own lines. The DSL prefers this for parser-friendliness."
+  - flag: "-v"
+    format: "text_verbose"
+    preferred: false
+    notes: "Verbose — adds per-packet send/retransmit log. Repeatable: -vv adds hex dumps; -vvv is full payload hex. Use for debugging unresponsive targets only; output is noisy."
+  - flag: "--showbackoff"
+    format: "text_backoff_table"
+    preferred: false
+    notes: "Backoff-pattern fingerprint table. Header line + one row per probe with timing data. Implementation type printed at the bottom (e.g., `Implementation guess: Cisco IOS / PIX`)."
+
+common_options:
+  targeting:
+    - "<host>: target — LAST positional argument (NOT a flag value). Multiple hosts allowed."
+    - "-p <port>, --dport <port>: destination UDP port (default 500). Use 4500 for NAT-T."
+    - "-s <port>, --sport <port>: source UDP port. NB: setting --sport=500 requires raw socket / CAP_NET_RAW; default uses high port."
+    - "-r <int>, --retry <int>: retries per host (default 3)."
+    - "-t <ms>, --timeout <ms>: per-host timeout in milliseconds (default 500)."
+  mode:
+    - "-A, --aggressive: IKEv1 Aggressive Mode — required for PSK hash extraction."
+    - "-2, --ikev2: IKEv2 instead of default IKEv1."
+    - "-S <int>, --scrambler <int>: nonce scrambler seed (rare)."
+  identity:
+    - "-d <id>, --id <id>: Aggressive-Mode group ID (the 'group name')."
+    - "-n <id>, --inititator-id <id>: Aggressive-Mode initiator ID (NB: ike-scan upstream typo'd 'inititator')."
+    - "--id-type <num>: ID type — 1=IPV4, 2=FQDN, 3=USER_FQDN (default), 9=DER_ASN1_DN, 11=KEY_ID."
+  transform:
+    - "--trans=<enc>,<hash>,<auth>,<group>: explicit transform — IANA numeric values."
+    - "--vendor=<hex>: vendor-ID payload (32+ hex chars)."
+  output:
+    - "-M, --multiline: one attribute per line (preferred for parsing)."
+    - "-v, --verbose: verbose; repeatable (-vv -vvv)."
+    - "-q, --quiet: quiet."
+    - "-N, --nodns: don't resolve hostnames in output."
+  fingerprinting:
+    - "--showbackoff[=<seconds>]: backoff-pattern vendor fingerprint (slow but precise)."
+    - "--showbackofftime[=<seconds>]: emit raw backoff timing data."
+  psk_capture:
+    - "-P <file>, --pskcrack <file>: SAVE captured Aggressive-Mode PSK hash to file (use WITH -A)."
+  psk_crack:
+    - "<hashfile>: PSK hash file (the file produced by ike-scan -P)."
+    - "-d <dict>, --dictionary <dict>: dictionary attack with file."
+    - "-B <charset>, --bruteforce <charset>: brute-force charset (alphabet)."
+    - "-l <int>, --bruteflen <int>: brute-force length."
+    - "-c <name>, --charset <name>: named charset (alnum / alpha / numeric / ...)."
+    - "-N <int>, --threads <int>: thread count (some builds)."
+
+gotchas:
+  - "MULTI-BINARY toolkit — ike-scan (network probing) and psk-crack (offline cracker) are SEPARATE binaries. Choose the right one per usage_pattern. Each declares `binary:` explicitly. cli_in_container forwards the chosen binary explicitly (mirror of impacket / smtp / snmp pattern)."
+  - "TARGET IS THE LAST POSITIONAL — ike-scan accepts multiple positional hosts; the DSL takes the LAST as the canonical scope target. With `-P /session/file.txt` the file path is a FLAG VALUE (consumed by `-P`), not a positional. With `-d <id>` and `-n <id>` the IDs are flag values too. `--trans=5,2,1,2` looks numeric but its value is captured by `--trans=` (long-form syntax)."
+  - "AGGRESSIVE MODE LEAKS THE PSK HASH — when the responder accepts Aggressive Mode (most pre-2010 IPsec configs, many post-2010 also if unhardened), `-A -d <group> -P /session/hash.txt` saves a crackable PSK hash. This is the headline IKE misconfig exploitation move. Main Mode does NOT leak (DH-protected), so capture requires Aggressive."
+  - "TRANSFORM SPEC IS COMMA-SEPARATED IANA NUMBERS — `--trans=enc,hash,auth,group`. Common: `--trans=5,2,1,2` = 3DES/SHA1/PSK/MODP1024 (the 'classic enterprise' default). Encryption: 1=DES, 5=3DES, 7=AES (with key length appended for AES, e.g., `7/128`). Hash: 1=MD5, 2=SHA1, 4=SHA-256. Auth: 1=PSK, 3=RSA-Sig, 64221=Hybrid. Group: 1=MODP768, 2=MODP1024, 5=MODP1536, 14=MODP2048."
+  - "DEFAULT TRANSFORM SET TRIES 8 — without `--trans`, ike-scan tries 8 hardcoded transforms in order. If the responder accepts NONE of them, you get `0 returned handshake`. Try `--trans=5,2,1,2` and `--trans=7/128,2,1,2` (AES/SHA1/PSK/MODP1024) before declaring the host non-IKE."
+  - "IKEv2 IS A DIFFERENT PROTOCOL — `-2` / `--ikev2` switches to IKEv2 (RFC 7296). Many IKEv1 flags don't apply: no Aggressive Mode (IKEv2 doesn't have one), different transform syntax, different message types. ike-scan's IKEv2 support is BASIC — for deep IKEv2 attack work, use other tools (strongSwan client, custom scripts)."
+  - "NAT-T IS UDP/4500 — NAT-Traversal IPsec runs on 4500. ALWAYS probe both 500 AND 4500 in early recon. Some implementations only respond to NAT-T after a from-500 floating handshake; combine with `--natt` flag where supported (varies by build). Discovery via `nmap -sU -p 500,4500`."
+  - "psk-crack DOES NOT WORK ON MAIN MODE — only on Aggressive Mode hashes. Main Mode's PSK derivation uses DH-derived skeyid, which is computationally infeasible to crack. If `ike-scan -P` produced an empty file or no Aggressive-Mode hash line, the hash is not crackable; you need a different vector."
+  - "psk-crack -d FILE-NOT-FOUND IS SILENT-ish — psk-crack will say `Cannot open <file>` to stderr and exit nonzero. Verify the wordlist path inside the container (typically /session/<file> or /usr/share/wordlists/rockyou.txt). The container has the standard Kali wordlists."
+  - "psk-crack BRUTE LENGTH SCALING IS CATASTROPHIC — single-thread psk-crack does ~100k-500k attempts/sec. 36-char alphabet × 7 chars = 78 billion candidates = ~150 hours. Don't brute beyond length 6 without GPU; switch to hashcat (-m 5300 SHA1 / -m 5400 MD5)."
+  - "john DOES NOT SUPPORT IKE PSK — see_also.john has the full warning. Use psk-crack first, hashcat second; john only handles IKE PSK in jumbo-with-custom-format and even then is slower."
+  - "RAW SOCKET PRIVILEGE — ike-scan with `--sport=500` requires CAP_NET_RAW (root). The default uses a high source port and standard datagram socket — the Dockerfile does NOT enable privileged. If you need --sport=500 (some old responders fingerprint on source port), the user must approve --privileged container per the security model."
+  - "VENDOR-ID FINGERPRINTING IS NEVER DEFINITIVE — Vendor-ID payloads are advisory; vendors can strip / spoof them. `--showbackoff` (timing fingerprint) is more robust but slow (~120s/host). For high-confidence vendor ID, combine: Vendor-ID payload + backoff timing + transform set + lifetime defaults."
+  - "Feature 28 dynamic recipes are RETIRED for the kind:cli path — the LLM writes argv directly. Recipes still load for legacy method calls (scan, aggressive_mode, enumerate_transforms, brute_group_names, get_psk_hash, crack_psk) if /session/tool_recipes/ike-scan/ exists, but they're a dead branch under run_cli (REQ-TR-016)."
+  - "psk-crack `-B` HAS TWO ARGV SHAPES — the tool.yaml usage_patterns show the EXPLICIT-ALPHABET form (`-B abcdefghijklmnopqrstuvwxyz0123456789 -l 6 <hashfile>`). The legacy mcp-server.py used the SHORTHAND-CHARSET form (`-B<min>:<max>:<charset>` where charset is a single letter: `a`=alnum, `c`=alpha, `n`=numeric, `s`=special — e.g., `-B1:6:a` for 1-6 alnum). BOTH WORK on Debian/Kali psk-crack 1.9.5; the explicit form is more portable across builds. Prefer the explicit form unless replicating legacy behaviour."
+  - "PSK HASH FILE FORMAT (on-disk, written by `ike-scan -P`) — single line of NINE colon-separated hex fields: `g_xr:g_xi:cky_r:cky_i:sai_b:idir_b:ni_b:nr_b:hash_r`. To validate the file is non-empty / well-formed via the `read` tool: confirm at least one line has 9+ colon-separated parts AND ≥3 of the fields are hex strings >20 chars long (DH values, SAi, hash). Empty file == Aggressive Mode wasn't actually accepted; re-run ike-scan and confirm the `Aggressive Mode handshake returned` line appeared."
+  - "ike-scan -M OUTPUT LINE MARKERS (for `read` / `grep` post-processing) — the multi-line output uses these distinguishable line shapes: `<ip> <text>` (host summary line), `\\tSA=(...)` (transform line, indented, parens-wrapped), `\\tVID=<hex>` (vendor-ID line, indented), `Handshake returned` (success substring inside host summary). Combine with the failure_signatures patterns (`0 returned handshake`, `0 returned notify`, `Aggressive Mode handshake returned`) to classify a result without writing a full parser."
+  - "psk-crack OUTPUT FORMAT VARIES BY BUILD — Debian/Kali 1.9.5 emits `Key found \"<password>\"` on success, but older / patched builds may emit `key found: <password>` (lowercase, colon-separated) or `PSK = <password>` (equals-sign form). The kind:cli path's failure_signatures only document the `Key found` substring; if a different build is in play, grep for all three. Failure / no-key-found is signalled by absence of any of these AND clean exit (psk-crack does NOT print `Key not found` on dictionary exhaustion in all builds — silence + exit-0 is the canonical 'ran cleanly, no match' state)."
+  - "psk-crack `-N` VS ike-scan `-N` COLLIDE BY LETTER — psk-crack's `-N` is THREAD COUNT (value flag, integer), ike-scan's `-N` is `--nodns` (boolean, no value). Both are listed in value_flags, but the binary chosen by usage_pattern's `binary:` field disambiguates. CRITICAL: do NOT pass `-N <int>` to ike-scan (it'll either be ignored or eat the next positional as the host); do NOT pass bare `-N` to psk-crack (it expects an integer thread count)."
+  - "psk-crack DICTIONARY FILE PATH — psk-crack consumes `-d <dict>` as a value flag (path), then expects the hashfile as the LAST positional. Supported wordlist locations inside the container: `/usr/share/wordlists/rockyou.txt` (Kali default), `/usr/share/wordlists/seclists/...` (if seclists installed), `/session/<custom>.txt` (engagement-specific, written via the `write` tool BEFORE invoking psk-crack). Verify path with `ls /usr/share/wordlists/` via the bash tool if uncertain."
+
+failure_signatures:
+  # Layer-diverse signals (SKILL #11) — at least 6 distinct verifiable layers:
+  #   1. DNS  2. UDP / network  3. IKE-protocol-error
+  #   4. Argument / config  5. Permission / privilege  6. psk-crack tool-internal
+  #
+  # Verified against:
+  #   - ike-scan 1.9.5 source / man page
+  #   - psk-crack 1.9.5 source
+  #   - real-world responses from Cisco / Juniper / strongSwan
+  - signal: "Could not resolve"
+    remediation: "DNS resolution failed for the host. Verify hostname spelling, try an IP literal, check container DNS (`/etc/resolv.conf`). On HTB / lab, ensure VPN tun0 is up."
+  - signal: "getaddrinfo"
+    remediation: "Linux libc DNS error (often `getaddrinfo: Name or service not known`). Same root cause as 'Could not resolve'. Use IP, or fix DNS."
+  - signal: "Name or service not known"
+    remediation: "DNS / hostname lookup failure. Same as getaddrinfo. Try IP literal."
+  - signal: "0 returned handshake"
+    remediation: "ike-scan sent the proposal but got NO response. Causes: (a) port 500 closed/filtered, (b) responder doesn't support any of the 8 default transforms — try `--trans=5,2,1,2` (3DES/SHA1/PSK/MODP1024) or `--trans=7/128,2,1,2` (AES/SHA1/PSK/MODP1024), (c) responder is IKEv2-only — try `-2`, (d) target is on NAT-T port — try `-p 4500`, (e) wrong source port handling — verify with `nmap -sU -p 500`."
+  - signal: "0 returned notify"
+    remediation: "ike-scan sent the proposal and got a notify rejection (Main Mode error). Most common: NO-PROPOSAL-CHOSEN (none of the offered transforms acceptable), INVALID-EXCHANGE (Main Mode not allowed — try Aggressive `-A`), AUTHENTICATION-FAILED (PSK auth required but none configured)."
+  - signal: "NO-PROPOSAL-CHOSEN"
+    remediation: "Responder rejected ALL offered transforms. Try a different transform spec — most common production transform is `--trans=5,2,1,2` (3DES/SHA1/PSK/MODP1024) or `--trans=7/256,4,1,14` (AES-256/SHA-256/PSK/MODP2048). Walk through the IANA-defined enc/hash/auth/group quads."
+  - signal: "INVALID-EXCHANGE"
+    remediation: "Responder doesn't allow the chosen exchange type. If Main Mode (default) was rejected, try Aggressive Mode (`-A`); if Aggressive was rejected, the responder requires Main Mode (more common in modern hardened deployments)."
+  - signal: "AUTHENTICATION-FAILED"
+    remediation: "Auth required at IKE phase. Likely cert-based (RSA-Sig) auth required — `--trans` should specify auth=3 (RSA-Sig) instead of 1 (PSK). For the Aggressive-Mode group-name brute path, this means the group is invalid; try other group names."
+  - signal: "INVALID-PAYLOAD-TYPE"
+    remediation: "Malformed packet from ike-scan's perspective. Usually a flag combination issue (e.g., `--vendor` with wrong hex length, `--id-type` mismatch). Drop the offending flag and re-run."
+  - signal: "PAYLOAD-MALFORMED"
+    remediation: "Same root as INVALID-PAYLOAD-TYPE. Verify all flag values are well-formed (hex strings even-length, transform spec valid)."
+  - signal: "Aggressive Mode handshake returned"
+    remediation: "SUCCESS marker for Aggressive Mode — the responder ACCEPTED the proposal and returned its half. If you used `-P /session/<file>`, the PSK hash is now in that file, ready for psk-crack. Not actually a failure but document for completeness."
+  - signal: "Main Mode handshake returned"
+    remediation: "SUCCESS marker for Main Mode — same as above but no PSK leak. The responder is alive and supports the offered transform. Document the transform from the SA= line for follow-up."
+  - signal: "Operation not permitted"
+    remediation: "Likely raw-socket / CAP_NET_RAW failure — `--sport=500` was used without privileged container. Either drop `--sport=500` (use default high source port) or run the container with `--cap-add=NET_RAW` (requires user approval per security model)."
+  - signal: "Permission denied"
+    remediation: "File-level error — usually `-P /session/<file>` with bad write permission, or `-d <dict>` (psk-crack) with unreadable dictionary. Verify /session/ is writable; verify the wordlist file exists and is readable."
+  - signal: "Could not bind to source port"
+    remediation: "Source port binding failed — usually because `--sport=500` was requested without raw-socket privilege OR because another process on the container is bound to 500. Drop `--sport`."
+  - signal: "Bad value"
+    remediation: "Argv parse error — flag value didn't pass validation. Common causes: --trans malformed (need exactly four comma-separated numbers), --vendor with odd-length hex, --id-type out of range (1-11)."
+  - signal: "Invalid"
+    remediation: "Generic argv parse error. Run `ike-scan --help` (or `psk-crack --help`) to verify flag spelling. Common: `--trans` vs `--transform` (only `--trans` exists), `--id` vs `--ID` (case-sensitive)."
+  - signal: "unknown option"
+    remediation: "Flag not recognised by this build. Verify with `--help`; some flags (`--natt`, `--ikev2`) are post-1.9.4 and may not exist on older builds."
+  - signal: "Cannot open"
+    remediation: "File-not-found — typically psk-crack's `-d <dict>` or hashfile positional points at a path that doesn't exist inside the container. Verify path (typically /session/<file> or /usr/share/wordlists/rockyou.txt). Verify the file was created via the `write` tool BEFORE invoking the binary."
+  - signal: "no hash data found"
+    remediation: "psk-crack: hashfile is empty or doesn't contain a valid IKE PSK hash. Re-run `ike-scan -P` and verify the file was populated. Common cause: Aggressive Mode wasn't actually accepted (check ike-scan output for `Aggressive Mode handshake returned` line)."
+  - signal: "Key not found"
+    remediation: "psk-crack: dictionary / brute exhausted without finding the PSK. Try a longer / different wordlist, increase brute length, or switch to hashcat -m 5300 / -m 5400 for GPU acceleration."
+  - signal: "Key found"
+    remediation: "SUCCESS marker for psk-crack — the line is `Key found \"<password>\"`. Not a failure but documented for completeness. Capture the password between the quotes."
+
+help_commands:
+  - command: "ike-scan --help"
+    purpose: "ike-scan full flag reference (~80 flags). Long form."
+  - command: "ike-scan -h"
+    purpose: "ike-scan help — short form."
+  - command: "ike-scan --version"
+    purpose: "ike-scan version (e.g., `ike-scan 1.9.5`). Useful to verify flag availability."
+  - command: "psk-crack --help"
+    purpose: "psk-crack full flag reference. Tiny tool — ~10 flags. NB: long-form and short-form availability varies by build."
+  - command: "psk-crack -h"
+    purpose: "psk-crack help — short form."
+

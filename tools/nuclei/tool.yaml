@@ -1,33 +1,55 @@
 name: nuclei
-version: "3.0"
-description: "Template-based vulnerability scanner (v3.7.0) with 12,000+ templates covering CVEs (3,800+), XSS (1,300+), misconfigurations (900+), RCE (900+), technology detection (810+), LFI (820+), SQLi (540+), default logins (300+), auth bypasses (250+), SSRF (180+), and more. Supports HTTP, DNS, SSL/TLS, TCP, and headless browser protocols. Templates are community-maintained by ProjectDiscovery and auto-updated."
+kind: cli
+binary: nuclei
+version: "3.7.0"
+description: "ProjectDiscovery template-based vulnerability scanner. Runs YAML templates (CVE checks, misconfigurations, exposed panels, default credentials, technology detection, SSL/TLS, DNS) against HTTP/DNS/SSL/TCP/headless targets. Ships with the community-maintained nuclei-templates set (~12,000+ templates by default; auto-updates on first run unless -disable-update-check). Output is structured JSONL (-jsonl, one finding per line) with template-id, info.name, info.severity, host, matched-at, extracted-results, info.reference. Severity ranges info / low / medium / high / critical / unknown. Native CLI; LLM constructs the full nuclei invocation. Use curl for one-shot probes, ffuf for content discovery, nikto for legacy CGI checks, sqlmap for SQLi exploitation."
 image: "ghcr.io/silicon-works/mcp-tools-nuclei:latest"
 image_size_mb: 500
-timeout_seconds: 600
+# Dual-clock model:
+#   idle_timeout_seconds — silence between MCP heartbeats. nuclei prints
+#     findings as they're discovered AND a stats line every -stats-interval
+#     seconds when -stats is set. 10 min silent = stuck, no templates
+#     matching, or DNS timeout death-loop.
+#   max_runtime_seconds  — hard wall-clock cap; never resets on heartbeat.
+#     6 h covers the full ~12K template set against a /24 with default
+#     rate limit (150 req/s).
+# Legacy `timeout_seconds` is used by older clients as the hard cap.
+idle_timeout_seconds: 600
+max_runtime_seconds: 21600
+timeout_seconds: 21600
 
 capabilities:
   - vulnerability_scanning
   - cve_detection
   - technology_detection
   - misconfiguration_detection
+  - default_credential_detection
+  - exposed_panel_detection
+  - ssl_tls_analysis
+  - dns_misconfiguration_detection
 
-# Routing hints for tool selection
+phases:
+  - enumeration
+
 routing:
   use_for:
     - "vulnerability scanning and CVE detection"
-    - "known CVE exploitation check with template matching"
+    - "known CVE check with template matching against detected software"
     - "web application misconfiguration scanning"
     - "technology fingerprinting via nuclei templates"
     - "default credentials and exposed admin panel detection"
     - "SSL TLS certificate and cipher suite analysis"
     - "DNS misconfiguration zone takeover DKIM DMARC SPF check"
-    - "remote code execution RCE detection"
-    - "exposed sensitive files and information disclosure"
-    - "SSRF blind XSS out-of-band vulnerability detection"
+    - "remote code execution RCE detection via templates"
+    - "exposed sensitive files and information disclosure scanning"
+    - "subdomain takeover detection"
   never_use_for:
-    - "port scanning"
-    - "directory brute-forcing"
-    - "password cracking"
+    - "port scanning — use nmap"
+    - "directory brute-forcing — use ffuf"
+    - "password cracking — use hydra or hashcat"
+    - "SQL injection exploitation — use sqlmap (nuclei detects, sqlmap exploits)"
+    - "single one-shot HTTP request — use curl"
+    - "JavaScript-rendered pages — use playwright"
   triggers:
     - "nuclei"
     - "CVE scan"
@@ -35,11 +57,11 @@ routing:
     - "template scan"
     - "security scan"
     - "misconfiguration scan"
+    - "exposed panel"
+    - "default credentials"
+    - "subdomain takeover"
   prefer_over:
     - "nikto"  # nuclei has more templates and is faster
-
-phases:
-  - enumeration
 
 requirements:
   network: true
@@ -49,183 +71,371 @@ resources:
   memory_mb: 512
   cpu: 1.0
 
-methods:
-  scan:
-    description: "Run nuclei templates against a target. By default runs all 12,000+ templates across HTTP, DNS, SSL, and TCP protocols. Use templates param to narrow to specific directories (http/cves/, http/vulnerabilities/, http/misconfiguration/, http/exposed-panels/, http/default-logins/, http/technologies/, http/exposures/, http/takeovers/, http/token-spray/, ssl/, dns/, network/) or tags param to filter by vulnerability type. Output is structured JSONL with template ID, name, severity, matched URL, extracted data, description, and references."
-    when_to_use: "After discovering services (from nmap) to systematically check for known CVEs, misconfigurations, exposed panels, default credentials, and information disclosure. This is the primary vulnerability scanning tool — run it after web-fingerprint identifies the technology stack. Use tags to focus on relevant vulnerability types: 'cve' for known CVEs against detected software versions, 'misconfig' for server misconfigurations, 'default-login' for default credentials on admin panels, 'exposure' for exposed sensitive files/endpoints. For SSL/TLS testing use templates='ssl/' to check for deprecated TLS, expired certs, weak ciphers, self-signed certificates. For DNS issues use templates='dns/' for zone takeover, DKIM/DMARC/SPF checks."
-    params:
-      target:
-        type: string
-        required: true
-        description: "Target URL or IP (e.g., 'http://10.10.10.1', 'https://target.htb:8443', '10.10.10.1'). For non-HTTP protocols (dns, ssl, tcp) provide the hostname or IP."
-      templates:
-        type: string
-        description: "Template path or directory to run. Available directories: 'http/cves/' (known CVEs), 'http/vulnerabilities/' (generic vulns), 'http/misconfiguration/' (server misconfigs), 'http/exposed-panels/' (admin panels), 'http/default-logins/' (default creds), 'http/technologies/' (tech detection), 'http/exposures/' (sensitive files/info), 'http/takeovers/' (subdomain takeover), 'http/token-spray/' (API token testing), 'ssl/' (TLS/cert issues), 'dns/' (DNS misconfigs), 'network/' (TCP service checks). Comma-separated for multiple."
-      tags:
-        type: string
-        description: "Filter templates by tags (comma-separated). Common tags with template counts: 'cve' (~3,800), 'xss' (~1,300), 'exposure' (~1,300), 'misconfig' (~900), 'rce' (~900), 'tech' (~810), 'lfi' (~820), 'sqli' (~540), 'default-login' (~300), 'auth-bypass' (~250), 'token' (~230), 'ssrf' (~180). Combine: 'cve,rce' for CVEs and RCE only."
-      severity:
-        type: string
-        description: "Filter by severity level (comma-separated). Values: 'info', 'low', 'medium', 'high', 'critical', 'unknown'. Use 'critical,high' for quick high-impact-only scan. Use 'critical,high,medium' for a balanced scan."
-      rate_limit:
-        type: integer
-        default: 150
-        description: "Maximum requests per second. Reduce to 50-100 for stealthier scanning or if target rate-limits. Increase to 300+ for faster scanning on robust targets."
-      follow_redirects:
-        type: boolean
-        default: true
-        description: "Follow HTTP redirects (nuclei -fr flag). Enable for targets that redirect HTTP→HTTPS or / → /login. Disable when you want to scan the exact URL without following redirects."
-      headers:
-        type: string
-        description: "Custom headers in 'Header:Value' format, comma-separated for multiple (e.g., 'Authorization:Bearer token123,Cookie:session=abc'). Essential for authenticated scanning behind login pages or WAFs."
-      proxy:
-        type: string
-        description: "HTTP/SOCKS5 proxy URL (e.g., 'socks5://127.0.0.1:1080', 'http://127.0.0.1:8080'). Use with tunnel MCP server for scanning internal targets via SSH tunnel."
-      exclude_tags:
-        type: string
-        description: "Tags to exclude from scan (comma-separated, e.g., 'dos,fuzz' to skip denial-of-service and fuzzing templates). Useful for avoiding noisy or destructive templates."
-      timeout:
-        type: integer
-        default: 600
-        description: "Total scan timeout in seconds (default 10 minutes). A full scan with all templates can take 5-15 minutes. Increase to 1800 (30min) for thorough scans. Decrease to 120-300 for focused scans with specific tags/templates."
-    returns:
-      findings:
-        type: array
-        description: "Detected vulnerabilities, each with: template_id, name, severity (info/low/medium/high/critical), type (http/dns/ssl/tcp), host, matched_at (exact URL), extracted (extracted data like versions/tokens), description, reference (CVE/advisory URLs), tags"
-      by_severity:
-        type: object
-        description: "Finding counts grouped by severity level (e.g., {critical: 1, high: 3, medium: 5, low: 2, info: 10})"
-      total_findings:
-        type: integer
-        description: "Total number of findings across all severities"
+see_also:
+  - tool: nmap
+    reason: "Run nmap first to enumerate open ports and services; feed identified web services into nuclei for template-based vulnerability scanning"
+  - tool: web-fingerprint
+    reason: "Faster signature-based tech detection — try web-fingerprint first; fall back to nuclei -tags tech for templates covering more technologies"
+  - tool: ffuf
+    reason: "For directory and parameter discovery — once ffuf finds endpoints, scan them with nuclei for known vulnerabilities"
+  - tool: curl
+    reason: "For one-shot probes to confirm a single template finding or check the response shape before running a full nuclei scan"
+  - tool: sqlmap
+    reason: "Once nuclei detects a potential SQLi via template, hand off the URL to sqlmap for confirmed exploitation"
+  - tool: nikto
+    reason: "Legacy alternative for CGI/web-server checks — nuclei is generally preferred (more templates, structured output)"
 
-  quick_scan:
-    description: "Fast scan focusing on critical and high severity vulnerabilities only, filtered by a specific vulnerability focus area. Uses higher rate limit (200 rps) and only runs templates tagged with the focus area AND severity critical/high. Much faster than a full scan — typically completes in 1-3 minutes."
-    when_to_use: "For rapid initial assessment when you want to quickly check for high-impact vulnerabilities without waiting for a full scan. Run this first to find quick wins, then follow up with a full scan if needed. Focus areas: 'cve' for known CVEs with public exploits, 'rce' for remote code execution, 'sqli' for SQL injection, 'xss' for cross-site scripting, 'lfi' for local file inclusion, 'ssrf' for server-side request forgery, 'auth-bypass' for authentication bypass, 'default-login' for default credentials on admin panels."
-    params:
-      target:
-        type: string
-        required: true
-        description: "Target URL or IP (e.g., 'http://10.10.10.1', 'https://target.htb')"
-      focus:
-        type: string
-        enum: ["cve", "rce", "lfi", "sqli", "xss", "ssrf", "auth-bypass", "default-login"]
-        default: "cve"
-        description: "Vulnerability type to focus on. Maps to nuclei tags: 'cve' (~3,800 templates, known CVEs), 'rce' (~900, remote code execution), 'lfi' (~820, local file inclusion), 'sqli' (~540, SQL injection), 'xss' (~1,300, cross-site scripting), 'ssrf' (~180, server-side request forgery), 'auth-bypass' (~250, authentication bypass), 'default-login' (~300, default credentials)"
-      follow_redirects:
-        type: boolean
-        default: true
-        description: "Follow HTTP redirects"
-      headers:
-        type: string
-        description: "Custom headers in 'Header:Value' format, comma-separated"
-      proxy:
-        type: string
-        description: "HTTP/SOCKS5 proxy URL"
-      timeout:
-        type: integer
-        default: 300
-        description: "Scan timeout in seconds. Nuclei has ~60-90s startup overhead; quick scans typically complete in 2-4 minutes total."
-    returns:
-      findings:
-        type: array
-        description: "Critical and high severity findings matching the focus area, each with template_id, name, severity, matched_at URL, extracted data, description, and references"
-      total_findings:
-        type: integer
-        description: "Number of critical/high findings found"
+# ── kind:cli specific sections ──────────────────────────────────────
 
-  tech_detect:
-    description: "Fast technology detection using nuclei's ~810 'tech' tagged templates. Identifies web technologies, frameworks, CMS platforms, server software, and infrastructure components. Uses the same template engine as vulnerability scanning but only runs detection templates — no exploitation or active testing. Faster than a full scan but slower than web-fingerprint's signature matching."
-    when_to_use: "For technology fingerprinting when web-fingerprint's 25 built-in signatures aren't sufficient. Nuclei's tech templates cover hundreds more technologies via community-maintained templates. However, web-fingerprint is faster for common technologies (WordPress, Laravel, nginx, etc.) and should be tried first. Use tech_detect when: web-fingerprint didn't identify the technology, you need more specific version detection, or you want to detect niche/uncommon technologies."
-    params:
-      target:
-        type: string
-        required: true
-        description: "Target URL or IP (e.g., 'http://10.10.10.1', 'https://target.htb')"
-      timeout:
-        type: integer
-        default: 300
-        description: "Scan timeout in seconds. Nuclei has ~60s startup overhead for template loading; ~810 tech templates need 2-3 minutes total."
-    returns:
-      technologies:
-        type: array
-        description: "List of detected technology names (deduplicated)"
-      details:
-        type: array
-        description: "Full detection details for each technology, including template_id, name, matched_at URL, extracted version information, and tags"
+target_extraction:
+  # nuclei target is supplied via -u (or -target alias).
+  # The URL host is what scope-validation cares about.
+  # Note: -t (template path), -w (workflow path), -proxy, -resolvers,
+  # -template-url, -workflow-url etc. all carry URLs/paths but are
+  # NOT targets — they are tool inputs. They must appear in value_flags
+  # so the DSL skips them.
+  # The -l <file> and -target-list <file> flags are rejected — see
+  # reject_flags. They put the target list inside a file body where
+  # scope validation can't reach.
+  - rule: "flag_value"
+    flag: "-u"
+    parse_as: "url_host"
+  - rule: "flag_value"
+    flag: "-target"
+    parse_as: "url_host"
 
-  auto_scan:
-    description: "Automatic vulnerability scan using Wappalyzer-based technology detection to select only relevant templates. Nuclei detects the target's technology stack (CMS, framework, server, etc.) and runs matching templates instead of all 12,000+. Much faster and more targeted than a full scan while still covering known CVEs and misconfigurations for the detected stack."
-    when_to_use: "After discovering a web service, as a smart alternative to a full scan. Auto-scan is ideal when you don't know what technology the target runs — it detects the stack first, then scans for relevant vulnerabilities. Faster than a full scan because it only runs matching templates. Use this when: you want a targeted scan without manually specifying tags/templates, web-fingerprint identified the technology but you want vulnerability scanning focused on that stack, or you want a good balance between speed and coverage."
-    params:
-      target:
-        type: string
-        required: true
-        description: "Target URL (e.g., 'http://10.10.10.1', 'https://target.htb')"
-      severity:
-        type: string
-        description: "Filter by severity (info,low,medium,high,critical). Use 'critical,high' for fast high-impact-only results."
-      rate_limit:
-        type: integer
-        default: 150
-        description: "Maximum requests per second"
-      follow_redirects:
-        type: boolean
-        default: true
-        description: "Follow HTTP redirects"
-      headers:
-        type: string
-        description: "Custom headers in 'Header:Value' format, comma-separated"
-      timeout:
-        type: integer
-        default: 600
-        description: "Timeout in seconds"
-    returns:
-      findings:
-        type: array
-        description: "Detected vulnerabilities matching the auto-detected technology stack"
-      by_severity:
-        type: object
-        description: "Finding counts grouped by severity level"
-      total_findings:
-        type: integer
-        description: "Total number of findings"
+# Flags that put the target outside the command line where scope validation
+# can't reach it. Plugin's cli_in_container rejects the call before container
+# spawn when any of these appear.
+reject_flags:
+  - "-l"             # load target list from file (target inside file body)
+  - "-target-list"   # alias for -l
+  - "-list"          # alias seen in some nuclei docs
+reject_flags_reason: "Target-list file ingestion (-l / -target-list / -list) puts the target hosts inside the file body, outside the command line where scope validation can reach. Extract a single URL into -u (or repeat with multiple -u flags if nuclei supports it) so the plugin can validate each target against engagement scope."
 
-  dast_scan:
-    description: "Dynamic application security testing (DAST) using nuclei's built-in fuzzer engine. Fuzzes HTTP parameters (query, body, headers, cookies) with injection payloads to discover vulnerabilities like SQLi, XSS, SSRF, command injection, and more. Aggression level controls payload count: low uses fewer payloads for faster scanning, high uses comprehensive payload sets for thorough testing."
-    when_to_use: "After initial reconnaissance and vulnerability scanning to actively test for injection vulnerabilities that template-based scanning can't find. DAST/fuzzing is more aggressive than template scanning — it sends actual attack payloads to parameters. Use this when: template scans found no vulnerabilities but the target has input parameters, you want to test for SQLi/XSS/command injection on specific endpoints, or you want to complement template-based scanning with active fuzzing. Use a lower rate_limit (50-100) to avoid overwhelming the target."
-    params:
-      target:
-        type: string
-        required: true
-        description: "Target URL to fuzz (e.g., 'http://target.htb/search?q=test'). Include parameters for targeted fuzzing."
-      aggression:
-        type: string
-        enum: ["low", "medium", "high"]
-        default: "low"
-        description: "Fuzzing aggression level controlling payload count. low=fewer payloads (faster, less noise), medium=balanced, high=comprehensive payload sets (slower, thorough). Start with low and escalate if needed."
-      headers:
-        type: string
-        description: "Custom headers in 'Header:Value' format, comma-separated. Use for authenticated fuzzing."
-      follow_redirects:
-        type: boolean
-        default: true
-        description: "Follow HTTP redirects"
-      proxy:
-        type: string
-        description: "HTTP/SOCKS5 proxy URL"
-      rate_limit:
-        type: integer
-        default: 100
-        description: "Maximum requests per second (lower default for fuzzing to avoid overwhelming targets)"
-      timeout:
-        type: integer
-        default: 600
-        description: "Timeout in seconds"
-    returns:
-      findings:
-        type: array
-        description: "Fuzzing findings with template_id, name, severity, matched_at URL, extracted data, and vulnerability details"
-      total_findings:
-        type: integer
-        description: "Total number of findings from fuzzing"
+# Per-tool value-taking flags whose values must NOT be confused with targets.
+# nuclei uses single-dash long flags (e.g., -rate-limit, -disable-update-check,
+# NOT --rate-limit) — verified against `nuclei -h`. The DSL merges these with
+# its built-in defaults.
+value_flags:
+  # Targets / templates
+  - "-u"                       # target URL (extracted)
+  - "-target"                  # alias for -u (extracted)
+  - "-l"                       # rejected, listed for parser correctness
+  - "-target-list"             # rejected, listed for parser correctness
+  - "-list"                    # rejected, listed for parser correctness
+  - "-t"                       # template path or directory
+  - "-templates"               # alias for -t
+  - "-w"                       # workflow path
+  - "-workflows"               # alias for -w
+  - "-id"                      # template ID(s) to run
+  - "-template-id"             # alias for -id
+  - "-tags"                    # tag filter (comma-separated)
+  - "-severity"                # severity filter (info,low,medium,high,critical,unknown)
+  - "-s"                       # short form of -severity
+  - "-author"                  # author filter
+  - "-exclude-tags"            # tag exclusion
+  - "-etags"                   # short form of -exclude-tags
+  - "-exclude-id"              # template-ID exclusion
+  - "-exclude-templates"       # template-path exclusion
+  - "-et"                      # short form of -exclude-templates
+  - "-include-tags"            # explicit include
+  - "-include-templates"       # explicit include
+  - "-template-display"        # display matching templates
+  - "-tl"                      # template list
+  - "-templates-directory"     # custom templates dir
+  - "-td"                      # short form of -templates-directory
+  - "-template-url"            # remote template URL — NOT the target
+  - "-workflow-url"            # remote workflow URL — NOT the target
+  - "-new-templates-directory" # path for new-templates check
+  # Connection / performance
+  - "-rate-limit"              # req/sec (default 150)
+  - "-rl"                      # short form of -rate-limit
+  - "-rate-limit-minute"       # req/min
+  - "-rlm"                     # short form
+  - "-bulk-size"               # parallel hosts
+  - "-bs"                      # short form of -bulk-size
+  - "-c"                       # concurrency / template threads (default 25)
+  - "-concurrency"             # alias for -c
+  - "-headless-bulk-size"      # headless parallel
+  - "-hbs"                     # short form
+  - "-headless-concurrency"    # headless concurrency
+  - "-headc"                   # short form
+  - "-timeout"                 # per-request timeout (default 5s)
+  - "-retries"                 # retry count (default 1)
+  - "-max-host-error"          # max errors before skipping host (default 30)
+  - "-mhe"                     # short form
+  - "-track-error"             # track specific errors
+  - "-no-mhe"                  # disable max-host-error skipping
+  - "-page-timeout"            # headless page timeout
+  - "-proxy"                   # HTTP/SOCKS proxy URL — NOT the target
+  - "-p"                       # short form of -proxy
+  - "-proxy-internal"          # proxy internal requests
+  - "-resolvers"               # custom resolvers list/file — NOT targets
+  - "-system-resolvers"        # use system resolvers
+  - "-interface"               # bind interface for network templates
+  - "-source-ip"               # source IP for network templates
+  - "-attack-type"             # attack type (batteringram | pitchfork | clusterbomb)
+  # Auth / template variables
+  - "-H"                       # custom header (repeatable)
+  - "-header"                  # alias for -H
+  - "-V"                       # template variable key=value
+  - "-var"                     # alias for -V
+  - "-iv"                      # input variables file
+  - "-vars"                    # alias
+  - "-headers-file"            # headers from file
+  # Output
+  - "-o"                       # output file path
+  - "-output"                  # alias for -o
+  - "-jsonl"                   # JSONL output (boolean — listed for completeness)
+  - "-j"                       # short alias for -jsonl in some versions
+  - "-json"                    # JSON output (boolean — listed for completeness)
+  - "-jsonl-export"            # JSONL export to specific path
+  - "-je"                      # short form
+  - "-json-export"             # JSON export to specific path
+  - "-jsonl-output"            # alias
+  - "-sarif-export"            # SARIF format export
+  - "-se"                      # short form (note: also stop-on-spurious-errors in some tools — nuclei uses for sarif)
+  - "-markdown-export"         # Markdown export directory
+  - "-me"                      # short form
+  - "-report-config"           # reporting config file
+  - "-rc"                      # short form
+  - "-report-db"               # report DB path
+  # Logging / debug
+  - "-debug-output"            # debug output file path
+  - "-trace-log"               # trace log file path
+  - "-template-log"            # template log file path
+  - "-error-log"               # error log file path
+  - "-elog"                    # short form
+  - "-stats-interval"          # stats print interval (seconds)
+  - "-si"                      # short form of -stats-interval
+  - "-metrics-port"            # metrics server port
+  - "-config"                  # config file path
+  - "-config-template"         # template config path
+  # Headless / browser
+  - "-show-browser"            # boolean — listed for completeness
+  - "-system-chrome"           # boolean
+  - "-headless"                # boolean — listed for completeness
+  - "-no-color"                # boolean
+  # Update / behaviour
+  - "-update"                  # boolean — listed for completeness
+  - "-update-templates"        # boolean
+  - "-ut"                      # short form
+  - "-update-template-dir"     # path
+  - "-utd"                     # short form
+  - "-update-directory"        # path
+  - "-disable-update-check"    # boolean — listed for completeness
+  - "-duc"                     # short form
+  - "-no-update-templates"     # boolean
+  - "-nut"                     # short form
+  - "-no-stdin"                # boolean — CRITICAL in containers
+  - "-ni"                      # short for -no-interactsh in some versions
+  - "-no-interactsh"           # boolean — disable OAST
+  - "-interactsh-url"          # custom interactsh server URL
+  - "-iserver"                 # alias for -interactsh-url
+  - "-interactsh-token"        # interactsh auth token
+  - "-itoken"                  # alias
+  - "-interactions-cache-size" # int
+  - "-interactions-eviction"   # int (seconds)
+  - "-interactions-poll-duration" # seconds
+  - "-interactions-cooldown-period"  # seconds
+  - "-stop-at-first-match"     # boolean
+  - "-protocols-only"          # boolean (alias of -protocols varies)
+  - "-protocols"               # comma-separated protocol list (http, dns, ssl, ...)
+  - "-exclude-protocols"       # comma-separated
+  - "-fuzz-aggression"         # low | medium | high (DAST fuzzer)
+  - "-fa"                      # short form
+  - "-uri"                     # specific URI (less common)
+
+usage_patterns:
+  - name: "Critical-only quick scan (single URL)"
+    command: "nuclei -u {url} -severity critical -jsonl -o /session/nuclei-crit.jsonl -no-stdin -disable-update-check"
+    when: "Fast initial pass for the highest-impact findings only. Pairs with web-fingerprint or nmap output. -severity critical strips ~99% of templates so the scan finishes quickly. Always set -no-stdin in container runs (prevents nuclei from blocking on closed stdin) and -disable-update-check for reproducible runs."
+
+  - name: "Tag-filtered CVE + exposure scan"
+    command: "nuclei -u {url} -tags cve,exposure -severity high,critical -jsonl -o /session/nuclei-cve.jsonl -no-stdin -disable-update-check"
+    when: "Scoped scan for known CVEs and information-disclosure exposures at high+critical severity. Use after web-fingerprint identifies the technology stack. -tags is comma-separated; combine cve / rce / exposure / misconfig / default-login as the situation calls for."
+
+  - name: "Targeted single-CVE check by template ID"
+    command: "nuclei -u {url} -id {cve_id} -jsonl -o /session/nuclei-{cve_id}.jsonl -no-stdin -disable-update-check"
+    when: "Verify a specific CVE without running the full set. Example: -id CVE-2021-44228 (Log4Shell). -id is a precise filter (template ID match), so the scan completes in seconds. Use when nmap or web-fingerprint identified a vulnerable software version and you want to confirm the exploit path."
+
+  - name: "Workflow-driven scan"
+    command: "nuclei -u {url} -w {workflow_path} -jsonl -o /session/nuclei-workflow.jsonl -no-stdin -disable-update-check"
+    when: "Run a multi-step workflow YAML that chains template execution. Workflows are useful for application-specific test sequences (e.g., login → check session → enumerate). Workflow path can be a local /session/*.yaml or a path under /root/nuclei-templates/workflows/."
+
+  - name: "Authenticated scan with custom headers"
+    command: "nuclei -u {url} -H 'Cookie: PHPSESSID={session_cookie}' -severity high,critical -jsonl -o /session/nuclei-auth.jsonl -no-stdin -disable-update-check"
+    when: "Scan endpoints behind a login or WAF. Pull the session cookie from web-session or a manual login first. -H is repeatable for multiple headers (e.g., Authorization Bearer + custom CSRF header)."
+
+  - name: "Auto-scan via Wappalyzer-style tech detection"
+    command: "nuclei -u {url} -as -severity critical,high -jsonl -o /session/nuclei-auto.jsonl -no-stdin -disable-update-check"
+    when: "nuclei -as flag detects target technologies first, then runs only matching templates instead of all 12K. Faster than a full scan; more relevant findings. Best when target stack is unknown and you want a smart sweep."
+
+  - name: "Through HTTP proxy (Burp inspection)"
+    command: "nuclei -u {url} -tags cve -severity high,critical -proxy http://127.0.0.1:8080 -jsonl -o /session/nuclei-proxy.jsonl -no-stdin -disable-update-check"
+    when: "Route scan traffic through Burp/ZAP for inspection or replay. -proxy accepts http://host:port or socks5://host:port. Combine with tunnel MCP for scanning internal targets via SSH SOCKS proxy."
+
+  - name: "Tech-detection only (template-based fingerprinting)"
+    command: "nuclei -u {url} -tags tech -jsonl -o /session/nuclei-tech.jsonl -no-stdin -disable-update-check"
+    when: "Use nuclei's ~810 tech-tagged templates to identify CMS, framework, server software. Slower than web-fingerprint's signature matching but covers more technologies. Good fallback when web-fingerprint returns sparse results."
+
+  - name: "Stealth-tuned scan (low rate, throttled)"
+    command: "nuclei -u {url} -tags cve -severity critical -rate-limit 20 -c 5 -timeout 15 -jsonl -o /session/nuclei-stealth.jsonl -no-stdin -disable-update-check"
+    when: "Reduce request rate (-rate-limit) and template concurrency (-c) to avoid triggering rate-limits or alerting WAFs. Default 150 req/s + 25 concurrent templates is too aggressive for stealth — drop to 20 req/s + 5 concurrent."
+
+  - name: "DAST / built-in fuzzer scan"
+    command: "nuclei -u {url} -dast -fuzz-aggression low -rate-limit 100 -jsonl -o /session/nuclei-dast.jsonl -no-stdin -disable-update-check -fr"
+    when: "Enable nuclei's built-in fuzzer (DAST mode) for parameter-injection / SSRF / SQLi / XSS payload discovery. -fuzz-aggression {low|medium|high} controls payload count — low is the safe default. Lower -rate-limit 100 (vs scan default 150) reduces target stress under fuzz load."
+
+  - name: "Silent JSONL scan with periodic progress"
+    command: "nuclei -u {url} -tags cve -severity high,critical -silent -stats -si 30 -jsonl -o /session/nuclei-stats.jsonl -no-stdin -disable-update-check -fr"
+    when: "Long scans where you want clean JSONL findings on stdout but still need a heartbeat. -silent suppresses the banner / per-template progress; -stats -si 30 prints a stats line every 30 s so the dual-clock idle timer keeps resetting and you can see scan progress."
+
+output_formats:
+  - flag: "-jsonl -o {path}"
+    format: "jsonl"
+    preferred: true   # newline-delimited JSON, one finding per line — ideal streaming parser
+  - flag: "-jsonl-export {path}"
+    format: "jsonl_export"
+    preferred: false
+  - flag: "-json-export {path}"
+    format: "json_array"
+    preferred: false  # JSON array — must be parsed as a whole, harder to stream
+  - flag: "-sarif-export {path}"
+    format: "sarif"
+    preferred: false  # for IDE / GitHub integration
+  - flag: "-markdown-export {dir}"
+    format: "markdown_dir"
+    preferred: false  # one markdown file per finding in the directory
+  - flag: "-o {path}"
+    format: "text"
+    preferred: false  # human-readable, no structure
+
+common_options:
+  targeting:
+    - "-u URL: target URL (single, repeatable). FQDN, IP, with optional port, scheme, path. Examples: -u http://target.htb -u https://10.10.10.5:8443/admin"
+    - "-target URL: alias for -u"
+    - "-l FILE: REJECTED — see reject_flags. Use multiple -u flags or one URL per call instead."
+  templates:
+    - "-t PATH: specific template or directory (e.g., http/cves/2021/, /session/custom.yaml)"
+    - "-w PATH: workflow YAML"
+    - "-id ID: template ID to run (e.g., CVE-2021-44228). Repeatable / comma-separated."
+    - "-tags TAG[,TAG...]: tag filter. Common: cve, rce, sqli, xss, lfi, ssrf, exposure, misconfig, default-login, tech, takeover, dos."
+    - "-severity LEVEL[,LEVEL...]: severity filter. Values: info, low, medium, high, critical, unknown. Default: all (very loud)."
+    - "-author AUTHOR: filter by template author"
+    - "-exclude-tags / -etags TAG[,TAG...]: exclude templates with these tags (e.g., -etags dos,fuzz to skip destructive templates)"
+    - "-exclude-id ID[,ID...]: skip specific template IDs"
+    - "-exclude-templates / -et PATH: skip templates at this path"
+    - "-as: automatic scan — Wappalyzer-style tech detect, then only matching templates"
+  connection:
+    - "-rate-limit / -rl N: max requests per second (default 150). Tune to 20-50 for stealth, 300+ for fast scans on robust targets."
+    - "-rate-limit-minute / -rlm N: max requests per minute (alternative cap)"
+    - "-bulk-size / -bs N: parallel hosts to scan at once"
+    - "-c / -concurrency N: parallel templates per host (default 25)"
+    - "-timeout N: per-request timeout in seconds (default 5)"
+    - "-retries N: retry count on failure (default 1)"
+    - "-max-host-error / -mhe N: skip host after N errors (default 30)"
+    - "-proxy / -p URL: HTTP or SOCKS5 proxy URL"
+    - "-resolvers FILE: custom DNS resolver list"
+  auth:
+    - "-H 'Name: Value': custom header (repeatable). Use for Authorization, Cookie, X-CSRF-Token, etc."
+    - "-V key=value: template variable assignment (used by some templates with {{key}} placeholders)"
+    - "-iv FILE: variables YAML file"
+    - "-headers-file FILE: load headers from a file"
+  output:
+    - "-jsonl -o PATH: PREFERRED — JSONL output (one finding per line)"
+    - "-jsonl-export PATH: same as above to a specific file"
+    - "-json-export PATH: JSON array output (less ideal for streaming parsers)"
+    - "-sarif-export PATH: SARIF format for IDE / GitHub integration"
+    - "-markdown-export DIR: one Markdown file per finding"
+    - "-o PATH: plain-text human-readable output"
+    - "-silent: suppress progress / banner; only print findings"
+    - "-stats: show progress stats line"
+    - "-stats-interval / -si N: stats update interval in seconds (default 5)"
+  noise_control:
+    - "-disable-update-check / -duc: skip the template-update check on startup (saves ~10-30s, REQUIRED for reproducible runs)"
+    - "-no-update-templates / -nut: do not update templates on this run"
+    - "-no-stdin: REQUIRED in containers — without this nuclei may block reading stdin"
+    - "-no-interactsh / -ni: disable OAST (out-of-band) interaction tracking — saves startup time when you don't need OAST templates"
+    - "-stop-at-first-match: exit after first finding (useful for quick CVE confirmation with -id)"
+    - "-no-color: disable ANSI colors"
+
+gotchas:
+  - "Default scan loads ALL ~12,000 templates and runs them — extremely noisy and slow. ALWAYS scope with -tags / -severity / -id, or use -as for Wappalyzer-driven auto-selection."
+  - "Templates auto-update on first run by default — use -disable-update-check (or -no-update-templates) for reproducible runs in CI / lab. Update check needs internet egress; in airgap labs it will block startup."
+  - "-jsonl writes one JSON object per LINE (NDJSON / JSONL) — easier to parse than -json-export which writes a single JSON array. Always prefer -jsonl for tooling."
+  - "-rate-limit defaults to 150 req/s — too aggressive for small targets / stealth ops. Drop to 20-50 for HTB-style boxes; raise above 300 only on robust production targets."
+  - "-no-stdin is CRITICAL in container runs. Without it, nuclei may try to read stdin (especially when piped or run under exec) and block forever. Always include -no-stdin."
+  - "-c (concurrency) defaults to 25 templates per host. Reasonable on most targets, but check vs. target capacity. Drop to 5-10 for slow / fragile services."
+  - "Severity values are: info, low, medium, high, critical, unknown. Default is ALL severities (loud). Use -severity critical,high to scope to high-impact findings only."
+  - "Use -id <template-id> to test exactly ONE template (e.g., -id CVE-2021-44228 for Log4Shell). -tags cve is too broad (~3,800 templates)."
+  - "nuclei may exit 0 on a clean scan with no findings AND on a scan that hit hard errors (template parse errors, DNS fails). Always pattern-match output for failure_signatures regardless of exit code — same as ffuf and sqlmap."
+  - "OAST / interactsh requires outbound DNS to interactsh.com — disable with -no-interactsh in airgap labs. Otherwise nuclei may hang waiting for OAST callbacks that never arrive."
+  - "Workflow YAMLs (-w) execute a chain of templates with shared state. They're more powerful than individual templates but harder to debug; start with -t individual templates first."
+  - "Headless browser templates (tech with -headless flag) need Chromium in the container — image must include it. Without headless support those templates silently skip."
+  - "Custom headers via -H must use the literal 'Name: Value' format with the colon-space separator. Comma-separating multiple headers in one -H value does NOT work — repeat -H for each header."
+  - "-silent suppresses progress banner / per-host status lines and prints findings only. The legacy MCP server set it on every scan; recommended for clean JSONL output but optional. Pair with -stats / -si N if you still want a periodic progress line on long scans."
+  - "-fr / -follow-redirects is OFF by default in nuclei core. The legacy MCP server defaulted it ON because most CVE templates expect to follow 301/302 to the real handler. Add -fr explicitly when scanning targets that redirect to a canonical host or path; omit it if you want to scan only the immediate URL response."
+  - "DAST mode (-dast) flips nuclei into its built-in fuzzer; pair with -fuzz-aggression {low|medium|high}. The legacy quick_scan used a lower default rate-limit (100 req/s vs 150 for normal scans) for fuzzing — drop -rate-limit when running -dast against fragile targets."
+  - "Severity filter accepts ONLY: info, low, medium, high, critical, unknown. Any other token (e.g. 'crit', 'sev:high', 'severe') is rejected by nuclei's flag parser at startup with a 'FATA' line — validate severity strings client-side before invocation."
+  - "Tags reference (common values seen in HTB / CTF runs): cve, rce, sqli, xss, lfi, ssrf, exposure, misconfig, default-login, auth-bypass, takeover, tech, dos, fuzz, intrusive. The legacy quick_scan exposed cve / rce / lfi / sqli / xss / ssrf / auth-bypass / default-login as the practical 'focus' set."
+
+failure_signatures:
+  # Layer-diverse signals (SKILL #11):
+  #   - DNS layer (Go net resolver)
+  #   - TCP layer (Go net connect)
+  #   - TLS layer (Go crypto/x509)
+  #   - Template / parsing layer (nuclei template engine)
+  #   - Rate-limit / target-overload layer (nuclei host error tracking)
+  #   - Input / argument-validation layer (nuclei flag parser)
+  - signal: "Could not resolve host"
+    remediation: "DNS resolution failed. Verify hostname spelling, /etc/hosts inside the container, or pass an IP. Often paired with 'no such host' on Go's net stack."
+  - signal: "no such host"
+    remediation: "Go net resolver DNS-failure phrasing — 'lookup HOST: no such host'. Same root cause as 'Could not resolve host'. Use IP if DNS isn't authoritative."
+  - signal: "lookup"
+    remediation: "Go net.Lookup error — DNS resolution failed. Check resolver config or use bare IP. Match together with 'no such host' for full classification."
+  - signal: "connection refused"
+    remediation: "TCP refused — port closed or service down. Confirm with nmap -p N <host> first; the web service may have stopped."
+  - signal: "connect: connection refused"
+    remediation: "Go net stack version of TCP refused. Same root cause as 'connection refused'."
+  - signal: "i/o timeout"
+    remediation: "Connect or response timeout. Raise -timeout (default 5 s); reduce -c concurrency; check VPN / network path; consider raising -rate-limit-minute to spread load."
+  - signal: "context deadline exceeded"
+    remediation: "Per-request HTTP deadline hit — same as i/o timeout. Raise -timeout or check network latency."
+  - signal: "x509:"
+    remediation: "TLS certificate error (self-signed, expired, hostname mismatch). nuclei has no -k/--insecure short flag — for HTB / lab targets with self-signed certs, route through a permissive proxy via -proxy."
+  - signal: "tls: handshake failure"
+    remediation: "TLS handshake aborted — cipher suite mismatch, protocol version mismatch, or peer rejected handshake. Check target's TLS config; downgrade if scanning legacy services."
+  - signal: "certificate signed by unknown authority"
+    remediation: "Self-signed cert without trusted CA. Pin the cert into the container or proxy via Burp / mitmproxy. Same root cause as x509:."
+  - signal: "Could not load templates"
+    remediation: "Template path doesn't exist or templates failed to parse. Verify -t path or run with default templates (omit -t). On first run check that -update-templates completed."
+  - signal: "could not find any templates"
+    remediation: "No templates matched the -tags / -id / -author filter. Loosen the filter, or check the tag spelling against `nuclei -tl`."
+  - signal: "template not found"
+    remediation: "Specific template path or ID doesn't exist. Verify with `nuclei -tl -tags <tag>` or `nuclei -id <id> -template-display`."
+  - signal: "could not parse template"
+    remediation: "Template YAML is malformed or uses an unsupported nuclei version syntax. Update templates (-update-templates) or fix the template YAML."
+  - signal: "host error count exceeded"
+    remediation: "Target hit -max-host-error threshold (default 30) — nuclei stopped scanning this host. Reduce -rate-limit, raise -mhe, or check whether target is rate-limiting / WAF-blocking."
+  - signal: "target stopped responding"
+    remediation: "Target became unresponsive mid-scan — likely rate-limit or temporary outage. Reduce -rate-limit / -c and retry; check service health first."
+  - signal: "no input provided"
+    remediation: "No target was passed to -u / -target / -l. Add -u <url>. Note: -l is rejected by this plugin; use -u instead."
+  - signal: "Could not create runner"
+    remediation: "nuclei runner initialization failed — usually templates dir issue or invalid argv combo. Check -t path and -tags spelling. Run with -debug to see the full stack."
+  - signal: "FATA"
+    remediation: "Top-level FATAL log line — read the next line for the specific cause. Common causes: missing -u, missing templates, unreachable interactsh server."
+  - signal: "Maximum running time"
+    remediation: "Hard runtime cap reached (rare — nuclei doesn't expose this directly; comes from the dual-clock max_runtime_seconds wrapper). Split the scan or raise the cap."
+
+help_commands:
+  - command: "nuclei -h"
+    purpose: "Full flag reference grouped by category (TARGET, TEMPLATES, FILTERING, OUTPUT, CONFIGURATION, INTERACTSH, RATE-LIMIT, OPTIMIZATIONS, HEADLESS, DEBUG, UPDATE, STATISTICS, CLOUD)"
+  - command: "nuclei -version"
+    purpose: "Version and build information (verify v3.x — flag set differs from v2.x)"
+  - command: "nuclei -tl"
+    purpose: "List all loaded templates (combine with -tags / -severity to preview the scope before running a real scan)"
+  - command: "nuclei -tl -tags cve"
+    purpose: "List templates for a specific tag — useful when planning a scoped scan"

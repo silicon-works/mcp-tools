@@ -61,25 +61,40 @@ jobs:
               for tool_name, tool in registry['tools'].items():
                   prefix = f"tools.{tool_name}"
 
-                  if 'name' not in tool:
-                      errors.append(f"{prefix}: missing 'name'")
-                  if 'description' not in tool:
-                      errors.append(f"{prefix}: missing 'description'")
-                  if 'image' not in tool:
-                      errors.append(f"{prefix}: missing 'image'")
-                  if 'capabilities' not in tool:
-                      errors.append(f"{prefix}: missing 'capabilities'")
-                  if 'phases' not in tool:
-                      errors.append(f"{prefix}: missing 'phases'")
-                  if 'methods' not in tool:
-                      errors.append(f"{prefix}: missing 'methods'")
+                  for field in ('name', 'description', 'image', 'capabilities', 'phases'):
+                      if field not in tool:
+                          errors.append(f"{prefix}: missing '{field}'")
+
+                  # Two shapes after Feature 35:
+                  #   kind: cli  → usage_patterns (argv templates), no methods
+                  #   kind: mcp  → methods (per-method JSON-schema params)
+                  kind = tool.get('kind', 'mcp')
+                  if kind == 'cli':
+                      patterns = tool.get('usage_patterns')
+                      if not patterns:
+                          errors.append(f"{prefix}: kind:cli missing 'usage_patterns'")
+                      elif not isinstance(patterns, list):
+                          errors.append(f"{prefix}: 'usage_patterns' must be a list")
+                      else:
+                          for i, p in enumerate(patterns):
+                              if not isinstance(p, dict):
+                                  errors.append(f"{prefix}: usage_patterns[{i}] must be a mapping")
+                                  continue
+                              for required_key in ('name', 'command', 'when'):
+                                  if required_key not in p:
+                                      errors.append(f"{prefix}: usage_patterns[{i}] missing '{required_key}'")
+                      if 'methods' in tool:
+                          errors.append(f"{prefix}: kind:cli must not declare 'methods'")
                   else:
-                      for method_name, method in tool['methods'].items():
-                          method_prefix = f"{prefix}.methods.{method_name}"
-                          if 'description' not in method:
-                              errors.append(f"{method_prefix}: missing 'description'")
-                          if 'params' not in method:
-                              errors.append(f"{method_prefix}: missing 'params'")
+                      if 'methods' not in tool:
+                          errors.append(f"{prefix}: kind:mcp missing 'methods'")
+                      else:
+                          for method_name, method in tool['methods'].items():
+                              method_prefix = f"{prefix}.methods.{method_name}"
+                              if 'description' not in method:
+                                  errors.append(f"{method_prefix}: missing 'description'")
+                              if 'params' not in method:
+                                  errors.append(f"{method_prefix}: missing 'params'")
 
           if errors:
               print("Registry validation failed:")
@@ -116,14 +131,18 @@ jobs:
           print(f"**Updated:** {registry['updated_at']}")
           print(f"**Tools:** {len(registry['tools'])}")
           print("")
-          print("| Tool | Version | Phases | Methods |")
-          print("|------|---------|--------|---------|")
+          print("| Tool | Kind | Version | Phases | Surface |")
+          print("|------|------|---------|--------|---------|")
 
           for name, tool in registry['tools'].items():
+              kind = tool.get('kind', 'mcp')
               version = tool.get('version', 'latest')
               phases = ', '.join(tool.get('phases', []))
-              methods = len(tool.get('methods', {}))
-              print(f"| {name} | {version} | {phases} | {methods} |")
+              if kind == 'cli':
+                  surface = f"{len(tool.get('usage_patterns', []))} patterns"
+              else:
+                  surface = f"{len(tool.get('methods', {}))} methods"
+              print(f"| {name} | {kind} | {version} | {phases} | {surface} |")
 
           EOF
 
