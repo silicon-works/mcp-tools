@@ -58,7 +58,7 @@ description: >
   ike-scan accepts ONE OR MORE positionals (hosts) — the DSL takes the LAST
   non-flag positional as the canonical scope target (matches the
   ike-scan-from-the-command-line convention of "host last"). A flag value
-  like `-P /session/file.txt` does NOT count as a positional.
+  like `-P /session/output/file.txt` does NOT count as a positional.
 
   Output is line-oriented text — ike-scan emits one summary line per host
   plus optional multi-line detail (`-M`). psk-crack emits a single
@@ -173,10 +173,10 @@ target_extraction:
   #   typical command form:
   #
   #       ike-scan -M -A -d test 10.10.10.5
-  #       ike-scan -M -A -d test -P /session/hash.txt 10.10.10.5
+  #       ike-scan -M -A -d test -P /session/output/hash.txt 10.10.10.5
   #
   #   In both cases the host is `10.10.10.5`. Critically, when `-P
-  #   /session/hash.txt` is used, the hash-file path is a FLAG VALUE
+  #   /session/output/hash.txt` is used, the hash-file path is a FLAG VALUE
   #   (consumed by `-P`), not a positional, and must NOT be confused with
   #   a target. Same for `-d <id>` (Aggressive-Mode group name) and `-n`
   #   (initiator ID).
@@ -330,7 +330,7 @@ usage_patterns:
 
   - name: "Aggressive Mode PSK extraction (the hash-capture move)"
     binary: "ike-scan"
-    command: "-M -A -d {group_name} -P /session/ike-hash.txt {host}"
+    command: "-M -A -d {group_name} -P /session/output/ike-hash.txt {host}"
     when: "Aggressive Mode (`-A`) + group ID (`-d <name>`) + save-hash flag (`-P /session/<file>`). If the responder accepts Aggressive Mode (most pre-2010 IPsec vendors do, many post-2010 also if not patched), the response includes a PSK hash that ike-scan saves to the file. Then feed that file to psk-crack. CRITICAL: this is the canonical Aggressive-Mode misconfig exploitation move."
 
   - name: "Aggressive Mode test WITHOUT capture (just check if accepted)"
@@ -398,22 +398,22 @@ usage_patterns:
   # ── psk-crack: dictionary attack ────────────────────────────
   - name: "psk-crack with bundled rockyou wordlist (default attack)"
     binary: "psk-crack"
-    command: "-d /usr/share/wordlists/rockyou.txt /session/ike-hash.txt"
+    command: "-d /usr/share/wordlists/rockyou.txt /session/output/ike-hash.txt"
     when: "Dictionary attack with the rockyou wordlist (~14M passwords). Hash file is the file produced by `ike-scan -P`. psk-crack runs single-threaded by default; use `-N <threads>` if available in the build (some Debian builds have a thread-count option). Expect 100k-500k attempts/sec single-thread; ~30 s for top-10k passwords, ~10 min for the full rockyou."
 
   - name: "psk-crack with custom wordlist (engagement-specific candidates)"
     binary: "psk-crack"
-    command: "-d /session/{custom_wordlist} /session/ike-hash.txt"
+    command: "-d /session/{custom_wordlist} /session/output/ike-hash.txt"
     when: "Custom wordlist (write to /session via the `write` tool first). Each line is one candidate. Use targeted lists when the engagement context suggests specific PSKs — company name + year, project codename, vendor defaults (cisco123, juniper, watchguard), department names. Often vastly more effective than rockyou for enterprise VPNs."
 
   - name: "psk-crack brute-force alphanumeric, 1-6 chars"
     binary: "psk-crack"
-    command: "-B abcdefghijklmnopqrstuvwxyz0123456789 -l 6 /session/ike-hash.txt"
+    command: "-B abcdefghijklmnopqrstuvwxyz0123456789 -l 6 /session/output/ike-hash.txt"
     when: "Brute force with explicit charset and length. `-B <charset>` defines the alphabet; `-l <int>` is fixed length (some builds support range via `-l <min>:<max>`). 36-char alphabet × 6-char length = 2.2 billion candidates — ~6 hours single-thread. Drop length to 5 for ~10 min. Length 7+ is impractical without GPU (use hashcat -m 5300 instead)."
 
   - name: "psk-crack brute-force numeric only (PIN-style PSKs)"
     binary: "psk-crack"
-    command: "-B 0123456789 -l 8 /session/ike-hash.txt"
+    command: "-B 0123456789 -l 8 /session/output/ike-hash.txt"
     when: "Numeric-only charset for PIN-style PSKs (common on consumer VPN routers and small business gateways). 10^8 = 100M candidates — ~3-5 minutes single-thread. Try this BEFORE rockyou when the target is a SOHO / consumer device — many ISP-provisioned gateways use a numeric default like '12345678' or '00000000'."
 
   - name: "psk-crack help"
@@ -481,8 +481,8 @@ common_options:
 
 gotchas:
   - "MULTI-BINARY toolkit — ike-scan (network probing) and psk-crack (offline cracker) are SEPARATE binaries. Choose the right one per usage_pattern. Each declares `binary:` explicitly. cli_in_container forwards the chosen binary explicitly (mirror of impacket / smtp / snmp pattern)."
-  - "TARGET IS THE LAST POSITIONAL — ike-scan accepts multiple positional hosts; the DSL takes the LAST as the canonical scope target. With `-P /session/file.txt` the file path is a FLAG VALUE (consumed by `-P`), not a positional. With `-d <id>` and `-n <id>` the IDs are flag values too. `--trans=5,2,1,2` looks numeric but its value is captured by `--trans=` (long-form syntax)."
-  - "AGGRESSIVE MODE LEAKS THE PSK HASH — when the responder accepts Aggressive Mode (most pre-2010 IPsec configs, many post-2010 also if unhardened), `-A -d <group> -P /session/hash.txt` saves a crackable PSK hash. This is the headline IKE misconfig exploitation move. Main Mode does NOT leak (DH-protected), so capture requires Aggressive."
+  - "TARGET IS THE LAST POSITIONAL — ike-scan accepts multiple positional hosts; the DSL takes the LAST as the canonical scope target. With `-P /session/output/file.txt` the file path is a FLAG VALUE (consumed by `-P`), not a positional. With `-d <id>` and `-n <id>` the IDs are flag values too. `--trans=5,2,1,2` looks numeric but its value is captured by `--trans=` (long-form syntax)."
+  - "AGGRESSIVE MODE LEAKS THE PSK HASH — when the responder accepts Aggressive Mode (most pre-2010 IPsec configs, many post-2010 also if unhardened), `-A -d <group> -P /session/output/hash.txt` saves a crackable PSK hash. This is the headline IKE misconfig exploitation move. Main Mode does NOT leak (DH-protected), so capture requires Aggressive."
   - "TRANSFORM SPEC IS COMMA-SEPARATED IANA NUMBERS — `--trans=enc,hash,auth,group`. Common: `--trans=5,2,1,2` = 3DES/SHA1/PSK/MODP1024 (the 'classic enterprise' default). Encryption: 1=DES, 5=3DES, 7=AES (with key length appended for AES, e.g., `7/128`). Hash: 1=MD5, 2=SHA1, 4=SHA-256. Auth: 1=PSK, 3=RSA-Sig, 64221=Hybrid. Group: 1=MODP768, 2=MODP1024, 5=MODP1536, 14=MODP2048."
   - "DEFAULT TRANSFORM SET TRIES 8 — without `--trans`, ike-scan tries 8 hardcoded transforms in order. If the responder accepts NONE of them, you get `0 returned handshake`. Try `--trans=5,2,1,2` and `--trans=7/128,2,1,2` (AES/SHA1/PSK/MODP1024) before declaring the host non-IKE."
   - "IKEv2 IS A DIFFERENT PROTOCOL — `-2` / `--ikev2` switches to IKEv2 (RFC 7296). Many IKEv1 flags don't apply: no Aggressive Mode (IKEv2 doesn't have one), different transform syntax, different message types. ike-scan's IKEv2 support is BASIC — for deep IKEv2 attack work, use other tools (strongSwan client, custom scripts)."

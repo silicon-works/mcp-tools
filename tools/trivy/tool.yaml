@@ -101,7 +101,7 @@ description: >
   Common sub-commands:
 
     image    <image-ref>     # e.g., alpine:3.14, registry.io/org/img:tag
-    fs       <path>          # e.g., /session/source
+    fs       <path>          # e.g., /session/output/source
     repo     <git-url>       # e.g., https://github.com/example/app
     config   <path>          # IaC dir — Terraform, K8s yaml, Dockerfile
     sbom     <sbom-file>     # CycloneDX / SPDX json/xml
@@ -120,7 +120,7 @@ description: >
   DB: trivy downloads a vulnerability DB (~500 MB) from
   ghcr.io/aquasecurity/trivy-db on first run unless `--skip-db-update`.
   The container ships with a pre-fetched DB to avoid first-call latency.
-  Persistent cache at /session/trivy-cache (or default ~/.cache/trivy).
+  Persistent cache at /session/output/trivy-cache (or default ~/.cache/trivy).
 
   Feature 28 dynamic recipes are RETIRED for the kind:cli path — the LLM
   writes argv directly. Recipes still load for legacy method calls
@@ -236,16 +236,16 @@ target_extraction:
   # TARGET is a SECOND positional that follows ALL flag-values.
   #
   # Examples:
-  #   trivy image -f json -o /session/x.json --severity HIGH,CRITICAL alpine:3.14
+  #   trivy image -f json -o /session/output/x.json --severity HIGH,CRITICAL alpine:3.14
   #     ^^^^^                                                          ^^^^^^^^^^
   #     subcmd                                                          target
-  #   trivy fs --scanners vuln,secret --no-progress /session/source
+  #   trivy fs --scanners vuln,secret --no-progress /session/output/source
   #            (flags + values consumed)            ^^^^^^^^^^^^^^^
   #                                                  target
   #   trivy repo -f json https://github.com/example/app
   #                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
   #                      target (git URL)
-  #   trivy config /session/terraform/   (zero flags)
+  #   trivy config /session/output/terraform/   (zero flags)
   #                ^^^^^^^^^^^^^^^^^^^^
   #                 target
   #   trivy aws --account-id 123456789012 --region us-east-1
@@ -445,43 +445,43 @@ value_flags:
 usage_patterns:
   # ── default / opening probes ──────────────────────────────────────
   - name: "Container image vuln scan (HIGH+CRITICAL only, JSON)"
-    command: "image -f json -o /session/trivy-image.json --severity HIGH,CRITICAL --no-progress {image}"
+    command: "image -f json -o /session/output/trivy-image.json --severity HIGH,CRITICAL --no-progress {image}"
     when: "First-pass container image audit — pulls the image, scans OS packages and language deps, and writes structured JSON. The HIGH,CRITICAL severity filter focuses on actionable findings (skip LOW/MEDIUM noise on a triage scan). `--no-progress` disables the spinner (CI-friendly). `{image}` is a registry/name:tag reference (e.g., alpine:3.14, registry.example.com/org/app:1.2.3). Add `--scanners vuln,secret,misconfig` to also detect hardcoded secrets and Dockerfile misconfigs in the image."
 
   - name: "Filesystem dependency + secret scan (project source)"
-    command: "fs -f json -o /session/trivy-fs.json --scanners vuln,secret --no-progress /session/source"
-    when: "Audit a project directory for vulnerable lock-file dependencies (package-lock.json, requirements.txt, Gemfile.lock, go.sum, Cargo.lock, pom.xml) AND hardcoded secrets (AWS keys, GitHub tokens, etc.). Useful for post-exploitation triage of a captured filesystem dump or for pre-deploy code audit. `/session/source` should be a directory you've already populated (via git clone, scp, or extraction)."
+    command: "fs -f json -o /session/output/trivy-fs.json --scanners vuln,secret --no-progress /session/output/source"
+    when: "Audit a project directory for vulnerable lock-file dependencies (package-lock.json, requirements.txt, Gemfile.lock, go.sum, Cargo.lock, pom.xml) AND hardcoded secrets (AWS keys, GitHub tokens, etc.). Useful for post-exploitation triage of a captured filesystem dump or for pre-deploy code audit. `/session/output/source` should be a directory you've already populated (via git clone, scp, or extraction)."
 
   - name: "Git repository scan (clone + scan)"
-    command: "repo -f json -o /session/trivy-repo.json --scanners vuln,secret,misconfig {git-url}"
+    command: "repo -f json -o /session/output/trivy-repo.json --scanners vuln,secret,misconfig {git-url}"
     when: "trivy clones the repository to a temp dir and runs the same checks as `fs`. Useful when you've identified a target repository (e.g., from S3 leak, GitHub org enumeration, or BloodHound output) and want an automated dependency / secret / misconfig audit. `{git-url}` accepts HTTPS URLs (https://github.com/example/app) — SSH URLs require key setup. Add `--commit <sha>` or `--branch <name>` to pin the scan to a specific revision."
 
   - name: "IaC misconfiguration scan (Terraform / K8s / Dockerfile)"
-    command: "config -f json -o /session/trivy-iac.json --severity HIGH,CRITICAL /session/terraform/"
+    command: "config -f json -o /session/output/trivy-iac.json --severity HIGH,CRITICAL /session/output/terraform/"
     when: "Scan an IaC directory for security misconfigurations — Terraform (.tf), Kubernetes YAML, Dockerfile, CloudFormation, Helm charts. Detects issues like 'public S3 bucket', 'pod runs as root', 'security group open to 0.0.0.0/0'. Useful when you've extracted IaC from a target repo or captured CI/CD artifacts. The directory is scanned recursively; no need to enumerate sub-folders."
 
   - name: "SBOM scan (consume existing CycloneDX / SPDX)"
-    command: "sbom -f json -o /session/trivy-sbom.json /session/sbom.cdx.json"
+    command: "sbom -f json -o /session/output/trivy-sbom.json /session/output/sbom.cdx.json"
     when: "Cross-reference a pre-existing SBOM file against the trivy vulnerability DB. Useful when you have a CycloneDX or SPDX document from an upstream supplier (or generated by another tool like syft) and need to find vulnerable components without re-scanning. Supports `.cdx.json`, `.spdx.json`, `.cdx.xml`, and `.spdx` formats."
 
   - name: "Generate SBOM from filesystem (CycloneDX format)"
-    command: "fs -f cyclonedx -o /session/sbom.cdx.json --list-all-pkgs /session/source"
+    command: "fs -f cyclonedx -o /session/output/sbom.cdx.json --list-all-pkgs /session/output/source"
     when: "Generate a CycloneDX SBOM for a project directory — full package inventory regardless of vulnerability status. `--list-all-pkgs` is the key flag (without it, only vulnerable packages appear in the output). The resulting `.cdx.json` can be fed back into `trivy sbom` later, uploaded to a SBOM registry, or attached to a release."
 
   - name: "AWS account vulnerability + misconfig scan"
-    command: "aws --account-id {account-id} --region {region} -f json -o /session/trivy-aws.json"
+    command: "aws --account-id {account-id} --region {region} -f json -o /session/output/trivy-aws.json"
     when: "Scan an AWS account for service-level misconfigurations and IaC findings. Credentials come from environment variables (AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY / AWS_SESSION_TOKEN) or ~/.aws/credentials inside the container. NOTE: this is a DIFFERENT shape from other sub-commands — there is NO positional target. The account-id + region is the scope. Use `--service iam` or `--service s3` to filter to a specific service if a full-account scan is too noisy."
 
   - name: "Kubernetes cluster scan (uses kubeconfig)"
-    command: "k8s -f json -o /session/trivy-k8s.json --report summary --severity HIGH,CRITICAL"
+    command: "k8s -f json -o /session/output/trivy-k8s.json --report summary --severity HIGH,CRITICAL"
     when: "Scan the Kubernetes cluster pointed to by KUBECONFIG. Iterates every workload (Deployment, StatefulSet, DaemonSet, Job, CronJob), scans the underlying container images, AND audits the manifest configurations. Use `--namespaces <list>` to limit scope. `--report summary` collapses findings to severity counts; omit for full per-resource detail."
 
   - name: "Offline scan (pre-baked DB, no network)"
-    command: "image --skip-db-update --skip-java-db-update --offline-scan -f json -o /session/trivy-offline.json {image}"
+    command: "image --skip-db-update --skip-java-db-update --offline-scan -f json -o /session/output/trivy-offline.json {image}"
     when: "When the container has no internet access (air-gapped engagement) but the trivy DB has been pre-cached. `--skip-db-update` prevents the network fetch; `--offline-scan` skips lookups that need the network (e.g., go.mod indirect deps that need GOPROXY). The container image ships with a pre-fetched DB at build time, so this works out of the box."
 
   - name: "CI / pipeline gate (exit non-zero on findings)"
-    command: "image --severity HIGH,CRITICAL --exit-code 1 --ignore-unfixed -f sarif -o /session/trivy-gate.sarif {image}"
+    command: "image --severity HIGH,CRITICAL --exit-code 1 --ignore-unfixed -f sarif -o /session/output/trivy-gate.sarif {image}"
     when: "Pipeline-gating mode — trivy exits 1 if any HIGH or CRITICAL fixed vulnerabilities are found, suitable for breaking a CI build. `--ignore-unfixed` filters out vulns with no available fix (less actionable for a release gate). SARIF output integrates with GitHub Security tab and other code-scanning consumers."
 
   - name: "Help / version check"
@@ -525,7 +525,7 @@ output_formats:
 common_options:
   targeting:
     - "SUB-COMMAND IS REQUIRED — the very first positional after `trivy` MUST be one of: image, fs, repo, config, sbom, k8s, aws, vm, version, plugin. `trivy alpine:3.14` (no subcmd) prints help and exits non-zero with `Error: unknown command`."
-    - "TARGET IS THE LAST POSITIONAL after the sub-command. Examples: `trivy image alpine:3.14`, `trivy fs /session/source`, `trivy repo https://github.com/example/app`, `trivy config /session/terraform/`. Sub-command `aws` is the exception — it has no positional target (uses --account-id / --region / env credentials)."
+    - "TARGET IS THE LAST POSITIONAL after the sub-command. Examples: `trivy image alpine:3.14`, `trivy fs /session/output/source`, `trivy repo https://github.com/example/app`, `trivy config /session/output/terraform/`. Sub-command `aws` is the exception — it has no positional target (uses --account-id / --region / env credentials)."
   filtering:
     - "--severity LIST: comma-separated subset of UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL. Default is all. For triage, use `HIGH,CRITICAL` to skip LOW/MEDIUM noise."
     - "--scanners LIST: vuln,misconfig,secret,license — combine multiple in one run. Default is `vuln`. For container images, `vuln,secret,misconfig` covers all common findings. Replaces the older `--security-checks` (still works as alias)."
@@ -534,9 +534,9 @@ common_options:
     - "--ignorefile FILE: path to a `.trivyignore` (or .yaml) file listing CVE IDs to suppress. Useful for FP allowlists."
   output:
     - "-f FORMAT / --format FORMAT: table | json | sarif | cyclonedx | spdx | spdx-json | github | junit | template. JSON is preferred for tooling, SARIF for code-scanning integrations, CycloneDX/SPDX for SBOM consumers."
-    - "-o FILE / --output FILE: write to file instead of stdout. Combined with `-f json -o /session/trivy-<x>.json`."
+    - "-o FILE / --output FILE: write to file instead of stdout. Combined with `-f json -o /session/output/trivy-<x>.json`."
   cache:
-    - "--cache-dir DIR: persist DB + scan cache. Default is ~/.cache/trivy. Use /session/trivy-cache for engagement-persistent cache (survives container restart inside the same session)."
+    - "--cache-dir DIR: persist DB + scan cache. Default is ~/.cache/trivy. Use /session/output/trivy-cache for engagement-persistent cache (survives container restart inside the same session)."
     - "--clear-cache: delete the existing cache before running. Useful if the DB is corrupted."
     - "--skip-db-update: don't fetch the latest DB. Pair with the pre-baked image DB for offline mode."
   network:
@@ -551,7 +551,7 @@ common_options:
 gotchas:
   - "SUB-COMMAND IS MANDATORY — every trivy invocation MUST start with one of `image`, `fs`, `repo`, `config`, `sbom`, `k8s`, `aws`, `vm`, `version`, `plugin`, or `--help`. `trivy alpine:3.14` (forgetting `image`) fails with `Error: unknown command \"alpine:3.14\" for \"trivy\"`. Each sub-command has its own flag set; `trivy --severity HIGH image alpine` works (global flag before subcmd) but most flag examples are documented as sub-command-local."
   - "TARGET SHAPE DEPENDS ON SUB-COMMAND — `image` expects a registry reference (alpine:3.14, registry.io/org/img:tag); `fs` and `config` expect a local filesystem path; `repo` expects a git URL (HTTPS or SSH); `sbom` expects an SBOM file; `aws` has no positional (uses --account-id / env). Mixing them up gives unhelpful errors like `failed to parse image reference` or `no such file or directory`."
-  - "DEFAULT DB DOWNLOAD ON FIRST RUN — trivy fetches a ~500 MB vulnerability DB from ghcr.io/aquasecurity/trivy-db on first scan unless `--skip-db-update` is set. The container image ships with a pre-fetched DB at build time (Dockerfile runs `trivy image --download-db-only` to bake it in), so the first call is fast. Persistent cache via `--cache-dir /session/trivy-cache` lets multiple scans within an engagement reuse the DB."
+  - "DEFAULT DB DOWNLOAD ON FIRST RUN — trivy fetches a ~500 MB vulnerability DB from ghcr.io/aquasecurity/trivy-db on first scan unless `--skip-db-update` is set. The container image ships with a pre-fetched DB at build time (Dockerfile runs `trivy image --download-db-only` to bake it in), so the first call is fast. Persistent cache via `--cache-dir /session/output/trivy-cache` lets multiple scans within an engagement reuse the DB."
   - "`--security-checks` IS DEPRECATED — newer trivy uses `--scanners vuln,misconfig,secret,license`. The old name still works as an alias but logs a deprecation warning. Always prefer `--scanners` in new commands."
   - "`--scanners vuln,misconfig,secret,license` COMBINES MULTIPLE CHECKS IN ONE RUN — single scan covers CVEs, IaC misconfigs, hardcoded secrets, and license issues. For container images, `vuln,secret,misconfig` is the high-value combo. License scanning is independent and rarely useful in pentest context (more relevant for compliance teams)."
   - "`--exit-code 1` MAKES TRIVY EXIT NON-ZERO ON FINDINGS — useful for CI/CD gates. Pair with `--severity HIGH,CRITICAL` to gate only on high-impact findings, and `--ignore-unfixed` to skip vulns with no fix yet."

@@ -186,7 +186,7 @@ environment:
   # s3scanner v3 — the Go binary calls AWS S3 anonymously by default. For
   # authenticated probing of YOUR OWN buckets, use the `aws` tool. For
   # `-provider custom` and the `-mq` / `-db` features, mount a config.yml
-  # under `/session/.s3scanner/config.yml` and the tool will pick it up
+  # under `/session/output/.s3scanner/config.yml` and the tool will pick it up
   # via the documented search path (`.` or `$HOME/.s3scanner/`).
   HOME:
     description: "Container HOME path. If a config.yml exists at $HOME/.s3scanner/config.yml it will be picked up automatically (used for -provider custom, -mq, -db). For default unauthenticated AWS scans no config is needed."
@@ -297,7 +297,7 @@ output_formats:
   - flag: "-json"
     format: "ndjson"
     preferred: true
-    notes: "Newline-delimited JSON — one JSON object per bucket result, written to stdout. Each object: {bucket: {name, region, exists (0|1), date_scanned, objects (arr|null), objects_enumerated, provider, num_objects, bucket_size, owner_id, owner_display_name, perm_auth_users_read|write|read_acl|write_acl|full_control, perm_all_users_read|write|read_acl|write_acl|full_control}, level: 'info'|'error', msg, time}. Permission integers: 0=denied, 1=allowed (PUBLIC if all_users — finding!), 2=unknown (auth required). PREFERRED for tooling — pipe to `tee /session/buckets.ndjson` to persist. `exists=1` AND `perm_all_users_read=1` is the open-bucket signal. Use `jq -c .` to filter."
+    notes: "Newline-delimited JSON — one JSON object per bucket result, written to stdout. Each object: {bucket: {name, region, exists (0|1), date_scanned, objects (arr|null), objects_enumerated, provider, num_objects, bucket_size, owner_id, owner_display_name, perm_auth_users_read|write|read_acl|write_acl|full_control, perm_all_users_read|write|read_acl|write_acl|full_control}, level: 'info'|'error', msg, time}. Permission integers: 0=denied, 1=allowed (PUBLIC if all_users — finding!), 2=unknown (auth required). PREFERRED for tooling — pipe to `tee /session/output/buckets.ndjson` to persist. `exists=1` AND `perm_all_users_read=1` is the open-bucket signal. Use `jq -c .` to filter."
   - flag: "(default — no flag)"
     format: "logfmt"
     preferred: false
@@ -314,14 +314,14 @@ common_options:
     - "THREADS — `-threads <int>` (default 4). Higher = faster brute-force lists, but watch for rate-limit / IP-block (AWS S3 throttles past ~32 anonymous RPS per IP)."
   output:
     - "-json: NDJSON to stdout. PREFERRED for tooling. Without it, output is logfmt (still readable, harder to parse)."
-    - "(no -o / --output flag): s3scanner writes to stdout only. Use shell redirect: `s3scanner ... -json > /session/buckets.ndjson`, or `| tee /session/buckets.ndjson` to also display."
+    - "(no -o / --output flag): s3scanner writes to stdout only. Use shell redirect: `s3scanner ... -json > /session/output/buckets.ndjson`, or `| tee /session/output/buckets.ndjson` to also display."
     - "-db is REJECTED (reject_flags) — diverts results to Postgres outside the audit log."
   perf:
     - "-threads <int>: number of concurrent workers (default 4). Increase for big brute-force lists (8-16 is safe; 32+ risks IP-rate-limit). Decrease if hitting cloud throttle."
     - "-enumerate adds ListObjects pagination time — large buckets (millions of objects) can take 10-30+ min. For speed, skip enumeration on the first pass."
   auth:
     - "v3 is anonymous by default — NO AWS credentials are needed for public-bucket probing. The Go binary does NOT honor AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY env vars (those work for the `aws` tool, not s3scanner)."
-    - "For `-provider custom`, mount a config.yml at `/session/.s3scanner/config.yml` (or set HOME so $HOME/.s3scanner/config.yml is found). YAML keys: `mq.uri` (RabbitMQ), `db.uri` (Postgres), `custom.endpoint` (custom provider URL)."
+    - "For `-provider custom`, mount a config.yml at `/session/output/.s3scanner/config.yml` (or set HOME so $HOME/.s3scanner/config.yml is found). YAML keys: `mq.uri` (RabbitMQ), `db.uri` (Postgres), `custom.endpoint` (custom provider URL)."
 
 gotchas:
   - "INPUT MODE IS MANDATORY — every invocation MUST start with one of `-bucket <name>`, `-bucket-file <file>`, or `-mq`. Forgetting it errors with `exactly one of: -bucket, -bucket-file, -mq required`."
@@ -335,7 +335,7 @@ gotchas:
   - "RATE-LIMITS WITH HIGH `-threads` — AWS S3 throttles anonymous requests past ~32 RPS per source IP. DigitalOcean Spaces and Linode Object Storage throttle harder. Default `-threads 4` is safe; bump to 8-16 for big runs but watch for `Throttling` / `503 Slow Down` errors in stderr."
   - "INVALID BUCKET NAMES — S3 bucket names must follow naming rules (3-63 chars, lowercase, dots/dashes only, no underscores). s3scanner emits `level=info msg=\"invalid | <name>\"` for invalid names — these aren't tool errors, just bucket validation. Check name compliance before brute-forcing."
   - "Feature 28 dynamic recipes are RETIRED for the kind:cli path — the LLM writes argv directly. Recipes still load for legacy method calls (scan, test) if /session/tool_recipes/s3scanner/ exists, but they're a dead branch under run_cli (REQ-TR-016)."
-  - "OUTPUT CAN BE LARGE — the legacy `scan` / `test` method handlers truncated `raw_output` to 20000 chars via sanitize_output. run_cli (kind:cli path) does NOT apply that cap; full stdout+stderr lands in the engagement transcript. For `-enumerate` on huge buckets (millions of objects, NDJSON output growing into MB), redirect to a session file: `s3scanner -bucket <name> -enumerate -json > /session/buckets.ndjson` and read it back via `read` / `grep` rather than letting the LLM ingest the whole stream."
+  - "OUTPUT CAN BE LARGE — the legacy `scan` / `test` method handlers truncated `raw_output` to 20000 chars via sanitize_output. run_cli (kind:cli path) does NOT apply that cap; full stdout+stderr lands in the engagement transcript. For `-enumerate` on huge buckets (millions of objects, NDJSON output growing into MB), redirect to a session file: `s3scanner -bucket <name> -enumerate -json > /session/output/buckets.ndjson` and read it back via `read` / `grep` rather than letting the LLM ingest the whole stream."
   - "STDERR + STDOUT INTERLEAVE — s3scanner emits `level=info` (and `level=error`) lines on stderr in default logfmt; with `-json` the bucket result lines go to stdout but error/info JSON still goes to stderr. The legacy handlers concatenated them (`combined = stdout + stderr`) before parsing. run_cli surfaces both streams; the LLM should expect mixed stdout/stderr when parsing NDJSON."
 
 failure_signatures:
@@ -353,13 +353,13 @@ failure_signatures:
   - signal: "unknown provider"
     remediation: "Provider: `-provider <value>` is not one of aws, custom, digitalocean, dreamhost, gcp, linode. Lowercase, exact match. For non-listed S3-compatible services (MinIO, Wasabi, Backblaze B2), use `-provider custom` plus a config.yml that defines the endpoint URL."
   - signal: "config file not found"
-    remediation: "Config: `-provider custom`, `-mq`, or `-db` was used without a config.yml. Mount config.yml at `/session/.s3scanner/config.yml` (set HOME to /session) OR use `-provider aws|gcp|digitalocean|dreamhost|linode` (none of those need config). For OpenSploit, prefer the no-config providers."
+    remediation: "Config: `-provider custom`, `-mq`, or `-db` was used without a config.yml. Mount config.yml at `/session/output/.s3scanner/config.yml` (set HOME to /session) OR use `-provider aws|gcp|digitalocean|dreamhost|linode` (none of those need config). For OpenSploit, prefer the no-config providers."
   - signal: "open"
     remediation: "Path/Filesystem: `-bucket-file` (REJECT — but if reached) was given a path that doesn't exist. Format is `open /path/to/file: no such file or directory`. Don't use `-bucket-file` (rejected). Use one `-bucket=<name>` per target."
   - signal: "no such file or directory"
     remediation: "Path: same root cause as `open ...`. Caller passed a non-existent path to a file-flag (would only reach this if reject_flags pipeline missed `-bucket-file`)."
   - signal: "network is unreachable"
-    remediation: "Network: TCP-level error reaching the S3 endpoint. Verify outbound 443 connectivity from the container with `nc -vz s3.amazonaws.com 443`. Common in air-gapped containers — for offline testing, use `-provider custom` against MinIO mounted at /session/."
+    remediation: "Network: TCP-level error reaching the S3 endpoint. Verify outbound 443 connectivity from the container with `nc -vz s3.amazonaws.com 443`. Common in air-gapped containers — for offline testing, use `-provider custom` against MinIO mounted at /session/output/."
   - signal: "no such host"
     remediation: "DNS: bucket-region endpoint doesn't resolve. Check container DNS with `getent hosts s3.amazonaws.com`. Common when the container's /etc/resolv.conf is missing or pointed at an unreachable resolver. For a known-good check, try `-bucket=s3.amazonaws.com -json` (intentionally invalid name to force the DNS path)."
   - signal: "request send failed"

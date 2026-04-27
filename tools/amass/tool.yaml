@@ -185,31 +185,31 @@ value_flags:
 
 usage_patterns:
   - name: "Passive subdomain enum (stealth, OSINT-only — recommended pre-engagement)"
-    command: "amass enum -passive -d {domain} -json /session/amass-{domain}.json -nocolor"
+    command: "amass enum -passive -d {domain} -json /session/output/amass-{domain}.json -nocolor"
     when: "First step in reconnaissance — discover subdomains without alerting the target. All data comes from third-party sources (CT logs, passive DNS, web archives), so the target sees zero traffic. Safe to run before formal engagement kick-off. Always prefer -json for tooling; the JSON record includes source attribution per finding."
 
   - name: "Active enum with DNS brute-force (loud, full coverage)"
-    command: "amass enum -active -brute -d {domain} -w /usr/share/seclists/Discovery/DNS/subdomains-top1million-5000.txt -json /session/amass-{domain}.json -nocolor"
-    when: "When passive enum is not finding enough subdomains and you have authorisation to actively probe. Performs DNS brute-force with the supplied wordlist plus zone-transfer attempts and cert crawling. Generates noticeable DNS traffic to the target's resolvers — only use after sign-off. The seclists path is a Kali-standard wordlist; substitute /session/custom.txt for engagement-specific lists."
+    command: "amass enum -active -brute -d {domain} -w /usr/share/seclists/Discovery/DNS/subdomains-top1million-5000.txt -json /session/output/amass-{domain}.json -nocolor"
+    when: "When passive enum is not finding enough subdomains and you have authorisation to actively probe. Performs DNS brute-force with the supplied wordlist plus zone-transfer attempts and cert crawling. Generates noticeable DNS traffic to the target's resolvers — only use after sign-off. The seclists path is a Kali-standard wordlist; substitute /session/output/custom.txt for engagement-specific lists."
 
   - name: "Intel mode — organisation ASN / domain / netblock discovery"
-    command: "amass intel -d {domain} -whois -json /session/amass-intel-{domain}.json"
+    command: "amass intel -d {domain} -whois -json /session/output/amass-intel-{domain}.json"
     when: "Discover organisation-level intel — ASNs, registered netblocks, related (sister) domains via WHOIS reverse lookup — before subdomain enum. Output feeds into nmap (scan ASN ranges) or back into another `amass enum` run for newly-discovered sister domains. Pair with `-org` or `-asn` for ASN-based searches."
 
   - name: "Quick passive sweep with timeout (CI / fast triage)"
-    command: "amass enum -passive -d {domain} -timeout 5 -silent -o /session/amass-quick.txt"
-    when: "Time-boxed (5-minute) passive sweep for a quick subdomain inventory. Use `-silent` to suppress the ASCII-art banner and progress lines. Plain text output (one subdomain per line) for shell pipelines — `cat /session/amass-quick.txt | xargs -I{} curl -sI http://{}` patterns. For tooling prefer `-json`."
+    command: "amass enum -passive -d {domain} -timeout 5 -silent -o /session/output/amass-quick.txt"
+    when: "Time-boxed (5-minute) passive sweep for a quick subdomain inventory. Use `-silent` to suppress the ASCII-art banner and progress lines. Plain text output (one subdomain per line) for shell pipelines — `cat /session/output/amass-quick.txt | xargs -I{} curl -sI http://{}` patterns. For tooling prefer `-json`."
 
   - name: "Custom config + custom resolvers (engagement-specific OSINT)"
-    command: "amass enum -config /session/amass.yaml -d {domain} -rf /session/resolvers.txt -json /session/amass-{domain}.json"
-    when: "When the engagement supplies its own API keys (Censys, SecurityTrails, VirusTotal etc.) via /session/amass.yaml — overrides the default ~/.amass/config.yaml which is empty / has stale keys in the container. `-rf` points at a file of trusted DNS resolvers (e.g., from trickest/resolvers) for higher-quality brute-force results."
+    command: "amass enum -config /session/output/amass.yaml -d {domain} -rf /session/output/resolvers.txt -json /session/output/amass-{domain}.json"
+    when: "When the engagement supplies its own API keys (Censys, SecurityTrails, VirusTotal etc.) via /session/output/amass.yaml — overrides the default ~/.amass/config.yaml which is empty / has stale keys in the container. `-rf` points at a file of trusted DNS resolvers (e.g., from trickest/resolvers) for higher-quality brute-force results."
 
   - name: "Brute-force only (no passive sources, no API keys needed)"
-    command: "amass enum -brute -norecursive -d {domain} -w /usr/share/seclists/Discovery/DNS/subdomains-top1million-5000.txt -r 1.1.1.1,8.8.8.8 -json /session/amass-brute.json"
+    command: "amass enum -brute -norecursive -d {domain} -w /usr/share/seclists/Discovery/DNS/subdomains-top1million-5000.txt -r 1.1.1.1,8.8.8.8 -json /session/output/amass-brute.json"
     when: "Pure DNS brute-force without any passive OSINT — useful when API keys are unavailable and you only want wordlist-driven subdomain discovery. `-norecursive` keeps the brute-force flat (no recursion into discovered subdomains). `-r` overrides the resolver list with public resolvers."
 
   - name: "Track changes across engagement runs (diff mode)"
-    command: "amass track -d {domain} -dir /session/amass-db"
+    command: "amass track -d {domain} -dir /session/output/amass-db"
     when: "After running `amass enum` two or more times against the same domain (with shared `-dir`), `amass track` prints additions / removals between successive runs. Useful for long-running engagements or red-team retainers to spot newly-added attack surface."
 
 output_formats:
@@ -276,7 +276,7 @@ gotchas:
   - "Sub-command is REQUIRED. `amass -d target.com` will fail — must be `amass enum -d target.com` (or intel / viz / track / db). The plugin does NOT auto-insert the sub-command; the LLM must include it as the first positional."
   - "`-passive` mode is OSINT-only — no direct queries to the target. Use this in pre-engagement reconnaissance to avoid tipping off the target. Passive is the v5 DEFAULT, so omitting both -active and -passive gets passive behaviour."
   - "`-active -brute` is LOUD — generates measurable DNS query traffic to the target's resolvers, plus AXFR (zone transfer) attempts. Only run after engagement sign-off."
-  - "Default config at ~/.amass/config.yaml may have stale or empty API keys in the container image. Use `-config /session/amass.yaml` for explicit config paths with engagement-specific keys (Censys, SecurityTrails, VirusTotal, etc.)."
+  - "Default config at ~/.amass/config.yaml may have stale or empty API keys in the container image. Use `-config /session/output/amass.yaml` for explicit config paths with engagement-specific keys (Censys, SecurityTrails, VirusTotal, etc.)."
   - "Output to `-json` is PREFERRED for tooling — structured records include source attribution per subdomain. `-o` is plain text (one subdomain per line, no metadata). `-oA <prefix>` writes both plus a .zone file."
   - "`-timeout N` is in MINUTES, not seconds. Setting `-timeout 5` means cap at 5 minutes. Common mistake: copying `-timeout` semantics from nuclei / nmap (which use seconds) and ending up with absurdly short or long runs."
   - "`-include` / `-exclude` filter DATA SOURCES (e.g., crtsh, virustotal, securitytrails), NOT subdomains. Use `-bl` / `-blf` to blacklist subdomains from results."
@@ -311,7 +311,7 @@ failure_signatures:
   - signal: "i/o timeout"
     remediation: "Network timeout — slow OSINT API or unreachable resolver. Reduce `-rqps` / `-dns-qps`, raise `-timeout`, or check VPN egress."
   - signal: "unmarshalling config file"
-    remediation: "Config YAML parse error. Validate /session/amass.yaml syntax — common cause: tab indentation (YAML wants spaces), missing key, or wrong section header."
+    remediation: "Config YAML parse error. Validate /session/output/amass.yaml syntax — common cause: tab indentation (YAML wants spaces), missing key, or wrong section header."
   - signal: "Invalid config"
     remediation: "Config file rejected by amass. Compare against the upstream sample at https://github.com/owasp-amass/amass/blob/master/examples/config.yaml — schema changed between v3 and v5."
   - signal: "API quota exceeded"

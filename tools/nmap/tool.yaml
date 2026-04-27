@@ -2,7 +2,7 @@ name: nmap
 kind: cli
 binary: nmap
 version: "7.98"
-description: "Network scanner (nmap 7.98) for port discovery, service/version detection, OS fingerprinting, and NSE script-based vulnerability scanning. Supports TCP SYN/Connect/ACK/UDP/FIN/Window/NULL/Xmas/Maimon scan types, 613 NSE scripts across categories (vuln, exploit, brute, auth, default, discovery, safe), timing templates T0-T5, and structured XML/grepable/JSON output. Compiled with libssh2, openssl, lua 5.4. Container runs privileged (raw socket access) for SYN/UDP/OS-detection scans. Custom NSE scripts can be written to /session/nmap-scripts/ and referenced by absolute path with --script. Native CLI; LLM constructs the full nmap argv. Use for layer-3/4 reconnaissance and enumeration; not a web fuzzer (use ffuf), SQLi tester (sqlmap), or password cracker (hydra)."
+description: "Network scanner (nmap 7.98) for port discovery, service/version detection, OS fingerprinting, and NSE script-based vulnerability scanning. Supports TCP SYN/Connect/ACK/UDP/FIN/Window/NULL/Xmas/Maimon scan types, 613 NSE scripts across categories (vuln, exploit, brute, auth, default, discovery, safe), timing templates T0-T5, and structured XML/grepable/JSON output. Compiled with libssh2, openssl, lua 5.4. Container runs privileged (raw socket access) for SYN/UDP/OS-detection scans. Custom NSE scripts can be written to /session/output/nmap-scripts/ and referenced by absolute path with --script. Native CLI; LLM constructs the full nmap argv. Use for layer-3/4 reconnaissance and enumeration; not a web fuzzer (use ffuf), SQLi tester (sqlmap), or password cracker (hydra)."
 image: "ghcr.io/silicon-works/mcp-tools-nmap:latest"
 image_size_mb: 150
 # Dual-clock model — nmap can be silent for many minutes between hosts on
@@ -35,7 +35,7 @@ routing:
     - "determine what services are running on a target"
     - "find open ports on an IP address or CIDR range"
     - "identify local network interfaces and LHOST IP (use bash + ip addr; nmap is overkill for this)"
-    - "run custom NSE scripts from /session/nmap-scripts/"
+    - "run custom NSE scripts from /session/output/nmap-scripts/"
     - "engagement-specific vulnerability checks via custom NSE scripts"
   never_use_for:
     - "web directory or parameter fuzzing — use ffuf"
@@ -95,7 +95,7 @@ target_extraction:
   # nmap target is the LAST positional argument, after every flag and flag
   # value. Examples:
   #   nmap -sS -p 22,80,443 10.10.10.5
-  #   nmap -sV --script vuln -oX /session/scan.xml target.htb
+  #   nmap -sV --script vuln -oX /session/output/scan.xml target.htb
   #   nmap -Pn -T4 --min-rate 1000 192.168.1.0/24
   # The DSL's first_non_flag_positional rule walks argv, skipping every flag
   # and every value-flag's argument (per `value_flags` below), and returns the
@@ -234,8 +234,8 @@ usage_patterns:
     when: "Targeted vulnerability check when you have a specific CVE in mind. Common: smb-vuln-ms17-010, ssl-heartbleed, http-shellshock, http-vuln-cve2017-5638."
 
   - name: "Custom NSE script from /session"
-    command: "nmap --script /session/nmap-scripts/{script_name} -p {ports} -Pn -oX {output_xml} {target}"
-    when: "Engagement-specific check beyond nmap's built-in 613 scripts. Drop the .nse file via the write tool to /session/nmap-scripts/ first."
+    command: "nmap --script /session/output/nmap-scripts/{script_name} -p {ports} -Pn -oX {output_xml} {target}"
+    when: "Engagement-specific check beyond nmap's built-in 613 scripts. Drop the .nse file via the write tool to /session/output/nmap-scripts/ first."
 
   - name: "Ping sweep (host discovery only)"
     command: "nmap -sn -T4 -oX {output_xml} {cidr}"
@@ -327,7 +327,7 @@ common_options:
     - "--script-args 'name=value,...': script-specific args"
     - "--script-args-file FILE: args from file"
     - "--script-timeout N: per-script time cap (e.g., 30s)"
-    - "Custom: --script /session/nmap-scripts/foo.nse"
+    - "Custom: --script /session/output/nmap-scripts/foo.nse"
   timing:
     - "-T0..T5: paranoid / sneaky / polite / normal / aggressive / insane"
     - "-T4 (aggressive) is the standard for HTB / lab targets"
@@ -369,7 +369,7 @@ gotchas:
   - "Default scan timing (-T3 normal) is too slow for lab environments. Use -T4 + --min-rate 1000 on HTB; -T2 only on real engagements where stealth matters."
   - "-iL (read targets from file) and -iR (random targets) are REJECTED at the plugin layer — both put the target outside the command line. Read the file yourself and pass argv targets, or call nmap once per target."
   - "-D (decoy) and -S (source IP) take IP-looking values. The DSL's first_non_flag_positional rule plus value_flags listing prevents these from being mistaken for the actual target."
-  - "Output files (-oX /session/scan.xml, -oN /session/scan.nmap) MUST land under /session/ to survive after the container exits. /tmp inside the container is ephemeral."
+  - "Output files (-oX /session/output/scan.xml, -oN /session/output/scan.nmap) MUST land under /session/ to survive after the container exits. /tmp inside the container is ephemeral."
   - "OS detection (-O) needs at least one open and one closed port visible to be reliable. If the target only has open ports (or only closed), expect 'No exact OS matches'."
   - "NSE vuln scripts are noisy and slow — a full --script vuln on a /24 can run for hours. Pin to known open ports with -p and limit to specific scripts (smb-vuln-* rather than the whole vuln category) when possible."
   - "--script vuln + --script-timeout 30s prevents one slow script from hanging the whole scan."
@@ -435,4 +435,4 @@ help_commands:
   - command: "nmap --script-help all"
     purpose: "Full NSE script catalog with descriptions"
   - command: "nmap --script-updatedb"
-    purpose: "Rebuild the NSE script index after dropping custom .nse files into /session/nmap-scripts/"
+    purpose: "Rebuild the NSE script index after dropping custom .nse files into /session/output/nmap-scripts/"

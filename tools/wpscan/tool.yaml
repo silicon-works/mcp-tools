@@ -305,41 +305,41 @@ value_flags:
 usage_patterns:
   # ── default / opening probes ──────────────────────────────────────
   - name: "Basic enumeration (vulnerable plugins + themes + users)"
-    command: "--url http://target/wp -e u,vp,vt --random-user-agent -f json -o /session/wpscan.json"
-    when: "First-pass WordPress scan once a target is confirmed to be WordPress (look for /wp-content/, wp-login.php, X-Powered-By: WordPress). The default enumerate combo `u,vp,vt` finds vulnerable plugins, vulnerable themes, and users without taking long. Add `--api-token` if available — without it, vulnerability mapping is skipped. Output goes to /session/wpscan.json (structured)."
+    command: "--url http://target/wp -e u,vp,vt --random-user-agent -f json -o /session/output/wpscan.json"
+    when: "First-pass WordPress scan once a target is confirmed to be WordPress (look for /wp-content/, wp-login.php, X-Powered-By: WordPress). The default enumerate combo `u,vp,vt` finds vulnerable plugins, vulnerable themes, and users without taking long. Add `--api-token` if available — without it, vulnerability mapping is skipped. Output goes to /session/output/wpscan.json (structured)."
 
   - name: "Aggressive plugin discovery (all plugins, brute-forced paths)"
-    command: "--url http://target/wp --plugins-detection aggressive -e ap --random-user-agent -f json -o /session/wpscan-plugins.json"
+    command: "--url http://target/wp --plugins-detection aggressive -e ap --random-user-agent -f json -o /session/output/wpscan-plugins.json"
     when: "When the basic `vp` enum returns nothing useful — the target may have non-vulnerable but unusual plugins, OR a missing API token suppresses the vp output. `--plugins-detection aggressive` brute-forces plugin directory names from the WPScan database (~10,000 known plugins) — slow, noisy, but finds plugins that aren't referenced in page source. Use `-e ap` to enumerate all plugins regardless of known-vulnerability status."
 
   - name: "Brute-force WordPress login (small targeted wordlist)"
-    command: "--url http://target/wp -U /session/users.txt -P /session/passwords.txt -t 4 --random-user-agent -f json -o /session/wpscan-brute.json"
+    command: "--url http://target/wp -U /session/output/users.txt -P /session/output/passwords.txt -t 4 --random-user-agent -f json -o /session/output/wpscan-brute.json"
     when: "After enumerating users, brute-force passwords. Use a SMALL targeted wordlist — wpscan iterates one password per HTTP request (or 500 per request via XML-RPC multicall on WP < 4.4). Threads default to 5; lower to 2-4 to avoid Wordfence / security-plugin lockout. Use `--password-attack xmlrpc` if XML-RPC is available (faster) or `wp-login` if XML-RPC is disabled."
 
   - name: "Comprehensive scan with WPScan API token (CVE mapping)"
-    command: "--url http://target/wp -e u,vp,vt,cb,dbe --api-token {token} --random-user-agent -f json -o /session/wpscan-api.json"
+    command: "--url http://target/wp -e u,vp,vt,cb,dbe --api-token {token} --random-user-agent -f json -o /session/output/wpscan-api.json"
     when: "Production-style scan with vulnerability data. The `--api-token` enables CVE lookups for every detected plugin / theme / WordPress core version (one API request each — 25 free / day at https://wpscan.com/profile). `cb` and `dbe` add config-backup + database-export discovery. Token can also come from WPSCAN_API_TOKEN env var."
 
   - name: "Through HTTP proxy (Burp / inspection)"
-    command: "--url http://target/wp -e u --proxy http://127.0.0.1:8080 --random-user-agent -f json -o /session/wpscan-proxy.json"
+    command: "--url http://target/wp -e u --proxy http://127.0.0.1:8080 --random-user-agent -f json -o /session/output/wpscan-proxy.json"
     when: "Route all wpscan HTTP traffic through a local proxy for inspection / replay / WAF testing. The proxy URL is the LOCAL inspection point, NOT the target. Useful for: confirming what wpscan actually sends, capturing requests for replay with curl, debugging WAF blocks. `--proxy-auth user:pass` if the proxy requires auth."
 
   # ── stealth / detection-evasion ──────────────────────────────────────
   - name: "Stealthy mode (passive detection + random UA)"
-    command: "--url http://target/wp --stealthy -e u --random-user-agent -f json -o /session/wpscan-stealth.json"
+    command: "--url http://target/wp --stealthy -e u --random-user-agent -f json -o /session/output/wpscan-stealth.json"
     when: "When detection avoidance is more important than thoroughness. `--stealthy` is the alias for `--random-user-agent --detection-mode passive --plugins-version-detection passive`. Trade-off: misses plugins not referenced in page source. Useful against WAF-protected targets or when the engagement explicitly forbids brute-forcing paths."
 
   - name: "Throttled scan (avoid rate-limit / WAF block)"
-    command: "--url http://target/wp -e u,vp -t 2 --throttle 500 --random-user-agent -f json -o /session/wpscan-throttle.json"
+    command: "--url http://target/wp -e u,vp -t 2 --throttle 500 --random-user-agent -f json -o /session/output/wpscan-throttle.json"
     when: "When the target has a WAF (Cloudflare, Sucuri, Wordfence) that triggers on rapid requests. `-t 2` reduces threads from default 5 to 2; `--throttle 500` adds 500ms delay between requests. Slows the scan dramatically but avoids 429 / 403 blocks. Combine with `--proxy` to route through a known-good IP."
 
   # ── auth-required scans ──────────────────────────────────────
   - name: "Authenticated scan (cookie-string)"
-    command: "--url http://target/wp --cookie-string 'wordpress_logged_in_<hash>=<value>; wp-settings-1=...' -e u,vp,vt --random-user-agent -f json -o /session/wpscan-auth.json"
+    command: "--url http://target/wp --cookie-string 'wordpress_logged_in_<hash>=<value>; wp-settings-1=...' -e u,vp,vt --random-user-agent -f json -o /session/output/wpscan-auth.json"
     when: "When WordPress requires authentication (private blog, paywall, restricted dev environment). Capture the `wordpress_logged_in_*` cookie from a logged-in browser session and pass via `--cookie-string`. Format: 'k1=v1; k2=v2'. Same cookie format as curl. Useful for scanning admin-only plugins or restricted areas."
 
   - name: "Site behind HTTP basic auth"
-    command: "--url http://target/wp --http-auth user:password -e u,vp --random-user-agent -f json -o /session/wpscan-htauth.json"
+    command: "--url http://target/wp --http-auth user:password -e u,vp --random-user-agent -f json -o /session/output/wpscan-htauth.json"
     when: "When the site is wrapped in HTTP basic auth (common for staging environments). `--http-auth user:pass` adds the Authorization header. The user:pass string contains a colon but is NOT a URL — won't be misextracted as target."
 
   # ── help / version ──────────────────────────────────────
@@ -396,12 +396,12 @@ gotchas:
   - "`-e` ENUMERATION CODES ARE SINGLE/DOUBLE-LETTER, COMMA-CONCATENATED — `-e u,vp,vt` = users + vulnerable plugins + vulnerable themes. NOT a space-separated list. Combinations are bounded: only one of vp/ap/p (plugins) and one of vt/at/t (themes) at a time."
   - "WPSCAN API TOKEN IS REQUIRED FOR VULNERABILITY DATA — without `--api-token` (or WPSCAN_API_TOKEN env var), wpscan still detects plugin / theme / version, but the `vulnerabilities` field is empty. Token is FREE at https://wpscan.com/profile (25 lookups/day). Without a token, you can identify outdated plugins but cannot map them to CVEs."
   - "`--plugins-detection aggressive` BRUTE-FORCES `/wp-content/plugins/<name>/` PATHS — finds plugins not referenced in page source but is loud (~10,000 HTTP requests, default ~5 threads). Most WAFs catch this. Use `passive` or `--stealthy` when avoiding detection. Run aggressive scans through a proxy if engagement scope allows."
-  - "`-f json` PRODUCES STRUCTURED OUTPUT, `-f cli` IS HUMAN-READABLE — for any agent / tool consumption, ALWAYS use `-f json -o /session/wpscan.json`. The cli format has ANSI colour codes that break parsing; cli-no-colour is plaintext but still unstructured."
+  - "`-f json` PRODUCES STRUCTURED OUTPUT, `-f cli` IS HUMAN-READABLE — for any agent / tool consumption, ALWAYS use `-f json -o /session/output/wpscan.json`. The cli format has ANSI colour codes that break parsing; cli-no-colour is plaintext but still unstructured."
   - "EXIT CODE 0 ON CLEAN SCANS AND ON SOME FAILURES — wpscan exits 0 even when the scan was aborted (e.g., `Scan Aborted: The remote website is up, but does not seem to be running WordPress`). Pattern-match output for `[ERROR]`, `Scan Aborted`, `Url is invalid` regardless of exit code."
   - "`--random-user-agent` IS RECOMMENDED FOR ANY SCAN — wpscan's default UA is `WPScan v3.8.X (https://wpscan.com)` which immediately fingerprints the scanner. Use `--random-user-agent` for basic stealth or `--user-agent '<custom>'` for a specific one. The legacy mcp-server.py auto-injected `--random-user-agent` into every method (scan/bruteforce/enumerate_*); under kind:cli the LLM is responsible — treat it as a near-mandatory default unless the engagement explicitly requires a fixed UA."
-  - "`-f json` MAY BE PRECEDED BY BANNER / UPDATE WARNING LINES ON STDOUT — wpscan can print an update notification or banner before the JSON document starts, especially on a cold container or when its DB is stale. The legacy `json.loads(stdout)` would fail on prefixed text. Under kind:cli, prefer `-o /session/wpscan-<n>.json` (writes pure JSON to file, leaving stdout for human-readable status) and read the file rather than parsing stdout. If parsing stdout, locate the first `{` and slice from there. `--no-banner` plus `--no-update` further reduces noise."
+  - "`-f json` MAY BE PRECEDED BY BANNER / UPDATE WARNING LINES ON STDOUT — wpscan can print an update notification or banner before the JSON document starts, especially on a cold container or when its DB is stale. The legacy `json.loads(stdout)` would fail on prefixed text. Under kind:cli, prefer `-o /session/output/wpscan-<n>.json` (writes pure JSON to file, leaving stdout for human-readable status) and read the file rather than parsing stdout. If parsing stdout, locate the first `{` and slice from there. `--no-banner` plus `--no-update` further reduces noise."
   - "BRUTE-FORCE IS RATE-LIMITED BY DEFAULT (5 THREADS) — for serious password attacks, lower threads (-t 2) to avoid Wordfence / security-plugin lockout, OR use `--password-attack xmlrpc-multicall` to batch 500 passwords per request (only works on WP < 4.4). Both wp-login and xmlrpc paths exist; the multicall path is fastest but vanishingly rare in modern installs."
-  - "WORDLISTS GO TO `-P` (passwords) AND `-U` (users) — these are LOCAL FILES, not targets. The plugin's reject_flags is empty because wordlists are not target lists. Examples: `-P /session/passwords.txt -U admin` or `-P /usr/share/wordlists/rockyou.txt -U /session/users.txt`."
+  - "WORDLISTS GO TO `-P` (passwords) AND `-U` (users) — these are LOCAL FILES, not targets. The plugin's reject_flags is empty because wordlists are not target lists. Examples: `-P /session/output/passwords.txt -U admin` or `-P /usr/share/wordlists/rockyou.txt -U /session/output/users.txt`."
   - "rockyou.txt IS TOO LARGE FOR HTTP BRUTE-FORCE — 14M passwords × 1 request each = 14M HTTP requests. Will time out the 6-hour cap and burn through any rate limit. Use a curated wordlist (top-100, top-1000, or domain-specific) for HTTP brute-force."
   - "`--proxy-auth user:pass` AND `--http-auth user:pass` BOTH USE COLON SEPARATOR — these are credential strings, NOT URLs. value_flags catches them so they're never misextracted as targets."
   - "`--cookie-string 'k1=v1; k2=v2'` IS A SINGLE FLAG VALUE — quote the entire cookie string. Cookies inside (e.g., `redirect_to=http://target.com/wp-admin/`) may contain URL-shaped content but the entire string is a single value, not a target."

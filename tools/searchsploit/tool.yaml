@@ -84,7 +84,7 @@ see_also:
   - tool: cve-lookup
     reason: "After searchsploit --cve returns matching exploits, use cve-lookup to fetch the full NVD record (CVSS score, CPE, affected versions, references) for the same CVE — the two tools are complementary."
   - tool: nmap
-    reason: "Standard workflow: nmap -sV -oX /session/scan.xml <target>, then `searchsploit --nmap /session/scan.xml -j` to find exploits matching the detected services. The nmap XML output is the canonical input for searchsploit's --nmap mode."
+    reason: "Standard workflow: nmap -sV -oX /session/output/scan.xml <target>, then `searchsploit --nmap /session/output/scan.xml -j` to find exploits matching the detected services. The nmap XML output is the canonical input for searchsploit's --nmap mode."
   - tool: nuclei
     reason: "After searchsploit identifies a CVE / exploit candidate, use nuclei to run the matching template (-id CVE-2021-44228) against the live target to confirm exploitability before running the full exploit."
   - tool: exploit-runner
@@ -101,7 +101,7 @@ target_extraction:
   #      are exploit-title keywords, NOT hostnames or IPs.
   #   2. CVE IDs (--cve CVE-2021-44228) — identifiers, not targets.
   #   3. EDB-IDs (--id 12345) — local DB primary keys, not targets.
-  #   4. Local file paths (--nmap /session/scan.xml) — input file, not
+  #   4. Local file paths (--nmap /session/output/scan.xml) — input file, not
   #      a target. The IPs INSIDE the nmap XML are scan results, not new
   #      targets for searchsploit.
   #   5. EDB-IDs to mirror (--mirror 12345) — local file copy operation.
@@ -181,8 +181,8 @@ usage_patterns:
     when: "Fetch metadata for a specific exploit by its EDB-ID. Useful when you've seen an EDB-ID referenced elsewhere (write-up, blog post, advisory) and want to confirm the exploit is in the local mirror and get its file path. Returns the matching record with Title, Path, Date. Combine with `-p` (show full path) to print the local file path explicitly. To READ the exploit source code after locating it, run `cat <path>` via run_cli."
 
   - name: "Search by nmap XML output (service-driven exploit discovery)"
-    command: "searchsploit --nmap /session/scan.xml -j"
-    when: "POWERFUL integration — feed nmap's XML output to searchsploit and get exploits matching ALL detected services in one call. Workflow: `nmap -sV -oX /session/scan.xml <target>` (note the -oX for XML output, not -oN for nmap normal output), then `searchsploit --nmap /session/scan.xml -j`. searchsploit parses the XML, extracts each `<service>` banner (product, version, extrainfo), and runs an exploit search per service. Output is grouped per host:port. Best when you've already enumerated a target and want a one-shot exploit-candidate list."
+    command: "searchsploit --nmap /session/output/scan.xml -j"
+    when: "POWERFUL integration — feed nmap's XML output to searchsploit and get exploits matching ALL detected services in one call. Workflow: `nmap -sV -oX /session/output/scan.xml <target>` (note the -oX for XML output, not -oN for nmap normal output), then `searchsploit --nmap /session/output/scan.xml -j`. searchsploit parses the XML, extracts each `<service>` banner (product, version, extrainfo), and runs an exploit search per service. Output is grouped per host:port. Best when you've already enumerated a target and want a one-shot exploit-candidate list."
 
   - name: "Mirror exploit to /session/ for modification"
     command: "cd /session && searchsploit --mirror 50383"
@@ -235,7 +235,7 @@ common_options:
     - "--cve <CVE-ID>: search by CVE. Accepts forms 'CVE-2021-44228' or '2021-44228'. Searches the CVE field directly (more precise than free-text)."
     - "--id <EDB-ID>: lookup mode keyed on EDB-ID. The positional becomes the ID."
   mirror:
-    - "--mirror <EDB-ID>: copy the matching exploit file to the current working directory. Use `cd /session && searchsploit --mirror <id>` to land in /session/. Auto-resolves EDB-ID → file path."
+    - "--mirror <EDB-ID>: copy the matching exploit file to the current working directory. Use `cd /session && searchsploit --mirror <id>` to land in /session/output/. Auto-resolves EDB-ID → file path."
     - "--examine <EDB-ID> / -x <EDB-ID>: open the matching exploit in $PAGER (no pager inside container — falls back to cat-like behavior or fails silently). Prefer mirror + cat for inspection inside container."
   nmap_import:
     - "--nmap <XML-PATH>: parse an nmap XML scan file and search for exploits matching each detected service. Powerful one-shot service-to-exploit pipeline. The nmap input MUST be XML format (`-oX`), not normal output (`-oN`)."
@@ -248,8 +248,8 @@ gotchas:
   - "searchsploit has NO NETWORK TARGET. The positional arguments are SEARCH TERMS (e.g., `apache 2.4`), not hostnames. target_extraction returns null; scope-validation does NOT apply because there is no remote host to validate. Same design as john / hashcat / volatility / ilspy — all offline tools operating on local artifacts."
   - "JSON output (`-j`) is the cleanest format for tooling. The default tabular output uses pipe-separated columns with header lines that break naive parsers. Always prefer `-j` for downstream consumption; the JSON has top-level keys `SEARCH`, `DB_PATH`, `RESULTS_EXPLOIT`, `RESULTS_SHELLCODE`, `RESULTS_PAPER`."
   - "`--cve` is the most useful when you have a known CVE — it searches the CVE field directly rather than scanning titles, so it returns precise results. Accepts both `CVE-2021-44228` and `2021-44228` forms; the `CVE-` prefix is optional but recommended for clarity."
-  - "`--nmap <xml-file>` is a powerful integration — feed nmap's XML output (-oX, NOT -oN) to find exploits matching ALL detected services in a single call. Standard workflow: `nmap -sV -oX /session/scan.xml <target>` then `searchsploit --nmap /session/scan.xml -j`. Skips services without product/version banners. Output groups results per service."
-  - "`--mirror <id>` copies the exploit file to the CURRENT WORKING DIRECTORY (CWD), not /session/ by default. Use `cd /session && searchsploit --mirror 12345` to land in /session/. The wrapper runs each call in its own shell, so the cd MUST be in the same command. Alternative: chain `searchsploit --mirror 12345 && mv 12345.* /session/` (less clean)."
+  - "`--nmap <xml-file>` is a powerful integration — feed nmap's XML output (-oX, NOT -oN) to find exploits matching ALL detected services in a single call. Standard workflow: `nmap -sV -oX /session/output/scan.xml <target>` then `searchsploit --nmap /session/output/scan.xml -j`. Skips services without product/version banners. Output groups results per service."
+  - "`--mirror <id>` copies the exploit file to the CURRENT WORKING DIRECTORY (CWD), not /session/ by default. Use `cd /session && searchsploit --mirror 12345` to land in /session/output/. The wrapper runs each call in its own shell, so the cd MUST be in the same command. Alternative: chain `searchsploit --mirror 12345 && mv 12345.* /session/` (less clean)."
   - "Empty results are NOT a failure — searchsploit exits 0 even when zero exploits match. The default table renderer prints `Exploits: No Result` / `Shellcodes: No Result`; in `-j` mode the arrays are empty (`{\"RESULTS_EXPLOIT\": [], ...}`). The agent must inspect the result count, not just the exit code."
   - "Database needs to be up-to-date for new CVEs. `searchsploit -u` updates from the ExploitDB git mirror — REQUIRES NETWORK. The image bundles a snapshot at build time; for engagements requiring the absolute-latest exploits run `-u` first. Skip in air-gapped environments — the bundled mirror is still useful (45k+ entries)."
   - "Search-term order doesn't matter (default fuzzy mode). `apache 2.4 rce` and `rce apache 2.4` return the same results. Use `-e` (exact match) when order matters or when the default returns too many irrelevant results."

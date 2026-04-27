@@ -2,7 +2,7 @@ name: hashcat
 kind: cli
 binary: hashcat
 version: "7.1.2"
-description: "GPU-accelerated password cracking tool — hashcat v7.1.2 with 600+ hash modes (-m N) and 6 attack modes (-a N): straight (-a 0, wordlist with optional rules), combination (-a 1, two wordlists concatenated), brute-force/mask (-a 3, pattern with built-in or custom charsets), hybrid wordlist+mask (-a 6), hybrid mask+wordlist (-a 7), association (-a 9, cred-stuffing). Ships with rockyou.txt (~14M passwords) and 28+ rule files (best64, dive, OneRuleToRuleThemAll, rockyou-30000, etc.). Hashcat operates ENTIRELY OFFLINE on local hash files — there is no network target; the positional arguments are local file paths inside the container (e.g., /session/hashes.txt /session/wordlist.txt). Native CLI; the LLM constructs the full hashcat invocation. CPU-only inside Docker (no --gpus passthrough); requires --force to bypass GPU detection. Use john for format auto-detection and *2john converter scripts; use hydra for ONLINE brute-force; use hash-lookup for online hash databases."
+description: "GPU-accelerated password cracking tool — hashcat v7.1.2 with 600+ hash modes (-m N) and 6 attack modes (-a N): straight (-a 0, wordlist with optional rules), combination (-a 1, two wordlists concatenated), brute-force/mask (-a 3, pattern with built-in or custom charsets), hybrid wordlist+mask (-a 6), hybrid mask+wordlist (-a 7), association (-a 9, cred-stuffing). Ships with rockyou.txt (~14M passwords) and 28+ rule files (best64, dive, OneRuleToRuleThemAll, rockyou-30000, etc.). Hashcat operates ENTIRELY OFFLINE on local hash files — there is no network target; the positional arguments are local file paths inside the container (e.g., /session/output/hashes.txt /session/output/wordlist.txt). Native CLI; the LLM constructs the full hashcat invocation. CPU-only inside Docker (no --gpus passthrough); requires --force to bypass GPU detection. Use john for format auto-detection and *2john converter scripts; use hydra for ONLINE brute-force; use hash-lookup for online hash databases."
 image: "ghcr.io/silicon-works/mcp-tools-hashcat:latest"
 image_size_mb: 1030
 # Dual-clock model:
@@ -255,35 +255,35 @@ value_flags:
 
 usage_patterns:
   - name: "Wordlist attack vs NTLM with status updates"
-    command: "hashcat -a 0 -m 1000 /session/hashes.txt /session/rockyou.txt --potfile-path /session/hashcat.pot --status --status-timer=30 --force"
+    command: "hashcat -a 0 -m 1000 /session/output/hashes.txt /session/output/rockyou.txt --potfile-path /session/output/hashcat.pot --status --status-timer=30 --force"
     when: "The most common cracking workflow against Windows NTLM hashes (e.g., from impacket-secretsdump). -a 0 = straight wordlist mode; -m 1000 = NTLM. Pin --potfile-path to /session/ so cracks survive container restart. --status --status-timer=30 emits progress every 30s (heartbeats keep idle_timeout_seconds happy on slow runs). --force is required because Docker containers without --gpus passthrough otherwise abort with 'No devices found'. Add `-r /usr/share/hashcat/rules/best64.rule` for a fast 64-rule mangling pass; add `-r /usr/share/hashcat/rules/dive.rule` for an aggressive 99K-rule run."
 
   - name: "Mask attack vs MD5 (8-char alphanumeric)"
-    command: "hashcat -a 3 -m 0 /session/hashes.txt '?l?l?l?l?d?d?d?d' --potfile-path /session/hashcat.pot --force"
+    command: "hashcat -a 3 -m 0 /session/output/hashes.txt '?l?l?l?l?d?d?d?d' --potfile-path /session/output/hashcat.pot --force"
     when: "Pattern-based brute-force when you know the password structure (e.g., 'word + 4 digits' = ?l?l?l?l?d?d?d?d). -a 3 = mask mode; -m 0 = raw MD5. Built-in charsets: ?l (a-z), ?u (A-Z), ?d (0-9), ?s (special), ?a (all printable), ?h (lowercase hex), ?H (uppercase hex), ?b (any byte 0x00-0xff). Combine `-i --increment-min=4 --increment-max=8` to try lengths 4 through 8 of the mask. Custom charsets via -1/-2/-3/-4 (e.g., `-1 ?l?d` defines ?1 as lowercase+digits). WARNING: ?a?a?a?a?a?a?a?a (8 char, all printable) is ~6.6 quadrillion candidates — infeasible on CPU."
 
   - name: "Wordlist + best64 rules vs SHA1"
-    command: "hashcat -a 0 -m 100 -r /usr/share/hashcat/rules/best64.rule /session/hashes.txt /session/rockyou.txt --potfile-path /session/hashcat.pot --force"
+    command: "hashcat -a 0 -m 100 -r /usr/share/hashcat/rules/best64.rule /session/output/hashes.txt /session/output/rockyou.txt --potfile-path /session/output/hashcat.pot --force"
     when: "Classic 'rockyou + best64' workflow against raw SHA1 (-m 100). best64.rule contains 64 effective mangling rules — small enough to be fast, broad enough to catch most weak transformations (capitalize, append digits, leetspeak). For more aggressive coverage stack rules: `-r best64.rule -r toggles1.rule`. For exhaustive coverage use dive.rule (~99K rules, slow). For a balanced single-rule pass use `-r OneRuleToRuleThemAll.rule` (~52K rules, community gold standard)."
 
   - name: "Hybrid wordlist+mask vs sha512crypt"
-    command: "hashcat -a 6 -m 1800 /session/hashes.txt /session/rockyou.txt '?d?d?d' --potfile-path /session/hashcat.pot --force --status --status-timer=60"
+    command: "hashcat -a 6 -m 1800 /session/output/hashes.txt /session/output/rockyou.txt '?d?d?d' --potfile-path /session/output/hashcat.pot --force --status --status-timer=60"
     when: "-a 6 hybrid mode appends a mask to each wordlist word. Example: rockyou entry 'password' + mask '?d?d?d' tries password000 through password999. -m 1800 = sha512crypt ($6$) — Linux /etc/shadow format. SLOW per-attempt; expect hours-to-days for full rockyou × 1000 candidates. --status-timer=60 emits heartbeats so the wrapper doesn't kill the run on idle timeout. Use `-a 7 mask wordlist` for the reverse (mask prepended: 000password)."
 
   - name: "Show already-cracked passwords from potfile"
-    command: "hashcat -m 1000 --show /session/hashes.txt --potfile-path /session/hashcat.pot --force"
+    command: "hashcat -m 1000 --show /session/output/hashes.txt --potfile-path /session/output/hashcat.pot --force"
     when: "Inspect the potfile for previously cracked passwords without re-running the attack. Use after a long crack run to harvest results, after a timeout to see partial progress, or to confirm hashes were cracked in a previous container session. -m must MATCH the original crack call (hashcat matches by hash structure + mode). Returns instantly: hash:plaintext (or user:hash:plaintext if --username was used). Pair with --left to list uncracked hashes."
 
   - name: "Kerberoast TGS-REP crack"
-    command: "hashcat -a 0 -m 13100 /session/tgs-hashes.txt /session/rockyou.txt -r /usr/share/hashcat/rules/best64.rule --potfile-path /session/hashcat.pot --force --status --status-timer=60"
+    command: "hashcat -a 0 -m 13100 /session/output/tgs-hashes.txt /session/output/rockyou.txt -r /usr/share/hashcat/rules/best64.rule --potfile-path /session/output/hashcat.pot --force --status --status-timer=60"
     when: "Crack TGS-REP hashes captured by impacket-GetUserSPNs (kerberoasting). -m 13100 = Kerberos 5 TGS-REP etype 23 (RC4). For etype 18 (AES256) use -m 19700, etype 17 (AES128) -m 19600. Slow per-attempt due to AES/RC4 + HMAC; --status-timer=60 keeps heartbeats flowing. Mode 18200 covers AS-REP roasting (krb5asrep RC4); for AES variants use 19800/19900. --keep-guessing useful when multiple SPN tickets share a password."
 
   - name: "Custom charset mask (lowercase+digits, 6-12 chars)"
-    command: "hashcat -a 3 -m 1000 /session/hashes.txt '?1?1?1?1?1?1?1?1?1?1?1?1' -1 '?l?d' --increment-min=6 --increment-max=12 --potfile-path /session/hashcat.pot --force"
+    command: "hashcat -a 3 -m 1000 /session/output/hashes.txt '?1?1?1?1?1?1?1?1?1?1?1?1' -1 '?l?d' --increment-min=6 --increment-max=12 --potfile-path /session/output/hashcat.pot --force"
     when: "Custom charset attack — define ?1 as lowercase+digits, then build a 12-char mask of ?1s and increment from length 6 to 12. Useful when policy restricts characters (e.g., no symbols allowed). -1/-2/-3/-4 define charsets ?1/?2/?3/?4. -m 1000 = NTLM. Increment trades depth for breadth: shorter lengths finish first. Add `-O` for optimized kernels (faster but caps password length around 16-32 depending on algo)."
 
   - name: "Resumable session for long bcrypt run"
-    command: "hashcat -a 0 -m 3200 --session=client-bcrypt-1 /session/hashes.txt /session/rockyou.txt -r /usr/share/hashcat/rules/best64.rule --potfile-path /session/hashcat.pot --force --status --status-timer=120"
+    command: "hashcat -a 0 -m 3200 --session=client-bcrypt-1 /session/output/hashes.txt /session/output/rockyou.txt -r /usr/share/hashcat/rules/best64.rule --potfile-path /session/output/hashcat.pot --force --status --status-timer=120"
     when: "bcrypt (-m 3200) is intentionally slow; full rockyou + best64 can take days on CPU. --session=NAME writes resume state (<name>.restore in current dir or $HOME/.local/share/hashcat/sessions/). If the run is killed (container stop, hard timeout), resume with `hashcat --restore --session=client-bcrypt-1`. Combine with --runtime=N for a hashcat-internal soft cap. Pair with `-w 1` (low workload) for shared infrastructure or `-w 4` (insane) for dedicated runs."
 
   - name: "Benchmark / device check"
@@ -291,8 +291,8 @@ usage_patterns:
     when: "Benchmark hashcat against -m 1000 (NTLM) on this host's available devices. Useful (a) to verify the container's CPU fallback works, (b) to estimate runtime for a planned attack, (c) to detect missing OpenCL ICDs. -b alone runs all benchmark modes; -b -m N benches a specific mode. --force is required without GPU. `--opencl-info` prints all detected OpenCL platforms / devices."
 
   - name: "Identify hash type and view example"
-    command: "hashcat --identify /session/hashes.txt --force"
-    when: "Auto-identify hash format. Reads /session/hashes.txt and prints candidate -m mode numbers + names. Note: works only on the FIRST line; for mixed-format files split by mode. Pair with `hashcat -m N --example-hashes` to see what a given mode's example hash looks like — useful to confirm the format guess. For unknown hashes prefer running both `hashcat --identify` AND `hashid` (separate tool) and cross-referencing."
+    command: "hashcat --identify /session/output/hashes.txt --force"
+    when: "Auto-identify hash format. Reads /session/output/hashes.txt and prints candidate -m mode numbers + names. Note: works only on the FIRST line; for mixed-format files split by mode. Pair with `hashcat -m N --example-hashes` to see what a given mode's example hash looks like — useful to confirm the format guess. For unknown hashes prefer running both `hashcat --identify` AND `hashid` (separate tool) and cross-referencing."
 
 output_formats:
   # hashcat has no JSON / XML / SARIF cracked-result output. Its 'output' is
@@ -328,7 +328,7 @@ common_options:
   hash_type:
     - "-m N / --hash-type N: hashcat hash mode (REQUIRED for crack runs). Common: 0=MD5, 100=SHA1, 1000=NTLM, 1400=SHA256, 1700=SHA512, 1800=sha512crypt ($6$ Linux shadow), 3200=bcrypt ($2*$), 5500=NetNTLMv1, 5600=NetNTLMv2 (responder), 13100=Kerberos TGS-REP RC4, 19700=Kerberos TGS-REP AES256, 18200=Kerberos AS-REP RC4, 22000=WPA-PBKDF2-PMKID+EAPOL. Run `hashcat --help | less` for the full ~600-mode list."
   inputs:
-    - "POSITIONAL HASH FILE: required for crack runs (e.g., /session/hashes.txt). One hash per line; `--username` enables user:hash format."
+    - "POSITIONAL HASH FILE: required for crack runs (e.g., /session/output/hashes.txt). One hash per line; `--username` enables user:hash format."
     - "POSITIONAL WORDLIST(S): -a 0 needs ONE wordlist; -a 1 needs TWO; -a 6/7 need ONE wordlist + ONE mask string. /usr/share/wordlists/rockyou.txt (~14M) ships in the image."
     - "POSITIONAL MASK: -a 3 takes ONE mask string (e.g., '?u?l?l?l?d?d?d?d'); -a 6 takes wordlist THEN mask; -a 7 takes mask THEN wordlist."
   rules:
@@ -337,7 +337,7 @@ common_options:
   output:
     - "-o PATH / --outfile PATH: write cracked results to PATH (in addition to potfile)."
     - "--outfile-format=N: output column spec. 1=hash, 2=plaintext, 3=hash:plaintext, 4=hex-plaintext, 5=hash:hex-plaintext, 6=plaintext:hex-plaintext, 7=hash:plaintext:hex-plaintext, ..."
-    - "--potfile-path PATH: override the potfile location. Default: ~/.local/share/hashcat/hashcat.potfile (or ~/.hashcat/hashcat.potfile on older builds). ALWAYS pin to /session/hashcat.pot to preserve cracks across container restarts."
+    - "--potfile-path PATH: override the potfile location. Default: ~/.local/share/hashcat/hashcat.potfile (or ~/.hashcat/hashcat.potfile on older builds). ALWAYS pin to /session/output/hashcat.pot to preserve cracks across container restarts."
     - "--show: print cracked passwords from potfile (re-reads potfile, no cracking)."
     - "--left: print uncracked hashes."
     - "--logfile-disable: suppress logfile."
@@ -385,12 +385,12 @@ gotchas:
   - "hashcat has NO NETWORK TARGET. The positional arguments are LOCAL FILE PATHS (hash file, wordlists) and/or a MASK STRING. target_extraction returns null; scope-validation does NOT apply because there's no remote host to validate against. Same design as john."
   - "-m N IS REQUIRED for crack runs. Default is invalid; running without -m errors with 'No hash-mode specified'. Use `hashcat --identify FILE` to guess, then `hashcat -m N --example-hashes` to confirm the example matches your hash."
   - "--force IS REQUIRED in Docker without GPU passthrough. Containers built without --gpus all (the current default) cannot enumerate GPU devices, so hashcat aborts with 'No devices found' UNLESS --force tells it to fall back to CPU-only. Every usage_pattern includes --force for this reason."
-  - "Potfile location varies by hashcat version (~/.hashcat/hashcat.potfile on older builds, ~/.local/share/hashcat/hashcat.potfile on v6+/v7). It lives in the container's home dir and is WIPED on container restart. ALWAYS pin --potfile-path /session/hashcat.pot to preserve cracks across restarts."
+  - "Potfile location varies by hashcat version (~/.hashcat/hashcat.potfile on older builds, ~/.local/share/hashcat/hashcat.potfile on v6+/v7). It lives in the container's home dir and is WIPED on container restart. ALWAYS pin --potfile-path /session/output/hashcat.pot to preserve cracks across restarts."
   - "--show re-reads the potfile to display already-cracked hashes. Different from john's --show in that hashcat REQUIRES -m N (john auto-detects from the hash). Format MUST match the original crack call."
   - "-O (optimized kernels) is FASTER but LIMITS max password length (~16-32 chars depending on algo). For long passwords or wordlists with long entries, omit -O and accept the slower default kernel."
   - "Workload profile -w 4 (insane) maxes out device usage and may starve other processes. Use -w 1 (low) on shared containers; -w 2 (default) for typical work; -w 3 (high) for dedicated runs; -w 4 (insane) only on dedicated bare-metal. The legacy MCP server defaulted to `-w 2` in this image specifically to avoid OOM kills inside the 1024 MB container; if you raise `-w` to 3 or 4, also bump `resources.memory_mb` to 2048+ or expect 'Out of memory' aborts on heavy ruleset runs."
   - "On CPU (no GPU passthrough), hashcat must JIT-COMPILE the kernel before any candidates are tried. Cold-start kernel compile typically takes 30-90 seconds for slow algorithms (bcrypt, sha512crypt, scrypt, Argon2, Kerberos AES); subsequent runs of the same -m N reuse the cached kernel and start cracking in ~1-2 seconds. When sizing --runtime and the outer max_runtime_seconds, add at least 120 s of head-room above your intended cracking budget so the kernel has time to build before the runtime cap fires."
-  - "When --potfile-path is pinned to /session/, set `-o /dev/null` (or omit -o entirely) to avoid writing a duplicate outfile in cwd. The legacy MCP server used `-o /dev/null` because cracked results are always recoverable via `--show` from the pinned potfile. If you DO want a separate outfile (e.g. for hash:plaintext columns the potfile doesn't preserve), use `--outfile /session/cracked.txt --outfile-format=3` instead of falling back to the default which writes to cwd."
+  - "When --potfile-path is pinned to /session/, set `-o /dev/null` (or omit -o entirely) to avoid writing a duplicate outfile in cwd. The legacy MCP server used `-o /dev/null` because cracked results are always recoverable via `--show` from the pinned potfile. If you DO want a separate outfile (e.g. for hash:plaintext columns the potfile doesn't preserve), use `--outfile /session/output/cracked.txt --outfile-format=3` instead of falling back to the default which writes to cwd."
   - "Exit code is NOT the only completion signal. hashcat exits 1 on 'exhausted' (all candidates tried, none cracked) — same as exits 2/3/4 (aborted variants). To distinguish exhausted-but-clean from real failure, parse stdout/stderr for the literal string `Exhausted` or `Status...........: Exhausted`. The legacy server treated 'Exhausted' as success-with-no-cracks; you should too — it means the attack ran cleanly, not that it errored."
   - "`hashcat --identify` only inspects the FIRST LINE of the input file and only knows the structural patterns hashcat itself encodes. For broader hash-format detection — especially for ambiguous 32-hex digests (MD5 vs NTLM vs LM-half vs MD4) and prefix-tagged Unix crypt strings ($1$, $5$, $6$, $2a$, $P$, $apr1$, $argon2id$) — pair `hashcat --identify` with `hashid` (separate tool) and cross-reference. The legacy MCP server bundled a regex heuristic on top of --identify covering: md5crypt $1$, sha256crypt $5$, sha512crypt $6$, bcrypt $2[aby]$, phpass $P$/$H$, apr1, argon2, MySQL 4.1+ `*[A-F]{40}`, LM 16-hex, MD5+salt `[a-f]{32}:[a-f]+`. If hashcat --identify returns nothing useful, eyeball the prefix manually before assuming the hash is unidentifiable."
   - "Mask syntax differs slightly from john's: hashcat ?l ?u ?d ?s ?a are identical; ?h = lowercase hex, ?H = uppercase hex, ?b = any byte 0x00-0xff (binary). Custom charsets ?1-?4 via -1/-2/-3/-4 (note: the -N short flag, NOT --N). Up to 4 custom charsets standard; some builds support up to 8."
@@ -417,13 +417,13 @@ failure_signatures:
   - signal: "Could not open hashfile"
     remediation: "hashcat-specific variant of file-open failure on the positional hash file. Same root cause: wrong path or permission denied. Check `ls -l /session/<name>.txt`."
   - signal: "No hashes loaded"
-    remediation: "Hash file is empty, malformed, OR -m N mismatches the hash structure. Verify with `head /session/hashes.txt` and run `hashcat -m N --example-hashes` to confirm the example matches your hash. A 32-hex-char string is MD5 (-m 0) AND NTLM (-m 1000) — context disambiguates (Windows dump = NTLM; web app dump = MD5)."
+    remediation: "Hash file is empty, malformed, OR -m N mismatches the hash structure. Verify with `head /session/output/hashes.txt` and run `hashcat -m N --example-hashes` to confirm the example matches your hash. A 32-hex-char string is MD5 (-m 0) AND NTLM (-m 1000) — context disambiguates (Windows dump = NTLM; web app dump = MD5)."
   - signal: "Hashfile.*on line.*Token length exception"
     remediation: "A hash on the named line doesn't match the expected token count for -m N. Often caused by mixing formats in one file or a stray colon (e.g., user:hash with --username flag missing). Filter the file to one format per file, then crack each separately."
   - signal: "Token length exception"
     remediation: "Generic version of the above — hashcat's loader rejected a hash. Fix: confirm -m matches the hash structure; if input is user:hash add --username; if salts are involved verify the salt format."
   - signal: "No hash-mode specified"
-    remediation: "Required -m N flag was omitted on a crack run. hashcat does NOT auto-detect the hash mode (john does). Run `hashcat --identify /session/hashes.txt` to guess, then re-run with `-m N`. For known formats reference: 0=MD5, 100=SHA1, 1000=NTLM, 1800=sha512crypt, 3200=bcrypt, 5600=NetNTLMv2, 13100=Kerberos TGS-REP RC4."
+    remediation: "Required -m N flag was omitted on a crack run. hashcat does NOT auto-detect the hash mode (john does). Run `hashcat --identify /session/output/hashes.txt` to guess, then re-run with `-m N`. For known formats reference: 0=MD5, 100=SHA1, 1000=NTLM, 1800=sha512crypt, 3200=bcrypt, 5600=NetNTLMv2, 13100=Kerberos TGS-REP RC4."
   - signal: "Mode '.*' is not supported"
     remediation: "-m N value is invalid (e.g., -m 99999 doesn't exist). Run `hashcat --help | grep -E '^[[:space:]]+[0-9]+ \\|'` to list valid modes, or `hashcat --example-hashes` for example hashes per mode."
   - signal: "Invalid -m specified"
@@ -462,7 +462,7 @@ help_commands:
     purpose: "Long form of -V — same output."
   - command: "hashcat -m N --example-hashes"
     purpose: "Print example hashes for mode N — verify your hash matches the expected structure before launching a crack."
-  - command: "hashcat --identify /session/hashes.txt"
+  - command: "hashcat --identify /session/output/hashes.txt"
     purpose: "Auto-identify hash mode from the first line of the hash file. Pair with hashid (separate tool) for cross-validation."
   - command: "hashcat --opencl-info"
     purpose: "Enumerate OpenCL platforms and devices. Useful for diagnosing 'No devices found' errors."

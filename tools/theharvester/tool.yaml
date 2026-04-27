@@ -171,7 +171,7 @@ target_extraction:
   #     match, but `-b` is in value_flags so the value is consumed.
   #   - `-e <DNS resolver IP>` — IP literal, looks IP-shaped but is the
   #     RESOLVER, not target. Listed in value_flags.
-  #   - `-f <output-prefix>` — file path under /session/. Not a target.
+  #   - `-f <output-prefix>` — file path under /session/output/. Not a target.
   #   - `-r <int>`, `-l <int>`, `-S <int>` — integer values. Not targets.
   #
   # `-d` is REQUIRED — a call without -d fails at theHarvester argparse
@@ -216,37 +216,37 @@ value_flags:
 usage_patterns:
   # ── quick / single-source recon ──────────────────────────────────────
   - name: "Quick OSINT (free certificate-transparency + threat-intel sources)"
-    command: "-d {domain} -b crtsh,otx -l 100 -f /session/theharvester-{domain}-quick"
-    when: "First-pass OSINT — crtsh (CT logs) and otx (AlienVault OTX) are free, fast, and high signal-to-noise. Use this as the default opening probe before deciding whether to run the full source set. Output: /session/theharvester-<domain>-quick.json (structured, preferred) plus .html and .xml siblings."
+    command: "-d {domain} -b crtsh,otx -l 100 -f /session/output/theharvester-{domain}-quick"
+    when: "First-pass OSINT — crtsh (CT logs) and otx (AlienVault OTX) are free, fast, and high signal-to-noise. Use this as the default opening probe before deciding whether to run the full source set. Output: /session/output/theharvester-<domain>-quick.json (structured, preferred) plus .html and .xml siblings."
 
   - name: "Comprehensive (all sources, slow, may need API keys)"
-    command: "-d {domain} -b all -l 500 -f /session/theharvester-{domain}-full"
+    command: "-d {domain} -b all -l 500 -f /session/output/theharvester-{domain}-full"
     when: "Run every available source — exhaustive coverage when the engagement budget allows 10-30 minutes per domain. WARNING: paid sources without API keys silently fail; rate limits trip on heavy use. The fast subset (crtsh,otx,hackertarget,rapiddns,urlscan,certspotter) covers ~80% of findings without API keys."
 
   - name: "Single source (targeted query)"
-    command: "-d {domain} -b github-code -l 50 -f /session/theharvester-{domain}-github"
+    command: "-d {domain} -b github-code -l 50 -f /session/output/theharvester-{domain}-github"
     when: "Drill into a specific source — useful when you know which OSINT vector matters. github-code (requires API key) finds emails leaked in commit messages and source code. Other useful single-source runs: `-b crtsh` (CT logs only), `-b hackertarget` (DNS aggregator), `-b urlscan` (web crawl)."
 
   # ── enrichment paths ──────────────────────────────────────
   - name: "With DNS verification (slower, higher accuracy)"
-    command: "-d {domain} -b crtsh,otx,hackertarget -l 200 -v -f /session/theharvester-{domain}-verified"
+    command: "-d {domain} -b crtsh,otx,hackertarget -l 200 -v -f /session/output/theharvester-{domain}-verified"
     when: "After harvesting hosts, perform a DNS lookup against each to confirm the host actually resolves. Filters out historical / decommissioned subdomains from CT logs. Use when you need a cleaned hostlist for downstream nmap / nuclei runs. -v adds wall-clock time proportional to result count (one DNS query each)."
 
   - name: "Reverse-DNS sweep on discovered IPs"
-    command: "-d {domain} -b crtsh,hackertarget -l 100 -r 100 -f /session/theharvester-{domain}-reverse"
+    command: "-d {domain} -b crtsh,hackertarget -l 100 -r 100 -f /session/output/theharvester-{domain}-reverse"
     when: "After resolving hosts to IPs, reverse-DNS the first N IPs to discover sibling hostnames in the same netblock. Useful for: finding sister-services on shared infrastructure, identifying CDN vs origin IPs, mapping internal vs external naming. -r N caps the reverse lookups (default behaviour without this flag is no reverse)."
 
   - name: "Custom DNS resolver (engagement-specific resolver)"
-    command: "-d {domain} -b crtsh,hackertarget -l 200 -v -e 1.1.1.1 -f /session/theharvester-{domain}-cf"
+    command: "-d {domain} -b crtsh,hackertarget -l 200 -v -e 1.1.1.1 -f /session/output/theharvester-{domain}-cf"
     when: "Override the system resolver — useful when: the container's /etc/resolv.conf points at the engagement's split-horizon DNS (which would only know internal subdomains), you want to verify against a known-good public resolver (Cloudflare 1.1.1.1, Google 8.8.8.8), or you're comparing answers across resolvers."
 
   # ── advanced DNS modes ──────────────────────────────────────
   - name: "DNS forced enumeration (brute + verify)"
-    command: "-d {domain} -b crtsh,hackertarget -l 200 -n -f /session/theharvester-{domain}-dns"
+    command: "-d {domain} -b crtsh,hackertarget -l 200 -n -f /session/output/theharvester-{domain}-dns"
     when: "-n triggers DNS forced enumeration on the harvested hosts — verifies and tries common subdomain alterations. Lighter than amass brute-force but adds a layer of active DNS probing on top of pure passive OSINT."
 
   - name: "Shodan enrichment (requires API key)"
-    command: "-d {domain} -b crtsh,otx -l 100 -s -f /session/theharvester-{domain}-shodan"
+    command: "-d {domain} -b crtsh,otx -l 100 -s -f /session/output/theharvester-{domain}-shodan"
     when: "After harvesting hosts, query Shodan for each IP to add open-port and banner data. Requires a valid Shodan API key in ~/.theHarvester/api-keys.yaml. Useful for getting a quick attack-surface preview before running nmap. Without an API key Shodan enrichment silently no-ops."
 
   - name: "Help / version"
@@ -282,7 +282,7 @@ common_options:
     - "-c: DNS brute-force (lightweight wordlist-driven probe)."
     - "-t: DNS TLD discovery — find sister domains on adjacent TLDs (com → net, org, etc.)."
   output:
-    - "-f PREFIX: output-prefix path (e.g., /session/theharvester-example.com). Writes prefix.html, prefix.xml, prefix.json. JSON is the preferred structured form."
+    - "-f PREFIX: output-prefix path (e.g., /session/output/theharvester-example.com). Writes prefix.html, prefix.xml, prefix.json. JSON is the preferred structured form."
     - "-l N: results per source cap (default 500). Lower for fast triage; higher for thorough harvesting."
     - "-S N: paginated source start point (rare in modern usage; some sources don't honour it)."
   proxy:
@@ -305,7 +305,7 @@ gotchas:
   - "GITHUB-CODE SOURCE IS HIGH-NOISE BUT HIGH-SIGNAL — finds emails leaked in commit messages, code, secrets in repos. Often reveals employee email addresses for phishing recon. Requires GitHub API key."
   - "Feature 28 dynamic recipes are RETIRED for the kind:cli path — the LLM writes argv directly. Recipes still load for legacy method calls (harvest, list_sources) if /session/tool_recipes/theharvester/ exists, but they're a dead branch under run_cli (REQ-TR-016)."
   - "DOMAIN VALUE MUST BE BARE — `-d <domain>` accepts ONLY a hostname/FQDN, not a URL. theHarvester argparse will accept `-d https://example.com/path` but most sources then silently zero-result because they expect a bare DNS label. Strip protocol prefix (`https?://`) and any trailing path/query/fragment before passing to -d. Legacy mcp-server.py auto-stripped these (see _clean_domain helper); kind:cli passes argv through raw — the LLM is responsible for emitting `-d example.com` not `-d https://example.com/`."
-  - "API KEYS LIVE IN ~/.theHarvester/api-keys.yaml — the container image does NOT pre-stage this file. To use paid sources (shodan, censys, virustotal, etc.), drop the YAML at /session/api-keys.yaml and copy into ~/.theHarvester/ at run time, or accept silent zero-results from those sources. theHarvester does NOT warn the user about missing keys; the only signal is empty result arrays."
+  - "API KEYS LIVE IN ~/.theHarvester/api-keys.yaml — the container image does NOT pre-stage this file. To use paid sources (shodan, censys, virustotal, etc.), drop the YAML at /session/output/api-keys.yaml and copy into ~/.theHarvester/ at run time, or accept silent zero-results from those sources. theHarvester does NOT warn the user about missing keys; the only signal is empty result arrays."
 
 failure_signatures:
   # Layer-diverse signals (SKILL #11) — at least 5 distinct verifiable layers:

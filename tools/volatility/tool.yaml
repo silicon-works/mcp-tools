@@ -109,9 +109,9 @@ see_also:
 target_extraction:
   # Volatility 3 has NO network target. Its operation is purely local memory
   # dump analysis. The "operands" of a vol call are:
-  #   1. The dump file path supplied via -f (e.g., /session/dump.raw)
+  #   1. The dump file path supplied via -f (e.g., /session/output/dump.raw)
   #   2. The plugin name as a positional (e.g., windows.pslist.PsList)
-  #   3. Optional plugin-specific arguments (e.g., --pid 1234, -o /session/out)
+  #   3. Optional plugin-specific arguments (e.g., --pid 1234, -o /session/output/out)
   # NONE of these are network endpoints. The plugin's TargetValidation
   # framework is designed for network targets (host/IP/URL); applying it to
   # a file path or plugin name would either always reject (wrong) or always
@@ -152,7 +152,7 @@ value_flags:
   - "-s"                          # symbol-table override
   - "--symbol-table"              # long form of -s
   - "--symbol-dirs"               # additional symbol-table dirs (colon-separated)
-  - "--cache-path"                # cache dir path (pin to /session/vol-cache for persistence)
+  - "--cache-path"                # cache dir path (pin to /session/output/vol-cache for persistence)
   - "--clear-cache"               # boolean — listed for safety
   # Plugin discovery / dirs
   - "-p"                          # additional plugin dirs (colon-separated)
@@ -198,43 +198,43 @@ value_flags:
 
 usage_patterns:
   - name: "Identify dump OS and basic info"
-    command: "vol -f /session/dump.raw windows.info.Info"
+    command: "vol -f /session/output/dump.raw windows.info.Info"
     when: "ALWAYS run this first on a new dump. windows.info.Info prints the kernel version, build number, NTBuildLabEx, system time, layer details, and confirms the dump is parseable. For Linux dumps use `linux.banners.Banners`; for Mac dumps use `mac.kevents.KEvents` or `mac.bash.Bash` as a smoke test. If windows.info.Info fails ('Could not determine layer'), try linux.banners.Banners next — auto OS-detection is via the symbol-table match."
 
   - name: "List running processes (Windows)"
-    command: "vol -f /session/dump.raw windows.pslist.PsList -r json"
+    command: "vol -f /session/output/dump.raw windows.pslist.PsList -r json"
     when: "Standard process enumeration. -r json emits machine-readable output (preferred for downstream tooling vs the default table renderer). For Linux dumps use `linux.pslist.PsList`; for Mac use `mac.pslist.PsList`. Returns process name, PID, PPID, threads, handles, creation/exit times. Use -r csv for spreadsheet-friendly output, -r pretty for boxed table output. windows.pslist.PsList walks the EPROCESS list (can be hidden by rootkits); pair with windows.psscan.PsScan (pool-tag scan) and windows.psxview.PsXView (multi-source view) to detect hidden processes."
 
   - name: "Process tree (parent-child relationships)"
-    command: "vol -f /session/dump.raw windows.pstree.PsTree -r json"
+    command: "vol -f /session/output/dump.raw windows.pstree.PsTree -r json"
     when: "Render the process hierarchy. Useful to spot suspicious parent-child pairs (e.g., winword.exe → cmd.exe → powershell.exe → mshta.exe = phishing payload chain). Indentation in table renderer; nested objects in json. For Linux: `linux.pstree.PsTree`."
 
   - name: "Network connections snapshot"
-    command: "vol -f /session/dump.raw windows.netscan.NetScan -r json"
+    command: "vol -f /session/output/dump.raw windows.netscan.NetScan -r json"
     when: "Extract TCP/UDP connection records from memory. Returns local/remote IPs, ports, owning PIDs, and connection state. windows.netscan scans the pool for connection structures; windows.netstat.NetStat walks the partition table (more accurate but version-dependent). Pair with windows.pslist to map connections back to process names. For Linux: `linux.sockstat.Sockstat`."
 
   - name: "Linux bash command history"
-    command: "vol -f /session/dump.lime linux.bash.Bash"
+    command: "vol -f /session/output/dump.lime linux.bash.Bash"
     when: "Extract bash command history from a Linux memory dump. linux.bash.Bash scans bash process memory for HISTFILE-style entries — recovers the in-memory history even if .bash_history was deleted on disk. Lime format (`.lime` extension) is the typical Linux memory capture format from LiME LKM (Linux Memory Extractor). Other Linux dump formats: raw (dd), AVML (.aff4)."
 
   - name: "Extract NTLM hashes from SAM hive"
-    command: "vol -f /session/dump.raw windows.registry.hashdump.Hashdump -r json"
+    command: "vol -f /session/output/dump.raw windows.registry.hashdump.Hashdump -r json"
     when: "Extract NTLM password hashes from the SAM registry hive. Returns User:rid:lmhash:nthash format suitable for cracking with hashcat -m 1000 or john --format=NT. Note: this is the FULL plugin name `windows.registry.hashdump.Hashdump` (CamelCase class suffix). The legacy alias `windows.hashdump` may also work but the namespaced form is preferred. Requires SAM + SYSTEM hives present in the dump (typical for full memory captures)."
 
   - name: "Memory-injection / shellcode detection"
-    command: "vol -f /session/dump.raw windows.malfind.Malfind --pid 1234 -r json"
+    command: "vol -f /session/output/dump.raw windows.malfind.Malfind --pid 1234 -r json"
     when: "Detect injected code via VAD analysis. windows.malfind.Malfind looks for memory regions that are RWX (read/write/execute) AND backed by no file (anonymous private mapping) — the classic shellcode-injection signature. Use `--pid N` to scope to a single process; omit for an all-process scan (slower, more output). Pair with windows.vadinfo.VadInfo for raw VAD walking and windows.dumpfiles.DumpFiles to extract suspicious regions for offline yara/ghidra analysis."
 
   - name: "MFT extraction with output directory"
-    command: "vol -f /session/dump.raw windows.mftscan.MFTScan -o /session/mft/ --cache-path /session/vol-cache"
-    when: "Extract NTFS Master File Table entries from memory. windows.mftscan.MFTScan recovers file metadata (filenames, timestamps, sizes, parent dirs) from MFT records cached in RAM. -o /session/mft/ sets the output directory for any extracted artifacts (the directory MUST exist; mkdir -p first via a separate run_cli or rely on the plugin to create). --cache-path /session/vol-cache persists the layer-discovery cache across runs (significant speedup on large dumps after first analysis)."
+    command: "vol -f /session/output/dump.raw windows.mftscan.MFTScan -o /session/output/mft/ --cache-path /session/output/vol-cache"
+    when: "Extract NTFS Master File Table entries from memory. windows.mftscan.MFTScan recovers file metadata (filenames, timestamps, sizes, parent dirs) from MFT records cached in RAM. -o /session/output/mft/ sets the output directory for any extracted artifacts (the directory MUST exist; mkdir -p first via a separate run_cli or rely on the plugin to create). --cache-path /session/output/vol-cache persists the layer-discovery cache across runs (significant speedup on large dumps after first analysis)."
 
   - name: "Registry printkey (specific hive + key)"
-    command: "vol -f /session/dump.raw windows.registry.printkey.PrintKey --key 'Software\\Microsoft\\Windows\\CurrentVersion\\Run' -r json"
+    command: "vol -f /session/output/dump.raw windows.registry.printkey.PrintKey --key 'Software\\Microsoft\\Windows\\CurrentVersion\\Run' -r json"
     when: "Print a specific registry key's values. Useful for autostart enumeration (Run/RunOnce keys), service config (HKLM\\SYSTEM\\CurrentControlSet\\Services), or recently-used items. Backslashes in --key MUST be escaped or single-quoted in shell context (here single-quoted). Pair with windows.registry.hivelist.HiveList to enumerate available hives, then printkey to drill in. For full hive dump use windows.registry.hivescan.HiveScan."
 
   - name: "Timeliner — full system event timeline"
-    command: "vol -f /session/dump.raw timeliner.Timeliner -r csv --cache-path /session/vol-cache"
+    command: "vol -f /session/output/dump.raw timeliner.Timeliner -r csv --cache-path /session/output/vol-cache"
     when: "Build a chronological timeline by aggregating timestamps from multiple plugins (process create/exit, registry last-write, file timestamps, network events). -r csv is preferred (one row per event, sortable by time column). EXPENSIVE on large dumps — first run can take 30+ minutes building the cache; subsequent runs reuse --cache-path. Use after triage to construct an attack-narrative."
 
   - name: "List available plugins (introspection)"
@@ -267,7 +267,7 @@ output_formats:
 
 common_options:
   input:
-    - "-f PATH / --file PATH: REQUIRED for all analysis runs. Path to memory dump (raw, vmem, dmp, lime, AVML, snapshot.vmsn). Pre-stage in /session/."
+    - "-f PATH / --file PATH: REQUIRED for all analysis runs. Path to memory dump (raw, vmem, dmp, lime, AVML, snapshot.vmsn). Pre-stage in /session/output/."
     - "--single-location URL: alternate dump source. Supports file://, http(s)://, smb://, gs://, s3://. Used for streaming dumps from remote storage. NOT a network target — it's an alternate input transport. In OpenSploit workflows always use -f with /session/ paths."
   plugin:
     - "POSITIONAL PLUGIN NAME: namespaced and CASE-SENSITIVE. Format: <namespace>.<group>.<ClassName> for most (e.g., windows.pslist.PsList). A few are top-level: timeliner.Timeliner, banners.Banners, layerwriter.LayerWriter, isfinfo.IsfInfo, frameworkinfo.FrameworkInfo, configwriter.ConfigWriter, regexscan.RegExScan, vmscan.Vmscan."
@@ -283,7 +283,7 @@ common_options:
     - "--save-config PATH: write current resolved config to PATH for reuse on subsequent runs."
     - "-s / --symbol-table NAME: explicit symbol table override (e.g., a specific NT kernel build). Use after `vol -f dump.raw isfinfo.IsfInfo` to enumerate available tables."
     - "--symbol-dirs DIRS: colon-separated list of extra symbol-table directories (custom .pdb / ISF JSON files)."
-    - "--cache-path DIR: cache directory for layer auto-detection results. PIN TO /session/vol-cache for persistence — first run builds the cache (~30-60s on large dumps); subsequent runs reuse it."
+    - "--cache-path DIR: cache directory for layer auto-detection results. PIN TO /session/output/vol-cache for persistence — first run builds the cache (~30-60s on large dumps); subsequent runs reuse it."
     - "--clear-cache: invalidate the cache (rare; use when symbol-table changes break the cache)."
     - "-p DIRS / --plugin-dirs DIRS: colon-separated list of extra plugin directories (custom community plugins)."
   performance:
@@ -295,7 +295,7 @@ gotchas:
   - "VOLATILITY 3 vs VOLATILITY 2 are DIFFERENT, INCOMPATIBLE TOOLS. Vol3 binary is `vol`; Vol2 binary is `volatility`. This image ships ONLY Vol3. Plugin names changed: vol2 `imageinfo` → vol3 `windows.info.Info`; vol2 `pslist` → vol3 `windows.pslist.PsList`; vol2 `hashdump` → vol3 `windows.registry.hashdump.Hashdump`; vol2 `--profile=Win7SP1x64` is GONE (vol3 auto-detects via symbol-table match). If you copy vol2 invocations from old write-ups they will fail."
   - "PLUGIN NAME IS A POSITIONAL after flags: `vol -f dump.raw windows.pslist.PsList`, NOT `vol windows.pslist.PsList -f dump.raw` (though the latter does parse — argparse is permissive). Plugin names are CASE-SENSITIVE. Common errors: typing `windows.pslist` (missing `.PsList` class suffix), `Windows.pslist.PsList` (wrong-case namespace), `windows.PSlist.PsList` (wrong-case group)."
   - "Plugin namespacing: `windows.X.Y` for Windows targets, `linux.X.Y` for Linux, `mac.X.Y` for macOS. A few plugins are top-level (no OS namespace): timeliner.Timeliner, banners.Banners, layerwriter.LayerWriter, regexscan.RegExScan, isfinfo.IsfInfo, vmscan.Vmscan, frameworkinfo.FrameworkInfo, configwriter.ConfigWriter."
-  - "First run on a NEW dump runs layer auto-detection — can take 30-60 seconds (or more on large dumps) while symbol-table matching scans the dump. Subsequent runs reuse the cache. ALWAYS pass `--cache-path /session/vol-cache` to persist this cache across container restarts; without it every fresh container redoes the work."
+  - "First run on a NEW dump runs layer auto-detection — can take 30-60 seconds (or more on large dumps) while symbol-table matching scans the dump. Subsequent runs reuse the cache. ALWAYS pass `--cache-path /session/output/vol-cache` to persist this cache across container restarts; without it every fresh container redoes the work."
   - "`-r json` is the most useful renderer for downstream parsing. Default `table` is human-readable but uses tabs and ASCII drawings that break naive parsers. `json_lines` is good for streaming (one object per line). `csv` is good for spreadsheets and timeliner. `pretty` is `table` with ANSI box-drawing — only for terminal viewing."
   - "Some plugins WRITE TO DISK — windows.dumpfiles.DumpFiles, windows.mftscan.MFTScan with --dump, windows.memmap.Memmap with --dump. They REQUIRE -o /path/to/dir AND the directory MUST EXIST. Pre-create with `vol ... mkdir-equivalent` (NOT a vol command; do it via a separate run_cli `mkdir`). The `--remove-files` flag cleans up extracted files after the plugin finishes — combine with `--dump` for ephemeral analysis."
   - "Volatility has NO NETWORK TARGET. The positional argument is a PLUGIN NAME (e.g., `windows.pslist.PsList`), and the dump file path is supplied via `-f`. target_extraction returns null; scope-validation does NOT apply because there is no remote host to validate against. Same design as john / hashcat — all three operate on local artifacts."

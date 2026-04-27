@@ -259,7 +259,7 @@ usage_patterns:
   - name: "Send a crafted email (basic — no TLS, no auth)"
     binary: "swaks"
     command: "--server {host} --port 25 --to {to} --from {from} --header 'Subject: {subject}' --body '{body}' --timeout 30"
-    when: "Send a complete email transaction (HELO + MAIL FROM + RCPT TO + DATA + QUIT). For phishing pretexts on internal MTAs that don't enforce SPF or for triggering server-side processing (account creation, password resets, alert systems). The body is sent verbatim; literal newlines must be escaped or use --data /session/body.txt. ALWAYS verify the message lands in the recipient's mailbox (spam folders included) — successful 250 doesn't mean delivery."
+    when: "Send a complete email transaction (HELO + MAIL FROM + RCPT TO + DATA + QUIT). For phishing pretexts on internal MTAs that don't enforce SPF or for triggering server-side processing (account creation, password resets, alert systems). The body is sent verbatim; literal newlines must be escaped or use --data /session/output/body.txt. ALWAYS verify the message lands in the recipient's mailbox (spam folders included) — successful 250 doesn't mean delivery."
 
   - name: "Send with full custom headers (header injection / spoofing)"
     binary: "swaks"
@@ -310,7 +310,7 @@ usage_patterns:
   - name: "VRFY user enumeration (most direct method)"
     binary: "smtp-user-enum"
     command: "-M VRFY -t {host} -p 25 -U /session/{userlist} -w 10"
-    when: "Test whether the SMTP server accepts the VRFY command and reveals user existence. VRFY response 250/252 = user exists; 550 = doesn't exist. Most modern MTAs disable VRFY (postfix has it OFF by default) but many legacy installs (sendmail, qmail) leave it on. -U is a newline-separated username file (write via /session/users.txt). Common username sources: /usr/share/seclists/Usernames/Names/names.txt, output of theharvester, or a hand-built list (root, admin, postmaster, mail, daemon, nobody, ftp, www-data, michael, james — the Solidstate / HTB classics)."
+    when: "Test whether the SMTP server accepts the VRFY command and reveals user existence. VRFY response 250/252 = user exists; 550 = doesn't exist. Most modern MTAs disable VRFY (postfix has it OFF by default) but many legacy installs (sendmail, qmail) leave it on. -U is a newline-separated username file (write via /session/output/users.txt). Common username sources: /usr/share/seclists/Usernames/Names/names.txt, output of theharvester, or a hand-built list (root, admin, postmaster, mail, daemon, nobody, ftp, www-data, michael, james — the Solidstate / HTB classics)."
 
   - name: "RCPT TO enumeration (when VRFY is disabled)"
     binary: "smtp-user-enum"
@@ -432,7 +432,7 @@ gotchas:
   - "smtp-user-enum has POOR TLS support — it doesn't STARTTLS by default and may fail on servers that require it. For STARTTLS-mandatory targets, fall back to swaks in a loop: `for u in $(cat users.txt); do swaks --server X -tls --quit-after RCPT --to $u@domain --from probe@x; done`. Or use nmap's smtp-enum-users NSE script which handles STARTTLS."
   - "swaks header SYNTAX — `--header 'Subject: foo'` requires a literal colon-space between name and value. `--header 'Subject:foo'` (no space after colon) is technically valid RFC 5322 but some MTAs reject. swaks does not auto-fix — pass exact wire format."
   - "MULTIPLE -header flags — composable. `--header 'X-A: 1' --header 'X-B: 2'` adds both. There is NO list-of-headers flag; one --header per header line. For long headers split across lines (continuation), use `--header 'X-Long: line1\\n line2'` with leading-space continuation."
-  - "swaks --data with file path that BEGINS with @ requires the @ to be doubled or quoted. `--data /session/body.txt` is fine; `--data @/session/body.txt` is also valid (alternative syntax — swaks treats @ as 'read from file'). When in doubt, use the bare path form."
+  - "swaks --data with file path that BEGINS with @ requires the @ to be doubled or quoted. `--data /session/output/body.txt` is fine; `--data @/session/output/body.txt` is also valid (alternative syntax — swaks treats @ as 'read from file'). When in doubt, use the bare path form."
   - "DEFAULT smtp-user-enum WORDLIST PATH — there isn't one. The Pentest Monkey distribution ships with NO default list. Common candidates: /usr/share/seclists/Usernames/Names/names.txt (10K names), /usr/share/seclists/Usernames/top-usernames-shortlist.txt (17 entries — for fast probes), or a hand-built list of 20-50 OS / service usernames (root, admin, daemon, mail, postmaster, www-data, michael, james, ...)."
   - "Feature 28 dynamic recipes are RETIRED for the kind:cli path — the LLM writes argv directly. Recipes still load for legacy method calls (send, enum_users, relay_test) if /session/tool_recipes/smtp/ exists, but they're a dead branch under run_cli (REQ-TR-016)."
   - "swaks transaction-log SHAPE — server response lines start with `<` (e.g., `<** 220 ...`, `<- 250 OK`). Each line carries a 3-digit SMTP code parseable with `<[*~\\s]*\\s*(\\d{3})\\s*(.*)` (legacy parser regex). Client-side commands start with `==>` (e.g., `==> EHLO ...`). When parsing manually, key signals are: `<` lines for codes, `==>` lines for what was sent, the trailing summary `~> ...` lines for swaks's own status. Don't try to parse swaks output as JSON — it's purely text."

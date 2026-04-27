@@ -57,7 +57,7 @@ binary: cloudfox
 # `--output-format`) AND to `--output-directory` as filesystem artifacts
 # ("loot files" — text/CSV per service). The default output directory is
 # `~/.cloudfox/cloudfox-output/<account-id>/<service>/` — for OpenSploit, set
-# `--output-directory=/session/cloudfox/` to keep everything under the
+# `--output-directory=/session/output/cloudfox/` to keep everything under the
 # engagement working dir.
 #
 # Auth: cloudfox does NOT take credentials in argv. AWS auth is via:
@@ -118,14 +118,14 @@ description: >
 
   Auth: NO credentials in argv. cloudfox honors:
     1. `--profile <name>` from ~/.aws/credentials (mount ~/.aws/ or write to
-       /session/.aws/credentials and set HOME=/session before invocation)
+       /session/output/.aws/credentials and set HOME=/session before invocation)
     2. AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY / AWS_SESSION_TOKEN env vars
     3. AZURE_*, GOOGLE_APPLICATION_CREDENTIALS, KUBECONFIG env vars
 
   Output: BOTH stdout (table/csv/json per `--output-format`) AND filesystem
   artifacts to `--output-directory` ("loot files" — text/CSV per service).
   Default output dir is ~/.cloudfox/cloudfox-output/<account-id>/<service>/.
-  For OpenSploit, ALWAYS pass `--output-directory=/session/cloudfox/` to keep
+  For OpenSploit, ALWAYS pass `--output-directory=/session/output/cloudfox/` to keep
   loot under the engagement working dir.
 
   Phase: enumeration / post-exploitation (after AWS credentials obtained).
@@ -214,7 +214,7 @@ environment:
     description: "Default AWS region. Overridden by --region or --all-regions."
     required: false
   HOME:
-    description: "Container HOME path. cloudfox reads ~/.aws/credentials (AWS profiles), ~/.azure/ (Azure session), ~/.config/gcloud/ (GCP). For per-engagement creds, set HOME=/session and mount /session/.aws/credentials."
+    description: "Container HOME path. cloudfox reads ~/.aws/credentials (AWS profiles), ~/.azure/ (Azure session), ~/.config/gcloud/ (GCP). For per-engagement creds, set HOME=/session and mount /session/output/.aws/credentials."
     required: false
   AZURE_CLIENT_ID:
     description: "Azure service-principal client ID (for `cloudfox azure ...`). Pair with AZURE_CLIENT_SECRET + AZURE_TENANT_ID."
@@ -226,10 +226,10 @@ environment:
     description: "Azure tenant ID."
     required: false
   GOOGLE_APPLICATION_CREDENTIALS:
-    description: "Path to GCP service-account JSON key file (for `cloudfox gcp ...`). e.g., /session/.gcp/sa-key.json"
+    description: "Path to GCP service-account JSON key file (for `cloudfox gcp ...`). e.g., /session/output/.gcp/sa-key.json"
     required: false
   KUBECONFIG:
-    description: "Path to Kubernetes kubeconfig (for `cloudfox k8s ...`). e.g., /session/.kube/config"
+    description: "Path to Kubernetes kubeconfig (for `cloudfox k8s ...`). e.g., /session/output/.kube/config"
     required: false
 
 see_also:
@@ -334,27 +334,27 @@ value_flags:
 usage_patterns:
   # ── opening / inventory ──────────────────────────────────────────
   - name: "AWS account inventory (FIRST scan after creds obtained)"
-    command: "aws inventory --profile=default --output-format=json --output-directory=/session/cloudfox/"
-    when: "First run after obtaining AWS credentials. `inventory` is fast (~30s) and reports account size + preferred regions — orienting data BEFORE running heavy modules. Always emit `--output-format=json` for machine parsing and `--output-directory=/session/cloudfox/` to keep loot under the engagement working dir (default is ~/.cloudfox/cloudfox-output/ which is ephemeral). The `--profile=default` value is the engagement-scope identifier (validated by target_extraction)."
+    command: "aws inventory --profile=default --output-format=json --output-directory=/session/output/cloudfox/"
+    when: "First run after obtaining AWS credentials. `inventory` is fast (~30s) and reports account size + preferred regions — orienting data BEFORE running heavy modules. Always emit `--output-format=json` for machine parsing and `--output-directory=/session/output/cloudfox/` to keep loot under the engagement working dir (default is ~/.cloudfox/cloudfox-output/ which is ephemeral). The `--profile=default` value is the engagement-scope identifier (validated by target_extraction)."
 
   - name: "AWS full sweep (all-checks across all regions)"
-    command: "aws all-checks --profile=default --all-regions --output-format=json --output-directory=/session/cloudfox/ --verbosity=2 -y"
+    command: "aws all-checks --profile=default --all-regions --output-format=json --output-directory=/session/output/cloudfox/ --verbosity=2 -y"
     when: "Run EVERY AWS sub-command sequentially across ALL enabled regions. Slow (5-30 min for moderate accounts; up to 2h for large enterprise accounts). Use after `inventory` confirms account scope. `--all-regions` triggers per-region pagination for region-scoped services. `-y` auto-answers prompts for non-interactive mode. CHECK idle_timeout=600 covers the longest API pagination — cloudfox is silent during AWS rate-limit waits."
 
   - name: "AWS attack-path discovery (workloads with admin)"
-    command: "aws workloads --profile=default --admin-only --output-format=json --output-directory=/session/cloudfox/"
+    command: "aws workloads --profile=default --admin-only --output-format=json --output-directory=/session/output/cloudfox/"
     when: "THE high-value cloudfox sub-command. `workloads` finds compute resources (EC2, Lambda, ECS, CodeBuild) whose attached IAM role HAS admin permissions OR has a policy path TO admin. `--admin-only` filters to confirmed admin-with-path. Output is the set of compute targets where compromising the workload yields admin AWS access. Pair with `cloudfox aws principals` and `cloudfox aws permissions` for full attack-path context."
 
   - name: "AWS IAM principal + permission enumeration"
-    command: "aws principals --profile=default --output-format=json --output-directory=/session/cloudfox/"
+    command: "aws principals --profile=default --output-format=json --output-directory=/session/output/cloudfox/"
     when: "Enumerate IAM users + roles (NOT permissions — that's a separate sub-command). Fast (~1-2 min). Run BEFORE `permissions` to know which principals to map. Output JSON includes ARN, type (User/Role), creation date, attached policy count. For permissions per principal, follow with `cloudfox aws permissions --profile=default`."
 
   - name: "AWS env-var secret discovery (Lambda/ECS/CodeBuild)"
-    command: "aws env-vars --profile=default --all-regions --output-format=json --output-directory=/session/cloudfox/"
+    command: "aws env-vars --profile=default --all-regions --output-format=json --output-directory=/session/output/cloudfox/"
     when: "Discover secrets leaked into env vars across compute services. Lambda function configurations, ECS task definitions, and CodeBuild project envs frequently contain DB passwords, API keys, internal-service tokens. `--all-regions` is critical — env-var leaks are often region-localized. Output JSON has `Service`, `Resource`, `Region`, `EnvVarName`, `EnvVarValue`. Filter for `password|secret|key|token|api` after."
 
   - name: "AWS secrets-manager + SSM enumeration"
-    command: "aws secrets --profile=default --all-regions --output-format=json --output-directory=/session/cloudfox/"
+    command: "aws secrets --profile=default --all-regions --output-format=json --output-directory=/session/output/cloudfox/"
     when: "Enumerate AWS Secrets Manager secrets + SSM Parameter Store parameters. Reports secret NAMES + ARNs (not values — values require an explicit `aws secretsmanager get-secret-value` call). Use the output to identify high-value secrets for follow-up extraction via the `aws` CLI tool."
 
   - name: "AWS IAM permission simulation (what can this principal do?)"
@@ -362,7 +362,7 @@ usage_patterns:
     when: "Evaluate whether a specific principal CAN perform a specific action on a specific resource. Wraps the AWS IAM SimulatePrincipalPolicy API. Use after `permissions` identifies a candidate principal — `iam-simulator` confirms whether a SPECIFIC API call would succeed (handles policy boundaries, SCPs, condition keys). NOTE: principal ARN is NOT a target_extraction value — it's auth-context, not engagement scope."
 
   - name: "AWS instance enumeration (with user-data + IAM profile)"
-    command: "aws instances --profile=default --all-regions --output-format=json --output-directory=/session/cloudfox/"
+    command: "aws instances --profile=default --all-regions --output-format=json --output-directory=/session/output/cloudfox/"
     when: "Enumerate EC2 instances with public/private IPs, attached IAM instance-profile, AND user-data scripts. User-data often contains seeded credentials, install-time secrets, or bootstrapping logic exploitable for privesc. Always pass `--all-regions` for full account view."
 
   - name: "AWS custom region scan (no all-regions)"
@@ -370,16 +370,16 @@ usage_patterns:
     when: "Scan a single AWS region (skip `--all-regions`). Useful when targeting a known production region. `--verbosity=3` includes loot files inline in stdout (otherwise loot files only land in `--output-directory`). `--output-format=table` is the default human-readable form for terminal viewing."
 
   - name: "Azure inventory"
-    command: "azure inventory --subscription=<subscription-id> --output-format=json --output-directory=/session/cloudfox/"
+    command: "azure inventory --subscription=<subscription-id> --output-format=json --output-directory=/session/output/cloudfox/"
     when: "Azure-side enumeration. Auth via `az login` cached session (mount ~/.azure/) OR via AZURE_CLIENT_ID + AZURE_CLIENT_SECRET + AZURE_TENANT_ID env vars. Subscription ID is the engagement-scope identifier (validated by target_extraction). Fewer sub-commands than AWS — `azure rbac`, `azure storage`, `azure vms`, `azure whoami` are the others."
 
   - name: "GCP inventory"
-    command: "gcp inventory --project=<project-id> --output-format=json --output-directory=/session/cloudfox/"
+    command: "gcp inventory --project=<project-id> --output-format=json --output-directory=/session/output/cloudfox/"
     when: "GCP-side enumeration. Auth via `gcloud auth` cached session OR GOOGLE_APPLICATION_CREDENTIALS pointing at a service-account JSON. Project ID is engagement-scope. Sub-commands: `gcp inventory`, `gcp instances`, `gcp secrets`, `gcp buckets`, `gcp iam`, `gcp all-checks`."
 
   - name: "Kubernetes pod enumeration"
-    command: "k8s pods --kubeconfig=/session/.kube/config --namespace=default --output-format=json --output-directory=/session/cloudfox/"
-    when: "K8s post-exploitation enumeration. KUBECONFIG path is the engagement-scope identifier (validated by target_extraction). Sub-commands: `k8s pods`, `k8s secrets`, `k8s roles`, `k8s all-checks`. NOTE: also useful via env: `KUBECONFIG=/session/.kube/config cloudfox k8s pods --namespace=default`."
+    command: "k8s pods --kubeconfig=/session/output/.kube/config --namespace=default --output-format=json --output-directory=/session/output/cloudfox/"
+    when: "K8s post-exploitation enumeration. KUBECONFIG path is the engagement-scope identifier (validated by target_extraction). Sub-commands: `k8s pods`, `k8s secrets`, `k8s roles`, `k8s all-checks`. NOTE: also useful via env: `KUBECONFIG=/session/output/.kube/config cloudfox k8s pods --namespace=default`."
 
   - name: "Help / version probe"
     command: "--help"
@@ -397,7 +397,7 @@ output_formats:
   - flag: "--output-format=json"
     format: "json"
     preferred: true
-    notes: "JSON to stdout AND to loot file in --output-directory. PREFERRED for OpenSploit tooling — clean parse, nested fields preserved, jq-friendly. Top-level structure varies per sub-command. Pair with `--output-directory=/session/cloudfox/` to persist loot to engagement working dir."
+    notes: "JSON to stdout AND to loot file in --output-directory. PREFERRED for OpenSploit tooling — clean parse, nested fields preserved, jq-friendly. Top-level structure varies per sub-command. Pair with `--output-directory=/session/output/cloudfox/` to persist loot to engagement working dir."
   - flag: "--output-format=brief"
     format: "ansi-summary"
     preferred: false
@@ -405,7 +405,7 @@ output_formats:
 
 common_options:
   targeting:
-    - "PROFILE IS THE TARGET — `--profile <name>` (or `-p <name>`) identifies the AWS account scope. Maps to a profile in ~/.aws/credentials (mount or write to /session/.aws/credentials with HOME=/session). The profile NAME is the engagement-scope identifier — extracted by target_extraction and validated against authorized cloud accounts."
+    - "PROFILE IS THE TARGET — `--profile <name>` (or `-p <name>`) identifies the AWS account scope. Maps to a profile in ~/.aws/credentials (mount or write to /session/output/.aws/credentials with HOME=/session). The profile NAME is the engagement-scope identifier — extracted by target_extraction and validated against authorized cloud accounts."
     - "SUBSCRIPTION (Azure) — `--subscription <subscription-id>` for `cloudfox azure ...`. Engagement-scope identifier."
     - "PROJECT (GCP) — `--project <project-id>` for `cloudfox gcp ...`. Engagement-scope identifier."
     - "KUBECONFIG (k8s) — `--kubeconfig <path>` for `cloudfox k8s ...`. The KUBECONFIG path identifies the cluster context."
@@ -419,14 +419,14 @@ common_options:
   output:
     - "--output-format json — PREFERRED for tooling. Clean nested JSON to stdout AND loot files."
     - "--output-format table | csv | brief — alternates."
-    - "--output-directory <path> — where loot files land (text/CSV per service). DEFAULT is ~/.cloudfox/cloudfox-output/<account-id>/<service>/ (ephemeral inside container). For OpenSploit ALWAYS pass `/session/cloudfox/` for engagement persistence."
+    - "--output-directory <path> — where loot files land (text/CSV per service). DEFAULT is ~/.cloudfox/cloudfox-output/<account-id>/<service>/ (ephemeral inside container). For OpenSploit ALWAYS pass `/session/output/cloudfox/` for engagement persistence."
     - "--verbosity 1|2|3 — 1=control only, 2=+module output (default), 3=+loot files inline in stdout."
   perf:
     - "AWS API rate limits dominate runtime. cloudfox internally backs off on throttle. `inventory` is ~30s. `principals`/`permissions` ~1-2 min. `all-checks` is 5-30 min for moderate accounts; up to 2h for large enterprise accounts with many regions."
     - "`--all-regions` multiplies runtime by enabled-region count (typical accounts have 5-15 enabled regions)."
     - "Long silent stretches during AWS pagination — idle_timeout=600s (10 min) is calibrated for this. Reducing it risks killing healthy long scans."
   auth:
-    - "NO credentials in argv — cloudfox honors ~/.aws/credentials profiles + AWS_* env vars. For per-engagement isolation, write creds to /session/.aws/credentials and set HOME=/session before invocation, OR pass AWS_* env vars."
+    - "NO credentials in argv — cloudfox honors ~/.aws/credentials profiles + AWS_* env vars. For per-engagement isolation, write creds to /session/output/.aws/credentials and set HOME=/session before invocation, OR pass AWS_* env vars."
     - "STS session creds — set AWS_ACCESS_KEY_ID + AWS_SECRET_ACCESS_KEY + AWS_SESSION_TOKEN (the session token is required for STS / federated / assume-role creds)."
     - "Azure auth: `az login` cached session (mount ~/.azure/) OR AZURE_CLIENT_ID + AZURE_CLIENT_SECRET + AZURE_TENANT_ID env vars."
     - "GCP auth: `gcloud auth` cached session OR GOOGLE_APPLICATION_CREDENTIALS pointing at a service-account JSON file."
@@ -434,7 +434,7 @@ common_options:
 
 gotchas:
   - "PROVIDER + SUB-COMMAND ARE POSITIONALS — cobra-style `cloudfox <provider> <subcmd> [flags]`. Forgetting the provider errors with `Error: unknown command \"<flag-or-subcmd>\" for \"cloudfox\"`. Forgetting the sub-command (just `cloudfox aws --profile=...`) prints the aws-help instead of running anything (silent no-op for a tool runner — verify output)."
-  - "DEFAULT OUTPUT DIRECTORY IS EPHEMERAL — `~/.cloudfox/cloudfox-output/<account-id>/<service>/` lives INSIDE the container and is lost when the container exits. ALWAYS pass `--output-directory=/session/cloudfox/` to persist loot to the engagement working dir. The engagement audit log only captures stdout, NOT loot files — without --output-directory, loot is unrecoverable."
+  - "DEFAULT OUTPUT DIRECTORY IS EPHEMERAL — `~/.cloudfox/cloudfox-output/<account-id>/<service>/` lives INSIDE the container and is lost when the container exits. ALWAYS pass `--output-directory=/session/output/cloudfox/` to persist loot to the engagement working dir. The engagement audit log only captures stdout, NOT loot files — without --output-directory, loot is unrecoverable."
   - "`--all-regions` MULTIPLIES RUNTIME — each enabled region is a separate API round. A typical account has 5-15 enabled regions; `all-checks --all-regions` on a moderate account is 30+ min. Use `--region <one-region>` for targeted scans; reserve `--all-regions` for full sweeps."
   - "PROFILE VS ENV-VAR AUTH — `--profile=<name>` is the engagement-scope identifier (target_extraction matches it). When you skip `--profile` and rely on AWS_ACCESS_KEY_ID env var, target_extraction returns null and the orchestrator's null-target informational-call path applies. Either way works, but `--profile` is auditable and reproducible."
   - "NO CREDENTIALS IN ARGV — cloudfox does NOT take `--access-key` / `--secret-key` flags (the legacy mcp-server.py wraps env-var injection, not argv). All auth flows via env vars or ~/.aws/credentials profile files."
@@ -470,7 +470,7 @@ failure_signatures:
   - signal: "NoCredentialProviders"
     remediation: "Auth: AWS SDK Go credential chain found no source. Same root cause as `no valid credential`. Set env vars OR --profile."
   - signal: "could not load profile"
-    remediation: "Profile: `--profile <name>` references a profile that doesn't exist in ~/.aws/credentials or ~/.aws/config. Verify with `cat ~/.aws/credentials` (or /session/.aws/credentials with HOME=/session). Add the profile section: `[<name>]\\naws_access_key_id = AKIA...\\naws_secret_access_key = ...`."
+    remediation: "Profile: `--profile <name>` references a profile that doesn't exist in ~/.aws/credentials or ~/.aws/config. Verify with `cat ~/.aws/credentials` (or /session/output/.aws/credentials with HOME=/session). Add the profile section: `[<name>]\\naws_access_key_id = AKIA...\\naws_secret_access_key = ...`."
   - signal: "Error: unknown command"
     remediation: "Argument: cobra dispatcher saw a sub-command (or provider) that doesn't exist. Either misspelled or removed in this release. Run `cloudfox --help` (top-level), `cloudfox aws --help`, `cloudfox azure --help`, `cloudfox gcp --help`, or `cloudfox k8s --help` for current authoritative sub-command lists."
   - signal: "unknown flag"

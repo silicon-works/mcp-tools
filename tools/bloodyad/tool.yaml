@@ -258,7 +258,7 @@ usage_patterns:
 
   - name: "Kerberos pass-the-ticket auth (with KRB5CCNAME)"
     command: "bloodyAD --host {dc_fqdn} -d {domain} -u {username} -k get search --filter '(objectClass=user)'"
-    when: "Pass-the-ticket via Kerberos ccache. The ccache is supplied via the `KRB5CCNAME` environment variable (NOT a flag — bloodyAD's argparse `-k` has nargs='*' but consumes the action token if a value follows; bare `-k` with KRB5CCNAME env is the canonical form). The container's mcp-server.py auto-restores ccache from /session/credentials/*.ccache; cli_in_container path requires the agent to set KRB5CCNAME explicitly OR pre-stage the ccache to /etc/krb5.cc. NB: --host MUST be FQDN (DC FQDN like `dc01.corp.local`), NOT IP, for Kerberos SPN resolution."
+    when: "Pass-the-ticket via Kerberos ccache. The ccache is supplied via the `KRB5CCNAME` environment variable (NOT a flag — bloodyAD's argparse `-k` has nargs='*' but consumes the action token if a value follows; bare `-k` with KRB5CCNAME env is the canonical form). The container's mcp-server.py auto-restores ccache from /session/output/credentials/*.ccache; cli_in_container path requires the agent to set KRB5CCNAME explicitly OR pre-stage the ccache to /etc/krb5.cc. NB: --host MUST be FQDN (DC FQDN like `dc01.corp.local`), NOT IP, for Kerberos SPN resolution."
 
   - name: "PKINIT certificate auth (after ADCS abuse via certipy)"
     command: "bloodyAD --host {dc_ip} -d {domain} -u {target_user} -c '/session/{key_path}.key:/session/{cert_path}.crt' get writable"
@@ -318,7 +318,7 @@ common_options:
     - "`add dnsRecord <name> <data>` — add DNS record. Optional `--dnstype A|AAAA|CNAME|MX|PTR|SRV|TXT`, `--zone`, `--ttl`, etc."
     - "`add genericAll <target> <trustee>` — grant GenericAll ACE."
     - "`add rbcd <target> <service>` — same as `set rbcd` (alias for clarity)."
-    - "`add shadowCredentials <target>` — add Key Credentials. Optional `--path /session/out.pem`."
+    - "`add shadowCredentials <target>` — add Key Credentials. Optional `--path /session/output/out.pem`."
     - "`add uac <target> -f FLAG [-f FLAG ...]` — add UAC bits. -f is REPEATED for each flag (DONT_REQ_PREAUTH, TRUSTED_TO_AUTH_FOR_DELEGATION, etc.)."
   action_remove:
     - "POSITIONAL after auth flags: `remove` action. Sub-actions: `genericAll`, `rbcd`, `groupMember`, `shadowCredentials`, `dcsync`, `uac`, `dnsRecord`, `object`."
@@ -349,7 +349,7 @@ gotchas:
   - "GROUP NAMES WITH SPACES: many privileged groups have spaces (`Domain Admins`, `Enterprise Admins`, `Account Operators`). The shell MUST receive the value as a single argv token — agents quote with single quotes (`'Domain Admins'`)."
   - "MACHINE ACCOUNT TRAILING $: when referring to machine accounts (e.g., for `set rbcd <target> <delegate-from>`), use the sAMAccountName form `MACHINE$` (with trailing dollar). Without the $, bloodyAD won't find the object."
   - "NO LOCAL FILE WRITES BY DEFAULT: most actions write only to LDAP. The exception is `add shadowCredentials` which writes a PEM key+cert to CWD (or `--path` location) and a .pfx. PIN `--path /session/<name>.pem` for persistence — without it, the file lands in /app and is wiped on container restart."
-  - "WORKING DIRECTORY: bloodyAD chdir's nothing — it runs in /app inside the container. Generated files (e.g., shadow credentials PEM) land in /app unless `--path /session/...` is set. mcp-server.py's _ensure_work_dir is NOT used in the cli_in_container path."
+  - "WORKING DIRECTORY: bloodyAD chdir's nothing — it runs in /app inside the container. Generated files (e.g., shadow credentials PEM) land in /app unless `--path /session/output/...` is set. mcp-server.py's _ensure_work_dir is NOT used in the cli_in_container path."
   - "Feature 28 dynamic recipes are RETIRED for the kind:cli path — the LLM writes argv directly. Recipes still load for legacy method calls if /session/tool_recipes/bloodyad/ exists, but they're a dead branch under run_cli (REQ-TR-016)."
   - "PER-USER WRITE PERMISSION REQUIREMENT: bloodyAD shines when you have ACL write rights on AD objects. For read-only enum (`get search`, `get object`, `get writable`, `get membership`, `get children`, `get dnsDump`, `get trusts`), any authenticated user works. For modify operations (set/add/remove), explicit ACL grant is required — `get writable` first to discover what you CAN modify."
   - "CASE-SENSITIVE SUB-ACTIONS: bloodyAD argparse uses CASE-SENSITIVE sub-action names. `add groupMember` (camelCase, lowercase first letter) — NOT `add GroupMember`, `add groupmember`, or `add group_member`. Same for `add shadowCredentials`, `add dcsync`, `add genericAll`, `get dnsDump`, `add dnsRecord`. Verified against mcp-server.py argv construction."

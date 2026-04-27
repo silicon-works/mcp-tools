@@ -44,7 +44,7 @@ description: >
 
     nc -z -v -w 3 10.10.10.5 22                          # TCP open?
     nc -z -v -w 3 10.10.10.5 22-1024                     # range scan
-    nc -u -w 1 10.10.10.5 53 < /session/dns-query.bin    # UDP send
+    nc -u -w 1 10.10.10.5 53 < /session/output/dns-query.bin    # UDP send
     ncat --send-only --recv-only -w 3 10.10.10.5 22      # banner grab
     nc -w 5 10.10.10.5 4444                              # bind-shell connect (stdin → cmd)
     socat - TCP:10.10.10.5:80                            # stdio <-> TCP
@@ -350,7 +350,7 @@ usage_patterns:
   - name: "nc — send a UDP datagram"
     binary: "nc"
     command: "-u -w 1 {host} {port}"
-    when: "Send the contents of stdin as a single UDP datagram, then exit. -w 1 limits the wait for any response. Use for: sending a crafted DNS query (stdin = packed DNS bytes), SNMP get / trap, syslog message. The datagram payload comes from cli_in_container's stdin; for binary payloads, stage the bytes in /session/payload.bin and pipe via stdin."
+    when: "Send the contents of stdin as a single UDP datagram, then exit. -w 1 limits the wait for any response. Use for: sending a crafted DNS query (stdin = packed DNS bytes), SNMP get / trap, syslog message. The datagram payload comes from cli_in_container's stdin; for binary payloads, stage the bytes in /session/output/payload.bin and pipe via stdin."
 
   # ── nc — connect to bind shell ──
   - name: "nc — connect to bind shell"
@@ -452,7 +452,7 @@ gotchas:
   - "`-w SECONDS` IS CRITICAL. Without -w, nc waits for the kernel TCP timeout (75+ s) on filtered ports. Idle_timeout_seconds is 60 s — without -w 3 / -w 5, a single filtered-port probe will trip the wrapper timeout. Always pass -w on connect calls."
   - "FLAG OVERLAPS ACROSS BINARIES. -d means three different things: nc -d = detach stdin, ncat -d = delay between connects, socat -d = increase debug verbosity. -u: nc / ncat = UDP mode; socat -u = unidirectional left-to-right. -t: nc -t = telnet negotiation; socat -t = write-after-close timeout. -l: nc / ncat -l = LISTEN (rejected); socat -l = log to file. The cli_in_container parser is BINARY-SCOPED — at parse time the binary is fixed, so the same letter resolves correctly within that scope. The HUMAN-side risk is the LLM mistakenly choosing the wrong binary for the flag intent."
   - "`-p` IS SOURCE PORT here (when -l is rejected). On netcat-traditional and on ssh, -p has different meanings. Inside this nc tool, -l / -L are REJECTED so the only legitimate use of -p is SOURCE PORT (rarely needed). Don't confuse with sshpass -p (PASSWORD) or scp -P (port). The cli_in_container parser is binary-scoped."
-  - "STDIN HANDLING. Many usage patterns expect stdin (banner grab via /dev/null, UDP send via packed bytes, file send). cli_in_container's stdin support is required for these. If stdin isn't piped, nc may hang waiting for input — set -w to bound the wait, or stage the data in /session/payload.bin and rely on cli_in_container's stdin pipe."
+  - "STDIN HANDLING. Many usage patterns expect stdin (banner grab via /dev/null, UDP send via packed bytes, file send). cli_in_container's stdin support is required for these. If stdin isn't piped, nc may hang waiting for input — set -w to bound the wait, or stage the data in /session/output/payload.bin and rely on cli_in_container's stdin pipe."
   - "BANNER GRAB BEST PRACTICE. ncat with `--send-only --recv-only -w 3 host port` is cleaner than `nc -w 3 host port < /dev/null` because cli_in_container has NO SHELL — there's no `< /dev/null` redirect available. The ncat flags do the half-close in-binary."
   - "SOCAT ADDR SYNTAX IS DIFFERENT. socat takes `socat [OPTS] ADDR1 ADDR2` where each ADDR is `TYPE:host:port[,opts]` (e.g., TCP:10.10.10.5:80). The first POSITIONAL is one of these address tokens, NOT a bare hostname — target_extraction's regex-based positional walk MAY NOT cleanly extract the host from a socat ADDR. See open questions; deprioritize socat scope-validation for now."
   - "NETCAT-TRADITIONAL VS NETCAT-OPENBSD. Debian / Kali ship BOTH. The default `nc` symlink points to netcat-openbsd; the legacy binary lives at `nc.traditional`. Their flag sets DIFFER: e.g., -e (exec) is netcat-traditional only (and rejected here for safety). usage_patterns target the openbsd flavor unless explicitly using nc.traditional."
@@ -537,7 +537,7 @@ help_commands:
   - command: "socat -h"
     purpose: "socat option list (global flags only, NOT address types)."
   - command: "socat -hh"
-    purpose: "socat FULL help including address types (TCP, UDP, OPENSSL, STDIO, FILE, EXEC, SYSTEM, ...). Long output — pipe to /session/socat-help.txt for inspection."
+    purpose: "socat FULL help including address types (TCP, UDP, OPENSSL, STDIO, FILE, EXEC, SYSTEM, ...). Long output — pipe to /session/output/socat-help.txt for inspection."
   - command: "socat -V"
     purpose: "socat version banner."
   - command: "nc.traditional -h"

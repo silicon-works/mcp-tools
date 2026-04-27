@@ -186,43 +186,43 @@ value_flags:
 
 usage_patterns:
   - name: "SSH single-user wordlist (lockout-aware: -t 4 -f)"
-    command: "hydra -l admin -P /session/passwords.txt -t 4 -f -V -o /session/hydra-ssh.txt ssh://10.10.10.5"
+    command: "hydra -l admin -P /session/output/passwords.txt -t 4 -f -V -o /session/output/hydra-ssh.txt ssh://10.10.10.5"
     when: "Brute-force a known SSH username with a password list. -t 4 keeps under SSH MaxStartups (default 10:30:60); -f stops after the first valid pair; -V prints each attempt for observability. URL-positional `ssh://10.10.10.5` is the modern target syntax. Pin -o to /session/ so the result file survives the container exit. Always prefer this pattern over -L (multiple usernames) when you already know which account exists — limits failed attempts to ONE account's lockout counter."
 
   - name: "HTTP POST form attack (most common web-app brute-force shape)"
-    command: "hydra -L /session/users.txt -P /session/passwords.txt -t 16 -f -V -o /session/hydra-http.txt 10.10.10.5 http-post-form '/login.php:user=^USER^&pass=^PASS^:Login failed'"
+    command: "hydra -L /session/output/users.txt -P /session/output/passwords.txt -t 16 -f -V -o /session/output/hydra-http.txt 10.10.10.5 http-post-form '/login.php:user=^USER^&pass=^PASS^:Login failed'"
     when: "Brute-force a web login form. Uses the alternate `<host> <protocol> <module-spec>` positional form because http-post-form needs the module-spec as a separate positional argument. Module spec format: '<path>:<post-body-with-^USER^-and-^PASS^>:<fail-indicator>'. The fail-indicator is a string that appears ONLY on failed login (e.g., 'Login failed', 'Invalid', 'incorrect'). For 'success-detector' instead use S=indicator (e.g., 'S=Welcome admin'). For HTTPS, swap to https-post-form. -t 16 is fine for HTTP (web servers handle concurrency)."
 
   - name: "SMB Windows share single-user brute"
-    command: "hydra -l administrator -P /session/passwords.txt -t 4 -f -V -o /session/hydra-smb.txt smb://10.10.10.5"
+    command: "hydra -l administrator -P /session/output/passwords.txt -t 4 -f -V -o /session/output/hydra-smb.txt smb://10.10.10.5"
     when: "Brute-force SMB authentication with a known username. -t 4 because Windows AD lockout policies are tight (default 5 attempts in 30 minutes on modern AD). -f stops at first hit. For SMB1/SMB2 differences hydra auto-negotiates; if the server is SMB2-only and -e nsr fails, try the smb2 protocol explicitly: `smb2://...`. WARNING: this WILL count toward AD lockout. Run kerbrute --safe userenum FIRST to confirm the username is valid before burning lockout budget on hydra."
 
   - name: "FTP combo file (default credential testing)"
-    command: "hydra -C /session/combos.txt -t 4 -f -V -o /session/hydra-ftp.txt ftp://10.10.10.5"
+    command: "hydra -C /session/output/combos.txt -t 4 -f -V -o /session/output/hydra-ftp.txt ftp://10.10.10.5"
     when: "Test known user:pass combos from default-credential lists or prior dumps. Combo file format: one `username:password` per line. -C REPLACES all of -l/-L/-p/-P (mutually exclusive). Useful with /usr/share/seclists/Passwords/Default-Credentials/ftp-betterdefaultpasslist.txt. Always check anonymous FTP first (`hydra -l anonymous -p anonymous@ ftp://host`) before brute-forcing."
 
   - name: "MSSQL credential reuse — single user, single password"
-    command: "hydra -l sa -p 'Password123!' -V -o /session/hydra-mssql.txt mssql://10.10.10.5"
+    command: "hydra -l sa -p 'Password123!' -V -o /session/output/hydra-mssql.txt mssql://10.10.10.5"
     when: "Test ONE known credential pair against MSSQL — credential reuse from another service or a guessed default. No -L/-P → single combination tested ONCE. Common default is `sa:` (empty password, use -e n: `hydra -l sa -e n -V mssql://host`). For non-1433 ports use `-s <port> 10.10.10.5 mssql` (alternate form) or include the port in the URL: `mssql://10.10.10.5:1434`."
 
   - name: "MySQL user list × password list"
-    command: "hydra -L /session/users.txt -P /session/passwords.txt -V -t 4 -f -o /session/hydra-mysql.txt mysql://10.10.10.5"
+    command: "hydra -L /session/output/users.txt -P /session/output/passwords.txt -V -t 4 -f -o /session/output/hydra-mysql.txt mysql://10.10.10.5"
     when: "MySQL has expensive per-connection cost — keep -t low. Default port 3306. Common usernames: root, admin, mysql, dbadmin. ALWAYS test -e n FIRST (empty password is shockingly common for MySQL root). MySQL's `max_connect_errors` (default 100) will block the source IP — when this happens you need FLUSH HOSTS from another connection or wait."
 
   - name: "Empty/same/reverse password check (-e nsr — fast first pass)"
-    command: "hydra -l root -e nsr -V -f -o /session/hydra-easy.txt ssh://10.10.10.5"
+    command: "hydra -l root -e nsr -V -f -o /session/output/hydra-easy.txt ssh://10.10.10.5"
     when: "Try the three trivial password forms FIRST before any wordlist: n=null/empty, s=username-as-password (root:root), r=reversed-username (root:toor). Three attempts total per user; finishes in seconds. Catches misconfigured systems and dev/staging accounts. Always run before unleashing rockyou — if -e nsr hits, you're done; if it doesn't, you've burned only 3 lockout slots."
 
   - name: "User-loop mode (-u) — lockout-aware spray pattern"
-    command: "hydra -L /session/users.txt -P /session/passwords.txt -u -t 4 -V -o /session/hydra-spray.txt smb://10.10.10.5"
+    command: "hydra -L /session/output/users.txt -P /session/output/passwords.txt -u -t 4 -V -o /session/output/hydra-spray.txt smb://10.10.10.5"
     when: "Default hydra behaviour is `for user in users: for pass in passes: try`. With -u it becomes `for pass in passes: for user in users: try`. This is a 'horizontal' spray — every user gets ONE attempt with password1 before any user gets a SECOND attempt with password2. Critical when AD lockout threshold is 5 — spraying horizontally you can try 4 passwords against 100 users without locking ANY of them."
 
   - name: "PIN brute-force generator (-x)"
-    command: "hydra -l admin -x 4:4:1 -V -f -o /session/hydra-pin.txt ssh://10.10.10.5"
+    command: "hydra -l admin -x 4:4:1 -V -f -o /session/output/hydra-pin.txt ssh://10.10.10.5"
     when: "Brute-force generated 4-digit PINs (10,000 candidates). -x format: MIN:MAX:CHARSET. CHARSET tokens: a=lowercase, A=uppercase, 1=digits, custom-string also supported. Examples: '4:4:1' = 10K 4-digit PINs; '6:8:aA1' = 6-8 char mixed; '8:8:abcdef0123456789' = 8-char hex. WARNING: keyspace explodes — '8:8:aA1' is ~218 trillion. Use only when wordlists exhaust and you suspect a structured password."
 
   - name: "https-post-form with custom fail string"
-    command: "hydra -L /session/users.txt -P /session/passwords.txt -t 16 -f -V -o /session/hydra-https.txt -s 8443 10.10.10.5 https-post-form '/admin/login:username=^USER^&password=^PASS^&csrf=static_token:Invalid credentials'"
+    command: "hydra -L /session/output/users.txt -P /session/output/passwords.txt -t 16 -f -V -o /session/output/hydra-https.txt -s 8443 10.10.10.5 https-post-form '/admin/login:username=^USER^&password=^PASS^&csrf=static_token:Invalid credentials'"
     when: "HTTPS form on a non-standard port. -s 8443 overrides default 443; module spec uses S= for success-string OR plain string for fail-string (the colon-separated 3rd field). Static CSRF tokens can be embedded; dynamic CSRF tokens (rotated per response) require -m to include H= cookie/header reuse and may not work — use ffuf+web-session for dynamic CSRF flows."
 
   - name: "Module help — print options for a specific protocol"
@@ -299,7 +299,7 @@ gotchas:
   - "-f (per-target stop) vs -F (any-target stop): -f is what you usually want. -F only matters with -M (multiple targets, but -M is rejected by this tool spec) — for single-target work -F and -f behave identically."
   - "-t default is 16 — way too high for SSH (MaxStartups limits unauthenticated connections to ~10), MySQL (per-connection cost), and aggressive Windows AD lockout policies. Drop to 1-4 for SSH/MySQL/SMB; 16-32 OK for HTTP."
   - "-x <min>:<max>:<charset>: keyspace explodes fast. `8:8:aA1` is 62^8 ≈ 218 trillion — infeasible. Reserve for short fixed-length brute-forces (4-digit PINs = 10K, 6-digit numeric = 1M)."
-  - "Restore file (`hydra.restore`) is written on Ctrl-C in the CURRENT WORKING DIRECTORY of the running process. Resume with `hydra -R`. In Docker without a /session mount as cwd, the restore file dies with the container — long brute-forces should pin -o to /session/."
+  - "Restore file (`hydra.restore`) is written on Ctrl-C in the CURRENT WORKING DIRECTORY of the running process. Resume with `hydra -R`. In Docker without a /session mount as cwd, the restore file dies with the container — long brute-forces should pin -o to /session/output/."
   - "Some protocols accept credentials in the URL: `mysql://user:pass@10.10.10.5`. The DSL extracts the host (group 2 of the URL regex) — `user:pass@` is part of the userinfo and not extracted. Useful for testing a single known cred without -l/-p."
   - "SSL: -S flag, OR use the protocol-with-`s`-suffix variant (e.g., `https-post-form` instead of `http-post-form`, `smtps` instead of `smtp`). The variants set sane SSL defaults; -S on the bare protocol is more error-prone."
   - "ACCOUNT LOCKOUT RISK: hydra is a brute-force tool. It WILL lock out accounts in any environment with a lockout policy (most production AD; many enterprise web apps). Mitigations: (a) use -l (single user) not -L; (b) use -e nsr for free triple-shot first; (c) on AD use kerbrute --safe to enumerate valid users WITHOUT failed logins, then narrow hydra's -L; (d) check lockout policy with netexec --pass-pol on a domain-joined host before any spray. Document explicit user authorisation before any production brute-force."

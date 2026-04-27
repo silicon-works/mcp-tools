@@ -2,7 +2,7 @@ name: certipy
 kind: cli
 binary: certipy
 version: "5.0.4"
-description: "Active Directory Certificate Services (AD CS) enumeration and exploitation via Certipy v5.0.4 (ly4k/Certipy, pip certipy-ad). Single binary `certipy` with sub-command architecture — `certipy <subcommand> [options]` — over 11 subcommands: find / req / auth / shadow / forge / template / ca / account / cert / parse / relay. Discovers Certificate Authorities and certificate templates, identifies ESC1 through ESC16 vulnerability classifications, requests certificates with attacker-controlled Subject Alternative Names (ESC1), performs enrollment agent abuse (ESC3), exploits template write access (ESC4), manages Certificate Authority operations for ESC7 (enable/disable templates, approve/deny requests, add/remove officers, backup CA key), forges Golden Certificates from compromised CA keys (ESC5), authenticates via PKINIT to obtain TGTs and NT hashes, manipulates Shadow Credentials (msDS-KeyCredentialLink) for account takeover, manages AD accounts (create/read/update/delete), converts certificate formats (PFX/PEM/key extraction), and performs offline ADCS analysis from BOF or registry exports. Outputs PFX certificates, ccache/kirbi Kerberos tickets, and JSON enumeration reports to /session/. Authentication supports password, NTLM hash (pass-the-hash), Kerberos ccache, and AES keys. Username format is user@domain (UPN, NOT domain/user). All flags use single-dash long form (-username, -dc-ip, -ca, -template) — NOT GNU-style `--username`. Native CLI; the LLM constructs the full certipy invocation. The legacy method handlers (find/request/authenticate/...) auto-inherit run_cli from BaseMCPServer (mcp-common 0.3.0); kind:cli is the new default."
+description: "Active Directory Certificate Services (AD CS) enumeration and exploitation via Certipy v5.0.4 (ly4k/Certipy, pip certipy-ad). Single binary `certipy` with sub-command architecture — `certipy <subcommand> [options]` — over 11 subcommands: find / req / auth / shadow / forge / template / ca / account / cert / parse / relay. Discovers Certificate Authorities and certificate templates, identifies ESC1 through ESC16 vulnerability classifications, requests certificates with attacker-controlled Subject Alternative Names (ESC1), performs enrollment agent abuse (ESC3), exploits template write access (ESC4), manages Certificate Authority operations for ESC7 (enable/disable templates, approve/deny requests, add/remove officers, backup CA key), forges Golden Certificates from compromised CA keys (ESC5), authenticates via PKINIT to obtain TGTs and NT hashes, manipulates Shadow Credentials (msDS-KeyCredentialLink) for account takeover, manages AD accounts (create/read/update/delete), converts certificate formats (PFX/PEM/key extraction), and performs offline ADCS analysis from BOF or registry exports. Outputs PFX certificates, ccache/kirbi Kerberos tickets, and JSON enumeration reports to /session/output/. Authentication supports password, NTLM hash (pass-the-hash), Kerberos ccache, and AES keys. Username format is user@domain (UPN, NOT domain/user). All flags use single-dash long form (-username, -dc-ip, -ca, -template) — NOT GNU-style `--username`. Native CLI; the LLM constructs the full certipy invocation. The legacy method handlers (find/request/authenticate/...) auto-inherit run_cli from BaseMCPServer (mcp-common 0.3.0); kind:cli is the new default."
 image: "ghcr.io/silicon-works/mcp-tools-certipy:latest"
 image_size_mb: 721
 # Dual-clock model — most certipy ops are seconds-fast, but `find` against a
@@ -286,15 +286,15 @@ usage_patterns:
     when: "First-pass ADCS recon. -vulnerable filters output to only ESC-classified templates; -stdout dumps to console (no file). Use this to quickly identify exploitable templates and CAs in a domain. UPN format is mandatory — `user@domain.local`, NOT `domain\\user`. After identifying targets, re-run with `-output /session/<prefix>` to persist for sub-agents."
 
   - name: "find with persistent JSON+text output"
-    command: "certipy find -username {user_at_domain} -password '{password}' -dc-ip {dc_ip} -json -text -output /session/certipy-find"
-    when: "Full ADCS enumeration with persistent capture. Produces /session/certipy-find_*.json (machine-parseable) and /session/certipy-find_*.txt (human summary). Use the JSON for downstream programmatic analysis (e.g., extract CA names + template names for the next req call)."
+    command: "certipy find -username {user_at_domain} -password '{password}' -dc-ip {dc_ip} -json -text -output /session/output/certipy-find"
+    when: "Full ADCS enumeration with persistent capture. Produces /session/output/certipy-find_*.json (machine-parseable) and /session/output/certipy-find_*.txt (human summary). Use the JSON for downstream programmatic analysis (e.g., extract CA names + template names for the next req call)."
 
   - name: "request certificate for ESC1 (impersonate user via UPN SAN)"
-    command: "certipy req -username {user_at_domain} -password '{password}' -ca {ca_name} -template {template_name} -upn administrator@{domain} -dc-ip {dc_ip} -out /session/admin-cert"
-    when: "ESC1 exploitation: request a certificate from a vulnerable template, injecting an attacker-controlled UPN into the SAN to impersonate a privileged user (commonly administrator@domain). The CA accepts the SAN and issues a cert that PKINIT will accept as the impersonated user. Output PFX lands at /session/admin-cert.pfx for the auth step. CA name and template are CASE-SENSITIVE."
+    command: "certipy req -username {user_at_domain} -password '{password}' -ca {ca_name} -template {template_name} -upn administrator@{domain} -dc-ip {dc_ip} -out /session/output/admin-cert"
+    when: "ESC1 exploitation: request a certificate from a vulnerable template, injecting an attacker-controlled UPN into the SAN to impersonate a privileged user (commonly administrator@domain). The CA accepts the SAN and issues a cert that PKINIT will accept as the impersonated user. Output PFX lands at /session/output/admin-cert.pfx for the auth step. CA name and template are CASE-SENSITIVE."
 
   - name: "auth with PFX (PKINIT) to extract NT hash"
-    command: "certipy auth -pfx /session/admin-cert.pfx -pfx-pass '' -dc-ip {dc_ip}"
+    command: "certipy auth -pfx /session/output/admin-cert.pfx -pfx-pass '' -dc-ip {dc_ip}"
     when: "After requesting a cert (or shadow / forge), authenticate via Kerberos PKINIT. Output: NT hash via U2U + ccache file. Empty `-pfx-pass ''` is the typical case — certipy generates PFX without a password unless you specified `-pfx-pass` on the request. Use `-no-save` to skip writing the ccache (in-memory only)."
 
   - name: "shadow credentials full chain (auto)"
@@ -302,11 +302,11 @@ usage_patterns:
     when: "Shadow Credentials abuse: the attacker has GenericAll/GenericWrite/WriteProperty on `target_account`'s msDS-KeyCredentialLink. `auto` action does the full chain: add key cred → PKINIT auth → extract NT hash → remove key cred. Outputs target account's NT hash. NB: positional `auto` comes AFTER `shadow` and BEFORE flags."
 
   - name: "ptt — pass-the-ticket from a captured ccache"
-    command: "certipy ptt -pfx /session/admin-cert.pfx -no-save"
+    command: "certipy ptt -pfx /session/output/admin-cert.pfx -no-save"
     when: "Convert a PFX back into a usable Kerberos ticket without writing it to /etc/krb5.cc. Use `-no-save` to keep the ccache ephemeral. Often used after `forge` or `req` when you want to feed the ticket directly to certipy auth without a roundtrip."
 
   - name: "parse PFX (offline, format conversion)"
-    command: "certipy parse /session/admin-cert.pfx"
+    command: "certipy parse /session/output/admin-cert.pfx"
     when: "Offline operation — no network, no auth required. Lists the certificate's properties (subject, SANs, EKU, validity). Useful for verifying a generated PFX before using it for auth, or for inspecting a captured cert. Input file is the FIRST POSITIONAL after `parse`."
 
   - name: "ESC7 — relay-free CA officer abuse"
@@ -314,8 +314,8 @@ usage_patterns:
     when: "ESC7 step 1: enable the SubCA template on a CA where you have ManageCA rights. Follow with `req -template SubCA` (will be denied but produces request_id), then `ca -issue-request <id>` to approve, then `req -retrieve <id>` to fetch the issued cert. Single-dash long flags throughout — `-enable-template`, NOT `--enable-template`."
 
   - name: "ESC5 — forge a Golden Certificate from compromised CA key"
-    command: "certipy forge -ca-pfx /session/CA.pfx -upn administrator@{domain} -out /session/golden"
-    when: "After extracting a CA's certificate + private key (via `ca -backup` or external means), forge an arbitrary cert. The forged PFX (lands at /session/golden.pfx) impersonates any UPN you specify — combine with `auth` to get a TGT for that user. Survives password resets (unlike Golden Tickets)."
+    command: "certipy forge -ca-pfx /session/output/CA.pfx -upn administrator@{domain} -out /session/output/golden"
+    when: "After extracting a CA's certificate + private key (via `ca -backup` or external means), forge an arbitrary cert. The forged PFX (lands at /session/output/golden.pfx) impersonates any UPN you specify — combine with `auth` to get a TGT for that user. Survives password resets (unlike Golden Tickets)."
 
 output_formats:
   # certipy primarily writes files. The `-output <prefix>` flag (find / parse)
@@ -333,7 +333,7 @@ output_formats:
   - flag: "-stdout"
     format: "text"
     preferred: false
-    notes: "find / parse — print human-readable text summary to stdout instead of writing files. Useful for one-shot inspection but no file lands in /session/."
+    notes: "find / parse — print human-readable text summary to stdout instead of writing files. Useful for one-shot inspection but no file lands in /session/output/."
   - flag: "-bloodhound"
     format: "bloodhound_zip"
     preferred: false
@@ -468,20 +468,20 @@ gotchas:
   - "`-vulnerable` filters `find` to ESC-classified templates only — most useful for ESC1-ESC15 enumeration. Combine with `-enabled` to drop disabled templates from the noise."
   - "Sub-command takes a SECOND POSITIONAL in some cases: `shadow auto`, `account delete`, `parse <file>`. The DSL's flag_value-only target extraction correctly avoids these positionals (none are targets)."
   - "Feature 28 dynamic recipes (RECIPE_DIR=/session/tool_recipes/certipy) are RETIRED for the kind:cli path — the LLM writes argv directly. Recipes still load for legacy method calls if /session/tool_recipes/certipy/ exists, but they're a dead branch under run_cli (REQ-TR-016)."
-  - "Working directory: certipy chdir's to /session/certipy/ inside the container (mcp-server.py _ensure_work_dir line 969). When invoking from cli_in_container WITHOUT the legacy method, files land in the binary's CWD (likely /app). Always pin output paths with `-output /session/<prefix>` or `-out /session/<name>` for persistent capture."
+  - "Working directory: certipy chdir's to /session/output/certipy/ inside the container (mcp-server.py _ensure_work_dir line 969). When invoking from cli_in_container WITHOUT the legacy method, files land in the binary's CWD (likely /app). Always pin output paths with `-output /session/<prefix>` or `-out /session/<name>` for persistent capture."
   - "`-target` vs `-dc-ip` precedence in target_extraction: `-target` wins over `-dc-ip` because `-target` specifies the operation's actual target server (CA, LDAP), while `-dc-ip` is the DC for auth. When only `-dc-ip` is set (most common case), it IS the operation target."
   - "Certipy often EXITS 0 even on auth failure / connection failure. The legacy method handlers in mcp-server.py inspect output for error patterns (CERTSRV_E_*, KRB_AP_ERR_SKEW, STATUS_LOGON_FAILURE). cli_in_container does NOT have this classification — agents must pattern-match the output themselves. Use the `failure_signatures` below as a guide."
   - "Certipy v5 REMOVED the legacy `-old-bloodhound` zip output. Use the dedicated bloodhound MCP tool for BloodHound data collection."
   - "`relay` subcommand requires INTERACTIVE long-running listener mode with external coercion (PetitPotam, etc.). NOT suitable for cli_in_container — use impacket-relay (ntlmrelayx.py) instead."
   - "Kerberos `-k` requires `/etc/krb5.conf` configured with the realm. The legacy mcp-server.py auto-generates krb5.conf from `username@domain` (line 319 _ensure_krb5_conf). Under kind:cli the container has NO krb5.conf by default — Kerberos auth will fail with KRB5_CONFIG-related errors unless the agent first writes one (or pivots through `mcp_tool certipy <method>` which still calls _ensure_krb5_conf). Workaround: shell out via `bash -c \"cat > /etc/krb5.conf <<EOF\\n[libdefaults]\\n  default_realm = CORP.LOCAL\\n...EOF\\ncertipy ... -k\"`."
-  - "Kerberos `-k` also needs `KRB5CCNAME` env pointing at the ccache. The legacy handlers read `ccache_path` and inject `{KRB5CCNAME: <path>}` into the subprocess env (line 307 _get_auth_env). kind:cli's run_cli does NOT auto-set KRB5CCNAME — agents must invoke as `bash -c \"KRB5CCNAME=/session/credentials/<user>.ccache certipy ... -k\"`."
+  - "Kerberos `-k` also needs `KRB5CCNAME` env pointing at the ccache. The legacy handlers read `ccache_path` and inject `{KRB5CCNAME: <path>}` into the subprocess env (line 307 _get_auth_env). kind:cli's run_cli does NOT auto-set KRB5CCNAME — agents must invoke as `bash -c \"KRB5CCNAME=/session/output/credentials/<user>.ccache certipy ... -k\"`."
   - "`find` and `parse` ALWAYS need `-json -text -output <prefix>` for usable output. The legacy handlers add these flags unconditionally (line 1407, 2481). kind:cli does NOT — bare `certipy find -username u -dc-ip ip` writes to CWD with default names and produces no JSON. Always pass `-json -text -output /session/<unique-prefix>`."
   - "`template` has NO native `read` mode — to inspect a template you must `-save-configuration <file.json>` and read the JSON back. Legacy mcp-server.py maps `action=read` to `-save-configuration` (line 2057). Under kind:cli, naked `certipy template -template T` produces no useful output."
   - "`cert` without `-out` prints PEM to stdout instead of writing a file. Legacy auto-generates an output path (line 2412). For downstream tool reuse, ALWAYS pass `-out /session/<name>.pem` (or `.pfx` with `-export`)."
   - "`req -out <name>`: legacy sanitizes UPN/username (`@`, `\\\\`, `/` → `_`) before passing to `-out` to avoid path-injection in the filename (line 1540). When invoking via kind:cli, agents should provide a SAFE filename — do not pass the raw UPN/SAM/DOMAIN\\\\user as `-out` value or certipy may write to unexpected paths."
   - "`auth` has NO output-prefix flag — certipy writes `<principal>.ccache` / `<principal>.kirbi` based on the cert. If a file with that name exists in CWD, certipy prompts \"Overwrite? (y/n)\" on stdin and aborts on EOF. Legacy backs up + restores any existing ccache/kirbi (lines 1706-1712). Workaround for kind:cli: invoke `auth` from a fresh `/session/<unique-prefix>/` working dir, OR pre-clean any stale `*.ccache`/`*.kirbi` in CWD via bash."
   - "`shadow auto`/`add`: legacy pre-deletes stale `<account>.ccache` and `<account>.pfx` to avoid the same overwrite prompt (lines 1872-1876). Under kind:cli, ALWAYS pass `-out /session/<unique-prefix>_<account>` to dodge the collision."
-  - "`req -retrieve <id>` (ESC7) needs the saved private key visible as `<id>.key` in CWD. Legacy mcp-server.py searches for the most recent `*.key` and symlinks it as `<request_id>.key` (lines 1559-1571). Under kind:cli, the agent must `bash -c \"cd /session/certipy && ln -sf <prefix>.key <request_id>.key && certipy req -retrieve <id> ...\"` or copy the key file to the expected name."
+  - "`req -retrieve <id>` (ESC7) needs the saved private key visible as `<id>.key` in CWD. Legacy mcp-server.py searches for the most recent `*.key` and symlinks it as `<request_id>.key` (lines 1559-1571). Under kind:cli, the agent must `bash -c \"cd /session/output/certipy && ln -sf <prefix>.key <request_id>.key && certipy req -retrieve <id> ...\"` or copy the key file to the expected name."
 
 failure_signatures:
   # Layer-diverse signals (SKILL #11) — at least 6 distinct verifiable layers:

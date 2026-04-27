@@ -222,7 +222,7 @@ target_extraction:
 # multi-target bulk-input flag in any of the four binaries. (binwalk has
 # no -i / -L / file-list mode; foremost takes one -i input only; steghide
 # is one-stego-file-per-call; exiftool can recurse via -r but the recursion
-# root is still a single positional path under /session/.)
+# root is still a single positional path under /session/output/.)
 reject_flags: []
 reject_flags_reason: >
   forensics has no network target and no target-list flag in any of the
@@ -340,27 +340,27 @@ usage_patterns:
   # ── binwalk: signature scan + extraction ──
   - name: "Binwalk signature scan (no extraction)"
     binary: "binwalk"
-    command: "-B /session/sample.bin"
+    command: "-B /session/output/sample.bin"
     when: "First-pass triage of an unknown binary or firmware. -B (signature scan) is the default mode — emits a table of DECIMAL / HEX OFFSET / DESCRIPTION for every magic-number match in the file. Read-only; nothing extracted. Use this BEFORE -e to preview what's inside (squashfs filesystems, JFFS2 partitions, gzip blobs, certificates, RSA keys, U-Boot headers, kernel images)."
 
   - name: "Binwalk extract embedded files"
     binary: "binwalk"
-    command: "-e /session/firmware.bin"
-    when: "Single-level extraction. -e auto-extracts every file binwalk can identify (gzip, zlib, squashfs, JFFS2, cpio, tar, zip, certificates, ...). Output goes to `_<basename>.extracted/` in CWD by default. Use `cd /session && binwalk -e file` (but cli_in_container has NO shell — use -C /session/extracted/ instead). Skip -M (matryoshka) for one-level; add -M for recursive."
+    command: "-e /session/output/firmware.bin"
+    when: "Single-level extraction. -e auto-extracts every file binwalk can identify (gzip, zlib, squashfs, JFFS2, cpio, tar, zip, certificates, ...). Output goes to `_<basename>.extracted/` in CWD by default. Use `cd /session && binwalk -e file` (but cli_in_container has NO shell — use -C /session/output/extracted/ instead). Skip -M (matryoshka) for one-level; add -M for recursive."
 
   - name: "Binwalk recursive extract with depth limit"
     binary: "binwalk"
-    command: "-e -M -d 4 -C /session/extracted /session/firmware.bin"
-    when: "Recursive (matryoshka) extraction — when an extracted file itself contains more embedded data, binwalk re-extracts it. -d 4 limits depth (default is unlimited, which on a deeply-nested firmware can recurse for hours). -C /session/extracted forces output dir to /session/extracted/ (not the cli_in_container CWD which is unpredictable). Standard pattern for router firmware blobs (uImage → kernel + squashfs → /etc/passwd, /etc/shadow, certs)."
+    command: "-e -M -d 4 -C /session/output/extracted /session/output/firmware.bin"
+    when: "Recursive (matryoshka) extraction — when an extracted file itself contains more embedded data, binwalk re-extracts it. -d 4 limits depth (default is unlimited, which on a deeply-nested firmware can recurse for hours). -C /session/output/extracted forces output dir to /session/output/extracted/ (not the cli_in_container CWD which is unpredictable). Standard pattern for router firmware blobs (uImage → kernel + squashfs → /etc/passwd, /etc/shadow, certs)."
 
   - name: "Binwalk include-filter (only extract specific signatures)"
     binary: "binwalk"
-    command: "-e -y 'private key' -C /session/keys /session/firmware.bin"
+    command: "-e -y 'private key' -C /session/output/keys /session/output/firmware.bin"
     when: "Targeted extraction — -y SIGNATURE_NAME (regex) limits extraction to matches whose description contains the regex. Examples: 'private key', 'certificate', 'squashfs', 'gzip'. Faster than full extract and avoids irrelevant noise files. -x is the inverse (exclude)."
 
   - name: "Binwalk entropy analysis"
     binary: "binwalk"
-    command: "-J /session/sample.bin"
+    command: "-J /session/output/sample.bin"
     when: "Entropy plot data emitted as JSON (rather than gnuplot). Useful for detecting encrypted / compressed regions in firmware (high entropy ~= 0.95+) vs structured data (low entropy). Combine with binwalk -B to map signatures onto entropy regions and identify which embedded blobs are encrypted."
 
   - name: "Binwalk help"
@@ -371,23 +371,23 @@ usage_patterns:
   # ── foremost: file carving ──
   - name: "Foremost carve all types from disk image"
     binary: "foremost"
-    command: "-i /session/dump.raw -o /session/carved"
-    when: "Default-config carve — recovers jpg, gif, png, bmp, avi, exe, mpg, wav, riff, wmv, mov, pdf, ole, doc, zip, rar from header/footer signatures. -i specifies INPUT (file or device); -o specifies OUTPUT directory (MUST NOT EXIST — foremost refuses to overwrite). Output structure: /session/carved/audit.txt + per-type subdirs (jpg/, png/, ...). Standard CTF disk-image workflow."
+    command: "-i /session/output/dump.raw -o /session/output/carved"
+    when: "Default-config carve — recovers jpg, gif, png, bmp, avi, exe, mpg, wav, riff, wmv, mov, pdf, ole, doc, zip, rar from header/footer signatures. -i specifies INPUT (file or device); -o specifies OUTPUT directory (MUST NOT EXIST — foremost refuses to overwrite). Output structure: /session/output/carved/audit.txt + per-type subdirs (jpg/, png/, ...). Standard CTF disk-image workflow."
 
   - name: "Foremost carve specific file types"
     binary: "foremost"
-    command: "-i /session/dump.raw -o /session/carved -t jpg,png,pdf"
+    command: "-i /session/output/dump.raw -o /session/output/carved -t jpg,png,pdf"
     when: "Targeted carve when you know what you're looking for (e.g., 'find PDFs deleted from this disk'). -t accepts comma-separated types: jpg, gif, png, bmp, avi, exe, mpg, wav, riff, wmv, mov, pdf, ole, doc, zip, rar, htm, cpp, all. Faster + cleaner output than carving everything. 'all' is the same as omitting -t."
 
   - name: "Foremost quick scan (sector-aligned headers)"
     binary: "foremost"
-    command: "-q -i /session/disk.img -o /session/carved-quick"
+    command: "-q -i /session/output/disk.img -o /session/output/carved-quick"
     when: "-q skips non-sector-aligned positions — much faster on large disk images but misses files whose headers don't align to 512-byte sectors. Good for first-pass triage; follow with full -d (deep) carve if -q yields zero results. Trade-off: speed vs completeness."
 
   - name: "Foremost timestamped output (re-runnable)"
     binary: "foremost"
-    command: "-T -i /session/dump.raw -o /session/carved"
-    when: "-T appends a timestamp to the output dir name (e.g., /session/carved_Wed_Mar_05_12_34_56_2026/). Avoids the 'output directory exists' error when re-running; each run gets its own dir. Useful in iterative workflows or when comparing -t filtered runs."
+    command: "-T -i /session/output/dump.raw -o /session/output/carved"
+    when: "-T appends a timestamp to the output dir name (e.g., /session/output/carved_Wed_Mar_05_12_34_56_2026/). Avoids the 'output directory exists' error when re-running; each run gets its own dir. Useful in iterative workflows or when comparing -t filtered runs."
 
   - name: "Foremost help"
     binary: "foremost"
@@ -397,27 +397,27 @@ usage_patterns:
   # ── steghide: stego embed / extract / info ──
   - name: "Steghide info — check for embedded data (no passphrase)"
     binary: "steghide"
-    command: "info /session/cover.jpg -p ''"
+    command: "info /session/output/cover.jpg -p ''"
     when: "Read-only inspection. `info` subcommand prints the file's format (jpeg/bmp/wav/au), capacity (max embeddable bytes), and — if `-p PASS` matches the embed passphrase — the embedded file name + size. `-p ''` (empty) tries the no-passphrase case. Without `-p` flag, steghide prompts interactively (HANGS under cli_in_container — NO TTY); ALWAYS pass `-p ''` even for the no-pass case."
 
   - name: "Steghide info — with passphrase"
     binary: "steghide"
-    command: "info /session/cover.jpg -p 'CorrectHorseBatteryStaple'"
+    command: "info /session/output/cover.jpg -p 'CorrectHorseBatteryStaple'"
     when: "Same as above but with a known passphrase. If the passphrase matches, the output includes the embedded file's name and size (e.g., 'embedded file \"flag.txt\": size: 42 bytes, encrypted: rijndael-128, compressed: yes'). If wrong, steghide prints 'could not extract any data with that passphrase!'. Try common passwords: '', 'password', '123456', the cover file's filename, the CTF challenge name."
 
   - name: "Steghide extract — empty passphrase"
     binary: "steghide"
-    command: "extract -sf /session/cover.jpg -p '' -xf /session/secret.bin"
-    when: "Extraction with no passphrase. -sf (stego file) names the cover; -xf (extract file) names the output path. -p '' is REQUIRED to suppress the interactive passphrase prompt (which hangs under cli_in_container). If extraction succeeds, /session/secret.bin contains the hidden data. If wrong passphrase, stderr says 'could not extract any data with that passphrase!'."
+    command: "extract -sf /session/output/cover.jpg -p '' -xf /session/output/secret.bin"
+    when: "Extraction with no passphrase. -sf (stego file) names the cover; -xf (extract file) names the output path. -p '' is REQUIRED to suppress the interactive passphrase prompt (which hangs under cli_in_container). If extraction succeeds, /session/output/secret.bin contains the hidden data. If wrong passphrase, stderr says 'could not extract any data with that passphrase!'."
 
   - name: "Steghide extract — known passphrase"
     binary: "steghide"
-    command: "extract -sf /session/cover.jpg -p 'sekret' -xf /session/secret.bin -f"
+    command: "extract -sf /session/output/cover.jpg -p 'sekret' -xf /session/output/secret.bin -f"
     when: "Extraction with passphrase. -f (force) overwrites -xf path if it exists (omit -f if you want to fail-safe on existing output)."
 
   - name: "Steghide embed — proof-of-concept"
     binary: "steghide"
-    command: "embed -cf /session/photo.jpg -ef /session/payload.txt -sf /session/stego.jpg -p 'sekret' -N -e rijndael-128"
+    command: "embed -cf /session/output/photo.jpg -ef /session/output/payload.txt -sf /session/output/stego.jpg -p 'sekret' -N -e rijndael-128"
     when: "Embed a payload into a cover file (post-exploitation pivot or stego CTF artifact). -cf (cover); -ef (embed-file); -sf (output stego file); -p (passphrase); -N (don't embed the original filename — opsec); -e (encryption algo: rijndael-128 = AES). Output stego.jpg looks identical to photo.jpg byte-for-byte except in the LSBs of selected DCT coefficients."
 
   - name: "Steghide help"
@@ -428,37 +428,37 @@ usage_patterns:
   # ── exiftool: metadata extraction ──
   - name: "Exiftool JSON metadata — single file"
     binary: "exiftool"
-    command: "-j /session/photo.jpg"
+    command: "-j /session/output/photo.jpg"
     when: "Default JSON-output metadata dump. Output is a JSON array containing one object whose keys are tag names (Make, Model, GPSLatitude, ExifVersion, FileSize, ...) and values are tag values. PARSER-FRIENDLY — preferred for downstream consumption. Without -j, output is human-readable 'Tag : Value' lines."
 
   - name: "Exiftool JSON metadata — recurse directory"
     binary: "exiftool"
-    command: "-j -r /session/photos"
+    command: "-j -r /session/output/photos"
     when: "Recursive metadata extraction. -r walks subdirectories; output is a JSON array with one object per file. Useful for OSINT — e.g., extract GPS coordinates from a directory of photos. Combine with -if 'GPSLatitude' to filter to only files with GPS data."
 
   - name: "Exiftool human-readable — quick triage"
     binary: "exiftool"
-    command: "/session/document.pdf"
+    command: "/session/output/document.pdf"
     when: "Default text output (no -j). Prints 'Tag : Value' lines, one per metadata field. Good for human triage; bad for parsing. PDF metadata includes Author, Creator, Producer, Title, CreationDate, ModDate, Pages, PDFVersion, plus any embedded XMP. Often surfaces creator-software fingerprints and authoring identities."
 
   - name: "Exiftool short tag names + GPS in raw decimal"
     binary: "exiftool"
-    command: "-s -c '%+.6f' /session/photo.jpg"
+    command: "-s -c '%+.6f' /session/output/photo.jpg"
     when: "-s uses short (no-spaces) tag names — easier to grep; -c '%+.6f' formats GPS coordinates as raw signed decimals (e.g., +37.7749 instead of '37 deg 46\\' 29.6\" N'). Combine with -j for parser-friendly machine-readable GPS extraction."
 
   - name: "Exiftool extension filter"
     binary: "exiftool"
-    command: "-j -r -ext jpg -ext png /session/dump"
+    command: "-j -r -ext jpg -ext png /session/output/dump"
     when: "-ext FILTER restricts processing to specific file extensions. Combine multiple -ext flags for OR logic. Useful when -r would otherwise traverse a huge dir of mixed types — e.g., focus on images only, ignore .docx and .exe."
 
   - name: "Exiftool conditional filter"
     binary: "exiftool"
-    command: "-j -r -if '$GPSLatitude' /session/photos"
+    command: "-j -r -if '$GPSLatitude' /session/output/photos"
     when: "-if accepts a Perl-like expression evaluated per file; only files where the expression is true are output. Example: extract metadata only from files that have GPS data. Other useful conditionals: '$Author', '$Make eq \"Canon\"', '$DateTimeOriginal lt \"2020:01:01\"'."
 
   - name: "Exiftool fast mode"
     binary: "exiftool"
-    command: "-j -fast2 /session/large-video.mp4"
+    command: "-j -fast2 /session/output/large-video.mp4"
     when: "-fast / -fast2 / -fast3 progressively skip slower scans. -fast skips trailers; -fast2 also skips MakerNote details; -fast3 skips files entirely if no metadata in the first MB. Useful on huge files (videos, disk images) where full scan is overkill."
 
   - name: "Exiftool version"
@@ -508,7 +508,7 @@ common_options:
     - "-e: extract automatically — pulls every recognized embedded file into `_<basename>.extracted/`."
     - "-M: matryoshka (recursive) extract — walks into extracted files and re-extracts. ALWAYS pair with -d to bound depth."
     - "-d N: max matryoshka depth (default unlimited). Use -d 2 or -d 4 for tractable runtimes on real firmware."
-    - "-C DIR: output directory root for extracted files (otherwise CWD). Pin to /session/extracted/ for predictable paths."
+    - "-C DIR: output directory root for extracted files (otherwise CWD). Pin to /session/output/extracted/ for predictable paths."
     - "-y REGEX: include filter — only extract signatures whose description matches REGEX."
     - "-x REGEX: exclude filter — skip signatures whose description matches REGEX."
     - "-l N: scan length in bytes (default = file size)."
@@ -559,22 +559,22 @@ common_options:
 gotchas:
   - "MULTI-BINARY toolkit — choose the right binary per task. binwalk (extract / signature scan), foremost (file carving from disk images), steghide (steganography on JPEG/BMP/WAV/AU), exiftool (metadata for 400+ formats). Each usage_pattern declares `binary:` explicitly. cli_in_container forwards the chosen binary; there is NO top-level binary."
   - "NO NETWORK TARGET — forensics is purely local. target_extraction is empty; the plugin extracts target=null. Scope-validation does NOT apply; the operation never reaches a remote host. Same shape as john / hashcat / volatility / ilspy / searchsploit."
-  - "BINWALK -e EXTRACTS TO CWD BY DEFAULT — output goes to `_<basename>.extracted/` in the cli_in_container CWD, which is unpredictable across plugin versions. ALWAYS pass `-C /session/extracted/` to pin output under the persistent /session/ mount, OR use binwalk's `-r` (auto-cleanup) sparingly. Without -C, the extracted tree may be lost when the container exits."
+  - "BINWALK -e EXTRACTS TO CWD BY DEFAULT — output goes to `_<basename>.extracted/` in the cli_in_container CWD, which is unpredictable across plugin versions. ALWAYS pass `-C /session/output/extracted/` to pin output under the persistent /session/ mount, OR use binwalk's `-r` (auto-cleanup) sparingly. Without -C, the extracted tree may be lost when the container exits."
   - "BINWALK -M (matryoshka) IS UNBOUNDED — without -d N, binwalk recursively extracts everything inside everything inside everything. On a real firmware blob that has nested squashfs / tar / gzip, this can recurse for HOURS and produce gigabytes. ALWAYS bound with -d 2 or -d 4. The mcp-server.py default was -d 8; for run_cli, pin -d explicitly."
-  - "FOREMOST OUTPUT DIR MUST NOT EXIST — foremost refuses to overwrite. Either (a) pick a fresh dir name per call (e.g., /session/carved-2026-04-25/), (b) use -T for timestamped auto-suffix, or (c) delete the prior dir via the read tool's sibling write tool BEFORE invoking foremost. The mcp-server.py wrapper handled (c) automatically; under run_cli the LLM must do it explicitly."
+  - "FOREMOST OUTPUT DIR MUST NOT EXIST — foremost refuses to overwrite. Either (a) pick a fresh dir name per call (e.g., /session/output/carved-2026-04-25/), (b) use -T for timestamped auto-suffix, or (c) delete the prior dir via the read tool's sibling write tool BEFORE invoking foremost. The mcp-server.py wrapper handled (c) automatically; under run_cli the LLM must do it explicitly."
   - "FOREMOST WORKS ON IMAGES, NOT ON LIVE DISKS UNDER A CONTAINER — passing /dev/sda to foremost inside cli_in_container will fail (no /dev access by default). Always operate on a saved disk-image file (dd output, .img, .raw, .e01 if libewf is installed)."
   - "STEGHIDE PROMPTS INTERACTIVELY without -p — under cli_in_container there is NO TTY, so steghide hangs forever waiting for a passphrase. ALWAYS pass `-p '<password>'` or `-p ''` (empty string for the no-pass case). Without it, the call will idle-timeout."
   - "STEGHIDE ONLY SUPPORTS JPEG / BMP / WAV / AU — pass any other format (PNG, GIF, TIFF, MP3, MP4) and steghide returns 'unsupported file format' (or similar). Use stegoVeritas, zsteg (LSB), or steg-detection tools for those formats. (PNG steg = zsteg; TIFF / GIF = LSB tools.)"
   - "STEGHIDE CASE-SENSITIVE PASSPHRASE — `Password` ≠ `password`. The 'could not extract any data with that passphrase!' error is the same for wrong-pass and no-data-embedded; you can't tell them apart from output alone."
   - "EXIFTOOL `-j` IS JSON ARRAY — even for a single file, exiftool emits `[{...}]` (array with one object). Parsers must handle the array layer. Use `jq '.[0]'` to unwrap (but cli_in_container has no shell — pipe must be expressed via tool_runner stdin_data or processed client-side after run_cli returns)."
   - "EXIFTOOL CAN MODIFY FILES — flags like -overwrite_original, `-Tag=Value`, `-tagsFromFile`, and `-delete_original` REWRITE metadata in place. For OFFENSIVE / FORENSIC analysis you almost always want READ-ONLY mode (no `=` flags, no `-overwrite_original`). The default `exiftool <file>` is safe (read-only); be careful with `-w` writing per-file outputs (those go to a SEPARATE file, not the original)."
-  - "EXIFTOOL `-r` RECURSE CAN BE EXPENSIVE — recursing /session/dump on a multi-GB extracted firmware tree can take minutes. Combine `-r` with `-ext` filtering to scope. Use `-fast2` or `-fast3` to skip slow scans."
+  - "EXIFTOOL `-r` RECURSE CAN BE EXPENSIVE — recursing /session/output/dump on a multi-GB extracted firmware tree can take minutes. Combine `-r` with `-ext` filtering to scope. Use `-fast2` or `-fast3` to skip slow scans."
   - "BINWALK / FOREMOST OFTEN OVERLAP — both do file recovery. Rule of thumb: binwalk for STRUCTURED firmware / archives where signatures are expected at known offsets; foremost for UNSTRUCTURED disk images / partition dumps where files are scattered. binwalk tells you WHAT'S there; foremost extracts WHAT'S RECOVERABLE. Try both on uncertain inputs."
   - "BINWALK EXTERNAL EXTRACTORS CAN HANG — binwalk forks `7z`, `unsquashfs`, `jefferson`, `cramfsswap`, etc. for actual extraction. A malformed input that crashes one of those externals can leave a zombie or hang indefinitely. The idle_timeout_seconds (10 min) catches this; if you see a binwalk call go silent for 10+ minutes, that's the symptom."
   - "FILE PATHS MUST BE INSIDE /session/ — cli_in_container only mounts /session/ from the host. Files under /tmp, /root, /home are container-local and disappear at container restart. Always stage inputs into /session/ via the write tool BEFORE invoking forensics."
   - "Feature 28 dynamic recipes are RETIRED for the kind:cli path — the LLM writes argv directly. Recipes still load for legacy method calls (extract, analyze, carve, stego_extract, stego_info, metadata) if /session/tool_recipes/forensics/ exists, but they're a dead branch under run_cli (REQ-TR-016)."
   - "BINWALK EXTRACTOR USER (--run-as) — by default binwalk runs the external extractors (7z, unsquashfs, jefferson, ...) as the unprivileged `nobody` user, which can fail on certain artifacts (setuid binaries, owned-by-other-user files inside extracted filesystems). The legacy mcp-server.py wrapper hardcoded `--run-as=root`. Under run_cli, when invoking `binwalk -e` you may need to add `--run-as=root` explicitly if the extraction silently produces empty subdirectories or stderr complains about extractor permissions."
-  - "STEGHIDE SILENT-NO-OUTPUT — on rare inputs steghide's extract returns exit-0 with NO stderr error but ALSO does not produce the -xf output file (e.g., truncated stego data, format-detection edge case). The legacy wrapper checked `os.path.exists(output_path)` after the call. Under run_cli, after `steghide extract -sf ... -xf /session/secret.bin -p '...'`, always verify /session/secret.bin actually exists before assuming success — exit code alone is insufficient."
+  - "STEGHIDE SILENT-NO-OUTPUT — on rare inputs steghide's extract returns exit-0 with NO stderr error but ALSO does not produce the -xf output file (e.g., truncated stego data, format-detection edge case). The legacy wrapper checked `os.path.exists(output_path)` after the call. Under run_cli, after `steghide extract -sf ... -xf /session/output/secret.bin -p '...'`, always verify /session/output/secret.bin actually exists before assuming success — exit code alone is insufficient."
   - "STEGHIDE EXTRACT -f (FORCE OVERWRITE) — without -f, steghide refuses to overwrite the -xf output if it already exists from a prior run. The legacy wrapper always added -f and unlinked the prior file. Under run_cli, either include -f in the argv (matches legacy behavior) or pick a fresh -xf path per call. Without -f and with an existing output file, steghide will error rather than overwrite."
 
 failure_signatures:

