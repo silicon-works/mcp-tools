@@ -1,5 +1,5 @@
 version: '2.0'
-updated_at: '2026-04-27T18:23:27Z'
+updated_at: '2026-04-30T21:37:06Z'
 tools:
   amass:
     name: amass
@@ -426,47 +426,54 @@ tools:
         returns: {}
   bloodhound:
     name: bloodhound
+    kind: cli
+    binary: bloodhound-python
     version: 1.9.0
-    description: 'Active Directory relationship mapping and attack path analysis via bloodhound-python v1.9.0 (dirkjanm/BloodHound.py,
-      Kali apt package bloodhound.py). This is BloodHound LEGACY (BloodHound.py) — not BloodHound CE''s built-in ingestor.
-      Two methods: collect, collect_stealth. Ingests AD data by querying LDAP (port 389/636) and optionally enumerating computers
-      (SMB/RPC) to map users, groups, computers, domains, GPOs, OUs, containers, ACLs, sessions, and trust relationships.
-      Output is BloodHound-compatible JSON files (7 types: users, groups, computers, domains, gpos, ous, containers) written
-      to /session/ for downstream analysis. Collection presets: ''Default'' (Group, LocalAdmin, Session, Trusts), ''All''
-      (everything except LoggedOn), ''DCOnly'' (LDAP-only, no host contact — stealth). Supports NTLM password auth, pass-the-hash
-      (--hashes LM:NT), Kerberos ccache (-k), and AES key auth. Requires valid domain credentials — unlike kerbrute which
-      needs none. DNS resolution uses DC as nameserver (-ns) with TCP by default for Docker reliability. For unauthenticated
-      AD enumeration, use kerbrute first to discover valid usernames, then use bloodhound with obtained credentials.'
+    description: 'Active Directory relationship mapping and attack-path data collector via bloodhound-python v1.9.0 (dirkjanm/BloodHound.py,
+      Kali apt package bloodhound.py). This is the BloodHound LEGACY ingestor (meta.version 5 JSON) — NOT BloodHound CE''s
+      built-in SharpHound-equivalent collector. Single binary `bloodhound-python` with one operation shape (collect AD data
+      and write JSON files); behaviour varies by `-c/--collectionmethod`. Authenticated against AD via NTLM password, NTLM
+      hash (LM:NT), Kerberos ccache (-k -no-pass with KRB5CCNAME), or AES key. Queries LDAP (389/636) on the DC and optionally
+      enumerates computers via SMB/RPC. Output files written as `<prefix>_<timestamp>_<type>.json` with -op as the prefix
+      — e.g. `-op /session/output/bh` produces `/session/output/bh_<ts>_users.json` etc. Collection presets: ''Default'' (Group
+      + LocalAdmin + Session + Trusts), ''All'' (everything except LoggedOn), ''DCOnly'' (LDAP-only stealth — no computer
+      contact). Individual methods can be combined: ''Group,ACL,Trusts''. Native CLI; the LLM constructs the full bloodhound-python
+      invocation. For unauthenticated AD enumeration use kerbrute first; for collected-data analysis use BloodHound CE / GUI
+      / Cypher queries against Neo4j (out of scope here).'
     image: ghcr.io/silicon-works/mcp-tools-bloodhound:latest
     image_size_mb: 258
-    timeout_seconds: 300
-    idle_timeout: 1800
+    idle_timeout_seconds: 600
+    max_runtime_seconds: 3600
+    timeout_seconds: 3600
     capabilities:
     - ad_enumeration
     - attack_path_analysis
     - ldap_collection
     - relationship_mapping
+    phases:
+    - enumeration
     routing:
       use_for:
       - collect Active Directory relationship data for attack path analysis
-      - map AD users, groups, computers, and trust relationships using BloodHound
-      - enumerate AD group memberships, ACLs, and delegation rights via LDAP
+      - map AD users, groups, computers, ACLs, sessions, and trust relationships using BloodHound
+      - enumerate AD group memberships and delegation rights via LDAP
       - collect BloodHound-compatible JSON data from a domain controller
-      - stealth AD collection using DCOnly method with no computer enumeration
+      - stealth AD collection using DCOnly (LDAP-only, no computer contact)
       - discover attack paths from owned user to Domain Admin via AD relationships
       - ingest AD data after obtaining valid credentials from password spray or hash dump
       - enumerate local admin rights, sessions, and DCOM/RDP/PSRemote access across domain computers
-      - collect AD certificate services, GPO, OU, and container objects for privilege escalation analysis
-      - map trust relationships between domains in a multi-domain forest
+      - map trust relationships in a multi-domain forest (with -gc override if needed)
       - generate BloodHound JSON files for import into BloodHound CE or legacy GUI
       never_use_for:
-      - username enumeration without credentials (use kerbrute — bloodhound requires valid LDAP bind creds)
-      - password spraying (use kerbrute — bloodhound is for data collection, not authentication brute-force)
-      - kerberoasting (use impacket.kerberoast — bloodhound collects relationships, not TGS tickets)
-      - AS-REP roasting (use impacket.asreproast)
-      - credential dumping from memory (use impacket.secretsdump)
-      - SMB enumeration without AD context (use netexec — faster for simple share/user enumeration)
-      - LDAP search queries (use impacket.get_ad_users or ldapsearch for targeted LDAP queries)
+      - username enumeration without credentials (use kerbrute — bloodhound REQUIRES valid LDAP bind creds)
+      - password spraying (use kerbrute — bloodhound is a data collector, not a credential brute-forcer)
+      - Kerberoasting (use impacket-GetUserSPNs — bloodhound collects SPN existence, doesn't request TGS tickets)
+      - AS-REP roasting (use impacket-GetNPUsers)
+      - credential dumping from memory or DC database (use impacket-secretsdump)
+      - SMB enumeration without AD context (use netexec — faster for share/user enumeration)
+      - running Cypher queries against collected data (BloodHound GUI / Neo4j is out of scope here — this tool only writes
+        JSON)
+      - BloodHound CE collection (use SharpHound or BloodHound CE's built-in collector — this is the LEGACY .py ingestor)
       triggers:
       - bloodhound
       - bloodhound-python
@@ -478,295 +485,319 @@ tools:
       - AD ingestor
       - domain enumeration
       - SharpHound alternative
-    phases:
-    - enumeration
+      - BloodHound legacy
     requirements:
       network: true
       privileged: false
     resources:
-      memory_mb: 256
-      cpu: 0.5
+      memory_mb: 512
+      cpu: 1.0
+    allowed_env: []
     see_also:
     - tool: kerbrute
-      reason: Enumerate valid usernames without credentials before collecting with bloodhound
+      reason: Enumerate valid usernames without credentials BEFORE collecting with bloodhound (bloodhound needs a valid LDAP
+        bind).
     - tool: impacket
-      reason: After collection, use impacket for kerberoasting (GetUserSPNs), secretsdump, or targeted LDAP queries
+      reason: 'After collection, use impacket for kerberoast (GetUserSPNs), AS-REP roast (GetNPUsers), DCSync (secretsdump),
+        or targeted LDAP queries on identified objects. Also impacket-getTGT to produce a ccache; pass the ccache path via
+        the cli_in_container `env` arg as `{KRB5CCNAME: "/session/output/credentials/<user>.ccache"}` for Kerberos auth (-k
+        -no-pass).'
     - tool: netexec
-      reason: Validate credentials across protocols before bloodhound collection, or use nxc ldap --bloodhound as lightweight
-        alternative
+      reason: Validate credentials independently before bloodhound (`nxc ldap <dc> -d <domain> -u <user> -p <pass>`). nxc
+        also has a `--bloodhound` flag for a lightweight subset of collection.
     - tool: certipy
-      reason: After bloodhound identifies ADCS, use certipy for certificate-based attack paths (ESC1-ESC8)
+      reason: After bloodhound identifies AD CS enrollments / certificate templates, use certipy for ESC1-ESC15 attack paths.
     - tool: responder
-      reason: After BloodHound identifies forced authentication targets or relay paths, use responder to capture NTLMv2 hashes
+      reason: After bloodhound identifies forced-authentication targets or relay paths, use responder to capture NTLMv2 hashes
         from those targets.
     - tool: evil-winrm
-      reason: After BloodHound shows CanPSRemote edges to target hosts, use evil-winrm for WinRM shell access.
-    methods:
-      collect:
-        description: 'Collect AD data using bloodhound-python with configurable collection methods. Runs `bloodhound-python
-          -d <domain> -u <user> -p <pass> -c <collection> -ns <dc_ip> --dns-tcp -v -op /session/output/bh` with optional flags
-          for LDAPS, channel binding, hash auth, Kerberos, workers, exclude-dcs, zip, dc_host override, and computerfile scope
-          limiting. DC hostname is auto-discovered via DNS using dc_ip as nameserver; dc_host override only needed if auto-discovery
-          fails. Output files written as `/session/output/bh_<timestamp>_<type>.json` — one file per type (users, groups,
-          computers, domains, gpos, ous, containers). Each JSON file has `{"data": [...], "meta": {"type": "<type>", "count":
-          <int>, "methods": 0, "version": 5}}` structure. Returns structured file summaries including path, filename, size,
-          type, and object count for each file. The `collection_types` field lists which AD object types were collected. Success
-          is determined by whether any output files were generated — empty output with valid creds usually indicates wrong
-          domain name or DNS resolution failure. File rotation occurs at 40000 entries per type. The -v (verbose) flag is
-          always enabled, producing indent=1 JSON output.'
-        when_to_use: '(1) After obtaining valid domain credentials via password spray (kerbrute), hash dump (impacket.secretsdump),
-          or initial foothold — collect comprehensive AD data to discover privilege escalation paths. (2) When you need to
-          identify all members of high-value groups (Domain Admins, Enterprise Admins, Backup Operators) and the shortest
-          attack paths to reach them. (3) When mapping ACL-based attack chains: who has GenericAll/WriteDACL/AddMember on
-          which objects. (4) To discover Kerberoastable accounts (users with SPNs) or AS-REP-roastable accounts for further
-          credential attacks. (5) When enumerating trust relationships in a multi-domain forest. (6) Collection=''All'' for
-          maximum coverage on first run; collection=''Group'' or ''ACL'' for targeted follow-up. (7) Use with --exclude-dcs
-          to avoid ATA/ATP detections on domain controllers.'
-        required_ports:
-        - 389
-        params:
-          domain:
-            type: string
-            required: true
-            description: Target AD domain name (e.g., 'corp.local', 'fries.htb'). Case-insensitive. Must resolve via the DC's
-              DNS — if bloodhound fails with 'Could not find a domain', verify domain name via nmap LDAP scripts or ldapsearch.
-          username:
-            type: string
-            required: true
-            description: 'Username for LDAP bind. Format: bare username (''admin'') or UPN (''admin@corp.local''). Must have
-              read access to AD objects — any authenticated domain user works for most collection methods.'
-          password:
-            type: string
-            description: Password for NTLM or Kerberos authentication. Mutually exclusive with hashes (provide one or the
-              other). If both password and hashes are omitted, must use kerberos=true with a valid ccache.
-          hashes:
-            type: string
-            description: NTLM hash in LM:NT format for pass-the-hash authentication (e.g., 'aad3b435b51404ee:31d6cfe0d16ae931b73c59d7e0c089c0').
-              Use when you have extracted hashes but not plaintext passwords.
-          kerberos:
-            type: boolean
-            default: false
-            description: Use Kerberos authentication via ccache file (set KRB5CCNAME environment variable). For use after
-              obtaining a TGT via impacket.getTGT or certipy authenticate. When kerberos=true and no password is provided,
-              -no-pass is automatically added to the command line.
-          aes_key:
-            type: string
-            description: AES key for Kerberos authentication (128 or 256 bit hex string). Alternative to password/hash when
-              you have extracted AES keys from a keytab or secretsdump.
-          auth_method:
-            type: enum
-            values:
-            - auto
-            - ntlm
-            - kerberos
-            default: auto
-            description: Force authentication method. 'auto' tries Kerberos then NTLM fallback. Use 'ntlm' if Kerberos is
-              misconfigured or unavailable. Use 'kerberos' to force Kerberos-only (requires valid ccache or password).
-          dc_ip:
-            type: string
-            required: true
-            description: Domain controller IP address. Used as DNS nameserver (-ns) for name resolution inside the container.
-              The DC hostname is auto-discovered via DNS. Must be an IP, not hostname — Docker containers cannot resolve AD
-              hostnames without this nameserver.
-          dc_host:
-            type: string
-            description: DC hostname FQDN (e.g., 'dc01.corp.local'). Optional — if omitted, bloodhound auto-discovers the
-              DC hostname via DNS using dc_ip as nameserver. Only needed if DNS auto-discovery fails.
-          collection:
-            type: string
-            default: Default
-            description: 'Collection method(s), comma-separated. Presets: ''All'' (everything except LoggedOn — most comprehensive),
-              ''Default'' (Group, LocalAdmin, Session, Trusts — good balance), ''DCOnly'' (LDAP-only queries to DC, no computer
-              enumeration — stealthiest). Individual methods: Group, LocalAdmin, Session, Trusts, ObjectProps, ACL, DCOM,
-              RDP, PSRemote, LoggedOn, Container. Combine with commas: ''Group,ACL,Trusts''. LoggedOn requires admin rights
-              on target computers and is excluded from ''All'' due to noise.'
-          gc_host:
-            type: string
-            description: Override Global Catalog server hostname or IP. Needed for multi-domain forest collection where the
-              DC is not the GC. If unset, bloodhound auto-selects a GC.
-          use_ldaps:
-            type: boolean
-            default: false
-            description: Use LDAP over TLS (port 636 instead of 389). Encrypts all LDAP queries. May bypass network IDS that
-              only inspects cleartext LDAP. Required when DC enforces LDAPS-only.
-          ldap_channel_binding:
-            type: boolean
-            default: false
-            description: Use LDAP Channel Binding (forces LDAPS protocol). Required when the DC enforces EPA (Extended Protection
-              for Authentication). If collection fails with channel binding errors, enable this.
-          dns_tcp:
-            type: boolean
-            default: true
-            description: Use TCP for DNS queries instead of UDP. Enabled by default for reliability in Docker containers where
-              UDP DNS can be unreliable. Disable only if you need UDP DNS for specific network reasons.
-          dns_timeout:
-            type: integer
-            default: 3
-            description: 'DNS query timeout in seconds (bloodhound default: 3). Increase to 10-15 if DNS resolution is slow
-              inside Docker or across VPN tunnels.'
-          workers:
-            type: integer
-            default: 10
-            description: 'Number of concurrent worker threads for computer enumeration (default: 10). Reduce to 1-2 for stealth
-              to minimize concurrent connections. Only affects methods that contact computers (LocalAdmin, Session, RDP, DCOM,
-              PSRemote, LoggedOn). DCOnly ignores this.'
-          exclude_dcs:
-            type: boolean
-            default: false
-            description: Skip domain controllers during computer enumeration. Avoids Microsoft ATA/ATP detections that trigger
-              on enumeration of DC resources. Recommended when stealth is important.
-          zip_output:
-            type: boolean
-            default: false
-            description: Compress all output JSON files into a single ZIP archive. Useful for BloodHound CE import which accepts
-              ZIP uploads directly.
-          computerfile:
-            type: string
-            description: Path to file containing computer FQDNs (one per line) to limit enumeration scope. File must be in
-              /session/ directory. Restricts computer-based methods (LocalAdmin, Session, etc.) to only these hosts.
-          timeout:
-            type: integer
-            default: 300
-            description: Maximum execution time in seconds. 300s handles most single-domain collections. Increase for large
-              domains (10K+ computers) or when using slow collection methods like LoggedOn.
-          ccache_path:
-            type: string
-            description: Path to Kerberos ccache file (e.g., /session/output/credentials/auditor.ccache)
-        returns:
-          files:
-            type: array
-            description: 'Array of file summary objects, one per output file. Each has: path (full path in /session/), filename
-              (basename), size_bytes, type (users/groups/computers/domains/gpos/ous/containers), count (number of AD objects
-              in file). ZIP files have type=''zip'' and contents array of filenames.'
-          file_count:
-            type: integer
-            description: Total number of output files generated. Typical 'Default' collection produces 4-7 files. 'All' produces
-              7 files. Zero files indicates authentication or DNS failure.
-          collection_types:
-            type: array
-            description: List of AD object types collected (e.g., ['users', 'groups', 'computers', 'domains']). Extracted
-              from file meta.type fields. Empty when no files generated.
-          domain:
-            type: string
-            description: Domain that was collected
-          dc_ip:
-            type: string
-            description: DC IP that was queried
-          collection:
-            type: string
-            description: Collection method(s) that were used
-      collect_stealth:
-        description: 'Stealth AD collection using DCOnly method — only LDAP queries to the domain controller, no SMB/RPC connections
-          to individual computers. Hardcodes collection=''DCOnly'' which internally expands to group, trusts, objectprops,
-          acl, container methods — all resolved via LDAP queries to the DC. Output files include users, groups, domains, gpos,
-          ous, containers (but NOT computers since no computer enumeration occurs). Does NOT collect LocalAdmin, Session,
-          DCOM, RDP, or PSRemote data (these require contacting each computer). Same JSON output format as collect (`meta.version:
-          5`, `meta.type`, `meta.count`). Ideal for initial reconnaissance where network noise must be minimized.'
-        when_to_use: (1) First bloodhound run after obtaining creds — minimal network footprint while still getting group
-          memberships, ACLs, and trust relationships. (2) When ATA/ATP or EDR is monitoring for lateral movement — DCOnly
-          only talks to the DC via LDAP. (3) Before deciding whether a noisier 'All' collection is worth the risk. (4) In
-          CTF/HTB scenarios where you want quick results without waiting for computer enumeration.
-        required_ports:
-        - 389
-        params:
-          domain:
-            type: string
-            required: true
-            description: Target AD domain name (e.g., 'corp.local', 'fries.htb').
-          username:
-            type: string
-            required: true
-            description: Username for LDAP bind.
-          password:
-            type: string
-            description: Password for authentication.
-          hashes:
-            type: string
-            description: NTLM hash in LM:NT format for pass-the-hash.
-          kerberos:
-            type: boolean
-            default: false
-            description: Use Kerberos authentication via ccache. When kerberos=true and no password is provided, -no-pass
-              is automatically added to the command line.
-          aes_key:
-            type: string
-            description: AES key for Kerberos auth (128 or 256 bit hex string).
-          auth_method:
-            type: enum
-            values:
-            - auto
-            - ntlm
-            - kerberos
-            default: auto
-            description: Force authentication method.
-          dc_ip:
-            type: string
-            required: true
-            description: Domain controller IP address. Used as DNS nameserver (-ns). DC hostname auto-discovered.
-          dc_host:
-            type: string
-            description: DC hostname FQDN. Optional — auto-discovered via DNS if omitted.
-          gc_host:
-            type: string
-            description: Override Global Catalog server for multi-domain forest collection.
-          use_ldaps:
-            type: boolean
-            default: false
-            description: Use LDAP over TLS (port 636).
-          ldap_channel_binding:
-            type: boolean
-            default: false
-            description: Use LDAP Channel Binding (forces LDAPS). Required when DC enforces EPA.
-          dns_tcp:
-            type: boolean
-            default: true
-            description: 'Use TCP for DNS queries (default: true for Docker reliability).'
-          dns_timeout:
-            type: integer
-            default: 3
-            description: DNS query timeout in seconds.
-          workers:
-            type: integer
-            default: 10
-            description: Worker threads (mostly irrelevant for DCOnly since no computer enumeration occurs).
-          exclude_dcs:
-            type: boolean
-            default: false
-            description: Skip DCs during enumeration (irrelevant for DCOnly but accepted for API consistency).
-          zip_output:
-            type: boolean
-            default: false
-            description: Compress output JSON files into ZIP archive.
-          computerfile:
-            type: string
-            description: Computer FQDN allowlist file (irrelevant for DCOnly).
-          timeout:
-            type: integer
-            default: 300
-            description: Maximum execution time in seconds.
-          ccache_path:
-            type: string
-            description: Path to Kerberos ccache file (e.g., /session/output/credentials/auditor.ccache)
-        returns:
-          files:
-            type: array
-            description: Array of file summary objects (same format as collect). DCOnly typically produces fewer files — users,
-              groups, domains, gpos, ous, containers but NOT computers (no computer enumeration).
-          file_count:
-            type: integer
-            description: Total output files generated.
-          collection_types:
-            type: array
-            description: AD object types collected.
-          domain:
-            type: string
-            description: Domain that was collected
-          dc_ip:
-            type: string
-            description: DC IP that was queried
-          collection:
-            type: string
-            description: Always 'DCOnly' for this method
+      reason: After bloodhound shows CanPSRemote edges to target hosts, use evil-winrm for WinRM shell access.
+    - tool: dns
+      reason: If bloodhound's `-ns` DNS auto-discovery fails, use dns to query SRV records (`_ldap._tcp.dc._msdcs.<domain>`)
+        directly to find the DC FQDN.
+    target_extraction:
+    - rule: flag_value
+      flag: -ns
+      parse_as: raw
+    - rule: flag_value
+      flag: --nameserver
+      parse_as: raw
+    - rule: flag_value
+      flag: -dc
+      parse_as: raw
+    - rule: flag_value
+      flag: --domain-controller
+      parse_as: raw
+    - rule: flag_value
+      flag: -gc
+      parse_as: raw
+    - rule: flag_value
+      flag: --global-catalog
+      parse_as: raw
+    reject_flags: []
+    reject_flags_reason: bloodhound-python has no target-list flag, no -iL-equivalent, and no random-target mode. The single
+      DC target is supplied via -ns / -dc / -gc — all single-value flags. --computerfile is a LOCAL allowlist for already-discovered
+      computers (scope-narrowing, not target-adding); accepted. --cachefile is bloodhound's internal LDAP query cache; accepted.
+    value_flags:
+    - -u
+    - --username
+    - -p
+    - --password
+    - -aesKey
+    - --hashes
+    - --auth-method
+    - -d
+    - --domain
+    - -c
+    - --collectionmethod
+    - -ns
+    - --nameserver
+    - -dc
+    - --domain-controller
+    - -gc
+    - --global-catalog
+    - --dns-timeout
+    - -w
+    - --workers
+    - --computerfile
+    - --cachefile
+    - -op
+    - --outputprefix
+    usage_patterns:
+    - name: Default collection (password auth — first run)
+      command: bloodhound-python -d corp.local -u admin -p 'P@ssw0rd' -ns 10.10.10.5 --dns-tcp -c Default -w 10 -op /session/output/bh
+        -v
+      when: First-pass AD collection with valid creds. Default = Group + LocalAdmin + Session + Trusts. Touches DC (LDAP)
+        AND every computer (SMB/RPC). For HTB/labs, use Default for breadth. -ns MUST be the DC IP — Docker can't resolve
+        AD names without it. --dns-tcp is critical inside Docker (UDP DNS unreliable). Outputs `bh_<timestamp>_<type>.json`
+        to /session/output/. Per `bloodhound-python --help`, all global flags here are valid; no positional args.
+    - name: DCOnly stealth collection (recommended first run)
+      command: bloodhound-python -d corp.local -u admin -p 'P@ssw0rd' -ns 10.10.10.5 --dns-tcp -c DCOnly -op /session/output/bh
+        -v
+      when: Only LDAP queries to the DC — no SMB/RPC computer contact. Use this FIRST after obtaining creds when ATA/ATP/Defender
+        for Identity is monitoring. DCOnly internally expands to Group + Trusts + ObjectProps + ACL + Container. Produces
+        users/groups/domains/gpos/ous/containers but NOT a computers file (no per-host enumeration). Once paths are reviewed,
+        decide whether the noisier All run is worth the risk.
+    - name: All collection (most comprehensive, except LoggedOn)
+      command: bloodhound-python -d corp.local -u admin -p 'P@ssw0rd' -ns 10.10.10.5 --dns-tcp -c All -w 10 -op /session/output/bh
+        -v
+      when: Most comprehensive — All except LoggedOn (which requires admin on each target). Includes Group + LocalAdmin +
+        Session + Trusts + ObjectProps + ACL + DCOM + RDP + PSRemote + Container. Use after DCOnly when full enumeration is
+        acceptable risk. For very large domains, bump max_runtime_seconds in tool.yaml or accept that the hard cap may fire.
+    - name: Pass-the-hash (NTLM hashes only, no plaintext)
+      command: bloodhound-python -d corp.local -u admin --hashes 'aad3b435b51404ee:31d6cfe0d16ae931b73c59d7e0c089c0' -ns 10.10.10.5
+        --dns-tcp -c Default -op /session/output/bh -v
+      when: When you have NTLM hashes (from secretsdump, lsass dump, cached creds) but not plaintext. --hashes takes LM:NT
+        format — the LM is usually all-zeros (`aad3b435b51404ee`). bloodhound auto-uses these for both Kerberos pre-auth and
+        NTLM bind. No -no-pass needed (the hash IS the credential).
+    - name: Kerberos ccache (env passthrough)
+      command: bloodhound-python -d corp.local -u admin -k -no-pass -ns 10.10.10.5 --dns-tcp -c Default -op /session/output/bh
+        -v
+      env:
+        KRB5CCNAME: /session/output/credentials/admin.ccache
+      when: After `impacket-getTGT` writes a ccache, run bloodhound with -k -no-pass and pass the ccache path via the cli_in_container
+        `env` arg (NOT bash -c — that is refused as a scope-bypass shape). The plugin allowlists KRB5CCNAME globally, so no
+        tool.yaml change needed. -no-pass is mandatory with -k (without it, bloodhound prompts for a password and blocks on
+        stdin).
+    - name: Bypass Kerberos clock skew (FAKETIME)
+      command: bloodhound-python -d corp.local -u admin -p 'pw' -ns 10.10.10.5 --dns-tcp -c DCOnly -op /session/output/bh
+        -v
+      env:
+        FAKETIME: +5h
+      when: 'When KRB_AP_ERR_SKEW fires (host clock differs from DC by >5min), pass FAKETIME with the offset that aligns to
+        the DC''s clock. The plugin hoists FAKETIME to ContainerOptions.clockOffset which the container manager wires through
+        libfaketime at docker run; the container restarts when the offset changes. FAKETIME format: `+5h`, `-30m`, `+1d`,
+        `+3600s`. Combine with KRB5CCNAME if also using Kerberos ccache: `env: {KRB5CCNAME: "/session/output/credentials/<user>.ccache",
+        FAKETIME: "+5h"}`.'
+    - name: AES key auth (from secretsdump -history or keytab)
+      command: bloodhound-python -d corp.local -u admin -aesKey 'b65f...256bit hex...' -ns 10.10.10.5 --dns-tcp -c Default
+        -op /session/output/bh -v
+      when: When you have AES keys from secretsdump -history or a captured keytab. AES keys are 128 or 256 bit hex strings
+        (32 or 64 hex chars). Alternative to password/hash; only AES auth is attempted (no NTLM fallback).
+    - name: LDAPS (port 636 — encrypted LDAP)
+      command: bloodhound-python -d corp.local -u admin -p 'P@ssw0rd' -ns 10.10.10.5 --dns-tcp --use-ldaps -c Default -op
+        /session/output/bh -v
+      when: Use when DC enforces LDAPS-only (port 389 closed) or when network IDS only inspects cleartext LDAP. --use-ldaps
+        switches to port 636 with TLS. Server certificate is NOT validated — bloodhound trusts whatever the DC presents. Port
+        636 must be open.
+    - name: LDAP channel binding (EPA-enforced DC)
+      command: bloodhound-python -d corp.local -u admin -p 'P@ssw0rd' -ns 10.10.10.5 --dns-tcp --ldap-channel-binding -c Default
+        -op /session/output/bh -v
+      when: When the DC enforces Extended Protection for Authentication (EPA) — channel binding is required for the LDAP bind
+        to succeed. --ldap-channel-binding implies --use-ldaps. Try this when --use-ldaps alone fails with channel-binding
+        errors. Modern hardened DCs increasingly enforce this.
+    - name: Avoid ATA/ATP detections (--exclude-dcs)
+      command: bloodhound-python -d corp.local -u admin -p 'P@ssw0rd' -ns 10.10.10.5 --dns-tcp -c All --exclude-dcs -op /session/output/bh
+        -v
+      when: Skip computer enumeration on domain controllers — ATA / ATP / Defender for Identity trigger on enumeration of
+        DC-hosted resources. Recommended for any production engagement where stealth matters. Doesn't affect main LDAP collection
+        (which goes to a DC by definition) — only the per-computer SMB/RPC methods (LocalAdmin, Session, RDP, etc.).
+    - name: Multi-domain forest with custom Global Catalog
+      command: bloodhound-python -d child.corp.local -u admin -p 'P@ssw0rd' -ns 10.10.10.5 -gc gc.corp.local --dns-tcp -c
+        All -op /session/output/bh -v
+      when: When the target domain is a child in a forest and the GC is on a different host. -gc explicitly points at the
+        forest's Global Catalog FQDN (or IP). Without this, bloodhound auto-discovers the GC via DNS — when auto-discovery
+        is wrong, child-domain authentication fails. Pair with --disable-autogc if auto-discovery keeps overriding -gc.
+    - name: Force a specific GC (--disable-autogc + -gc)
+      command: bloodhound-python -d child.corp.local -u admin -p 'P@ssw0rd' -ns 10.10.10.5 -gc gc.corp.local --disable-autogc
+        --dns-tcp -c All -op /session/output/bh -v
+      when: When auto-GC selection picks a wrong/unreachable GC and your -gc override gets ignored. --disable-autogc disables
+        the auto-discovery path entirely so the -gc value is honoured. Use this only after seeing auto-GC misbehave (it overrides
+        -gc silently in some forest layouts).
+    - name: Computer scope file (--computerfile)
+      command: bloodhound-python -d corp.local -u admin -p 'P@ssw0rd' -ns 10.10.10.5 --dns-tcp -c All --computerfile /session/output/computers.txt
+        -op /session/output/bh -v
+      when: 'Limit per-computer methods to only the FQDNs in /session/output/computers.txt (one per line). Useful for: targeted
+        enumeration of high-value hosts; avoiding noise on already-enumerated computers; skipping known-down hosts. File must
+        contain FQDNs (NOT IPs) — bloodhound resolves them via -ns. Write the file with the `write` tool BEFORE invoking bloodhound.'
+    - name: ZIP output for BloodHound CE upload
+      command: bloodhound-python -d corp.local -u admin -p 'P@ssw0rd' -ns 10.10.10.5 --dns-tcp -c All --zip -op /session/output/bh
+        -v
+      when: Compress all output JSON files into a single ZIP. BloodHound CE accepts ZIP uploads directly via its UI; the legacy
+        GUI also accepts ZIPs. Convenient for transfer to a separate analysis host. Output file is `bh_<timestamp>_bloodhound.zip`.
+    - name: version / help
+      command: bloodhound-python --help
+      when: Confirm binary works and discover any newer flags. Returns the full bloodhound-python flag surface (no separate
+        sub-commands).
+    failure_signatures:
+    - signal: NoNameservers
+      remediation: DNS resolution failed via -ns. Verify -ns points at the DC's IP and is reachable. Run `nmap -p 53 <dc_ip>`
+        first. If behind VPN, verify tun0 is up and that DNS isn't being intercepted.
+    - signal: All nameservers failed
+      remediation: Same family as NoNameservers — the -ns value is unreachable for DNS. Check VPN, firewall rules, and the
+        IP itself.
+    - signal: LifetimeTimeout
+      remediation: DNS query exceeded the lifetime (default --dns-timeout 3s). Increase --dns-timeout to 10-15s for slow VPN
+        or geographically distant DCs. Also verify the DC's DNS is actually responsive with `nmap -p 53 <dc_ip>`.
+    - signal: DNS operation timed out
+      remediation: Same as LifetimeTimeout — DNS is slow. Bump --dns-timeout.
+    - signal: LDAPSocketOpenError
+      remediation: Cannot open TCP connection to LDAP. Verify port 389 (or 636 if --use-ldaps) is open on the DC. Try `nmap
+        -p 389,636 <dc_ip>`. If port is open but bind fails, see LDAPCommunicationError.
+    - signal: Failed to resolve LDAP server IP
+      remediation: DNS failed when resolving the DC FQDN for LDAP. Same root cause as NoNameservers. If you supplied -dc as
+        FQDN, try IP instead — though bloodhound usually requires FQDN for -dc to support Kerberos SPN matching.
+    - signal: LDAPCommunicationError
+      remediation: LDAP connection dropped mid-collection. Network instability or DC throttling. Reduce -w (workers) to lighten
+        load. Partial JSON files may have been written; check /session/output/. Retry after a delay.
+    - signal: LDAPSocketReceiveError
+      remediation: LDAP socket interrupted during receive. Likely transient — retry the collection. If it persists, reduce
+        -w.
+    - signal: LDAPSocketSendError
+      remediation: Same as LDAPSocketReceiveError but on the send side. Retry.
+    - signal: Connection to LDAP server lost
+      remediation: LDAP connection terminated mid-collection. Strong indicator of ATA/ATP detection severing the connection.
+        Add --exclude-dcs and reduce -w to 2. If still failing, switch to DCOnly collection.
+    - signal: Could not authenticate to LDAP
+      remediation: 'LDAP bind failed. Verify creds independently: `nxc ldap <dc_ip> -d <domain> -u <user> -p <pass>`. If creds
+        work in nxc but not bloodhound, try --auth-method ntlm (Kerberos may be misconfigured). Account may also be locked
+        — check via netexec or `lookupsid`.'
+    - signal: channel binding
+      remediation: DC enforces EPA (Extended Protection for Authentication). Add --ldap-channel-binding to the call (implies
+        --use-ldaps). LDAPS port 636 must be open.
+    - signal: KRB_AP_ERR_SKEW
+      remediation: 'Clock skew between container and DC exceeds 5min Kerberos tolerance. Workarounds (in order of preference):
+        (1) pass `env: {FAKETIME: "+5h"}` to cli_in_container — the plugin hoists this to ContainerOptions.clockOffset and
+        the manager wires libfaketime at docker run; (2) sync host clock with the DC via chronyc/rdate/ntpdate; (3) get a
+        TGT from a clock-synced source via `impacket-getTGT` and use `env: {KRB5CCNAME: "/session/output/credentials/<user>.ccache"}`
+        with -k -no-pass; (4) switch to --auth-method ntlm if you have plaintext password or hash.'
+    - signal: Clock skew too great
+      remediation: Same as KRB_AP_ERR_SKEW.
+    - signal: KDC_ERR_PREAUTH_FAILED
+      remediation: Kerberos pre-authentication failed — wrong password, hash, or AES key. Verify creds with `nxc smb <dc_ip>
+        -d <domain> -u <user> -p <pass>` first. Try --auth-method ntlm to bypass Kerberos (works only if NTLM is enabled on
+        the DC).
+    - signal: Pre-authentication information was invalid
+      remediation: Same as KDC_ERR_PREAUTH_FAILED — wrong credential.
+    - signal: KDC_ERR_C_PRINCIPAL_UNKNOWN
+      remediation: Kerberos principal (username) doesn't exist in the realm. Verify with `kerbrute userenum`. Try the bare
+        username (-u admin) instead of UPN form (-u admin@corp.local).
+    - signal: KDC has no support for encryption type
+      remediation: DC doesn't support the encryption type bloodhound requested. Some hardened DCs disable RC4-HMAC. Try -aesKey
+        (AES256) instead of password; or switch to NTLM with --auth-method ntlm.
+    - signal: Could not find a domain controller
+      remediation: DNS at -ns could not locate a DC for the -d domain via SRV records. Verify the domain name with `nmap -p
+        389 --script ldap-rootdse <dc_ip>` (look at defaultNamingContext). If DNS auto-discovery genuinely fails, supply -dc
+        <FQDN> manually and verify the FQDN resolves via -ns.
+    - signal: Specified domain was not found in LDAP
+      remediation: 'The -d value doesn''t match what LDAP reports. The error message usually includes the actual domain —
+        re-run with that value. Common cause: passing the NetBIOS name (CORP) when the DNS domain is `corp.local`.'
+    - signal: Could not figure out the domain
+      remediation: bloodhound auto-discovery failed. Always specify -d explicitly — never rely on auto-discovery for kind:cli
+        usage.
+    - signal: LDAP server reports is domain as
+      remediation: Same family as 'Specified domain was not found in LDAP' — the error message names the correct domain, re-run
+        with that -d value.
+    - signal: computerfile.*[Nn]o such file
+      remediation: --computerfile path doesn't exist inside the container. Verify the file is in /session/output/ (or wherever
+        you specified) and that you wrote it via the `write` tool BEFORE invoking bloodhound. Run `ls /session/output/` to
+        confirm.
+    - signal: Permission denied.*\.json
+      remediation: Cannot write JSON output file. -op directory permissions issue. Verify /session/output/ is world-writable
+        from the host mount; if a sub-path was created with restrictive perms, recreate it via the `write` tool.
+    - signal: '[Errno 13] Permission denied'
+      remediation: Generic file-system permission error. Most often the -op output prefix points at a directory the container
+        can't write. Use /session/output/bh as the prefix.
+    - signal: '[Errno 111] Connection refused'
+      remediation: TCP port 389 (or 636 if --use-ldaps) refused. The DC may be down or LDAP filtered. Verify with `nmap -p
+        389,636 <dc_ip>`.
+    - signal: '[Errno 113] No route to host'
+      remediation: Network routing issue — DC IP unreachable. Verify VPN/network path. `ping <dc_ip>` from outside the container
+        first.
+    - signal: '[Errno 101] Network is unreachable'
+      remediation: Same family as 'No route to host' — bring up the VPN/network path before retrying.
+    gotchas:
+    - 'Output prefix shape: -op is a path PREFIX not a directory. Use `-op /session/output/bh` — bloodhound appends `_<timestamp>_<type>.json`.
+      Setting -op to `/session/output/` (trailing slash) produces files like `/session/output/_<ts>_<type>.json` (note the
+      leading underscore). The output DIRECTORY is the parent of -op.'
+    - 'DC hostname auto-discovery via DNS: when -ns is set but -dc is absent, bloodhound runs SRV lookups (`_ldap._tcp.dc._msdcs.<domain>`).
+      This works most of the time. When it fails, supply -dc <FQDN> explicitly. -dc must be the FQDN, NOT the IP — `-dc 10.10.10.5`
+      will fail Kerberos SPN matching.'
+    - 'JSON output is BloodHound LEGACY format (`meta.version: 5`). For BloodHound CE, use --zip and upload the ZIP directly
+      through CE''s UI; CE auto-detects legacy JSON. The legacy GUI (now archived) also accepts ZIPs.'
+    - DCOnly produces fewer files than Default — only users/groups/domains/gpos/ous/containers (NO computers.json). If you
+      need a computers list, use Default or All which contact each computer via SMB/RPC. For just a list of computer FQDNs,
+      use `nxc smb <dc> -d <dom> -u <u> -p <p> --computers` instead — much faster than waiting for bloodhound's per-computer
+      enumeration.
+    - LoggedOn collection requires LOCAL ADMIN on every target computer. It is excluded from `All` for this reason. Specify
+      `-c All,LoggedOn` only when you have admin on the targeted hosts AND accept the network noise (every host gets a login
+      attempt).
+    - --exclude-dcs is recommended for any production engagement. ATA/ATP/Defender for Identity trigger on DC enumeration
+      patterns. The flag skips per-computer LDAP queries against DCs but does NOT affect the main LDAP collection (which always
+      goes to a DC).
+    - 'Multi-domain forests: by default, bloodhound auto-selects a Global Catalog. If wrong (common bug for child-domain auth),
+      use -gc <FQDN> to override. --disable-autogc + -gc <FQDN> together force a specific GC.'
+    - Pass-the-hash format is LM:NT — the LM half is usually `aad3b435b51404ee` (empty password's LM hash). Just `--hashes
+      <full LM:NT>` works; no -no-pass needed (the hash IS the credential).
+    - 'Kerberos ccache via -k requires KRB5CCNAME env var. Pass it via cli_in_container''s structured `env` arg: `env: {KRB5CCNAME:
+      "/session/output/credentials/<user>.ccache"}`. The plugin allowlists KRB5CCNAME globally and forwards to run_cli''s
+      subprocess env — no bash wrapper. ALWAYS pair -k with -no-pass when using ccache (without -no-pass, bloodhound prompts
+      for a password and blocks). The legacy `bash -c "KRB5CCNAME=/p ..."` shape is refused (scope-bypass).'
+    - 'Clock skew (KRB_AP_ERR_SKEW): Python tools (bloodhound) DO respect libfaketime via LD_PRELOAD, unlike Go binaries.
+      The container has libfaketime installed and entrypoint.sh sets LD_PRELOAD when FAKETIME is in the container env. The
+      plugin''s cli_in_container `env` arg hoists FAKETIME into ContainerOptions.clockOffset, which the container manager
+      applies as an env var at docker run (manager.ts:351-358) — the container restarts when the offset changes. Pass `env:
+      {FAKETIME: "+5h"}` for a per-engagement offset; combine with KRB5CCNAME for ccache-based Kerberos.'
+    - 'Empty output with valid creds usually means: (1) wrong -d domain name (often NetBIOS name vs DNS suffix); (2) DNS auto-discovery
+      picked the wrong DC; (3) -ns unreachable. Always validate creds with `nxc ldap <dc_ip> -d <domain> -u <user> -p <pass>`
+      first, then use the EXACT domain nxc reports.'
+    - Workers (-w) only matter for computer-contacting methods (LocalAdmin, Session, RDP, DCOM, PSRemote, LoggedOn). DCOnly
+      ignores -w. Reduce -w to 1-2 for stealth, 10 for speed (default). Don't exceed 20 — DCs may rate-limit and drop connections,
+      causing LDAPCommunicationError mid-run.
+    - File rotation occurs at 40000 entries per type. Very large domains produce multiple files like `bh_<ts>_users_1.json`,
+      `bh_<ts>_users_2.json`. Aggregate them or just upload all to BloodHound CE — it handles multi-file imports transparently.
+    - 'No structured findings extraction in kind:cli mode: the legacy MCP wrapper used to return JSON-file summaries (path,
+      type, count) directly. Under run_cli the agent must `ls /session/output/bh_*.json` and `python3 -c "import json; print(json.load(open(''<file>''))[''meta''])"`
+      (or `jq .meta` if jq is in another tool''s image) to get per-file counts. The presence/absence of files is the success
+      signal — empty /session/output/ after a clean exit means authentication or DNS failure (see failure_signatures).'
+    - 'ATA/Defender for Identity detections this collection triggers (in order of likelihood): ''Reconnaissance using SMB
+      session enumeration'' (LocalAdmin/Session methods); ''Reconnaissance using account name enumeration'' (LDAP queries
+      to RID 500/501); ''Honeytoken account suspicious activities'' (if any honeypot accounts are touched). Use DCOnly + --exclude-dcs
+      to minimize.'
+    - 'Debug-only flags exist but are rarely useful in normal engagements: `--disable-pooling` disables the multi-process
+      ACL parser (debugging — slows large domains); `--cachefile <path>` writes/reads bloodhound''s internal LDAP query cache
+      (experimental, undocumented format). Skip both unless reproducing a specific bug. They''re listed in tool.yaml value_flags
+      only to keep argv parsing correct.'
   bloodyad:
     name: bloodyad
     kind: cli
