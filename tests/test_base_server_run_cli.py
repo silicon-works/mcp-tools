@@ -54,6 +54,9 @@ def test_run_cli_auto_registered_in_init() -> None:
     assert "args" in method.params
     assert "stdin_data" in method.params
     assert method.params["stdin_data"]["required"] is False
+    assert "env" in method.params
+    assert method.params["env"]["required"] is False
+    assert method.params["env"]["type"] == "object"
     assert "max_runtime" in method.params
     assert method.params["max_runtime"]["default"] == 86400
 
@@ -187,6 +190,98 @@ async def test_run_cli_stdin_data_accepts_bytes() -> None:
     )
     assert proc.returncode == 0
     assert "hello" in proc.stdout
+
+
+# ─────────────────────────────────────────────────────────────────────
+# env passthrough (sanctioned channel for KRB5CCNAME / FAKETIME / etc.)
+# ─────────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_run_cli_env_default_none_runs_cleanly() -> None:
+    """env=None (default) forwards cleanly — pre-env-feature contract preserved."""
+    server = _MinimalServer("test", "test")
+    result = await server.run_cli(binary="echo", args=["ok"])
+    assert result.success is True
+    assert "ok" in result.data["stdout"]
+
+
+@pytest.mark.asyncio
+async def test_run_cli_env_dict_reaches_subprocess() -> None:
+    """Sentinel test: env={"FOO":"bar"} → printenv FOO writes "bar" to stdout.
+
+    This is the end-to-end forwarding path: run_cli → run_command_with_progress
+    (line 548 merge with os.environ) → asyncio.create_subprocess_exec(env=).
+    """
+    server = _MinimalServer("test", "test")
+    result = await server.run_cli(
+        binary="printenv",
+        args=["OS_RUN_CLI_ENV_TEST"],
+        env={"OS_RUN_CLI_ENV_TEST": "sentinel-value"},
+    )
+    assert result.success is True
+    assert result.data["exit_code"] == 0
+    assert "sentinel-value" in result.data["stdout"]
+
+
+@pytest.mark.asyncio
+async def test_run_cli_env_merges_with_os_environ() -> None:
+    """Agent env overlays on os.environ — PATH and friends remain inherited.
+
+    Without merge, subprocess would only see {"FOO":"bar"} and `printenv PATH`
+    would exit non-zero with empty stdout.
+    """
+    server = _MinimalServer("test", "test")
+    result = await server.run_cli(
+        binary="printenv",
+        args=["PATH"],
+        env={"OS_RUN_CLI_ENV_TEST": "ignored"},
+    )
+    assert result.success is True
+    assert result.data["exit_code"] == 0
+    # PATH must still be set — proves os.environ wasn't replaced
+    assert len(result.data["stdout"].strip()) > 0
+
+
+@pytest.mark.asyncio
+async def test_run_cli_rejects_non_dict_env() -> None:
+    """env must be a dict — list/str/int rejected with params error."""
+    server = _MinimalServer("test", "test")
+    result = await server.run_cli(
+        binary="echo",
+        args=["x"],
+        env=["not", "a", "dict"],  # type: ignore[arg-type]
+    )
+    assert result.success is False
+    assert result.error_class == "params"
+    assert "dict" in result.error.lower()
+
+
+@pytest.mark.asyncio
+async def test_run_cli_rejects_env_with_non_string_value() -> None:
+    """env values must be strings — int/None/dict-as-value rejected."""
+    server = _MinimalServer("test", "test")
+    result = await server.run_cli(
+        binary="echo",
+        args=["x"],
+        env={"FOO": 42},  # type: ignore[dict-item]
+    )
+    assert result.success is False
+    assert result.error_class == "params"
+
+
+@pytest.mark.asyncio
+async def test_run_cli_rejects_env_with_non_string_key() -> None:
+    """env keys must be strings — protects direct Python callers (JSON-RPC
+    dispatch coerces JSON object keys to str, but defence-in-depth)."""
+    server = _MinimalServer("test", "test")
+    result = await server.run_cli(
+        binary="echo",
+        args=["x"],
+        env={123: "bar"},  # type: ignore[dict-item]
+    )
+    assert result.success is False
+    assert result.error_class == "params"
 
 
 # ─────────────────────────────────────────────────────────────────────

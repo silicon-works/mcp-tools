@@ -154,6 +154,12 @@ class BaseMCPServer(ABC):
                     "description": "Optional bytes/text fed to the binary's stdin (e.g. for john --stdin or hashcat).",
                     "required": False,
                 },
+                "env": {
+                    "type": "object",
+                    "description": "Optional env vars (Dict[str, str]) merged into the subprocess environment. Used by the plugin to forward agent-supplied values (KRB5CCNAME for Kerberos ccache, FAKETIME for libfaketime offset, etc.). The plugin enforces an allowlist before forwarding; here we just pipe to run_command_with_progress.",
+                    "required": False,
+                    "additionalProperties": {"type": "string"},
+                },
                 "max_runtime": {
                     "type": "integer",
                     "description": "Hard wall-clock cap in seconds. Defaults to 86400 (24h). Never resets — set generously.",
@@ -169,6 +175,7 @@ class BaseMCPServer(ABC):
         binary: str,
         args: List[str],
         stdin_data: Optional[str] = None,
+        env: Optional[Dict[str, str]] = None,
         max_runtime: int = 86400,
     ) -> "ToolResult":
         """Generic CLI runner — execute ``binary args...`` and return raw output.
@@ -181,6 +188,11 @@ class BaseMCPServer(ABC):
         Heartbeat-driven progress notifications keep the client's idle clock
         alive. ``max_runtime`` is the hard cap that catches genuinely wedged
         binaries.
+
+        ``env`` is the plugin's sanctioned channel for per-call env vars
+        (KRB5CCNAME for Kerberos ccache, FAKETIME for libfaketime offset,
+        etc.). The plugin allowlists keys before forwarding; here we just
+        merge into the subprocess env via run_command_with_progress.
         """
         if not binary or not isinstance(binary, str):
             return ToolResult(
@@ -194,6 +206,15 @@ class BaseMCPServer(ABC):
                 error="run_cli requires 'args' to be a list of strings",
                 error_class="params",
             )
+        if env is not None and (
+            not isinstance(env, dict)
+            or not all(isinstance(k, str) and isinstance(v, str) for k, v in env.items())
+        ):
+            return ToolResult(
+                success=False,
+                error="run_cli 'env' must be a Dict[str, str] when supplied",
+                error_class="params",
+            )
 
         cmd = [binary, *args]
 
@@ -202,6 +223,7 @@ class BaseMCPServer(ABC):
                 cmd,
                 timeout=max_runtime,
                 stdin_data=stdin_data,
+                env=env,
             )
         except ToolError as e:
             # ToolError from run_command_with_progress is the hard-cap path —
