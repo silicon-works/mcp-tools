@@ -17,7 +17,8 @@ RUN apt-get update && \
         ca-certificates \
         python3-full \
         krb5-user \
-        libkrb5-dev && \
+        libkrb5-dev \
+        libfaketime && \
     rm -rf /var/lib/apt/lists/* && \
     apt-get clean
 
@@ -39,5 +40,10 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy MCP server code
 COPY tools/mssql/mcp-server.py .
 
+# Dynamic faketime discovery entrypoint — activates LD_PRELOAD only when the
+# plugin sets FAKETIME (clock-skew workaround for Kerberos `-k` calls).
+COPY packages/mcp-common/entrypoint.sh /app/entrypoint.sh
+RUN chmod +x /app/entrypoint.sh
+
 # MCP servers communicate via stdio
-CMD ["python3", "mcp-server.py"]
+CMD ["/app/entrypoint.sh"]

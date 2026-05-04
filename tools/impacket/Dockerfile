@@ -16,11 +16,11 @@
 # etc. (no impacket- prefix), forcing us to maintain a layer of symlinks.
 # Image is ~1GB vs ~300MB for debian-slim, but correctness > size.
 #
-# Note on clock skew: the original MCP-server image carried libfaketime so the
-# server could splice FAKETIME via a meta-param. The current cli path does
-# not pipe a clock_offset env through, so we OMIT libfaketime here. If a
-# Kerberos call hits KRB_AP_ERR_SKEW, the agent should sync the host clock or
-# use a different attack path.
+# Clock skew: libfaketime is installed and the entrypoint discovers it
+# dynamically. The plugin's cli_in_container `env` arg accepts FAKETIME as a
+# container knob (hoisted to ContainerOptions.clockOffset → docker run env),
+# so an agent hitting KRB_AP_ERR_SKEW can shift the container clock to match
+# the DC without needing to sync the host clock.
 
 FROM kalilinux/kali-rolling
 
@@ -42,6 +42,7 @@ RUN apt-get update && \
         impacket-scripts \
         krb5-user \
         libkrb5-dev \
+        libfaketime \
         ca-certificates \
         python3-full \
     && rm -rf /var/lib/apt/lists/* \
@@ -73,8 +74,11 @@ RUN pip install --no-cache-dir /app/packages/mcp-common
 # MCP server (subclasses BaseMCPServer; auto-registers run_cli).
 COPY tools/impacket/mcp-server.py .
 
-# Session directory for artifacts (mounted by ContainerManager).
-WORKDIR /session
+# Dynamic faketime discovery entrypoint — activates LD_PRELOAD only when the
+# plugin sets FAKETIME, otherwise leaves the container untouched. WORKDIR
+# stays at /app so the entrypoint's `python3 mcp-server.py` resolves.
+COPY packages/mcp-common/entrypoint.sh /app/entrypoint.sh
+RUN chmod +x /app/entrypoint.sh
 
 # stdio MCP transport — ContainerManager spawns this and connects.
-CMD ["python3", "/app/mcp-server.py"]
+CMD ["/app/entrypoint.sh"]

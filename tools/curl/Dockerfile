@@ -22,6 +22,7 @@ RUN apt-get update && \
         ca-certificates \
         krb5-user \
         libgssapi-krb5-2 \
+        libfaketime \
         libpsl5 \
         libidn2-0 \
         python3 \
@@ -43,8 +44,11 @@ RUN pip install --no-cache-dir /app/packages/mcp-common
 # MCP server (subclasses BaseMCPServer; auto-registers run_cli).
 COPY tools/curl/mcp-server.py .
 
-# Session directory for artifacts (mounted by ContainerManager).
-WORKDIR /session
+# Dynamic faketime discovery entrypoint — activates LD_PRELOAD only when the
+# plugin sets FAKETIME (clock-skew workaround for Kerberos `--negotiate` auth).
+# WORKDIR stays at /app so the entrypoint's `python3 mcp-server.py` resolves.
+COPY packages/mcp-common/entrypoint.sh /app/entrypoint.sh
+RUN chmod +x /app/entrypoint.sh
 
 # stdio MCP transport — ContainerManager spawns this and connects.
-CMD ["python3", "/app/mcp-server.py"]
+CMD ["/app/entrypoint.sh"]
