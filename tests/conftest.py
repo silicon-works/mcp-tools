@@ -82,7 +82,7 @@ def pytest_configure(config: pytest.Config) -> None:
 
 # Tools that require --privileged for raw socket access, etc.
 PRIVILEGED_TOOLS = frozenset({
-    "strongswan", "nmap", "ike-scan", "netcat", "metasploit", "responder",
+    "strongswan", "nmap", "ike-scan", "netcat", "responder",
     "scapy",
 })
 

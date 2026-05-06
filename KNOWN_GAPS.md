@@ -18,7 +18,8 @@ Tools that need tool.yaml updates to document `/session/` custom file support:
 - **hydra**: Custom wordlists/combo files → `/session/wordlists/` → password/combo file params
 - **nuclei**: Custom YAML templates → `/session/nuclei-templates/` → template path
 - **john/hashcat**: Custom rules files → `/session/rules/` → rules path param
-- **metasploit**: Resource scripts, custom modules → `/session/msf/` → resource/module path
+<!-- metasploit: removed May 2026 — replaced with Rapid7's read-only msfmcpd. Resource-script + custom-module execution moved to exploit-runner. -->
+
 
 No code changes needed — just tool.yaml documentation so the agent discovers the capability via RAG.
 

@@ -29,7 +29,7 @@ class MCPClient:
     async def start(self):
         """Start the MCP server container."""
         docker_args = ["docker", "run", "-i", "--rm", "--network=host"]
-        privileged_tools = ["strongswan", "nmap", "ike-scan", "netcat", "metasploit", "responder"]
+        privileged_tools = ["strongswan", "nmap", "ike-scan", "netcat", "responder"]
         if any(tool in self.image.lower() for tool in privileged_tools):
             docker_args.append("--privileged")
             print(f"[MCP] Running in privileged mode")

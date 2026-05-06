@@ -1,5 +1,5 @@
 version: '2.0'
-updated_at: '2026-05-01T08:17:39Z'
+updated_at: '2026-05-04T22:56:43Z'
 tools:
   amass:
     name: amass
@@ -492,7 +492,9 @@ tools:
     resources:
       memory_mb: 512
       cpu: 1.0
-    allowed_env: []
+    allowed_env:
+    - KRB5CCNAME
+    - KRB5_CONFIG
     see_also:
     - tool: kerbrute
       reason: Enumerate valid usernames without credentials BEFORE collecting with bloodhound (bloodhound needs a valid LDAP
@@ -973,6 +975,9 @@ tools:
     - --preference
     - --forest
     - --key
+    allowed_env:
+    - KRB5CCNAME
+    - KRB5_CONFIG
     usage_patterns:
     - name: find writable AD objects (privesc path discovery)
       command: bloodyAD --host {dc_ip} -d {domain} -u {username} -p '{password}' get writable
@@ -1557,6 +1562,9 @@ tools:
     - -debug
     - -quiet
     - -timestamp
+    allowed_env:
+    - KRB5CCNAME
+    - KRB5_CONFIG
     usage_patterns:
     - name: find vulnerable templates (ESC1-ESC16 enumeration)
       command: certipy find -username {user_at_domain} -password '{password}' -dc-ip {dc_ip} -vulnerable -stdout
@@ -2795,6 +2803,9 @@ tools:
     - rule: flag_value
       flag: --url
       parse_as: url_host
+    allowed_env:
+    - KRB5CCNAME
+    - KRB5_CONFIG
     usage_patterns:
     - name: Basic GET
       command: curl -sS -o {output} -w '%{http_code} %{size_download}b %{time_total}s\n' {url}
@@ -4160,6 +4171,9 @@ tools:
     - -v
     - -h
     - --help
+    allowed_env:
+    - KRB5CCNAME
+    - KRB5_CONFIG
     usage_patterns:
     - name: Null-session full enum (most common first call)
       command: enum4linux-ng -A -oY /session/output/enum4linux-null {host}
@@ -4770,9 +4784,7 @@ tools:
       - pure curl HTTP exploits — use the curl tool, less overhead
       - interactive shell to a target — use shell-session, ssh, or evil-winrm
       - long-lived listeners / callback receivers — use netcat or shell-session (need persistent socket state)
-      - Metasploit modules — use the metasploit tool (msfrpcd-backed sessions)
       - running searchsploit — that's its own kind:cli tool
-      - msfvenom payload generation — use metasploit's generate_payload
       triggers:
       - exploit-runner
       - run python exploit
@@ -4801,7 +4813,9 @@ tools:
     - tool: searchsploit
       reason: Find existing CVE PoCs to feed into exploit-runner — searchsploit is the catalog, exploit-runner is the runtime
     - tool: metasploit
-      reason: Curated CVE module library; if a working metasploit module exists, prefer it over hand-rolling in exploit-runner
+      reason: Catalog lookup — use msf_search_modules / msf_module_info to find which Metasploit module covers a given CVE
+        and what options it takes, then write the equivalent PoC script for exploit-runner. The metasploit MCP is read-only;
+        execution always lives here.
     - tool: shell-session
       reason: After exploit-runner returns a shell, hand off to shell-session to maintain it across commands
     - tool: ssh
@@ -4812,7 +4826,9 @@ tools:
     target_extraction: []
     reject_flags: []
     value_flags: []
-    allowed_env: []
+    allowed_env:
+    - KRB5CCNAME
+    - KRB5_CONFIG
     usage_patterns:
     - name: Run Python exploit script (Write → run pattern)
       binary: python3
@@ -4964,8 +4980,9 @@ tools:
       script execution. gdb itself is still installed for non-interactive scripted use (gdb -batch, gdb-multiarch). For binary
       exploit dev, pwntools' ELF()/process()/remote() patterns + ropper cover the same surface as pwndbg's interactive features.
     - PYTHON2 + RUBY REMOVED. Empirical 17-engagement audit showed 0 run_python2 calls and 0 run_ruby calls. Modern PoCs are
-      python3-dominant; Ruby Metasploit modules run via the metasploit tool. If a niche legacy exploit needs python2, document
-      the need and add it back to the Dockerfile.
+      python3-dominant; Ruby Metasploit modules can be inspected via metasploit's msf_module_info but their msfconsole-driven
+      execution isn't exposed (read-only MCP) — port to python3 here when needed. If a niche legacy exploit needs python2,
+      document the need and add it back to the Dockerfile.
     - PYPYKATZ / LDAP3 / LDAPDOMAINDUMP installed. Live engagement audit (May 2026) showed agents do `import pypykatz` to
       parse LSASS dumps (after wmiexec.py + comsvcs.dll MiniDump pulled the .dmp), and use ldap3 / `ldapdomaindump` for AD
       enumeration. These are pip-installed in the image so agent doesn't need a pip3 install round-trip mid-engagement.
@@ -4985,8 +5002,8 @@ tools:
       engagement need surfaces.'
     - TEMPLATES REMOVED. The previous image shipped 3 baked-in CVE templates (Log4Shell, Cacti, Jenkins) accessed via run_template
       / search_templates / get_template methods. Empirical audit showed 10 search_templates calls but 0 run_template calls
-      — agents looked, didn't find what they needed, moved on. CVE library role belongs to metasploit (curated) + searchsploit
-      (broad). Don't reintroduce template-as-method here.
+      — agents looked, didn't find what they needed, moved on. CVE catalog role belongs to metasploit (msf_search_modules,
+      curated) + searchsploit (broad). Don't reintroduce template-as-method here.
     - 'RECIPE LOADER REMOVED. The previous server had a /session/tool_recipes/exploit-runner/ recipe loader. Empirical audit:
       0 recipe writes across 17 engagements. The recipe abstraction was retired uniformly across kind:cli framework tools
       (impacket, certipy, kerbrute, netexec) when those migrated. exploit-runner follows the same pattern — for ad-hoc binary
@@ -9129,6 +9146,9 @@ tools:
     - -wa
     - -l
     - -lh
+    allowed_env:
+    - KRB5CCNAME
+    - KRB5_CONFIG
     usage_patterns:
     - name: DCSync — dump all domain user NT hashes (NTLM only)
       binary: impacket-secretsdump
@@ -9291,12 +9311,13 @@ tools:
       if unsure.
     - -dc-ip is the KDC, NOT the attack target. The plugin's target_extraction extracts -dc-ip ONLY when no positional or
       -target is present (kerberoast/asreproast case). Always pin the actual attack host as either positional @host or -target.
-    - Kerberos auth requires KRB5CCNAME env pointing at a ccache. After getTGT writes /session/<user>.ccache, every subsequent
-      -k -no-pass call needs KRB5CCNAME=/session/<user>.ccache. cli_in_container does NOT currently pipe env vars; pre-set
-      this in the workspace if needed (or use password auth).
-    - 'Clock skew: Kerberos auth fails (KRB_AP_ERR_SKEW) when the host clock differs from the DC by >5min. The kind:cli image
-      has NO libfaketime — sync the host clock or skip Kerberos. The MCP-server image had FAKETIME wiring; that is NOT in
-      this image.'
+    - 'Kerberos auth requires KRB5CCNAME env pointing at a ccache. After getTGT writes /session/<user>.ccache, every subsequent
+      -k -no-pass call needs KRB5CCNAME=/session/<user>.ccache. Pass it via cli_in_container''s `env` arg: `env: ''{"KRB5CCNAME":"/session/<user>.ccache"}''`
+      (declared in this tool''s allowed_env).'
+    - 'Clock skew: Kerberos auth fails (KRB_AP_ERR_SKEW) when the host clock differs from the DC by >5min. Pass FAKETIME via
+      cli_in_container''s `env` arg to shift the container clock — e.g. `env: ''{"FAKETIME":"+10m"}''` if the DC is 10min
+      ahead. FAKETIME is a container knob (always allowed) and the plugin hoists it through libfaketime via LD_PRELOAD on
+      container start.'
     - GetUserSPNs / GetNPUsers do NOT take @host — only [domain/]user[:password]. The DC is auto-discovered from the domain,
       OR explicitly via -dc-ip. -dc-ip becomes the operational target via the fallback target_extraction rule.
     - 'The trailing slash on the domain matters for unauthenticated calls: ''CORP/'' + -no-pass works for asreproast against
@@ -9365,8 +9386,9 @@ tools:
     - signal: STATUS_PASSWORD_EXPIRED
       remediation: Cred is valid but expired. Use changepasswd to set a new one before further auth.
     - signal: KRB_AP_ERR_SKEW
-      remediation: Clock skew >5min between attacker and DC. Sync host clock with the target (rdate / chronyc) — the kind:cli
-        image has NO libfaketime workaround. As a fallback, get a TGT from a clock-synced source and pass via KRB5CCNAME.
+      remediation: 'Clock skew >5min between attacker and DC. Estimate the offset from nmap smb-os-discovery ''System time''
+        and pass FAKETIME via cli_in_container''s env arg to shift the container clock — e.g. `env: ''{"FAKETIME":"+10m"}''`
+        if the DC is 10min ahead. FAKETIME is a container knob, hoisted to LD_PRELOAD libfaketime by the plugin.'
     - signal: KDC_ERR_C_PRINCIPAL_UNKNOWN
       remediation: User principal not found in the realm. Verify [domain/]user format and that the domain is the correct realm
         name.
@@ -10681,317 +10703,483 @@ tools:
             description: First 2KB of the response after including the poisoned log file. Check for PHP execution output.
   metasploit:
     name: metasploit
+    kind: mcp
     version: '6.4'
-    description: 'Metasploit Framework v6.4 with persistent sessions via msfrpcd (RPC daemon). 9 methods: generate_payload
-      (msfvenom for executables and shellcode), search_modules (find exploits/auxiliary/post modules), check_vuln (scanner
-      module verification), run_exploit (execute exploit with session creation), exec_command (one-shot command execution
-      via exploit), list_sessions (active meterpreter/shell sessions), session_command (run commands in sessions), post_module
-      (post-exploitation modules), handler (multi/handler for reverse shells). Sessions persist across tool calls. Runs as
-      a service container — msfrpcd stays running between calls.'
+    description: Rapid7's official Metasploit MCP server (msfmcpd) running against a per-engagement msfrpcd + Postgres database.
+      Read-only surface — 8 tools for searching the module catalog and querying workspace database state (hosts, services,
+      vulnerabilities, notes, credentials, loot). Returns structured JSON with pagination metadata. Sessions and exploit execution
+      are NOT available through this tool — for that, use exploit-runner with public PoC scripts. Upstream (Rapid7) has stated
+      that execution and session-interaction tools will land in a future iteration; we'll inherit them automatically when
+      they ship.
+    source: https://github.com/rapid7/metasploit-framework
     image: ghcr.io/silicon-works/mcp-tools-metasploit:latest
     image_size_mb: 3000
-    timeout_seconds: 600
+    timeout_seconds: 60
+    idle_timeout_seconds: 600
     service: true
     service_name: metasploit
     capabilities:
-    - payload_generation
-    - exploit_execution
-    - vulnerability_checking
     - module_search
-    - session_management
+    - module_metadata
+    - workspace_database
+    - vulnerability_lookup
+    - credential_lookup
+    - loot_inventory
     phases:
+    - enumeration
     - exploitation
-    - post-exploitation
     requirements:
       network: true
       privileged: false
     resources:
       memory_mb: 2048
       cpu: 1.0
+    see_also:
+    - tool: exploit-runner
+      reason: Execution path. msfmcpd is read-only — once you've identified a module via msf_search_modules + msf_module_info,
+        run the actual exploit through exploit-runner with a public PoC script (Python/shell).
+    - tool: searchsploit
+      reason: Broader exploit catalog (Exploit-DB) covering non-msf PoCs. metasploit's catalog is curated/maintained; searchsploit's
+        is broad/historical. Use both when narrowing down a CVE — they don't fully overlap.
+    - tool: nmap
+      reason: Populates the metasploit workspace database when scan results are imported via msfconsole's db_import. Without
+        that, msf_host_info / msf_service_info / etc. return empty.
+    - tool: nuclei
+      reason: Independent vulnerability validation. After msf_search_modules suggests a module is exploitable, nuclei templates
+        can confirm the target's actually vulnerable before you commit to running the exploit.
+    warnings:
+    - READ-ONLY surface. This MCP cannot execute exploits, fire scanners, generate payloads, or interact with sessions. If
+      you need to fire something, route through exploit-runner — never try to coerce a write operation through msfmcpd, it
+      will return Unknown method.
+    - 'DB-backed tools (5 of 6) require workspace=''default'' explicitly. Upstream marks workspace required despite having
+      a default. Omitting it returns JSON-RPC -32602 ''Missing required arguments: workspace''.'
+    - 'Rate limit: 60 req/min, burst 10. Tight loops (>10 calls in <10s) will fail the 11th+ call until the bucket refills.
+      Pace catalog enumeration with ≥1s gaps.'
+    notes: 'Architecture: msfmcpd is a thin MCP-protocol layer over msfrpcd. The
+
+      container auto-spawns msfrpcd internally with random credentials at
+
+      startup, then translates incoming MCP tool calls into MessagePack-RPC
+
+      calls against the local msfrpcd. The DB tools query Postgres via the
+
+      framework''s ActiveRecord layer.
+
+
+      Why this exists alongside exploit-runner: msfmcpd''s value is the
+
+      CURATED MODULE CATALOG — ~2,300 maintained modules with structured
+
+      metadata (options, targets, references, reliability rankings). Looking
+
+      up a CVE → module mapping is much faster than searching ExploitDB +
+
+      reading PoC code. But upstream has not (yet) exposed module execution
+
+      through MCP, so the actual exploit run lives in exploit-runner.
+
+
+      Migration history (May 2026): replaces a 29-method Python wrapper that
+
+      duplicated msfconsole over pymetasploit3. The wrapper was retired once
+
+      Rapid7 shipped msfmcpd because (1) duplicating upstream''s surface is
+
+      maintenance debt and (2) execution belongs in exploit-runner where it
+
+      unifies the attack-pattern across all tools (msf, public PoCs, custom
+
+      scripts). The wrapper is preserved at commit ad330f9 in case the
+
+      decision ever reverses.
+
+
+      Cold start: ~30s end-to-end (Postgres start + msfdb init + workspace
+
+      bootstrap + msfmcpd auto-spawn of msfrpcd + module index load).
+
+      ContainerManager''s idle_timeout (set to 600s above) keeps the warm
+
+      container alive across multiple agent calls within an engagement.
+
+      '
     routing:
       use_for:
-      - run Metasploit exploit module against a target
-      - generate msfvenom payloads for reverse shells or meterpreter
-      - check if target is vulnerable with Metasploit scanner module
-      - manage meterpreter or shell sessions on exploited targets
-      - run post-exploitation modules for credential gathering
-      - set up multi/handler to catch reverse shell connections
-      - search for Metasploit modules by CVE or service name
-      - execute commands through exploit without full session
+      - search Metasploit modules by CVE, keyword, or module name
+      - look up which Metasploit module exploits a given CVE
+      - get detailed info / options / targets / references for a Metasploit module
+      - query workspace database for discovered hosts populated by other tools
+      - query workspace database for discovered services / open ports
+      - query workspace database for vulnerabilities flagged by msf scanners
+      - list credentials harvested into the metasploit workspace
+      - list loot files (SAM dumps, configs, screenshots) collected into the workspace
+      - list notes attached to hosts/services in the workspace
       never_use_for:
-      - port scanning
-      - directory enumeration
-      - SQL injection
+      - task: execute an exploit module against a target
+        use_instead: exploit-runner
+        reason: msfmcpd is read-only; use exploit-runner with the module's public PoC script
+      - task: interact with an open meterpreter or shell session
+        use_instead: shell-session
+        reason: msfmcpd does not expose session command APIs
+      - task: generate a payload (msfvenom)
+        use_instead: exploit-runner
+        reason: wrap the msfvenom invocation in a script and run it through exploit-runner
+      - task: run an auxiliary scanner / check_vuln
+        use_instead: exploit-runner
+        reason: use the public PoC for the CVE; metasploit MCP cannot fire scanners
+      - task: port scanning
+        use_instead: nmap
+      - task: directory enumeration / web fuzzing
+        use_instead: ffuf
+      - task: SQL injection
+        use_instead: sqlmap
+      - task: password brute force
+        use_instead: hydra
       triggers:
       - metasploit
-      - msfvenom
-      - meterpreter
+      - msfconsole
+      - msfmcpd
+      - 'msf '
+      - msf module
+      - metasploit module
+      - auxiliary module
       - exploit module
-      - msf
+      - post module
+      - CVE-\d{4}-\d{4,7}
+      - MS\d{2}-\d{3}
+      - EternalBlue
+      - EternalRomance
+      - BlueKeep
+      - ZeroLogon
+      - PrintNightmare
+      - samba.*usermap
+      - workspace database
+      - msf workspace
       prefer_over: []
     methods:
-      generate_payload:
-        description: Generate a payload using msfvenom. Supports all Metasploit payloads (staged/stageless, meterpreter/shell)
-          in multiple output formats (exe, elf, raw, python, php, asp, c, dll). Optional encoding with x86/shikata_ga_nai
-          or other encoders for AV evasion. Returns the payload as base64.
-        when_to_use: 'When you need a compiled payload binary for delivery to a target. Common payloads: ''windows/meterpreter/reverse_tcp''
-          (staged Windows meterpreter), ''linux/x64/shell_reverse_tcp'' (stageless Linux reverse shell), ''php/meterpreter/reverse_tcp''
-          (PHP web shell). After generating, use handler to start a listener, then deliver the payload to the target. For
-          simple text-based reverse shells (bash, python one-liners), use payload tool''s revshell or exploit-runner''s generate_payload
-          instead.'
-        params:
-          payload:
-            type: string
-            required: true
-            description: Payload name (e.g., 'windows/meterpreter/reverse_tcp') or shortcut
-          lhost:
-            type: string
-            required: true
-            description: Listening host IP for reverse connections
-          lport:
-            type: integer
-            required: true
-            description: Listening port for reverse connections
-          format:
-            type: string
-            default: raw
-            description: 'Output format: exe, elf, raw, python, php, asp, c, dll, etc.'
-          encoder:
-            type: string
-            description: Encoder to use (e.g., 'x86/shikata_ga_nai')
-          iterations:
-            type: integer
-            default: 1
-            description: Number of encoding iterations
-        returns:
-          payload_base64:
-            type: string
-            description: Base64 encoded payload
-          size_bytes:
-            type: integer
-            description: Payload size in bytes
-      search_modules:
-        description: Search for Metasploit modules
-        when_to_use: To find exploits or auxiliary modules for a specific vulnerability or service
+      msf_search_modules:
+        description: Search the Metasploit module catalog by keyword, CVE, or module name. Full-text matching across module
+          name, description, and references. Returns a paginated list of matches with type/name/fullname/rank/disclosure_date.
+        when_to_use: 'Map a CVE or vulnerability description to one or more Metasploit module paths. Common queries: ''CVE-2017-0144'',
+          ''eternalblue'', ''samba usermap'', ''apache struts''. After identifying a module, call msf_module_info for full
+          options + targets, then run the actual exploit via exploit-runner with the public PoC.'
         params:
           query:
             type: string
             required: true
-            description: Search query (e.g., 'ms17-010', 'apache struts', 'smb')
+            description: Search terms (keywords, module path fragment, CVE, advisory ID). 1–500 characters.
+          limit:
+            type: integer
+            default: 100
+            description: Max results (1-1000)
+          offset:
+            type: integer
+            default: 0
+            description: Pagination offset
+        returns:
+          metadata:
+            type: object
+            description: '{query, query_time, total_items, returned_items, limit, offset}'
+          data:
+            type: array
+            description: Matching modules — each record has {fullname, type, name, rank, disclosure_date}
+      msf_module_info:
+        description: Return detailed metadata for a single Metasploit module — description, options (with type/required/default/desc/enums),
+          targets, references, authors, has_check_method, default action, etc. No execution.
+        when_to_use: After msf_search_modules narrows down a module path, call this to discover what RHOSTS/LHOST/payload/target
+          options it accepts. Avoids agent trial-and-error guessing option names. Useful before writing a PoC script for exploit-runner.
+        params:
           type:
             type: enum
             values:
-            - all
             - exploit
             - auxiliary
             - post
             - payload
-            default: all
-            description: Module type to search for
+            - encoder
+            - nop
+            required: true
+            description: Module type
+          name:
+            type: string
+            required: true
+            description: Module path WITHOUT the type prefix (e.g. 'windows/smb/ms17_010_eternalblue', not 'exploit/windows/smb/ms17_010_eternalblue').
+              1–500 characters.
         returns:
-          modules:
+          metadata:
+            type: object
+            description: '{query_time}'
+          data:
+            type: object
+            description: '{type, name, fullname, rank, disclosure_date, description, license, filepath, architectures, platforms,
+              authors, privileged, has_check_method, default_options, references, targets, default_target, stance, actions,
+              default_action, options}'
+      msf_host_info:
+        description: Query hosts in the metasploit workspace database. Hosts are populated by db_nmap, db_import, or successful
+          module runs against discovered targets.
+        when_to_use: Inventory check — what hosts has msf seen during the engagement, what's their inferred OS / state. Useful
+          after the recon phase has imported scan data.
+        params:
+          workspace:
+            type: string
+            default: default
+            description: Workspace name (alphanumeric + underscore/hyphen)
+          addresses:
+            type: string
+            description: Filter by IP or CIDR (e.g. '192.168.1.0/24')
+          only_up:
+            type: boolean
+            default: false
+            description: Only return hosts marked alive
+          limit:
+            type: integer
+            default: 100
+          offset:
+            type: integer
+            default: 0
+        returns:
+          metadata:
+            type: object
+          data:
             type: array
-            description: Matching modules with paths and descriptions
-      check_vuln:
-        description: Check if a target is vulnerable using an auxiliary scanner module
-        when_to_use: To verify if a target is vulnerable before attempting exploitation
+            description: Host records (address, mac, name, os_name, os_flavor, os_sp, purpose, info, …)
+      msf_service_info:
+        description: Query services discovered on hosts in the workspace database. Populated by db_nmap, auxiliary scanners,
+          or successful module enumeration.
+        when_to_use: Find what's open on which host — service inventory. Filter by host/port/protocol/name when narrowing
+          down.
         params:
-          module:
+          workspace:
             type: string
             required: true
-            description: Auxiliary module path (e.g., 'auxiliary/scanner/smb/smb_ms17_010')
-          rhosts:
+            default: default
+            description: Workspace name. Upstream marks this required even though it has a default — always pass 'default'
+              unless you've explicitly created another workspace.
+          names:
             type: string
-            required: true
-            description: Target host(s)
-          options:
-            type: object
-            description: Additional module options as key-value pairs
-          timeout:
-            type: integer
-            default: 120
-            description: Timeout in seconds
-        returns:
-          vulnerable:
+            description: Comma-separated service names to filter (e.g. 'http' or 'ldap,ssh')
+          host:
+            type: string
+            description: Filter by host IP
+          ports:
+            type: string
+            description: Port or range (e.g. '80,443' or '1-1024')
+          protocol:
+            type: enum
+            values:
+            - tcp
+            - udp
+            description: Protocol filter
+          only_up:
             type: boolean
-            description: Whether target appears vulnerable
-      run_exploit:
-        description: Run an exploit module against a target. Sets RHOSTS, payload, LHOST, LPORT, and any additional options,
-          then executes. Returns whether the exploit succeeded and any new sessions created. Sessions persist across tool
-          calls — use list_sessions and session_command to interact with them.
-        when_to_use: 'To exploit a confirmed vulnerability with a Metasploit module. Always run check_vuln first when available.
-          Common exploit workflow: search_modules(''ms17-010'') → check_vuln with the auxiliary module → run_exploit with
-          the exploit module. Provide lhost/lport for reverse payloads. Sessions opened by successful exploits persist in
-          msfrpcd and can be accessed later via session_command.'
-        params:
-          module:
-            type: string
-            required: true
-            description: Exploit module path (e.g., 'exploit/windows/smb/ms17_010_eternalblue')
-          rhosts:
-            type: string
-            required: true
-            description: Target host(s)
-          payload:
-            type: string
-            description: Payload to use
-          lhost:
-            type: string
-            description: Listening host for reverse payloads
-          lport:
+            default: false
+          limit:
             type: integer
-            description: Listening port for reverse payloads
-          options:
-            type: object
-            description: Additional module options
-          timeout:
+            default: 100
+          offset:
             type: integer
-            default: 300
-            description: Timeout in seconds
+            default: 0
         returns:
-          exploit_success:
-            type: boolean
-            description: Whether exploit appeared successful
-          sessions:
+          metadata:
+            type: object
+          data:
             type: array
-            description: New sessions opened (id, type, info, via_exploit, tunnel_peer)
-          session_count:
-            type: integer
-            description: Number of new sessions opened
-      exec_command:
-        description: Execute a command on target using an exploit with cmd/unix/generic payload
-        when_to_use: For command execution exploits without needing a full session
+            description: Service records (host, port, proto, name, state, info)
+      msf_vulnerability_info:
+        description: Query vulnerabilities flagged by msf modules in the workspace database. Each vuln record links a host,
+          service, and module name.
+        when_to_use: After running auxiliary scanners (via exploit-runner with msf in scripted mode, or having imported scan
+          data), enumerate which CVEs are confirmed exploitable on which hosts.
         params:
-          module:
+          workspace:
             type: string
             required: true
-            description: Exploit module path that supports command execution
-          rhosts:
-            type: string
-            required: true
-            description: Target host(s)
-          command:
-            type: string
-            required: true
-            description: Command to execute on the target
-          options:
-            type: object
-            description: Additional module options (e.g., RPORT, TARGETURI)
-          timeout:
-            type: integer
-            default: 120
-            description: Timeout in seconds
-        returns:
-          exploit_success:
-            type: boolean
-            description: Whether exploit succeeded
-          command_output:
-            type: string
-            description: Output from executed command
-      list_sessions:
-        description: List active Meterpreter/shell sessions
-        when_to_use: To check for established sessions from previous exploits
-        params:
-          timeout:
-            type: integer
-            default: 30
-            description: Timeout in seconds
-        returns:
-          sessions:
+            default: default
+            description: Workspace name. Upstream marks this required even though it has a default — always pass 'default'
+              unless you've explicitly created another workspace.
+          names:
             type: array
-            description: Active sessions with id, type, info, tunnel_local, tunnel_peer, via_exploit, via_payload, platform,
-              arch
-          count:
-            type: integer
-            description: Number of active sessions
-      session_command:
-        description: Run a command in an active session
-        when_to_use: To execute commands in an established Meterpreter/shell session
-        params:
-          session_id:
-            type: integer
-            required: true
-            description: Session ID to interact with
-          command:
+            description: Array of vulnerability/module names (exact, case-sensitive match)
+          host:
             type: string
-            required: true
-            description: Command to execute in the session
-          timeout:
+          ports:
+            type: string
+          protocol:
+            type: enum
+            values:
+            - tcp
+            - udp
+          limit:
             type: integer
-            default: 60
-            description: Timeout in seconds
+            default: 100
+          offset:
+            type: integer
+            default: 0
         returns:
-          session_id:
-            type: integer
-            description: Session ID used
-          command:
-            type: string
-            description: Command executed
-          output:
-            type: string
-            description: Output from the command
-      post_module:
-        description: Run a post-exploitation module on a session
-        when_to_use: For post-exploitation tasks like credential gathering, privilege escalation
-        params:
-          module:
-            type: string
-            required: true
-            description: Post module path (e.g., 'post/multi/gather/env')
-          session_id:
-            type: integer
-            required: true
-            description: Session ID to run the module on
-          options:
+          metadata:
             type: object
-            description: Additional module options
-          timeout:
-            type: integer
-            default: 120
-            description: Timeout in seconds
-        returns:
-          module:
-            type: string
-            description: Module executed
-          session_id:
-            type: integer
-            description: Session ID used
-      handler:
-        description: Start a multi/handler to catch reverse shells
-        when_to_use: To set up a persistent listener for reverse shell payloads
+          data:
+            type: array
+      msf_note_info:
+        description: Query notes attached to hosts/services in the workspace. Notes record arbitrary metadata (smb fingerprints,
+          ssl certs, banner text, version strings).
+        when_to_use: Drill into details that scanners stored as notes — smb_version, ssh_version, ssl.certificate, etc. Useful
+          when planning the exploit phase.
         params:
-          payload:
+          workspace:
             type: string
             required: true
-            description: Payload to listen for (e.g., 'windows_reverse_tcp')
-          lhost:
+            default: default
+            description: Workspace name. Upstream marks this required even though it has a default — always pass 'default'
+              unless you've explicitly created another workspace.
+          type:
             type: string
-            required: true
-            description: Listening host IP
-          lport:
+            description: Note type (e.g. 'smb.fingerprint', 'ssl.certificate')
+          host:
+            type: string
+          ports:
+            type: string
+          protocol:
+            type: enum
+            values:
+            - tcp
+            - udp
+          limit:
             type: integer
-            required: true
-            description: Listening port
-          timeout:
+            default: 100
+          offset:
             type: integer
-            default: 300
-            description: Timeout waiting for connection (seconds)
+            default: 0
         returns:
-          payload:
+          metadata:
+            type: object
+          data:
+            type: array
+      msf_credential_info:
+        description: Query credentials harvested into the workspace. Populated by login_check scanners, hashdump-style post
+          modules, or db_import of credential dumps.
+        when_to_use: After credential-gathering activity, enumerate what creds are known and which hosts they apply to. Useful
+          for password-spray planning.
+        params:
+          workspace:
             type: string
-            description: Payload type
-          lhost:
-            type: string
-            description: Listening host
-          lport:
+            required: true
+            default: default
+            description: Workspace name. Upstream marks this required even though it has a default — always pass 'default'
+              unless you've explicitly created another workspace.
+          limit:
             type: integer
-            description: Listening port
-          handler_started:
-            type: boolean
-            description: Whether handler started successfully
-          job_id:
+            default: 100
+          offset:
+            type: integer
+            default: 0
+        returns:
+          metadata:
+            type: object
+          data:
+            type: array
+      msf_loot_info:
+        description: Query loot — files and data dumps collected into the workspace (SAM hashes, configs, screenshots, documents).
+        when_to_use: After post-exploitation gathered data has been written to the workspace, find the file paths to retrieve
+          content. Loot tracks the inventory; the actual files live on disk.
+        params:
+          workspace:
             type: string
-            description: Background job ID in msfrpcd
+            required: true
+            default: default
+            description: Workspace name. Upstream marks this required even though it has a default — always pass 'default'
+              unless you've explicitly created another workspace.
+          limit:
+            type: integer
+            default: 100
+          offset:
+            type: integer
+            default: 0
+        returns:
+          metadata:
+            type: object
+          data:
+            type: array
+    failure_signatures:
+    - signal: rate limit exceeded
+      error_class: rate_limited
+      remediation: Reduce call rate. msfmcpd defaults to 60 req/min, burst 10.
+    - signal: authentication failed
+      error_class: auth_failed
+      remediation: msfmcpd auto-generates random credentials each container start; auth failures suggest the embedded msfrpcd
+        died.
+    - signal: database is not available
+      error_class: tool_misconfigured
+      remediation: Postgres is not running in the container. msf_search_modules and msf_module_info still work; the 6 DB-backed
+        tools (host/service/vuln/note/credential/loot info) won't.
+    - signal: metasploit api error
+      error_class: tool_misconfigured
+      remediation: Generic msfrpcd-side failure. Check container logs (stderr).
+    - signal: invalid
+      error_class: invalid_parameter
+      remediation: Check tool arguments against the schema (workspace must be alphanumeric+underscore/hyphen, ports 1-65535,
+        search query ≤500 chars).
+    gotchas:
+    - 'READ-ONLY: this tool cannot run an exploit, fire a scanner, generate a payload, or talk to a session. For execution
+      → exploit-runner with the public PoC script for the CVE. Upstream (Rapid7) plans to add execution tools later — they
+      will appear here automatically when they ship.'
+    - 'Module path conventions differ between methods: msf_search_modules returns ''fullname'' INCLUDING the type prefix (e.g.
+      ''exploit/windows/smb/ms17_010_eternalblue''). msf_module_info wants ''type'' + ''name'' SEPARATELY (type=''exploit'',
+      name=''windows/smb/ms17_010_eternalblue''). Strip the leading ''exploit/'' when calling module_info.'
+    - Workspace database empty by default — msf only knows about hosts that this MCP's underlying msfrpcd has seen (via db_nmap/db_import
+      or successful module runs). Other tools' findings (nmap MCP results) do NOT auto-populate this DB. To use msf_host_info
+      / msf_service_info productively, route nmap results through msf via db_import.
+    - DB-backed tools (host, service, vulnerability, note, credential, loot) require Postgres to be running inside the container.
+      The entrypoint initializes it but if init fails (e.g. on resource-constrained hosts), those 6 tools will return 'database
+      is not available'. msf_search_modules and msf_module_info don't touch the DB and still work.
+    - msfmcpd auto-spawns msfrpcd internally with random credentials each container start. Sessions / state from a prior container
+      do NOT persist — every per-engagement spin-up gets a clean DB.
+    - 'Cold-start cost: ~30s on first call (Postgres start + msfdb init + workspace bootstrap + msfmcpd-spawned msfrpcd loading
+      ~2,300 modules). Subsequent calls within ContainerManager''s idle window (default 5min, this tool''s set to 10min) are
+      <1s.'
+    - Pagination defaults limit=100 max=1000. For exhaustive enumeration of hosts/services on a large workspace, page through
+      with offset increments.
+    - 'Rate limit: 60 requests/minute with burst of 10. Hammering more than 10 tool calls in quick succession will fail the
+      11th+ with a rate-limit error until the token bucket refills. Pace tight loops with ≥1s gaps, or cluster heavy enumeration
+      calls and wait between bursts.'
+    - '5 of 6 DB-backed tools mark `workspace` as REQUIRED in their JSON-Schema even though the param has a default value
+      of ''default'' (upstream inconsistency — only msf_host_info treats it as truly optional). Always pass `workspace: "default"`
+      explicitly to msf_service_info / msf_vulnerability_info / msf_note_info / msf_credential_info / msf_loot_info, or you''ll
+      get ''-32602 Missing required arguments: workspace''.'
+    - The auto-spawned msfrpcd creates DB schema but NOT any workspaces. The container's entrypoint pre-creates the 'default'
+      workspace via `msfconsole -x 'workspace -a default; exit'` so DB tools work out of the box. If you ever see 'Invalid
+      workspace', either the bootstrap failed or you passed a name that wasn't created — fall back to a manual `workspace
+      -a <name>` from msfconsole.
+    usage_patterns:
+    - name: CVE → module mapping
+      description: Find which Metasploit modules cover a known CVE.
+      method: msf_search_modules
+      args:
+        query: CVE-2017-0144
+        limit: 20
+    - name: Search by service + advisory
+      description: Find SMB-related auxiliary modules for MS17-010 detection.
+      method: msf_search_modules
+      args:
+        query: type:auxiliary smb ms17_010
+    - name: Module options before scripting
+      description: Look up RHOSTS/LHOST/payload/target options for an exploit module before writing the PoC script for exploit-runner.
+      method: msf_module_info
+      args:
+        type: exploit
+        name: windows/smb/ms17_010_eternalblue
+    - name: Workspace host inventory
+      description: After db_import or db_nmap (run via exploit-runner), enumerate discovered hosts.
+      method: msf_host_info
+      args:
+        only_up: true
+        limit: 100
+    - name: Service inventory by port range
+      description: What's listening on the upper port range across the workspace?
+      method: msf_service_info
+      args:
+        ports: 1024-65535
+        protocol: tcp
   mongodb:
     name: mongodb
     version: '1.0'
@@ -11602,6 +11790,9 @@ tools:
     - -row-count
     - -no-row-count
     - -show
+    allowed_env:
+    - KRB5CCNAME
+    - KRB5_CONFIG
     usage_patterns:
     - name: Version check via -file (smoke test)
       command: '{auth_target} -windows-auth -file /session/output/version.sql'
@@ -11776,12 +11967,12 @@ tools:
     - NAMED-INSTANCE DISCOVERY USES UDP/1434 — the SQL Browser service answers on UDP/1434 with the dynamic port for each
       named instance. If UDP/1434 is firewalled (common on hardened targets), -instance fails — fall back to nmap (`nmap -p
       1-65535 --script=ms-sql-info <host>`) to find the dynamic port and pass `-port <discovered_port>` directly.
-    - KERBEROS REQUIRES KRB5CCNAME ENV — for `-k -no-pass`, a TGT must already be in the ccache pointed to by KRB5CCNAME (typically
-      /session/<user>.ccache, written by impacket-getTGT in a prior call). The kind:cli image bundles krb5-user + libkrb5-dev
-      so kinit / GSSAPI bindings work; verify cli_in_container forwards KRB5CCNAME (open question — same as the impacket tool).
-    - CLOCK SKEW (KRB_AP_ERR_SKEW) — Kerberos auth fails when the host clock differs from the DC by >5min. The kind:cli image
-      has NO libfaketime (the original MCP-server image had FAKETIME wiring; this image does not). Sync the host clock (chronyc
-      / rdate) or skip Kerberos and use -hashes pass-the-hash instead.
+    - 'KERBEROS REQUIRES KRB5CCNAME ENV — for `-k -no-pass`, a TGT must already be in the ccache pointed to by KRB5CCNAME
+      (typically /session/<user>.ccache, written by impacket-getTGT in a prior call). Pass it via cli_in_container''s `env`
+      arg: `env: ''{"KRB5CCNAME":"/session/<user>.ccache"}''` (declared in this tool''s allowed_env).'
+    - 'CLOCK SKEW (KRB_AP_ERR_SKEW) — Kerberos auth fails when the host clock differs from the DC by >5min. Pass FAKETIME
+      via cli_in_container''s `env` arg to shift the container clock — e.g. `env: ''{"FAKETIME":"+10m"}''` if the DC is 10min
+      ahead. FAKETIME is a container knob (always allowed) and the plugin hoists it through libfaketime via LD_PRELOAD.'
     - WITHOUT -file, mssqlclient OPENS AN INTERACTIVE PROMPT — the container has no stdin (unless run_cli's `stdin_data` is
       used), so the binary blocks forever on the `SQL>` prompt. ALWAYS pass either -file PATH or stdin_data. There is no `--non-interactive`
       flag — -file IS the non-interactive escape.
@@ -11880,9 +12071,9 @@ tools:
         OR the ccache at KRB5CCNAME is from a different user / realm. Re-run impacket-getTGT to refresh, ensure KRB5CCNAME
         points to the correct file.
     - signal: KRB_AP_ERR_SKEW
-      remediation: Clock skew >5min between attacker and DC. Sync host clock (chronyc / rdate) — the kind:cli image has NO
-        libfaketime workaround. As a fallback, get a TGT from a clock-synced source and pass via KRB5CCNAME, OR skip Kerberos
-        and use -hashes pass-the-hash.
+      remediation: 'Clock skew >5min between attacker and DC. Estimate the offset from nmap smb-os-discovery ''System time''
+        and pass FAKETIME via cli_in_container''s env arg to shift the container clock — e.g. `env: ''{"FAKETIME":"+10m"}''`
+        if the DC is 10min ahead. As a fallback, skip Kerberos and use -hashes pass-the-hash.'
     - signal: KDC_ERR_S_PRINCIPAL_UNKNOWN
       remediation: Service principal not found for MSSQL. The SPN MSSQLSvc/<host>:<port> must be registered in AD for Kerberos
         to work. Try -target-ip with the IP if the FQDN doesn't have a registered SPN. Verify with `setspn -L <svc_account>`
@@ -13495,6 +13686,9 @@ tools:
     - --gfail-limit
     - --ufail-limit
     - --hfail-limit
+    allowed_env:
+    - KRB5CCNAME
+    - KRB5_CONFIG
     usage_patterns:
     - name: SMB null-session enum (anonymous shares + users)
       command: netexec smb {target} -u '' -p '' --shares --users
@@ -15070,7 +15264,8 @@ tools:
       6 XML targets, formula injection, external links for SSRF), create_docx (XXE, external image SSRF, Follina-style template
       injection), create_pptx (XXE, external media SSRF, hover/click action links), modify_office_xml (low-level XML editing
       via xpath), extract_office_xml (inspect XML internals), list_payloads (show available templates). All outputs include
-      base64-encoded file content for immediate delivery. No macros (use metasploit for VBA macro payloads).'
+      base64-encoded file content for immediate delivery. No macros — for VBA macro payloads, use exploit-runner with a msfvenom-via-script
+      wrapper.'
     image: ghcr.io/silicon-works/mcp-tools-office-exploit:latest
     image_size_mb: 80
     timeout_seconds: 300
@@ -15083,7 +15278,7 @@ tools:
     - template_injection
     see_also:
     - curl
-    - metasploit
+    - exploit-runner
     routing:
       use_for:
       - create malicious Excel XLSX with XSS payload in sheet names for PHPSpreadsheet CVE-2025-22131
@@ -15110,7 +15305,7 @@ tools:
       prefer_over: []
     warnings:
     - Generated documents are for authorized security testing ONLY
-    - Macro payloads (XLSM/DOCM) not supported in v1 - use metasploit instead
+    - Macro payloads (XLSM/DOCM) not supported in v1 — wrap msfvenom in an exploit-runner script for VBA generation
     - Output files must be within /session/ directory
     phases:
     - exploitation
@@ -18170,8 +18365,9 @@ tools:
       reason: After mirroring an exploit with `searchsploit --mirror <id>` to /session/, use exploit-runner to execute it
         (Python / Ruby / Perl / shell scripts). For C exploits, compile in /session/ first.
     - tool: metasploit
-      reason: If searchsploit returns Ruby (.rb) exploits, those are typically Metasploit modules — use the metasploit tool
-        to load and run them rather than exploit-runner.
+      reason: Use msf_search_modules to look up whether a Metasploit module exists for the same CVE. The metasploit MCP is
+        read-only — for execution, use exploit-runner with the public Ruby PoC (or rewrite as python3) since msfconsole-driven
+        module execution isn't exposed through MCP yet.
     target_extraction: []
     reject_flags: []
     reject_flags_reason: searchsploit has no network target and no target-list flag. The operands are search terms (positional),
@@ -18352,9 +18548,9 @@ tools:
     - The bundled mirror lives at `/usr/share/exploitdb/exploits/` (exploits) and `/usr/share/exploitdb/shellcodes/` (shellcodes)
       and `/usr/share/exploitdb/papers/` (papers). Paths in search results are RELATIVE to /usr/share/exploitdb/. Use `-p`
       to print the absolute path.
-    - Ruby (.rb) exploits are typically Metasploit modules — not standalone scripts. Loading them requires the Metasploit
-      framework (`use exploit/<path>` in msfconsole). Don't try to run .rb files directly via exploit-runner; use the metasploit
-      tool.
+    - Ruby (.rb) exploits are typically Metasploit modules — not standalone scripts. The metasploit MCP can find / inspect
+      them via msf_search_modules + msf_module_info but cannot execute them (read-only surface). For execution, port the Ruby
+      logic to a Python or shell PoC and run via exploit-runner, or use a public python3 PoC for the same CVE.
     - Many exploits are STALE or NON-FUNCTIONAL. Public PoCs frequently target specific OS builds, library versions, or environmental
       conditions that don't match the live target. The `--exclude='(PoC)'` filter removes proof-of-concept stubs but cannot
       detect bit-rot. Always review exploit code before execution.

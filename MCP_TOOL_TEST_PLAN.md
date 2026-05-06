@@ -402,7 +402,7 @@ These are used in almost every engagement. They mostly work but haven't been sys
 | 14 | exploit-runner | **done** 108 tests, 1 fixture. CRITICAL: process group kill (child processes survived timeout), no heartbeat, no stdin=DEVNULL. Template success detection broken. All fixed. 108 pass. |
 | 15 | shell-session | **done** 67 tests. CRITICAL: paramiko blocking asyncio event loop (root cause 62% timeout). "Error: None" bug on 80% of exec errors. Thread executor fix + 8 issues resolved. 67 pass. |
 | 16 | netcat | **done** 87 tests. All 16 methods. 100% engagement success rate. datetime deprecation fix. 87 pass. |
-| 17 | metasploit | **done** 102 tests (26 classes), 15 fixtures. Error classification, entrypoint.sh. All 9 methods covered. |
+| 17 | metasploit | **migrated May 2026** — Python wrapper retired in favor of Rapid7's official `msfmcpd` (kind:mcp). 8-test smoke suite covers the upstream-canonical tool surface (msf_search_modules, msf_module_info, msf_host_info, msf_service_info, msf_vulnerability_info, msf_note_info, msf_credential_info, msf_loot_info). Wrapper preserved at commit ad330f9 in case migration reverses. |
 | 18 | ffuf | **done** 48 tests, 3 fixtures. CRITICAL: silent mode + no heartbeat = 71.4% timeout (fixed). Error classification added. Feature 28 params already correct. 48 pass. |
 | 19 | hydra | **done** 61 tests, 12 fixtures. HTTPS→HTTP downgrade bug, empty password regex, heartbeat fix for 47.4% timeout. All 5 methods. 61 pass. |
 | 20 | sqlmap | **done** 127 tests, 20 fixtures. P0: false positive vuln detection. P1: os_shell drops all output. Error classifier added. Heartbeat was already correct. 126 pass, 1 skip. |
