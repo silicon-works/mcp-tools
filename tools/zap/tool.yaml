@@ -1,394 +1,426 @@
 name: zap
-version: "2.14"
-description: "OWASP ZAP 2.14 web application security scanner. 12 methods: spider (crawl to discover URLs), active_scan (test for SQLi, XSS, OWASP Top 10), quick_scan (spider + active scan combined), ajax_spider (Chrome headless for JavaScript-heavy SPAs), stop_scan, get_alerts (vulnerability details by severity), get_urls, scan_status, summary, proxy_history (captured HTTP traffic like Burp), send_request (manual HTTP like Burp Repeater), proxy_info (proxy settings for Playwright integration). Runs as a service container with persistent state. Can proxy Playwright browser traffic for combined JS app testing."
+kind: mcp
+version: "2.17"
+description: "OWASP ZAP 2.17.0 web application security scanner integrated via the official MCP Integration add-on (zaproxy/zap-extensions, mcp-v0.0.1, alpha April 2026). 14 tools covering version/info, context creation, three scanner pipelines (passive, active, traditional spider, AJAX spider) with start/stop/status verbs, and report generation. The add-on additionally advertises 10 MCP Resources + 2 Prompts, but opensploit's mcp_tool today dispatches only tools/call — to extract findings use zap_generate_report with template:sarif-json written to /session/output/, NOT mcp.resources_read. The container hybrid-installs the add-on jar into ZAP's plugin dir and runs a stdio↔HTTP bridge so opensploit's stdio-based ContainerManager talks to the HTTP-only ZAP MCP transparently."
+source: https://github.com/zaproxy/zap-extensions/tree/main/addOns/mcp
 image: "ghcr.io/silicon-works/mcp-tools-zap:latest"
-image_size_mb: 1200
+image_size_mb: 2300
 timeout_seconds: 600
+idle_timeout_seconds: 7200
+
+service: true
+service_name: "zap"
 
 capabilities:
-  - web_vulnerability_scanning
-  - active_scanning
-  - spider_crawling
-  - xss_detection
-  - sqli_detection
-  - security_assessment
-
-# Routing hints for tool selection
-routing:
-  use_for:
-    - "automated web application vulnerability scanning for OWASP Top 10"
-    - "active scan to find XSS SQL injection and other web vulnerabilities"
-    - "spider crawl web application to discover all pages and API endpoints"
-    - "crawl JavaScript SPA applications with ajax spider Chrome headless"
-    - "intercept and replay HTTP requests like Burp Suite Repeater"
-    - "proxy Playwright browser traffic through ZAP for JS-heavy app testing"
-    - "get vulnerability report with severity levels after web application scan"
-  never_use_for:
-    - "port scanning"
-    - "network scanning"
-    - "password cracking"
-  triggers:
-    - "ZAP"
-    - "OWASP"
-    - "active scan"
-    - "web scanner"
-    - "spider"
-    - "crawl"
-    - "web vulnerability"
-  prefer_over:
-    - "nikto"  # ZAP has active scanning, nikto is passive
-    - "curl"   # For security testing, use ZAP not manual curl
-
-# Cross-references to related tools
-see_also:
-  - playwright-mcp  # For browser automation, JavaScript execution, form filling, screenshots, console
+  - web_app_scanning
+  - active_vulnerability_detection
+  - passive_vulnerability_detection
+  - spider_crawl
+  - ajax_spider_crawl
+  - vulnerability_report_generation
+  - context_management
 
 phases:
   - enumeration
   - exploitation
+  - post-exploitation
 
 requirements:
   network: true
   privileged: false
 
 resources:
-  memory_mb: 2048
+  memory_mb: 8192
   cpu: 2.0
 
+see_also:
+  - tool: nmap
+    reason: "Discover open HTTP ports first (443/80/8080/8443/etc.) before pointing ZAP at them. ZAP can't find a service on a port we don't know is open."
+  - tool: nuclei
+    reason: "Complementary vuln scanner — nuclei is template-based and much faster on known CVEs; ZAP is form-aware and finds OWASP-class issues (XSS, SQLi, CSRF) nuclei doesn't model. Run both for coverage."
+  - tool: ffuf
+    reason: "Content discovery (hidden directories, vhost enumeration) before ZAP — ZAP's spider follows links it can see; ffuf brute-forces what isn't linked."
+  - tool: curl
+    reason: "Request replay / one-shot HTTP for verifying findings ZAP raises. The official MCP add-on does NOT (yet) expose a request-send tool; for arbitrary HTTP, use curl."
+  - tool: playwright-mcp
+    reason: "Browser automation for JavaScript-heavy targets the AJAX spider can't fully crawl (modals, OAuth redirects, anti-automation walls). Combine: playwright drives the user flow, ZAP records traffic via its proxy."
+
+warnings:
+  - "ALPHA UPSTREAM (mcp-v0.0.1, April 2026). The interface will evolve. Methods that exist today may rename, and tools we lack today (notably: arbitrary HTTP request replay, equivalent to our retired wrapper's send_request) will appear in future versions. Treat the surface as upstream-tracking rather than locked."
+  - "Active scan is INTRUSIVE. It sends real attack payloads (XSS, SQLi, command injection probes) to the target. NEVER point active scan at a target outside the engagement scope. Spider + passive scan only inspect traffic, but active scan generates real traffic that can crash fragile apps or trigger IDS."
+  - "Scans are LONG. Spider on a small site: seconds. AJAX spider: minutes. Active scan: minutes to hours depending on URL count and policy. Use the *_get_*_status verbs to poll until completion; don't assume a start_* call returns synchronously."
+
+notes: |
+  Architecture: ZAP's MCP Integration is a Java add-on living INSIDE ZAP's
+  daemon process. Unlike Rapid7's `msfmcpd` (separate Ruby binary speaking
+  stdio natively), ZAP's add-on only exposes MCP-over-HTTP on
+  http://127.0.0.1:8282/. The container therefore runs a small Python
+  stdio↔HTTP bridge (~140 LOC) as its entrypoint:
+
+    docker stdin → bridge → POST :8282 → ZAP add-on
+    docker stdout ← bridge ← JSON response ← ZAP add-on
+
+  This is invisible to opensploit's ContainerManager — same `docker run -i`
+  contract as every other kind:mcp tool.
+
+  Why this exists alongside our retired Python wrapper: we maintained 1495
+  LOC of mcp-server.py wrapping ZAP's REST API with manual error
+  classification + 12 hand-mapped methods. The official add-on covers ~92%
+  of that surface (14 vs 12 methods, missing only `send_request`) and is
+  maintained by the ZAP Dev Team. Replacing our wrapper removes the
+  maintenance burden and auto-tracks upstream evolution.
+
+  Migration history (May 2026): replaces a 1495-LOC Python wrapper that
+  duplicated parts of ZAP's REST API. Wrapper retired. For arbitrary HTTP
+  request replay (the one capability lost), use the `curl` tool against
+  the URL directly, or hit ZAP's underlying REST API via curl
+  (POST /JSON/core/action/sendRequest/) — but that's outside the MCP
+  contract.
+
+  Cold start: ~30s end-to-end (ZAP daemon JVM start + add-on load + HTTP
+  listener bind). ContainerManager's idle_timeout is 7200s (2hr) above —
+  sized to outlast active-scan runtimes that can reach 1-2hr on large apps.
+
+  STATE NON-PERSISTENCE: ZAP's in-memory state (sites tree, alerts, scan
+  IDs, history) does NOT survive container recycle. If the container is
+  reaped after the 2hr idle window, the next ZAP call cold-starts a
+  fresh daemon with EMPTY state. Always call zap_generate_report to
+  /session/output/ BEFORE long delays or context-switches — the report
+  file persists on disk; ZAP's memory does not.
+
+  Authentication: a random 32-hex security key is generated at container
+  start, set into ZAP's config via `-config mcp.securityKey=$KEY`, and
+  passed by the bridge in every HTTP request's `Authorization` header
+  (raw key, NOT `Bearer <key>` — verified against
+  McpHttpMessageHandler.java's MessageDigest.isEqual byte compare).
+
+  Resources + Prompts: in addition to the 14 Tools below, the add-on
+  advertises 10 MCP Resources (zap://alerts, zap://alerts/{alertRef},
+  zap://sites, zap://sites-tree, zap://history, zap://history/{id},
+  zap://contexts, zap://scan-policies, zap://scan-status,
+  zap://report-templates) and 2 Prompts (baseline_scan, full_scan).
+  These require resources/read + prompts/get JSON-RPC verbs.
+
+  CRITICAL — opensploit's mcp_tool dispatcher today emits ONLY
+  tools/call. Resources and Prompts are advertised but unreachable
+  client-side. Do NOT try mcp.resources_read(...) or
+  mcp.prompts_get(...) — both will fail. Workaround map:
+    - findings/alerts            → zap_generate_report (sarif-json)
+    - scan progress              → zap_get_*_status tools (4 verbs)
+    - sites/URLs discovered      → site-map section of HTML report,
+                                   or alerts' URL fields in SARIF
+    - contexts                   → agent already knows what it created
+    - scan-policies, templates   → static; documented in gotchas
+    - raw HTTP request replay    → curl tool with URL+payload from SARIF
+
+routing:
+  use_for:
+    - "spider / crawl a web application to discover URLs and forms"
+    - "active vulnerability scan of a web app for OWASP Top 10 issues"
+    - "AJAX-aware crawl of a JavaScript-heavy single-page application"
+    - "passive scan analysis (passive findings from observed traffic)"
+    - "generate ZAP scan report (HTML / Markdown / JSON / XML / SARIF) after scans complete"
+    - "create a scoped ZAP context restricting scans to a target site / regex"
+  never_use_for:
+    - task: "arbitrary HTTP request / replay"
+      use_instead: "curl"
+      reason: "Upstream's MCP add-on (alpha v0.0.1) does not expose a request-send tool yet; our retired wrapper had send_request — gone now. For one-off HTTP, use curl. For full request replay against a ZAP-tracked site, hit ZAP's REST API directly via curl."
+    - task: "subdomain / vhost enumeration"
+      use_instead: "ffuf"
+    - task: "DNS / external-attack-surface discovery"
+      use_instead: "amass"
+    - task: "open-port scanning"
+      use_instead: "nmap"
+    - task: "running a single CVE template against a target"
+      use_instead: "nuclei"
+    - task: "credential / hash brute-forcing"
+      use_instead: "hydra"
+  triggers:
+    - zap
+    - zaproxy
+    - 'OWASP ZAP'
+    - 'web app scan'
+    - 'web application scan'
+    - 'web application security scanner'
+    - spider
+    - 'ajax spider'
+    - 'active scan'
+    - 'passive scan'
+    - 'CSRF token'
+    - 'XSS scanner'
+    - 'SQL injection scanner'
+    - 'authenticated web scan'
+    - 'OWASP Top 10'
+  prefer_over: []
+
 methods:
-  spider:
-    description: "Crawl a target URL to discover all pages and endpoints"
-    when_to_use: "To discover all URLs on a web application before scanning"
-    params:
-      target:
-        type: string
-        required: true
-        description: "Target URL to crawl (e.g., http://target.com)"
-      max_depth:
-        type: integer
-        default: 5
-        description: "Maximum crawl depth"
-      max_children:
-        type: integer
-        default: 0
-        description: "Maximum child URLs per page (0=unlimited)"
-      wait:
-        type: boolean
-        default: true
-        description: "Wait for spider to complete (if false, returns immediately with scan_id)"
-      timeout:
-        type: integer
-        default: 300
-        description: "Maximum seconds to wait for spider. Returns partial results on timeout."
-      subtree_only:
-        type: boolean
-        default: true
-        description: "Only spider URLs under the target path (recommended)"
-    returns:
-      scan_id:
-        type: string
-        description: "Spider scan ID for status checking"
-      urls_found:
-        type: integer
-        description: "Number of URLs discovered"
-      progress:
-        type: integer
-        description: "Spider progress percentage (0-100)"
-      partial:
-        type: boolean
-        description: "True if scan timed out with partial results"
-
-  active_scan:
-    description: "Actively scan a target for vulnerabilities (SQLi, XSS, etc.)"
-    when_to_use: "To test a web application for security vulnerabilities"
-    params:
-      target:
-        type: string
-        required: true
-        description: "Target URL to scan"
-      wait:
-        type: boolean
-        default: true
-        description: "Wait for scan to complete (if false, returns immediately with scan_id)"
-      timeout:
-        type: integer
-        default: 600
-        description: "Maximum seconds to wait for scan. Returns partial results on timeout."
-      scan_policy:
-        type: string
-        description: "Scan policy name: 'Default Policy' or custom. Controls which checks run."
-    returns:
-      scan_id:
-        type: string
-        description: "Active scan ID for status checking"
-      progress:
-        type: integer
-        description: "Scan progress percentage (0-100)"
-      alerts:
-        type: object
-        description: "Counts by severity: high, medium, low, info, total"
-      partial:
-        type: boolean
-        description: "True if scan timed out with partial results"
-
-  quick_scan:
-    description: "Perform a complete scan: spider the target then run active scan. Returns partial results if either phase times out."
-    when_to_use: "For a comprehensive security assessment of a web application"
-    params:
-      target:
-        type: string
-        required: true
-        description: "Target URL to scan"
-      max_depth:
-        type: integer
-        default: 5
-        description: "Maximum spider depth"
-      max_children:
-        type: integer
-        default: 0
-        description: "Maximum child URLs per page (0=unlimited)"
-      spider_timeout:
-        type: integer
-        default: 300
-        description: "Maximum seconds for spider phase"
-      scan_timeout:
-        type: integer
-        default: 900
-        description: "Maximum seconds for active scan phase"
-      scan_policy:
-        type: string
-        description: "Scan policy name for active scan phase"
-      ajax_spider:
-        type: boolean
-        default: false
-        description: "Run AJAX spider after traditional spider (for JavaScript-heavy sites)"
-      exclude_regex:
-        type: string
-        description: "Regex pattern for URLs to exclude (e.g., 'logout|delete|signout')"
-    returns:
-      spider_id:
-        type: string
-        description: "Spider scan ID"
-      scan_id:
-        type: string
-        description: "Active scan ID"
-      urls_found:
-        type: integer
-        description: "Number of URLs discovered"
-      alerts:
-        type: object
-        description: "Counts by severity: high, medium, low, info, total"
-      partial:
-        type: boolean
-        description: "True if any phase timed out"
-
-  stop_scan:
-    description: "Stop a running spider or active scan"
-    when_to_use: "To cancel a stuck or long-running scan"
-    params:
-      scan_type:
-        type: string
-        required: true
-        description: "Type of scan to stop: 'spider', 'active', 'ajax', or 'all'"
-      scan_id:
-        type: string
-        description: "Specific scan ID to stop. If not provided, stops all scans of the type."
-    returns:
-      stopped:
-        type: array
-        description: "List of stopped scans with type and id"
-
-  get_alerts:
-    description: "Get vulnerabilities discovered by ZAP"
-    when_to_use: "To retrieve detailed vulnerability information after scanning"
-    params:
-      target:
-        type: string
-        description: "Filter alerts by target URL (optional)"
-      risk:
-        type: string
-        description: "Filter by risk level: High, Medium, Low, Informational"
-      limit:
-        type: integer
-        default: 100
-        description: "Maximum number of alerts to return"
-    returns:
-      alerts:
-        type: array
-        description: "List of vulnerabilities with details"
-
-  get_urls:
-    description: "Get all URLs discovered by the spider"
-    when_to_use: "To see what pages were found during crawling"
-    params:
-      target:
-        type: string
-        description: "Filter URLs by base URL (optional)"
-    returns:
-      urls:
-        type: array
-        description: "List of discovered URLs"
-
-  scan_status:
-    description: "Get the status of all running and completed scans"
-    when_to_use: "To check progress of background scans or verify scan completion"
+  zap_version:
+    description: "Return the ZAP version string. Diagnostic — confirms the daemon is reachable and on the expected major version."
+    when_to_use: "First call when spinning up a session, or to verify the container is alive after suspected hangs."
     params: {}
     returns:
-      spider_scans:
-        type: array
-        description: "List of spider scans with id, progress, state, urls_found"
-      active_scans:
-        type: array
-        description: "List of active scans with id, progress, state, alerts count"
-      running_spiders:
-        type: integer
-        description: "Number of currently running spider scans"
-      running_scans:
-        type: integer
-        description: "Number of currently running active scans"
-
-  summary:
-    description: "Get a summary of all findings by risk level"
-    when_to_use: "To get an overview of discovered vulnerabilities"
-    params:
-      target:
+      version:
         type: string
-        description: "Filter by target URL (optional)"
+
+  zap_info:
+    description: "Get high-level ZAP daemon information — version, mode (standard/safe/protect/attack), proxy address."
+    when_to_use: "After zap_version, to confirm the daemon's operational mode and proxy bindings before starting scans."
+    params: {}
     returns:
-      total:
-        type: integer
-        description: "Total number of issues"
-      by_risk:
+      info:
         type: object
-        description: "Issue counts by risk level"
 
-  proxy_history:
-    description: "Get HTTP messages captured by ZAP proxy"
-    when_to_use: "To review traffic that passed through the proxy"
+  zap_create_context:
+    description: "Create a named ZAP context bound to a URL pattern and optional include/exclude regexes. Contexts scope scanners — without one, ZAP scans whatever the spider crawled (could over-spread)."
+    when_to_use: "Before any spider/active_scan if the engagement requires strict scope control. Most production scans should use a context to prevent ZAP from chasing off-site links."
     params:
-      start:
-        type: integer
-        default: 0
-        description: "Start index"
-      count:
-        type: integer
-        default: 50
-        description: "Number of messages to return"
-      target:
+      name:
         type: string
-        description: "Filter by target URL (optional)"
-    returns:
-      messages:
-        type: array
-        description: "List of HTTP request/response pairs"
-
-  send_request:
-    description: "Send an HTTP request through ZAP proxy and get the response (like Burp Repeater)"
-    when_to_use: "To manually send or replay HTTP requests for testing"
-    params:
+        required: true
+        description: "Context name, e.g. 'sau-engagement' or 'webapp-staging'"
       url:
         type: string
         required: true
-        description: "Full URL to request (e.g., http://target.com/path)"
-      method:
-        type: string
-        default: "GET"
-        description: "HTTP method (GET, POST, PUT, DELETE, etc.)"
-      headers:
-        type: object
-        description: "Custom headers as key-value pairs"
-      body:
-        type: string
-        description: "Request body for POST/PUT requests"
-      follow_redirects:
-        type: boolean
-        default: true
-        description: "Follow HTTP redirects"
+        description: "Top-level URL the context is bound to, e.g. 'http://10.10.10.5/'"
+      include_regexes:
+        type: array
+        description: "List of regex patterns to include in scope (URLs matching at least one are in scope)"
+      exclude_regexes:
+        type: array
+        description: "List of regex patterns to exclude (logout endpoints, admin, etc.)"
     returns:
-      url:
+      context_id:
         type: string
-        description: "Request URL"
-      status_code:
-        type: integer
-        description: "HTTP response status code"
-      content_length:
-        type: integer
-        description: "Response body length in bytes"
 
-  proxy_info:
-    description: "Get ZAP proxy connection info for routing Playwright traffic through ZAP"
-    when_to_use: |
-      - Before using Playwright to test JS-heavy applications
-      - When you need ZAP to capture and analyze browser traffic
-      - For combining Playwright automation with ZAP scanning
-    notes: |
-      RECOMMENDED APPROACH for JavaScript-heavy applications:
-
-      1. Call zap.proxy_info() to get proxy host:port
-      2. Launch Playwright browser with proxy settings
-      3. Use Playwright to navigate, login, interact with the app
-      4. ZAP captures all traffic via proxy_history
-      5. Run active_scan on captured URLs for vulnerability detection
-
-      This approach is more reliable than ajax_spider and gives full control
-      over browser interactions (auth flows, form filling, waiting for elements).
-    params: {}
-    returns:
-      port:
-        type: integer
-        description: "Proxy port number"
-      instructions:
-        type: string
-        description: "Setup instructions"
-
-  ajax_spider:
-    description: "Crawl JavaScript-heavy applications using Chrome headless browser"
-    when_to_use: |
-      - Single Page Applications (React, Vue, Angular)
-      - Pages with dynamic content loading
-      - When traditional spider misses endpoints
-      - Automated JS app crawling without custom interaction logic
-    notes: |
-      Uses Chrome headless (more reliable than Firefox in Docker).
-      Automatically discovers endpoints by executing JavaScript and clicking links.
-
-      For CUSTOM interactions (specific login flows, complex forms), use Playwright+ZAP:
-      1. zap.proxy_info() - get proxy settings
-      2. playwright with proxy - custom browser automation
-      3. zap.proxy_history() - captured traffic
-      4. zap.active_scan() - vulnerability scanning
+  zap_start_spider:
+    description: "Start a traditional (non-JS) spider crawl against a target URL. Returns a scan_id for polling. Crawls follow links, forms, robots.txt, sitemap.xml — does NOT execute JavaScript."
+    when_to_use: "First scanner step on most web apps. Discover the URL surface before active_scan. For SPAs / JS-rendered pages, use start_ajax_spider (slower but JS-aware)."
     params:
       target:
         type: string
         required: true
-        description: "Target URL to crawl (e.g., http://target.com)"
-      wait:
-        type: boolean
-        default: true
-        description: "Wait for spider to complete"
-      timeout:
-        type: integer
-        default: 300
-        description: "Maximum seconds to wait for spider"
-      subtree_only:
-        type: boolean
-        default: true
-        description: "Only spider URLs under the target path"
-      max_crawl_depth:
-        type: integer
-        default: 10
-        description: "Maximum crawl depth"
-      max_duration:
-        type: integer
-        default: 0
-        description: "Maximum duration in minutes (0=unlimited)"
+        description: "Target URL e.g. 'http://10.10.10.5/' — should match a created context's URL"
     returns:
-      urls:
-        type: array
-        description: "List of discovered URLs"
-      urls_count:
-        type: integer
-        description: "Number of URLs discovered"
-      partial:
-        type: boolean
-        description: "True if scan timed out with partial results"
+      scan_id:
+        type: string
+
+  zap_stop_spider:
+    description: "Stop an in-progress spider scan."
+    when_to_use: "When spider has been running too long, or when you have enough URL coverage and want to move to active_scan."
+    params:
+      scan_id:
+        type: string
+        required: true
+    returns: {}
+
+  zap_get_spider_status:
+    description: "Poll spider scan progress. Returns percentage complete + state. Spider scans are typically fast (seconds to a minute) on small targets."
+    when_to_use: "Poll every ~10s after zap_start_spider until status reaches 100. Don't assume start_spider is synchronous."
+    params:
+      scan_id:
+        type: string
+        required: true
+    returns:
+      status:
+        type: object
+
+  zap_start_ajax_spider:
+    description: "Start an AJAX-aware spider that drives a real browser (Selenium-based, headless Chrome/Firefox) to render JavaScript and crawl SPAs."
+    when_to_use: "After traditional spider on JS-heavy sites — AJAX spider catches routes that only appear after JS executes (React Router, modals, lazy-loaded components). Significantly slower than traditional spider."
+    params:
+      target:
+        type: string
+        required: true
+    returns:
+      scan_id:
+        type: string
+
+  zap_stop_ajax_spider:
+    description: "Stop an in-progress AJAX spider."
+    when_to_use: "When AJAX spider has been running >10 min or you have sufficient JS-rendered surface coverage."
+    params:
+      scan_id:
+        type: string
+        required: true
+    returns: {}
+
+  zap_get_ajax_spider_status:
+    description: "Poll AJAX spider state. Status is {state: 'running' | 'stopped'} — no percentage (AJAX spider runs until URL queue is exhausted)."
+    when_to_use: "Periodic polling after start_ajax_spider. State 'stopped' = done."
+    params:
+      scan_id:
+        type: string
+        required: true
+    returns:
+      status:
+        type: object
+
+  zap_start_active_scan:
+    description: "Start an ACTIVE vulnerability scan against URLs already known to ZAP (typically from a prior spider/ajax_spider). Sends real attack payloads to test for SQLi, XSS, command injection, file inclusion, etc."
+    when_to_use: "AFTER spider/ajax_spider has populated the URL set. Active scan only probes URLs ZAP knows about. Choose policy based on engagement scope (default policy probes most rules; restrictive policies cut scan time)."
+    params:
+      target:
+        type: string
+        required: true
+        description: "Target URL"
+      policy:
+        type: string
+        description: "Optional ZAP scan policy name (e.g. 'Default Policy', 'API-Minimal'). Omit for default."
+    returns:
+      scan_id:
+        type: string
+
+  zap_stop_active_scan:
+    description: "Stop an in-progress active scan."
+    when_to_use: "When scan has been running too long, hit a brittle endpoint, or you've collected enough findings."
+    params:
+      scan_id:
+        type: string
+        required: true
+    returns: {}
+
+  zap_get_active_scan_status:
+    description: "Poll active scan progress. Returns percentage + URL count + alerts found so far."
+    when_to_use: "Poll every ~30s after start_active_scan. Active scans run for minutes to hours; long-running is normal."
+    params:
+      scan_id:
+        type: string
+        required: true
+    returns:
+      status:
+        type: object
+
+  zap_get_passive_scan_status:
+    description: "Get passive scan engine status. ZAP runs passive analyzers continuously on all observed traffic — no explicit start needed. This tool reports what's pending in the passive analysis queue."
+    when_to_use: "After spider/ajax_spider but before generating the report — confirms passive scanners have processed the discovered URLs (queue size 0 = done)."
+    params: {}
+    returns:
+      status:
+        type: object
+
+  zap_generate_report:
+    description: "Generate a vulnerability report from accumulated alerts. Supports multiple templates — HTML for humans, JSON for machines, SARIF for CI integration, etc."
+    when_to_use: "After all spiders and active scans complete + passive scan queue drains. Output is the deliverable artifact for the engagement."
+    params:
+      file_path:
+        type: string
+        required: true
+        description: "Output file path inside the container — write to /session/output/<name>.<ext> so opensploit can read it"
+      template:
+        type: string
+        required: true
+        description: "Template name — common options: 'traditional-html', 'traditional-md', 'traditional-json', 'sarif-json', 'risk-confidence-html'"
+      title:
+        type: string
+        description: "Optional report title"
+    returns:
+      report_path:
+        type: string
+
+failure_signatures:
+  # Substrings empirically observed in upstream alpha v0.0.1 responses
+  # (live-verified on Sau 2026-05-06). Update when upstream releases v0.0.2+.
+  - signal: "parameter is required"
+    error_class: invalid_parameter
+    remediation: "Add the missing parameter from the schema. zap_create_context requires both name and url; spider/active_scan require target; status/stop verbs require scan_id. Live shape: 'The url parameter is required' / 'The name parameter is required' etc."
+  - signal: "not found or was not started"
+    error_class: invalid_parameter
+    remediation: "The scan_id doesn't match any scan started by the corresponding zap_start_* verb. Live shape: 'Scan <id> not found or was not started via zap_start_spider'. Check you're polling the same scan_id you got back from start, and that you're using the right status verb (spider vs ajax_spider vs active_scan)."
+  - signal: "Unknown tool:"
+    error_class: tool_misconfigured
+    remediation: "The agent called a method name the upstream MCP add-on doesn't recognize. Note this is a JSON-RPC -32602 error (protocol level), NOT an isError=true tool result. Live shape: '{\"error\":{\"code\":-32602,\"message\":\"Unknown tool: zap_does_not_exist\"}}'. Check the method name against the 14 advertised in tools/list. If the method existed in our retired Python wrapper but doesn't exist upstream (e.g. send_request), there's no replacement — route to curl or wait for v0.0.2+."
+  - signal: "ZAP upstream unreachable"
+    error_class: tool_misconfigured
+    remediation: "Bridge couldn't reach ZAP on http://127.0.0.1:8282/. Either ZAP died (check docker logs) or the listener hasn't bound yet (cold start ~30s). The bridge translates these into JSON-RPC -32000 frames so opensploit doesn't see broken pipes."
+  - signal: "HTTP 401"
+    error_class: auth_failed
+    remediation: "Bridge sent a wrong Authorization header. The container generates a random ZAP_MCP_KEY at startup and the bridge reads it from env — if you see 401, the env var was wiped or the bridge isn't reading it. Restart the container."
+  - signal: "HTTPS required"
+    error_class: tool_misconfigured
+    remediation: "ZAP MCP returned 403 'HTTPS required'. The entrypoint sets `mcp.secureOnly=false` so plain HTTP works; if this fires, the config didn't apply. Check `docker logs <container>` for ZAP startup output to see if the -config flag was honored."
+  - signal: "Connection refused"
+    error_class: tool_misconfigured
+    remediation: "Same root cause as 'ZAP upstream unreachable' but at the OS level. ZAP daemon's HTTP listener on 127.0.0.1:8282 isn't up. Cold start is ~30s; if persistently down, ZAP's JVM probably crashed at startup."
+
+gotchas:
+  - "ALPHA upstream surface (mcp-v0.0.1, April 2026). Method names + parameter shapes can change between ZAP add-on versions; this image pins to v0.0.1 explicitly. When upstream releases v0.0.2+, rebuild the image to pick up changes — and re-validate scenarios.md."
+  - "14 tools, NOT 15. Reading the source dir at zap-extensions/addOns/mcp/src/main/java/.../tools/ shows 15 .java files including ZapStartScanTool.java, but that's an ABSTRACT base class — only the concrete Start*Tool subclasses get registered. Confirmed via inspection of ExtensionMcp.hook()."
+  - "No MCP session-id required. Unlike metasploit's msfmcpd which requires capturing the mcp-session-id header from initialize and reusing it, ZAP's McpHttpMessageHandler is stateless — every POST is independently authenticated by the Authorization header. The bridge sends no session-id at all. If a future ZAP version starts requiring one, the bridge will need an explicit code change to capture and replay it."
+  - "Authorization is the raw key, NOT 'Bearer <key>'. McpHttpMessageHandler does a constant-time byte compare against the verbatim Authorization header value. Sending 'Bearer <key>' will return 401."
+  - "mcp.secureOnly defaults to TRUE — must be explicitly set to false in the entrypoint or every plain-HTTP POST returns 403 'HTTPS required'. We set it via `-config mcp.secureOnly=false` at daemon launch. Don't remove this without also setting up TLS."
+  - "Cold start ~30s on this dev host (JVM start + add-on load + HTTP bind). ContainerManager idle_timeout is 7200s (2 hr) — sized to outlast active scans which can run 1-2hr on large apps. If you see 'connection refused' on first call, the container hasn't finished cold-starting yet — wait."
+  - "STATE NON-PERSISTENCE: ZAP's in-memory state (sites tree, alerts, scan IDs, history) does NOT survive container recycle. If the container is reaped after the 2hr idle window (or by manual restart), the next ZAP call cold-starts a fresh daemon with EMPTY state. ALWAYS call zap_generate_report (file_path under /session/output/) BEFORE walking away — the report file persists; ZAP's memory does not. Symptom of the trap: 'scan <N> not found' from a get_*_status call."
+  - "Active scan IS INTRUSIVE — it sends real SQLi/XSS/cmd-injection payloads. The container is not silent: ZAP rules will be loud in target logs/IDS. ALWAYS confirm engagement scope and target list before active_scan."
+  - "Spider only crawls what it can see (links, forms, robots.txt, sitemap.xml). For URLs not linked from anywhere, run ffuf for content discovery first, then spider the discovered paths."
+  - "AJAX spider is dramatically slower than traditional spider (drives a headless browser). On a SPA with 50 routes, expect 5-15 minutes. On a large SPA, longer. Always start with traditional spider; only add AJAX spider if traditional spider returns suspiciously few URLs for a JS-heavy site."
+  - "Reports written via zap_generate_report go to a path inside the container. Use `/session/output/<name>.<ext>` so opensploit can read the artifact (the standard /session/ mount). Common templates: 'traditional-html', 'traditional-md', 'traditional-json', 'sarif-json'."
+  - "Resources + Prompts UNREACHABLE from opensploit today: ZAP MCP advertises 10 Resources (zap://alerts, zap://history, etc.) + 2 Prompts beyond the 14 tools, but opensploit's mcp_tool only dispatches tools/call. DO NOT attempt mcp.resources_read(uri='zap://...') or mcp.prompts_get(...) — they fail with 'Method not found'. Substitute paths: findings → zap_generate_report(template='sarif-json', file_path='/session/output/findings.sarif') then Read the file; scan progress → the four zap_get_*_status tools; HTTP replay → curl with URL+payload extracted from SARIF."
+  - "Defense-in-depth — zap://alerts/{alertRef} resource has a known upstream truncation bug: response cuts off at exactly 8593 bytes for high-instance-count alerts (instanceCount > ~25), producing malformed JSON. Even after opensploit ships resources/read dispatch, AVOID this URI; zap_generate_report (sarif-json) returns the same data without truncation."
+
+usage_patterns:
+  - name: "Quick spider + active scan + report (most common)"
+    description: "Standard web-app scan flow — spider, wait, active scan, wait, report."
+    sequence:
+      - method: zap_create_context
+        args: { name: "engagement", url: "http://TARGET/", include_regexes: ["http://TARGET/.*"] }
+      - method: zap_start_spider
+        args: { target: "http://TARGET/" }
+      - method: zap_get_spider_status
+        args: { scan_id: "<from-start>" }
+      - method: zap_start_active_scan
+        args: { target: "http://TARGET/" }
+      - method: zap_get_active_scan_status
+        args: { scan_id: "<from-start>" }
+      - method: zap_generate_report
+        args: { file_path: "/session/output/zap.html", template: "traditional-html", title: "ENGAGEMENT" }
+
+  - name: "JS-heavy SPA scan"
+    description: "When the target is React/Vue/Angular with client-routing — traditional spider misses most routes."
+    sequence:
+      - method: zap_create_context
+        args: { name: "spa", url: "http://TARGET/" }
+      - method: zap_start_spider
+        args: { target: "http://TARGET/" }
+      - method: zap_get_spider_status
+      - method: zap_start_ajax_spider
+        args: { target: "http://TARGET/" }
+      - method: zap_get_ajax_spider_status
+      - method: zap_start_active_scan
+      - method: zap_get_active_scan_status
+      - method: zap_generate_report
+
+  - name: "Scope-narrowed scan with exclusions"
+    description: "Some endpoints (logout, admin self-destruct, billing) must NEVER be scanned. Use exclude_regexes."
+    sequence:
+      - method: zap_create_context
+        args:
+          name: "scoped"
+          url: "https://app.example.com/"
+          include_regexes: ["https://app\\.example\\.com/api/.*"]
+          exclude_regexes: ["/logout", "/admin/destroy", "/billing/.*"]
+      - method: zap_start_spider
+      - method: zap_start_active_scan
+
+  - name: "Active scan + extract SARIF findings (canonical agent extract path)"
+    description: "After active scan finishes, persist findings as SARIF JSON in /session/. opensploit reads + triages from the file. THIS is the only working path to programmatic ZAP findings — resources/read (zap://alerts, etc.) is NOT dispatched by opensploit's mcp_tool today."
+    sequence:
+      - method: zap_start_active_scan
+        args: { target: "http://TARGET/" }
+      - method: zap_get_active_scan_status
+        args: { scan_id: "<from-start>" }
+        notes: "poll until status == 100 (call repeatedly with the same scan_id)"
+      - method: zap_generate_report
+        args: { file_path: "/session/output/zap-findings.sarif", template: "sarif-json", title: "ENGAGEMENT" }
+        notes: "SARIF JSON gives one rule entry per alert with location, message, severity, evidence — structured for grep/jq/Read"
+
+  - name: "Verify scan progress without launching new ones"
+    description: "Container survived a polling-interval gap; want to know what's still running."
+    sequence:
+      - method: zap_version
+      - method: zap_info
+      - method: zap_get_passive_scan_status
+
+  - name: "Quick liveness probe"
+    description: "Just confirm ZAP MCP is alive after a long pause."
+    sequence:
+      - method: zap_version
