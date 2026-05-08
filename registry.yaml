@@ -1,5 +1,5 @@
 version: '2.0'
-updated_at: '2026-05-04T22:56:43Z'
+updated_at: '2026-05-08T12:17:40Z'
 tools:
   amass:
     name: amass
@@ -16330,32 +16330,36 @@ tools:
         filter or `-cve` for CVE filter). Also exercises the bundled chain-library load path.
   playwright-mcp:
     name: playwright-mcp
-    version: latest
-    description: 'Browser automation via Microsoft @playwright/mcp for complex web interactions, JavaScript-rendered pages,
-      form filling, and CAPTCHA solving. 27+ methods in 8 categories: navigation (navigate, navigate_back), page state (snapshot
-      for element refs, screenshot), interaction (click, hover, type, fill_form, select_option, file_upload, press_key, drag),
-      JavaScript (evaluate, run_code), monitoring (network_requests, console_messages), vision mode (mouse_click_xy, mouse_move_xy,
-      mouse_drag_xy for coordinate-based CAPTCHA interaction), verification (verify_element_visible, verify_text_visible,
-      verify_list_visible, verify_value), evidence (start_tracing, stop_tracing, pdf_save). Chrome headless with VNC access
-      at http://localhost:6080/vnc.html for human CAPTCHA solving. Can proxy through ZAP for vulnerability scanning.'
+    kind: mcp
+    version: 0.0.75
+    description: 'Browser automation via Microsoft''s official @playwright/mcp npm package (v0.0.75) running as a vendor MCP
+      container with VNC stack for human-in-the-loop CAPTCHA solving. 44 tools across 11 categories: navigation, accessibility
+      snapshots, screenshots, form interaction, vision-mode (coordinate-based mouse for CAPTCHAs), verify primitives, JS evaluation,
+      multi-tab, tracing, video recording, PDF generation. Chrome headless by default (chrome-headless-shell, VPN-compatible);
+      HEADED=1 env switches to full Chrome rendered on Xvfb display :99 with noVNC at http://localhost:6080/vnc.html for human
+      interaction. The container speaks MCP-over-stdio natively — no bridge needed (unlike ZAP).'
     source: https://github.com/microsoft/playwright-mcp
     image: ghcr.io/silicon-works/mcp-tools-playwright:latest
-    image_size_mb: 1500
-    timeout_seconds: 300
+    image_size_mb: 1550
+    timeout_seconds: 600
+    idle_timeout_seconds: 1800
+    service: true
+    service_name: playwright
     capabilities:
     - browser_automation
-    - javascript_execution
+    - javascript_rendering
+    - form_filling
+    - accessibility_snapshot
     - screenshot_capture
-    - form_interaction
-    - spa_testing
-    - captcha_interaction
-    - vision_interaction
-    - human_captcha_solving
-    - vnc_display
+    - video_recording
+    - pdf_generation
+    - vision_mode_xy_clicks
+    - request_response_capture
+    - human_in_the_loop_vnc
     phases:
-    - reconnaissance
     - enumeration
     - exploitation
+    - post-exploitation
     requirements:
       network: true
       privileged: false
@@ -16363,292 +16367,432 @@ tools:
       memory_mb: 2048
       cpu: 2.0
     see_also:
-    - curl
-    - zap
-    - ffuf
+    - tool: curl
+      reason: For simple API calls, file downloads, exploit payload delivery — anything that doesn't need JS rendering. Playwright
+        is heavy; use it only when curl returns empty bodies, when the page is JS-rendered, or when you need to drive a form
+        interactively.
+    - tool: zap
+      reason: 'Combine for JS-heavy security testing: configure Playwright to proxy through ZAP (PLAYWRIGHT_MCP_PROXY_SERVER=http://127.0.0.1:8080),
+        drive the user flow with Playwright, ZAP records all traffic + runs passive/active analysis on captured URLs.'
+    - tool: ffuf
+      reason: Content discovery for hidden routes Playwright's spider/crawl wouldn't find (Playwright follows links the page
+        exposes; ffuf brute-forces what isn't linked).
+    - tool: nuclei
+      reason: Independent vuln scanner — once Playwright proves a path is reachable, nuclei templates can validate specific
+        CVEs against it.
+    warnings:
+    - 'browser_run_code_unsafe runs in a sandboxed Node-side eval context with the Playwright `page` object exposed. Verified
+      live 2026-05-08: globalThis = {page, __end__, __fn__}; require/process/fs/child_process are ALL undefined. The risk
+      is NOT generic Node RCE — it''s full Playwright API access (page.context().request can fetch arbitrary URLs, read/clear
+      cookies, drive any tab). Roughly equivalent to giving the agent unrestricted browser_navigate+browser_evaluate+page.context().request
+      in one shot. Use browser_evaluate for simple in-page JS; reserve run_code_unsafe for chained Playwright operations or
+      context-level work.'
+    - Vision mode (browser_mouse_*_xy) operates in raw screen coordinates with no element-tree awareness. A miscalibrated
+      click hits whatever pixel is at that coordinate — including 'destructive' UI like delete buttons or logout links. Always
+      preview with browser_take_screenshot first when working with vision mode.
+    - Active browser sessions hold real socket connections to the target. A wedged page (infinite redirect, stuck on a CAPTCHA
+      wall, JS exception) can leak connections and consume the container's per-page memory budget. Use browser_close + browser_navigate
+      to fresh-start, not browser_resume, when you suspect state corruption.
+    notes: "Architecture: vendor MCP runs natively. The Microsoft @playwright/mcp\nnpm package speaks MCP-over-stdio directly,\
+      \ so unlike ZAP (where we\nrun a stdio↔HTTP bridge) the container's entrypoint just\n`exec npx @playwright/mcp --config\
+      \ ... --caps=...` and ContainerManager\ntalks to it on stdin/stdout. No bridge, no HTTP, no auth key.\n\nTwo browser\
+      \ modes via env:\n  HEADED=0 (default) — chrome-headless-shell binary. VPN-compatible\n                       (works\
+      \ against tun0 IPs). Faster startup. Used\n                       for 99% of agent flows.\n  HEADED=1            — full\
+      \ Chrome binary on Xvfb :99. Renders to a\n                       virtual display reachable via VNC at\n           \
+      \            http://localhost:6080/vnc.html. Used when an\n                       operator needs to manually solve a\
+      \ CAPTCHA or\n                       click through anti-automation walls. Requires\n                       the socat-based\
+      \ VPN workaround (see entrypoint.sh)\n                       when targeting HTB tun0 IPs because the full\n        \
+      \               Chrome binary cannot reach tun0 directly\n                       (ERR_ADDRESS_UNREACHABLE).\n\nVNC stack\
+      \ always starts (Xvfb + x11vnc + websockify on port 6080)\neven in headless mode — only useful in HEADED=1 but cheap\
+      \ to leave\nrunning and keeps the entrypoint single-codepath.\n\nCaps in v0.0.75:\n  vision   — browser_mouse_*_xy primitives\n\
+      \  pdf      — browser_pdf_save\n  devtools — browser_run_code_unsafe (raw Node-side JS, RCE-equivalent)\n  testing \
+      \ — browser_verify_*, browser_generate_locator (NOT in --help\n             output; looks retired but runtime still\
+      \ honors it)\nTracing + video + annotation tools are now default-enabled (no cap\nflag needed in v0.0.75).\n\nCold start:\
+      \ ~10-15s (Node + Chromium spawn, no JVM). Much faster\nthan ZAP. Suitable for ephemeral or service mode; we run service.\n\
+      \nMigration history: NO Python wrapper to retire — playwright-mcp has\nalways been a thin vendor wrapper around upstream's\
+      \ npm package. This\nMay 2026 round added the standardization layer (failure_signatures,\nusage_patterns, gotchas, scenarios.md,\
+      \ smoke test, kind:mcp explicit,\nidle_timeout_seconds) that was missing.\n"
     routing:
       use_for:
-      - login form
-      - web login
-      - fill form
-      - web page content
-      - JavaScript rendered page
-      - browser automation
-      - screenshot
-      - form interaction
-      - web application testing
-      - see what's on the page
-      - empty response from curl
-      - SPA testing
-      - session management
-      - cookie handling
-      - XSS testing
-      - XSS validation
-      - test payload execution
-      - check if JavaScript executes
-      - capture console errors
-      - payload validation
-      - verify XSS callback
-      - check cookie exfiltration
-      - CAPTCHA
-      - captcha solving
-      - captcha screenshot
-      - image captcha
-      - text captcha
-      - grid captcha
-      - reCAPTCHA
-      - slider captcha
-      - click captcha images
+      - drive a login form (fill username + password + click submit)
+      - navigate a JavaScript-rendered SPA where curl returns an empty body
+      - see what is rendered on a page (accessibility snapshot, not raw HTML)
+      - screenshot a page or specific element for evidence / report
+      - validate XSS / CSRF payload execution (fire payload, observe console + network)
+      - capture cookies / session tokens after authenticating to a web app
+      - solve a CAPTCHA via VNC handoff (HEADED=1, operator clicks via http://localhost:6080)
+      - click on coordinate-based CAPTCHAs (image grids, sliders) via vision-mode mouse_xy primitives
+      - record a video of an exploitation flow for the engagement report
+      - save a page as PDF for offline analysis
+      - drive multi-tab / multi-popup flows (OAuth, payment redirects, etc.)
+      - generate Playwright locator strings to reuse in custom test scripts
       never_use_for:
-      - simple API request
-      - file download
-      - exploit payload delivery
-      - directory fuzzing
-      - brute force
+      - task: simple API request
+        use_instead: curl
+        reason: Heavy. Cold start ~15s + memory cost vs curl's instant. Only use when JS rendering is actually needed.
+      - task: file download from a known URL
+        use_instead: curl
+      - task: directory / route brute-force
+        use_instead: ffuf
+      - task: credential brute-force
+        use_instead: hydra
+      - task: vulnerability scanning
+        use_instead: zap
+        reason: ZAP has dedicated scan rules + alert engine. Playwright is for driving the UI, not scanning.
+      - task: exploit payload delivery / running shellcode
+        use_instead: exploit-runner
       triggers:
-      - login page
+      - playwright
+      - login form
       - fill login
       - web form
-      - javascript
-      - browser
+      - javascript rendered
+      - JS-rendered
+      - browser automation
+      - headless browser
       - screenshot
       - empty body
       - page returns empty
       - captcha
       - CAPTCHA
-      prefer_over:
-      - curl
-    warnings:
-    - Large image (~1.5GB) - first pull takes time
-    - Requires more memory than curl (2GB recommended)
-    notes: 'Wraps Microsoft''s @playwright/mcp npm package in a locally-built container.
-
-      Use for: login forms, JavaScript-rendered content, web app testing.
-
-      Prefer over curl when pages return empty bodies or require JS rendering.
-
-
-      VNC/noVNC: The browser runs headed on a virtual display with VNC access.
-
-      Users can see and interact with the browser at http://localhost:6080/vnc.html
-
-      This enables human CAPTCHA solving — the agent navigates to the page,
-
-      then the user connects via VNC to solve the CAPTCHA directly.
-
-
-      WHEN TO USE PLAYWRIGHT vs CURL:
-
-      - Use Playwright: login forms, JS pages, empty curl responses, need to see page
-
-      - Use curl: simple API calls, file downloads, exploit payloads, known endpoints
-
-
-      PLAYWRIGHT + ZAP INTEGRATION (for JS-heavy security testing):
-
-      Configure proxy via env var: PLAYWRIGHT_MCP_PROXY_SERVER=http://127.0.0.1:8080
-
-      1. Start ZAP - it listens on port 8080
-
-      2. Launch Playwright container with proxy env var set
-
-      3. Use Playwright to browse/interact with target
-
-      4. ZAP captures all traffic via proxy_history
-
-      5. Run zap.active_scan() on captured URLs
-
-
-      See: https://github.com/microsoft/playwright-mcp
-
-      '
+      - reCAPTCHA
+      - image grid captcha
+      - slider captcha
+      - click captcha
+      - XSS validation
+      - XSS payload
+      - session cookie capture
+      - OAuth redirect
+      - payment flow
+      - SPA
+      - single-page app
+      prefer_over: []
     methods:
       browser_navigate:
-        description: Navigate to a URL
+        description: Navigate the active page to a URL. Waits for the page's load event by default.
+        when_to_use: 'First step on most flows. Mental model: navigate → snapshot → interact.'
         params:
           url:
             type: string
             required: true
-            description: URL to navigate to
+            description: Target URL e.g. http://10.10.10.5/
       browser_navigate_back:
-        description: Go back to the previous page
+        description: Navigate back in the history (browser back button).
+        when_to_use: Multi-step flows where you need to return to a prior page after capturing state.
+        params: {}
+      browser_close:
+        description: Close the active page. Browser process keeps running; this only ends the current page tab.
+        when_to_use: End-of-flow cleanup, or when a page is wedged and you want to fresh-start (close + new navigate).
         params: {}
       browser_snapshot:
-        description: Capture accessibility snapshot - call this first to get element refs for other tools
-        when_to_use: Before interacting with elements - returns refs needed for click/type/etc
-        params: {}
-      browser_take_screenshot:
-        description: Capture visual screenshot of the page or a specific element
-        when_to_use: Capture page state, CAPTCHA images, or element-level screenshots for vision analysis
+        description: Capture an accessibility snapshot — a structured tree of the page's interactive elements with refs the
+          agent uses for click/type/hover. Better than raw HTML for understanding what's on a page.
+        when_to_use: Before any interaction tool (click/type/hover/etc.) to get current refs. Refs are page-bound; navigate
+          invalidates them.
         params:
+          target:
+            type: string
+            description: 'Optional: limit snapshot to a sub-tree by ref'
           filename:
             type: string
-            description: Optional filename to save
+            description: Save snapshot to this file inside container (use /session/output/<name>.txt — platform convention;
+              entrypoint pre-creates the dir)
+          depth:
+            type: integer
+            description: Snapshot depth limit (default unlimited)
+          boxes:
+            type: boolean
+            description: Include layout box positions
+      browser_take_screenshot:
+        description: Capture a visual screenshot of the page or a specific element. Returns image content inline (base64)
+          by default; pass filename to save instead.
+        when_to_use: Evidence capture for reports. For making decisions about what's on the page, prefer browser_snapshot
+          — it's structured and lets you click by ref.
+        params:
+          type:
+            type: string
+            required: true
+            description: 'Image format: ''png'' or ''jpeg'''
           element:
             type: string
-            description: Human description of element to screenshot
-          ref:
+            description: Element description (used for permission prompt)
+          target:
             type: string
-            description: Element ref from browser_snapshot for element-level screenshot
+            description: Element ref from browser_snapshot to screenshot just that element
+          filename:
+            type: string
+            description: Save to this file inside container (use /session/output/<name>.png — platform convention; entrypoint
+              pre-creates the dir)
           fullPage:
             type: boolean
             description: 'Capture full scrollable page (default: viewport only)'
-          type:
+      browser_pdf_save:
+        description: Render the current page as PDF (pdf cap).
+        when_to_use: Evidence / reporting. PDF preserves printable layout; for screenshot of viewport prefer take_screenshot.
+        params:
+          filename:
             type: string
-            description: 'Image format: png (default) or jpeg'
+            description: Output PDF path inside container (use /session/output/<name>.pdf — platform convention; entrypoint
+              pre-creates the dir)
+      browser_console_messages:
+        description: Return console messages observed since the last call (or page load).
+        when_to_use: Validating payload execution (XSS popped an alert, exploit logged), debugging why a flow failed.
+        params:
+          level:
+            type: string
+            required: true
+            description: Filter level — must be one of 'error', 'warning', 'info', 'debug' (NOT 'log' or 'all' as older docs
+              claim — verified live 2026-05-08)
+          all:
+            type: boolean
+            description: Include all collected messages (not just since last call)
+          filename:
+            type: string
+            description: Dump messages to file (use /session/output/<name>.log — platform convention; entrypoint pre-creates
+              the dir)
+      browser_network_requests:
+        description: Return a numbered list of network requests since page load. Use the index with browser_network_request
+          to fetch full headers + body.
+        when_to_use: Discovering API endpoints, OAuth redirects, hidden XHR routes after a UI action.
+        params:
+          static:
+            type: boolean
+            required: true
+            description: true = include static assets (.js/.css/.png); false = filter to XHR/fetch/document only
+          filter:
+            type: string
+            description: Optional URL substring filter
+          filename:
+            type: string
+            description: Dump list to file
+      browser_network_request:
+        description: Get full details (headers + body) of one specific request by index from browser_network_requests.
+        when_to_use: After listing requests, drill into the interesting one (auth POST, API response with secrets, etc.).
+        params:
+          index:
+            type: integer
+            required: true
+            description: Index from browser_network_requests
+          part:
+            type: string
+            description: 'Optional: ''request'' or ''response'' for just that side'
+          filename:
+            type: string
+            description: Dump to file (request bodies can be large)
       browser_click:
-        description: Click on an element using ref from snapshot
+        description: Click an element using a ref from a prior browser_snapshot.
+        when_to_use: Triggering links, buttons, checkboxes, radios. Always snapshot first.
         params:
-          element:
-            type: string
-            required: true
-            description: Human description for permission
-          ref:
+          target:
             type: string
             required: true
             description: Element ref from browser_snapshot
-      browser_hover:
-        description: Hover over an element (reveal menus, tooltips)
-        params:
           element:
             type: string
-            required: true
-            description: Human description
-          ref:
+            description: Human description for permission prompt
+          doubleClick:
+            type: boolean
+            description: Double-click instead of single
+          button:
             type: string
-            required: true
-            description: Element ref from snapshot
+            description: '''left'' | ''middle'' | ''right'' (default left)'
+          modifiers:
+            type: array
+            description: Modifier keys held during click ('Shift', 'Control', 'Meta', 'Alt')
       browser_type:
-        description: Type text into an editable element
+        description: Type text into an editable element (input, textarea, contenteditable).
+        when_to_use: Filling form fields. For multi-field forms in one shot, prefer browser_fill_form.
         params:
-          ref:
+          target:
             type: string
             required: true
-            description: Element ref from browser_snapshot
-          element:
-            type: string
-            required: true
-            description: Human description for permission
+            description: Element ref
           text:
             type: string
             required: true
             description: Text to type
+          element:
+            type: string
+            description: Human description for permission prompt
           submit:
             type: boolean
             description: Press Enter after typing
           slowly:
             type: boolean
-            description: Type character by character (triggers key handlers)
+            description: Type character-by-character (triggers JS keyhandlers; required for some anti-automation forms)
       browser_fill_form:
-        description: Fill multiple form fields at once
+        description: Fill multiple form fields atomically. Faster + more reliable than sequential browser_type for full forms.
+        when_to_use: Login forms, registration, multi-field payloads.
         params:
           fields:
             type: array
             required: true
-            description: 'Array of {name, type, ref, value} - type must be: textbox|checkbox|radio|combobox|slider'
-      browser_select_option:
-        description: Select option from dropdown
-        params:
-          element:
-            type: string
-            required: true
-          ref:
-            type: string
-            required: true
-          value:
-            type: string
-            required: true
-            description: Option text to select
-      browser_file_upload:
-        description: Upload files to file input
-        params:
-          paths:
-            type: array
-            required: true
-            description: File paths to upload
+            description: 'Array of {name, type, target, value}. type ∈ {textbox, checkbox, radio, combobox, slider}. NOTE:
+              the field key is `target` NOT `ref` (drift from older docs — verified live 2026-05-08; passing `ref` returns
+              ''expected string, received undefined at fields.0.target'').'
       browser_press_key:
-        description: Press a keyboard key (Enter, Tab, Escape, ArrowDown, etc)
+        description: Press a single keyboard key (Enter, Tab, Escape, Arrow keys, F-keys, etc.).
+        when_to_use: Triggering keyboard shortcuts the page expects, navigating dropdowns, dismissing dialogs without a ref.
         params:
           key:
             type: string
             required: true
-            description: Key name like Enter, Tab, Escape
-      browser_evaluate:
-        description: Execute JavaScript on page or element
+            description: Key name e.g. 'Enter', 'Escape', 'ArrowDown', 'F12'
+      browser_hover:
+        description: Hover the mouse over an element. Reveals tooltips, dropdown menus, hover-only UI.
+        when_to_use: Multi-level menus, contextual UI that only appears on hover, JS that fires on mouseenter.
         params:
-          function:
+          target:
             type: string
             required: true
-            description: JS code as () => {...} or (element) => {...}
           element:
             type: string
-            description: Human description if targeting element
-          ref:
-            type: string
-            description: Element ref if targeting specific element
-      browser_run_code:
-        description: Run arbitrary Playwright code snippet
+            description: Human description for permission
+      browser_select_option:
+        description: Select an option from a dropdown / select element.
+        when_to_use: <select> elements where browser_click on the option doesn't work reliably.
         params:
-          code:
+          target:
             type: string
             required: true
-            description: Playwright code to execute
+            description: Select element ref
+          values:
+            type: array
+            required: true
+            description: Array of option values to select (multi-select supported)
+          element:
+            type: string
+            description: Human description
       browser_handle_dialog:
-        description: Handle alert, confirm, or prompt dialogs
+        description: Accept or dismiss a JavaScript dialog (alert, confirm, prompt) that the page raised.
+        when_to_use: When a click triggers a confirm/prompt and you need to accept it to proceed.
         params:
           accept:
             type: boolean
             required: true
-            description: Accept or dismiss dialog
+            description: true = OK / Accept, false = Cancel / Dismiss
           promptText:
             type: string
-            description: Text to enter for prompt dialogs
-      browser_network_requests:
-        description: Get list of network requests made by page
-        when_to_use: Discover API endpoints, check for sensitive data in requests
-        params: {}
-      browser_console_messages:
-        description: Get console log messages from page
-        when_to_use: Check for JavaScript errors, debug info, leaked secrets
-        notes: 'Critical for XSS testing. Captures:
-
-          - console.log() output (use for XSS markers like console.log(''XSS_EXECUTED''))
-
-          - JavaScript errors
-
-          - Network errors
-
-          '
-        params: {}
-      browser_wait_for:
-        description: Wait for text to appear/disappear or timeout
-        notes: 'Can wait for text/timeout. For waiting on specific network requests,
-
-          use browser_network_requests with polling or check ZAP proxy_history.
-
-          '
+            description: For prompt() dialogs, the text to enter
+      browser_file_upload:
+        description: Upload one or more files to a file input. Doesn't require a click on the file input — file is attached
+          programmatically.
+        when_to_use: File-upload exploits (path traversal, SSRF via SVG, malicious docx, etc.). Pre-stage the file in /session/output/
+          first (platform convention).
         params:
-          text:
-            type: string
-            description: Text to wait for
-          textGone:
-            type: string
-            description: Text to wait to disappear
-          timeout:
-            type: integer
-            description: Max wait time in ms
-      browser_tabs:
-        description: List, create, close, or switch browser tabs
+          paths:
+            type: array
+            description: Array of file paths inside the container to upload
+      browser_drag:
+        description: Drag from one element to another (HTML5 drag-and-drop API).
+        when_to_use: Drag-to-reorder UI, file-drop zones (use browser_drop for direct file paths instead), slider knobs.
         params:
-          action:
+          startTarget:
             type: string
             required: true
-            description: list, new, close, or select
-          tabId:
+            description: Drag-source ref
+          endTarget:
             type: string
-            description: Tab ID for close/select actions
+            required: true
+            description: Drop-target ref
+          startElement:
+            type: string
+            description: Human description for source
+          endElement:
+            type: string
+            description: Human description for target
+      browser_drop:
+        description: Drop file paths or MIME-typed data onto an element, simulating a drag from outside the page.
+        when_to_use: File-drop zones (drag-from-OS UX). Pass paths to upload local files, or data to inject MIME blobs.
+        params:
+          target:
+            type: string
+            required: true
+            description: Element ref to drop onto
+          paths:
+            type: array
+            description: File paths inside container to drop (use this OR data)
+          data:
+            type: object
+            description: Map of mime-type → string content to drop as DataTransfer items
+          element:
+            type: string
+            description: Human description
+      browser_mouse_click_xy:
+        description: Click at raw screen coordinates. NO element-tree awareness — clicks whatever pixel is at (x,y).
+        when_to_use: CAPTCHA image grids, canvas-based UI, click-through walls. Always browser_take_screenshot first to compute
+          coords.
+        params:
+          x:
+            type: integer
+            required: true
+          y:
+            type: integer
+            required: true
+          button:
+            type: string
+            description: left | middle | right
+          clickCount:
+            type: integer
+            description: 1 (single), 2 (double), 3 (triple)
+          delay:
+            type: integer
+            description: Delay in ms between mousedown and mouseup
+      browser_mouse_move_xy:
+        description: Move the mouse cursor to (x,y) without clicking.
+        when_to_use: Hover-on-canvas UI, drawing curves (combine with mouse_down + multiple mouse_move + mouse_up).
+        params:
+          x:
+            type: integer
+            required: true
+          y:
+            type: integer
+            required: true
+      browser_mouse_drag_xy:
+        description: Drag (mouse-down at start, move to end, mouse-up) using raw coords.
+        when_to_use: Slider CAPTCHAs, canvas drawing, custom drag UIs.
+        params:
+          startX:
+            type: integer
+            required: true
+          startY:
+            type: integer
+            required: true
+          endX:
+            type: integer
+            required: true
+          endY:
+            type: integer
+            required: true
+      browser_mouse_down:
+        description: Press mouse button (without releasing). Pair with mouse_move_xy + mouse_up for custom drag patterns.
+        when_to_use: Click-and-hold gestures, selection drawing, multi-step drag flows.
+        params:
+          button:
+            type: string
+            description: left | middle | right (default left)
+      browser_mouse_up:
+        description: Release the previously pressed mouse button.
+        when_to_use: Pair with mouse_down for custom gestures.
+        params:
+          button:
+            type: string
+            description: left | middle | right (default left)
+      browser_mouse_wheel:
+        description: Scroll the mouse wheel by deltaX / deltaY pixels.
+        when_to_use: Triggering infinite-scroll, lazy-loaded content, zoom-by-wheel.
+        params:
+          deltaX:
+            type: integer
+            required: true
+            description: Horizontal scroll delta in pixels
+          deltaY:
+            type: integer
+            required: true
+            description: Vertical scroll delta in pixels (positive = scroll down)
       browser_resize:
-        description: Resize browser window
+        description: Resize the browser window to specific pixel dimensions.
+        when_to_use: Triggering responsive breakpoints (mobile vs desktop), testing layouts at specific viewports.
         params:
           width:
             type: integer
@@ -16656,147 +16800,460 @@ tools:
           height:
             type: integer
             required: true
-      browser_close:
-        description: Close the browser page
-        params: {}
-      browser_drag:
-        description: Drag and drop between two elements
+      browser_wait_for:
+        description: Wait for text to appear / disappear on the page, or for a specific time.
+        when_to_use: After triggering an async action, before snapshotting / asserting. More reliable than fixed sleeps.
         params:
-          startElement:
+          time:
+            type: number
+            description: Seconds to wait unconditionally
+          text:
             type: string
-            required: true
-            description: Human description of source element
-          startRef:
+            description: Wait until this text appears
+          textGone:
             type: string
-            required: true
-            description: Ref of element to drag from
-          endElement:
-            type: string
-            required: true
-            description: Human description of target element
-          endRef:
-            type: string
-            required: true
-            description: Ref of element to drop onto
-      browser_mouse_click_xy:
-        description: Click at exact x,y coordinates on the page (vision mode)
-        when_to_use: Click CAPTCHA grid cells, image regions, or elements without accessible refs
+            description: Wait until this text disappears
+      browser_resume:
+        description: Resume execution after a pause (used with debugger control flow).
+        when_to_use: Advanced — not needed for typical agent flows. Mostly for manual debugging via the dashboard.
         params:
-          x:
-            type: integer
-            required: true
-            description: X coordinate in pixels
-          y:
-            type: integer
-            required: true
-            description: Y coordinate in pixels
-          button:
+          step:
+            type: boolean
+            description: If true, pause again before the next instruction
+          location:
             type: string
-            description: 'Mouse button: left (default), right, middle'
-      browser_mouse_move_xy:
-        description: Move mouse to exact x,y coordinates (vision mode)
-        when_to_use: Hover over CAPTCHA elements, position cursor before clicking
-        params:
-          x:
-            type: integer
-            required: true
-            description: X coordinate in pixels
-          y:
-            type: integer
-            required: true
-            description: Y coordinate in pixels
-      browser_mouse_drag_xy:
-        description: Drag from one x,y coordinate to another (vision mode)
-        when_to_use: Solve slider CAPTCHAs, drag-and-drop puzzles
-        params:
-          startX:
-            type: integer
-            required: true
-            description: Start X coordinate
-          startY:
-            type: integer
-            required: true
-            description: Start Y coordinate
-          endX:
-            type: integer
-            required: true
-            description: End X coordinate
-          endY:
-            type: integer
-            required: true
-            description: End Y coordinate
-      browser_install:
-        description: Install browser if not present (usually not needed - Chrome pre-installed)
-        params: {}
+            description: Pause point identifier
       browser_verify_element_visible:
-        description: Verify an element is visible on the page
-        when_to_use: Confirm payload rendered or element appeared after action
+        description: Assert an element with given role + accessible name is visible. Returns success/failure.
+        when_to_use: After an interaction, confirm the expected UI appeared (e.g. a success banner, the correct page heading).
         params:
-          ref:
+          role:
             type: string
             required: true
-            description: Element ref from browser_snapshot
-          timeout:
-            type: integer
-            description: Max wait time in ms
+            description: ARIA role e.g. 'button', 'heading', 'link'
+          accessibleName:
+            type: string
+            required: true
+            description: Accessible name (text content for buttons/links/headings)
+      browser_verify_list_visible:
+        description: Assert that a list (ul/ol/role=list) contains the expected items in order.
+        when_to_use: Verifying search results, navigation menus, dropdown contents.
+        params:
+          element:
+            type: string
+            required: true
+            description: Human description of the list
+          target:
+            type: string
+            required: true
+            description: Element ref of the list container
+          items:
+            type: array
+            required: true
+            description: Expected items in order
       browser_verify_text_visible:
-        description: Verify specific text is visible on the page
-        when_to_use: Check XSS output appeared, verify payload execution result
+        description: Assert text is somewhere on the page. Prefer verify_element_visible if you know the role.
+        when_to_use: Quick text-presence check when you don't have a specific element in mind.
         params:
           text:
             type: string
             required: true
-            description: Text to verify is visible
-          timeout:
-            type: integer
-            description: Max wait time in ms
-      browser_verify_list_visible:
-        description: Verify a list of items is visible
-        when_to_use: Enumerate visible data, check multiple payloads rendered
-        params:
-          items:
-            type: array
-            required: true
-            description: List of text items to verify
-          timeout:
-            type: integer
-            description: Max wait time in ms
+            description: Text to find
       browser_verify_value:
-        description: Verify form field has specific value
-        when_to_use: Check form state after injection, verify pre-filled values
+        description: Assert an input/select/checkbox has a specific value or state.
+        when_to_use: Verifying form pre-fill, persisted state, post-submit values.
         params:
-          ref:
+          type:
             type: string
             required: true
-            description: Element ref from browser_snapshot
+            description: Input type ('textbox', 'checkbox', 'select', etc.)
+          element:
+            type: string
+            required: true
+            description: Human description
+          target:
+            type: string
+            required: true
+            description: Element ref
           value:
             type: string
             required: true
-            description: Expected value
+            description: Expected value (or 'true'/'false' for checkbox)
+      browser_evaluate:
+        description: Run a JavaScript function inside the PAGE context. Has access to the DOM, page-side globals, the document
+          object.
+        when_to_use: Reading page-state JS doesn't expose via the accessibility tree (deep object inspection, computed values,
+          custom data attributes).
+        params:
+          function:
+            type: string
+            required: true
+            description: JS function source e.g. '() => document.title'
+          element:
+            type: string
+            description: Optional element ref — function gets it as argument
+          target:
+            type: string
+            description: Same — element ref alias
+          filename:
+            type: string
+            description: Dump return value to file
+      browser_run_code_unsafe:
+        description: RCE-EQUIVALENT — runs a Playwright function in the SERVER process (Node, not the page) with the `page`
+          object exposed. Has access to whatever the Playwright Node runtime can do (filesystem, env, subprocess, full Playwright
+          API). Devtools cap.
+        when_to_use: ONLY when you need Playwright Node-side API access the standard tools don't expose (advanced trace manipulation,
+          custom timeouts, multi-context juggling). 99% of the time browser_evaluate is what you actually want — it runs in
+          the page context with `document`/`window` available.
+        params:
+          code:
+            type: string
+            description: 'MUST be a function expression. Receives the Playwright `page` as first arg. Examples: ''(page) =>
+              page.title()''; ''async (page) => { const t = await page.title(); return { title: t, url: page.url() }; }''.
+              Bare expressions like ''1+1'' or ''document.title'' fail with TypeError or ReferenceError — verified live 2026-05-08.'
+          filename:
+            type: string
+            description: Optional file path with the function expression instead of inline `code`
+      browser_tabs:
+        description: List, create, close, or select tabs. Single tool with action verb argument.
+        when_to_use: OAuth flows that pop up a new tab, multi-window comparisons, isolating sessions per-tab.
+        params:
+          action:
+            type: string
+            required: true
+            description: '''list'' | ''new'' | ''close'' | ''select'''
+          index:
+            type: integer
+            description: Tab index for close/select actions
+          url:
+            type: string
+            description: URL for 'new' action
       browser_start_tracing:
-        description: Start recording browser execution trace
-        when_to_use: Capture full execution evidence for XSS, record all network activity
-        params:
-          name:
-            type: string
-            description: Optional trace name
+        description: Start a Playwright trace (DOM snapshots + actions + network) saved as .zip.
+        when_to_use: Before a flow you might need to debug later. Trace can be opened in Playwright Trace Viewer post-hoc.
+        params: {}
       browser_stop_tracing:
-        description: Stop recording and save trace file
-        when_to_use: Save evidence after completing XSS test or interaction sequence
+        description: Stop tracing and save the .zip artifact.
+        when_to_use: After the flow completes, save evidence.
+        params: {}
+      browser_start_video:
+        description: Start recording a video of the browser viewport.
+        when_to_use: Reproducing a complex flow for the engagement report, demonstrating an exploit chain.
         params:
-          path:
+          filename:
             type: string
-            description: Path to save trace file
-      browser_pdf_save:
-        description: Save current page as PDF
-        when_to_use: Capture page state as evidence, save rendered payload result
+            description: Output video path inside container
+          size:
+            type: string
+            description: Video resolution e.g. '1920x1080'
+      browser_stop_video:
+        description: Stop video recording and save the file.
+        when_to_use: End of a recorded flow.
+        params: {}
+      browser_video_chapter:
+        description: Add a chapter card to the video — full-screen overlay with title + optional description, useful for narrating
+          exploit demos.
+        when_to_use: Marking phases in a recorded engagement walkthrough ('Reconnaissance', 'Exploitation', 'Post-Ex').
         params:
-          path:
+          title:
             type: string
-            description: Path to save PDF file
-          fullPage:
-            type: boolean
-            description: Capture full scrollable page
+            required: true
+          description:
+            type: string
+            description: Sub-text under the title
+          duration:
+            type: number
+            description: Seconds the chapter card stays visible
+      browser_highlight:
+        description: Add a persistent visual highlight overlay around an element. Useful in headed mode + VNC for showing
+          the operator what the agent is looking at.
+        when_to_use: Headed-mode flows where the human operator needs to see what the agent has identified before approving
+          an action.
+        params:
+          target:
+            type: string
+            required: true
+            description: Element ref to highlight
+          element:
+            type: string
+            description: Human description
+          style:
+            type: string
+            description: Optional CSS for the overlay
+      browser_hide_highlight:
+        description: Remove a highlight overlay previously added.
+        when_to_use: Cleanup after a highlight session.
+        params:
+          target:
+            type: string
+            description: Element ref (or omit to clear all highlights)
+          element:
+            type: string
+            description: Human description
+      browser_annotate:
+        description: Open the Playwright Dashboard in annotation mode and wait for the user to draw annotations. Returns when
+          user finishes.
+        when_to_use: Operator-in-the-loop UI labeling, building training data for a vision model, manual QA marking.
+        params: {}
+      browser_generate_locator:
+        description: Generate a Playwright locator string for an element (e.g. for use in a hand-written test script after
+          the engagement).
+        when_to_use: Exporting agent-discovered selectors into a deliverable test suite.
+        params:
+          target:
+            type: string
+            required: true
+            description: Element ref
+          element:
+            type: string
+            description: Human description
+    failure_signatures:
+    - signal: TimeoutError
+      error_class: tool_misconfigured
+      remediation: Default Playwright action timeout is 30s. If a wait_for / type / click times out, the page is wedged or
+        the ref no longer points at a reachable element. Try browser_snapshot to get fresh refs, or browser_close + browser_navigate
+        to reset.
+    - signal: expected ref
+      error_class: invalid_parameter
+      remediation: The 'target' arg must be a ref string from a prior browser_snapshot call. Refs are POSITION-based across
+        snapshots, not identity-based — a stale ref from a prior page does NOT error, it silently routes to whatever element
+        occupies that position in the current snapshot tree (verified live 2026-05-08). Always re-snapshot after any navigation
+        before issuing click/type/fill_form.
+    - signal: ERR_ADDRESS_UNREACHABLE
+      error_class: network
+      remediation: 'Chromium can''t reach the target IP. Most common cause: HEADED=1 mode against a tun0/VPN target without
+        the socat workaround (full Chrome binary cannot reach tun0; chrome-headless-shell can). Switch to HEADED=0 OR set
+        VPN_TARGET + VPN_HOSTNAME env to enable the socat proxy in entrypoint.sh.'
+    - signal: ERR_NAME_NOT_RESOLVED
+      error_class: network
+      remediation: DNS lookup failed. For raw HTB IPs use http://10.x.x.x/ directly. For hostname-based vhosts (cozyhosting.htb),
+        pass --add-host=host:ip in the docker run flags AND use the hostname URL in browser_navigate.
+    - signal: Permission denied to access property
+      error_class: invalid_parameter
+      remediation: Cross-origin frame access. The page navigated to a different origin and the iframe / popup is sandboxed.
+        Use browser_tabs new + select to switch contexts instead of trying to evaluate across origins.
+    - signal: frame was detached
+      error_class: tool_misconfigured
+      remediation: The frame the ref pointed at is gone (navigation, parent frame removal). Re-snapshot to get fresh refs.
+    - signal: Page closed
+      error_class: session_lost
+      remediation: browser_close was called or the page crashed. Open a fresh page with browser_tabs action=new.
+    - signal: Ref
+      error_class: invalid_parameter
+      remediation: 'Live shape: ''Ref e9999 not found in the current page snapshot. Try capturing new snapshot.'' — bogus
+        ref. Run browser_snapshot to get current refs.'
+    - signal: outside allowed roots
+      error_class: tool_misconfigured
+      remediation: 'Live shape: ''File access denied: <path> is outside allowed roots. Allowed roots: /tmp/.playwright-mcp,
+        /''. Resolution: this image''s entrypoint.sh already passes --allow-unrestricted-file-access — if you still see this,
+        the image was built without the flag. The platform-wide convention for tool outputs is /session/output/<name>.<ext>;
+        this image''s entrypoint pre-creates that dir at container start. For deeper subdirs (e.g. /session/output/traces/foo/),
+        `mkdir -p` first via a separate run_cli call (page.pdf / page.screenshot do NOT auto-create parent dirs).'
+    - signal: expected string, received undefined at fields
+      error_class: invalid_parameter
+      remediation: browser_fill_form schema strict-validates field entries. The key is `target` (NOT `ref` as older docs say).
+        Use {name, type, target, value} per field.
+    gotchas:
+    - 'Refs are POSITION-based across snapshots, not identity-based. Verified live 2026-05-08: navigated from /login (where
+      e17 = Username textbox) to / (homepage), then called browser_click target=e17. Playwright did NOT error — it silently
+      clicked whatever element was at the e17 position in the new snapshot tree (a generic div, ran `await page.locator(''div'').nth(2).click()`).
+      ALWAYS browser_snapshot first after any navigation; reusing a stale ref does NOT fail safely, it executes a wrong action.'
+    - '44 tools, organized via --caps: vision (mouse_*_xy, 3 tools), pdf (pdf_save), devtools (run_code_unsafe, RCE-equivalent),
+      testing (verify_*, generate_locator, 5 tools, undocumented but still works in v0.0.75). The entrypoint enables all four
+      caps.'
+    - browser_evaluate runs in the PAGE context (DOM available). browser_run_code_unsafe runs in the SERVER context (Node,
+      filesystem + env access — RCE territory). Use browser_evaluate by default; only use run_code_unsafe when you need Playwright
+      API access.
+    - Headless (default) uses chrome-headless-shell which IS VPN/tun0-compatible. Headed (HEADED=1) uses full Chrome which
+      CANNOT reach tun0 directly — needs the socat-based VPN_TARGET+VPN_HOSTNAME workaround in entrypoint.sh. This is a real
+      HTB engagement gotcha; chrome-headless-shell is the right choice unless an operator needs to see the page via VNC.
+    - Vision mode (browser_mouse_*_xy) operates in raw screen coordinates — no element awareness. Always browser_take_screenshot
+      first to compute the right (x,y). A bad coord clicks whatever pixel is there, including 'destructive' UI.
+    - VNC stack always runs (Xvfb + x11vnc + websockify on port 6080) regardless of HEADED setting. In headless mode VNC is
+      technically pointing at a blank framebuffer. Cheap to leave running; keeps entrypoint single-codepath.
+    - browser_console_messages requires a `level` parameter (now mandatory in v0.0.75). Use 'all' to get everything, or filter
+      to 'error' / 'warn' for triage.
+    - browser_network_requests requires a `static` parameter. Set false to filter out static assets (.js/.css/images) — usually
+      what you want when looking for API/XHR calls.
+    - The Chrome `channel` config setting (in /config.json) is empty string `""` NOT `"chrome"`. Setting channel to 'chrome'
+      breaks VPN/tun0 routing — verified incident from Feb 2026. We use chromium bundled with the @playwright/mcp package,
+      which uses chrome-headless-shell binary.
+    - The container image is BIG (~1.55GB) — first pull is slow. Subsequent runs hit the local cache.
+    - Cold start ~10-15s (Node + Chromium spawn). Much faster than ZAP's JVM cold start. ContainerManager idle_timeout is
+      1800s (30 min) since browser flows can be long-running.
+    - 'browser_run_code_unsafe is RCE-equivalent: runs arbitrary Node JavaScript in the Playwright server process with full
+      filesystem + env access. Treat as you would `bash` — don''t accept untrusted input as the code parameter.'
+    - For host-header-sensitive vhosts (e.g. cozyhosting.htb redirects raw IPs), use docker run --add-host=hostname:ip and
+      navigate to the hostname URL. Without it, nginx/Apache will 301-redirect Chromium and the navigation appears to succeed
+      but lands on a different page than the agent expected.
+    - 'File-output tools (browser_take_screenshot, browser_pdf_save, browser_start_video, browser_start_tracing) write to
+      a sandboxed workspace by default (/tmp/.playwright-mcp/). The --allow-unrestricted-file-access flag (set in entrypoint.sh
+      by default in this image) removes the sandbox. **Path convention** — use /session/output/<name>.<ext>, the platform-wide
+      convention used by 70+ tools. This image''s entrypoint pre-creates /session/output at container start, so flat writes
+      to /session/output/foo.pdf succeed. Playwright''s page.pdf / page.screenshot do NOT auto-create parent dirs — for deeper
+      subdirs (e.g. /session/output/traces/foo/) the agent must `mkdir -p` first via a separate run_cli call. Verified live
+      2026-05-08: page.pdf to /session/output/x.pdf works with the flag + dir present.'
+    - 'Unreachable URLs HANG for the FULL navigation timeout. Verified live 2026-05-08: browser_navigate to http://10.99.99.99/
+      blocked exactly 60s with upstream defaults, returning `TimeoutError: browserBackend.callTool: Timeout 60000ms exceeded`.
+      CRITICAL: browser_navigate has NO per-call `timeout` argument (verified — schema is `{url}` only, additionalProperties:false).
+      Per-page `page.setDefaultNavigationTimeout(N)` set via run_code_unsafe is IGNORED — the MCP wrapper enforces its own
+      outer timeout, not Playwright''s internal one. The ONLY way to lower it is the entrypoint flag `--timeout-navigation
+      <ms>` (this image ships with 30000ms = 30s). For HTB engagements expect ~30s wasted on each unreachable target; budget
+      accordingly.'
+    - 'browser_take_screenshot, browser_pdf_save, browser_start_video, browser_start_tracing, snapshot/console-message dumps,
+      etc. all auto-route to /session/output via `--output-dir /session/output` set in entrypoint.sh. Verified live 2026-05-08:
+      video, snapshot YML, console log, and traces/ subdir all land on the bind-mount automatically without the agent specifying
+      an absolute path. browser_start_video/browser_start_tracing take NO `filename` arg — their output is always `--output-dir`-relative.
+      Means: opensploit''s report agent can pick up videos + traces from /session/output/ without the playwright agent doing
+      path bookkeeping.'
+    - 'browser_navigate response does NOT include the snapshot inline — only a reference to a `tmp/.playwright-mcp/page-<timestamp>.yml`
+      file inside the container. You MUST call browser_snapshot separately to get the page tree with refs. Same applies to
+      click/fill_form/type — they confirm the Playwright code that ran but do not echo a fresh snapshot. Pattern: any state-changing
+      action → browser_snapshot to see DOM state. Verified live 2026-05-08 against @playwright/mcp v0.0.75.'
+    - 'browser_run_code_unsafe expects a FUNCTION EXPRESSION as the `code` param, not a bare statement. Verified live 2026-05-08:
+      `code: ''1+1''` failed with `TypeError: __fn__ is not a function`; `code: ''document.title''` failed with `ReferenceError:
+      document is not defined`; `code: ''(page) => page.title()''` succeeded. The function is invoked Node-side with the Playwright
+      `page` object as its first arg — so to read DOM you must do `code: ''(page) => page.evaluate(() => document.title)''`,
+      or just use browser_evaluate. Mental model: this tool is `await (your_function)(page)` in Node, NOT `eval(your_code)`
+      in the browser.'
+    - 'Refs survive across non-navigating calls. Verified live 2026-05-08: e17/e20/e26 captured from /login snapshot remained
+      valid after fill_form (which doesn''t navigate). After clicking Login (POST → /login?error redirect), and after a 90s
+      idle pause, the browser session was still alive and refs were re-derivable via fresh browser_snapshot. Idle-timeout=1800s
+      is conservative; the actual browser session lasted at least 90s without any keepalive activity.'
+    - browser_evaluate accepts a JS expression as a STRING that evaluates to a function (e.g. `() => document.title`). Internally
+      it does `await page.evaluate('() => ...')`. Multi-statement function bodies work via `() => { stmt1; return stmt2; }`.
+    - 'CAPTCHA solving via VNC handoff: set HEADED=1, navigate to the page, ask the operator to attach to http://localhost:6080/vnc.html
+      and solve the CAPTCHA manually, then continue the agent flow. Memory + screen real-estate cost is real; only use when
+      needed.'
+    usage_patterns:
+    - name: Login + capture session cookies (most common)
+      description: 'Standard authenticated-app flow: navigate to login page, fill the form, submit, capture cookies + tokens
+        for reuse.'
+      sequence:
+      - method: browser_navigate
+        args:
+          url: http://TARGET/login
+      - method: browser_snapshot
+      - method: browser_fill_form
+        args:
+          fields:
+          - name: Username
+            type: textbox
+            target: <from-snapshot>
+            value: admin
+          - name: Password
+            type: textbox
+            target: <from-snapshot>
+            value: '...'
+      - method: browser_click
+        args:
+          target: <submit-button-ref>
+      - method: browser_wait_for
+        args:
+          text: Welcome
+      - method: browser_evaluate
+        args:
+          function: () => document.cookie
+    - name: XSS payload validation
+      description: Fire an XSS payload, verify it executed via console messages.
+      sequence:
+      - method: browser_navigate
+        args:
+          url: http://TARGET/search?q=<script>console.log('XSS_FIRED')</script>
+      - method: browser_console_messages
+        args:
+          level: all
+      - method: browser_take_screenshot
+        args:
+          type: png
+          filename: /session/output/xss-pop.png
+    - name: JS-heavy SPA exploration
+      description: When curl returns empty body — drive the SPA, snapshot what's actually rendered.
+      sequence:
+      - method: browser_navigate
+        args:
+          url: http://TARGET/
+      - method: browser_wait_for
+        args:
+          time: 3
+      - method: browser_snapshot
+      - method: browser_network_requests
+        args:
+          static: false
+    - name: CAPTCHA solving via VNC handoff
+      description: HEADED=1 + operator solves the CAPTCHA via http://localhost:6080/vnc.html, then agent continues.
+      sequence:
+      - method: browser_navigate
+        args:
+          url: http://TARGET/protected
+      - method: browser_take_screenshot
+        args:
+          type: png
+          filename: /session/output/captcha.png
+      - method: browser_wait_for
+        args:
+          text: Welcome
+      - method: browser_snapshot
+    - name: Vision-mode coordinate click for grid CAPTCHA
+      description: When the CAPTCHA is a canvas / image grid the accessibility tree doesn't expose. Screenshot, decide pixel
+        coords, click.
+      sequence:
+      - method: browser_take_screenshot
+        args:
+          type: png
+          filename: /session/output/grid.png
+      - method: browser_mouse_click_xy
+        args:
+          x: 234
+          y: 156
+      - method: browser_mouse_click_xy
+        args:
+          x: 312
+          y: 156
+      - method: browser_mouse_click_xy
+        args:
+          x: 234
+          y: 234
+    - name: OAuth flow with multi-tab popup
+      description: Login flow opens a new tab for OAuth provider, capture creds returned to the original tab. NOTE the explicit
+        browser_snapshot calls — refs from the OAuth-launching page do NOT apply to the OAuth provider's page. Skipping these
+        snapshots triggers the position-based-ref hazard (silent misroute, no error).
+      sequence:
+      - method: browser_navigate
+        args:
+          url: http://TARGET/oauth-login
+      - method: browser_snapshot
+      - method: browser_click
+        args:
+          target: <oauth-button-ref-from-snapshot>
+      - method: browser_tabs
+        args:
+          action: list
+      - method: browser_tabs
+        args:
+          action: select
+          index: 1
+      - method: browser_snapshot
+        args: {}
+      - method: browser_fill_form
+        args:
+          fields:
+          - name: email
+            type: textbox
+            target: <from-snapshot-of-tab-1>
+            value: '...'
+      - method: browser_click
+        args:
+          target: <consent-button-ref>
+      - method: browser_tabs
+        args:
+          action: select
+          index: 0
+      - method: browser_snapshot
+        args: {}
+      - method: browser_evaluate
+        args:
+          function: () => localStorage.getItem('auth_token')
   prowler:
     name: prowler
     version: 5.18.3
@@ -25488,403 +25945,463 @@ tools:
       purpose: List available plugins (no plugin name = list mode). Use to discover plugin names for `-p NAME` usage.
   zap:
     name: zap
-    version: '2.14'
-    description: 'OWASP ZAP 2.14 web application security scanner. 12 methods: spider (crawl to discover URLs), active_scan
-      (test for SQLi, XSS, OWASP Top 10), quick_scan (spider + active scan combined), ajax_spider (Chrome headless for JavaScript-heavy
-      SPAs), stop_scan, get_alerts (vulnerability details by severity), get_urls, scan_status, summary, proxy_history (captured
-      HTTP traffic like Burp), send_request (manual HTTP like Burp Repeater), proxy_info (proxy settings for Playwright integration).
-      Runs as a service container with persistent state. Can proxy Playwright browser traffic for combined JS app testing.'
+    kind: mcp
+    version: '2.17'
+    description: OWASP ZAP 2.17.0 web application security scanner integrated via the official MCP Integration add-on (zaproxy/zap-extensions,
+      mcp-v0.0.1, alpha April 2026). 14 tools covering version/info, context creation, three scanner pipelines (passive, active,
+      traditional spider, AJAX spider) with start/stop/status verbs, and report generation. The add-on additionally advertises
+      10 MCP Resources + 2 Prompts, but opensploit's mcp_tool today dispatches only tools/call — to extract findings use zap_generate_report
+      with template:sarif-json written to /session/output/, NOT mcp.resources_read. The container hybrid-installs the add-on
+      jar into ZAP's plugin dir and runs a stdio↔HTTP bridge so opensploit's stdio-based ContainerManager talks to the HTTP-only
+      ZAP MCP transparently.
+    source: https://github.com/zaproxy/zap-extensions/tree/main/addOns/mcp
     image: ghcr.io/silicon-works/mcp-tools-zap:latest
-    image_size_mb: 1200
+    image_size_mb: 2300
     timeout_seconds: 600
+    idle_timeout_seconds: 7200
+    service: true
+    service_name: zap
     capabilities:
-    - web_vulnerability_scanning
-    - active_scanning
-    - spider_crawling
-    - xss_detection
-    - sqli_detection
-    - security_assessment
-    routing:
-      use_for:
-      - automated web application vulnerability scanning for OWASP Top 10
-      - active scan to find XSS SQL injection and other web vulnerabilities
-      - spider crawl web application to discover all pages and API endpoints
-      - crawl JavaScript SPA applications with ajax spider Chrome headless
-      - intercept and replay HTTP requests like Burp Suite Repeater
-      - proxy Playwright browser traffic through ZAP for JS-heavy app testing
-      - get vulnerability report with severity levels after web application scan
-      never_use_for:
-      - port scanning
-      - network scanning
-      - password cracking
-      triggers:
-      - ZAP
-      - OWASP
-      - active scan
-      - web scanner
-      - spider
-      - crawl
-      - web vulnerability
-      prefer_over:
-      - nikto
-      - curl
-    see_also:
-    - playwright-mcp
+    - web_app_scanning
+    - active_vulnerability_detection
+    - passive_vulnerability_detection
+    - spider_crawl
+    - ajax_spider_crawl
+    - vulnerability_report_generation
+    - context_management
     phases:
     - enumeration
     - exploitation
+    - post-exploitation
     requirements:
       network: true
       privileged: false
     resources:
-      memory_mb: 2048
+      memory_mb: 8192
       cpu: 2.0
+    see_also:
+    - tool: nmap
+      reason: Discover open HTTP ports first (443/80/8080/8443/etc.) before pointing ZAP at them. ZAP can't find a service
+        on a port we don't know is open.
+    - tool: nuclei
+      reason: Complementary vuln scanner — nuclei is template-based and much faster on known CVEs; ZAP is form-aware and finds
+        OWASP-class issues (XSS, SQLi, CSRF) nuclei doesn't model. Run both for coverage.
+    - tool: ffuf
+      reason: Content discovery (hidden directories, vhost enumeration) before ZAP — ZAP's spider follows links it can see;
+        ffuf brute-forces what isn't linked.
+    - tool: curl
+      reason: Request replay / one-shot HTTP for verifying findings ZAP raises. The official MCP add-on does NOT (yet) expose
+        a request-send tool; for arbitrary HTTP, use curl.
+    - tool: playwright-mcp
+      reason: 'Browser automation for JavaScript-heavy targets the AJAX spider can''t fully crawl (modals, OAuth redirects,
+        anti-automation walls). Combine: playwright drives the user flow, ZAP records traffic via its proxy.'
+    warnings:
+    - 'ALPHA UPSTREAM (mcp-v0.0.1, April 2026). The interface will evolve. Methods that exist today may rename, and tools
+      we lack today (notably: arbitrary HTTP request replay, equivalent to our retired wrapper''s send_request) will appear
+      in future versions. Treat the surface as upstream-tracking rather than locked.'
+    - Active scan is INTRUSIVE. It sends real attack payloads (XSS, SQLi, command injection probes) to the target. NEVER point
+      active scan at a target outside the engagement scope. Spider + passive scan only inspect traffic, but active scan generates
+      real traffic that can crash fragile apps or trigger IDS.
+    - 'Scans are LONG. Spider on a small site: seconds. AJAX spider: minutes. Active scan: minutes to hours depending on URL
+      count and policy. Use the *_get_*_status verbs to poll until completion; don''t assume a start_* call returns synchronously.'
+    notes: "Architecture: ZAP's MCP Integration is a Java add-on living INSIDE ZAP's\ndaemon process. Unlike Rapid7's `msfmcpd`\
+      \ (separate Ruby binary speaking\nstdio natively), ZAP's add-on only exposes MCP-over-HTTP on\nhttp://127.0.0.1:8282/.\
+      \ The container therefore runs a small Python\nstdio↔HTTP bridge (~140 LOC) as its entrypoint:\n\n  docker stdin → bridge\
+      \ → POST :8282 → ZAP add-on\n  docker stdout ← bridge ← JSON response ← ZAP add-on\n\nThis is invisible to opensploit's\
+      \ ContainerManager — same `docker run -i`\ncontract as every other kind:mcp tool.\n\nWhy this exists alongside our retired\
+      \ Python wrapper: we maintained 1495\nLOC of mcp-server.py wrapping ZAP's REST API with manual error\nclassification\
+      \ + 12 hand-mapped methods. The official add-on covers ~92%\nof that surface (14 vs 12 methods, missing only `send_request`)\
+      \ and is\nmaintained by the ZAP Dev Team. Replacing our wrapper removes the\nmaintenance burden and auto-tracks upstream\
+      \ evolution.\n\nMigration history (May 2026): replaces a 1495-LOC Python wrapper that\nduplicated parts of ZAP's REST\
+      \ API. Wrapper retired. For arbitrary HTTP\nrequest replay (the one capability lost), use the `curl` tool against\n\
+      the URL directly, or hit ZAP's underlying REST API via curl\n(POST /JSON/core/action/sendRequest/) — but that's outside\
+      \ the MCP\ncontract.\n\nCold start: ~30s end-to-end (ZAP daemon JVM start + add-on load + HTTP\nlistener bind). ContainerManager's\
+      \ idle_timeout is 7200s (2hr) above —\nsized to outlast active-scan runtimes that can reach 1-2hr on large apps.\n\n\
+      STATE NON-PERSISTENCE: ZAP's in-memory state (sites tree, alerts, scan\nIDs, history) does NOT survive container recycle.\
+      \ If the container is\nreaped after the 2hr idle window, the next ZAP call cold-starts a\nfresh daemon with EMPTY state.\
+      \ Always call zap_generate_report to\n/session/output/ BEFORE long delays or context-switches — the report\nfile persists\
+      \ on disk; ZAP's memory does not.\n\nAuthentication: a random 32-hex security key is generated at container\nstart,\
+      \ set into ZAP's config via `-config mcp.securityKey=$KEY`, and\npassed by the bridge in every HTTP request's `Authorization`\
+      \ header\n(raw key, NOT `Bearer <key>` — verified against\nMcpHttpMessageHandler.java's MessageDigest.isEqual byte compare).\n\
+      \nResources + Prompts: in addition to the 14 Tools below, the add-on\nadvertises 10 MCP Resources (zap://alerts, zap://alerts/{alertRef},\n\
+      zap://sites, zap://sites-tree, zap://history, zap://history/{id},\nzap://contexts, zap://scan-policies, zap://scan-status,\n\
+      zap://report-templates) and 2 Prompts (baseline_scan, full_scan).\nThese require resources/read + prompts/get JSON-RPC\
+      \ verbs.\n\nCRITICAL — opensploit's mcp_tool dispatcher today emits ONLY\ntools/call. Resources and Prompts are advertised\
+      \ but unreachable\nclient-side. Do NOT try mcp.resources_read(...) or\nmcp.prompts_get(...) — both will fail. Workaround\
+      \ map:\n  - findings/alerts            → zap_generate_report (sarif-json)\n  - scan progress              → zap_get_*_status\
+      \ tools (4 verbs)\n  - sites/URLs discovered      → site-map section of HTML report,\n                             \
+      \    or alerts' URL fields in SARIF\n  - contexts                   → agent already knows what it created\n  - scan-policies,\
+      \ templates   → static; documented in gotchas\n  - raw HTTP request replay    → curl tool with URL+payload from SARIF\n"
+    routing:
+      use_for:
+      - spider / crawl a web application to discover URLs and forms
+      - active vulnerability scan of a web app for OWASP Top 10 issues
+      - AJAX-aware crawl of a JavaScript-heavy single-page application
+      - passive scan analysis (passive findings from observed traffic)
+      - generate ZAP scan report (HTML / Markdown / JSON / XML / SARIF) after scans complete
+      - create a scoped ZAP context restricting scans to a target site / regex
+      never_use_for:
+      - task: arbitrary HTTP request / replay
+        use_instead: curl
+        reason: Upstream's MCP add-on (alpha v0.0.1) does not expose a request-send tool yet; our retired wrapper had send_request
+          — gone now. For one-off HTTP, use curl. For full request replay against a ZAP-tracked site, hit ZAP's REST API directly
+          via curl.
+      - task: subdomain / vhost enumeration
+        use_instead: ffuf
+      - task: DNS / external-attack-surface discovery
+        use_instead: amass
+      - task: open-port scanning
+        use_instead: nmap
+      - task: running a single CVE template against a target
+        use_instead: nuclei
+      - task: credential / hash brute-forcing
+        use_instead: hydra
+      triggers:
+      - zap
+      - zaproxy
+      - OWASP ZAP
+      - web app scan
+      - web application scan
+      - web application security scanner
+      - spider
+      - ajax spider
+      - active scan
+      - passive scan
+      - CSRF token
+      - XSS scanner
+      - SQL injection scanner
+      - authenticated web scan
+      - OWASP Top 10
+      prefer_over: []
     methods:
-      spider:
-        description: Crawl a target URL to discover all pages and endpoints
-        when_to_use: To discover all URLs on a web application before scanning
-        params:
-          target:
-            type: string
-            required: true
-            description: Target URL to crawl (e.g., http://target.com)
-          max_depth:
-            type: integer
-            default: 5
-            description: Maximum crawl depth
-          max_children:
-            type: integer
-            default: 0
-            description: Maximum child URLs per page (0=unlimited)
-          wait:
-            type: boolean
-            default: true
-            description: Wait for spider to complete (if false, returns immediately with scan_id)
-          timeout:
-            type: integer
-            default: 300
-            description: Maximum seconds to wait for spider. Returns partial results on timeout.
-          subtree_only:
-            type: boolean
-            default: true
-            description: Only spider URLs under the target path (recommended)
-        returns:
-          scan_id:
-            type: string
-            description: Spider scan ID for status checking
-          urls_found:
-            type: integer
-            description: Number of URLs discovered
-          progress:
-            type: integer
-            description: Spider progress percentage (0-100)
-          partial:
-            type: boolean
-            description: True if scan timed out with partial results
-      active_scan:
-        description: Actively scan a target for vulnerabilities (SQLi, XSS, etc.)
-        when_to_use: To test a web application for security vulnerabilities
-        params:
-          target:
-            type: string
-            required: true
-            description: Target URL to scan
-          wait:
-            type: boolean
-            default: true
-            description: Wait for scan to complete (if false, returns immediately with scan_id)
-          timeout:
-            type: integer
-            default: 600
-            description: Maximum seconds to wait for scan. Returns partial results on timeout.
-          scan_policy:
-            type: string
-            description: 'Scan policy name: ''Default Policy'' or custom. Controls which checks run.'
-        returns:
-          scan_id:
-            type: string
-            description: Active scan ID for status checking
-          progress:
-            type: integer
-            description: Scan progress percentage (0-100)
-          alerts:
-            type: object
-            description: 'Counts by severity: high, medium, low, info, total'
-          partial:
-            type: boolean
-            description: True if scan timed out with partial results
-      quick_scan:
-        description: 'Perform a complete scan: spider the target then run active scan. Returns partial results if either phase
-          times out.'
-        when_to_use: For a comprehensive security assessment of a web application
-        params:
-          target:
-            type: string
-            required: true
-            description: Target URL to scan
-          max_depth:
-            type: integer
-            default: 5
-            description: Maximum spider depth
-          max_children:
-            type: integer
-            default: 0
-            description: Maximum child URLs per page (0=unlimited)
-          spider_timeout:
-            type: integer
-            default: 300
-            description: Maximum seconds for spider phase
-          scan_timeout:
-            type: integer
-            default: 900
-            description: Maximum seconds for active scan phase
-          scan_policy:
-            type: string
-            description: Scan policy name for active scan phase
-          ajax_spider:
-            type: boolean
-            default: false
-            description: Run AJAX spider after traditional spider (for JavaScript-heavy sites)
-          exclude_regex:
-            type: string
-            description: Regex pattern for URLs to exclude (e.g., 'logout|delete|signout')
-        returns:
-          spider_id:
-            type: string
-            description: Spider scan ID
-          scan_id:
-            type: string
-            description: Active scan ID
-          urls_found:
-            type: integer
-            description: Number of URLs discovered
-          alerts:
-            type: object
-            description: 'Counts by severity: high, medium, low, info, total'
-          partial:
-            type: boolean
-            description: True if any phase timed out
-      stop_scan:
-        description: Stop a running spider or active scan
-        when_to_use: To cancel a stuck or long-running scan
-        params:
-          scan_type:
-            type: string
-            required: true
-            description: 'Type of scan to stop: ''spider'', ''active'', ''ajax'', or ''all'''
-          scan_id:
-            type: string
-            description: Specific scan ID to stop. If not provided, stops all scans of the type.
-        returns:
-          stopped:
-            type: array
-            description: List of stopped scans with type and id
-      get_alerts:
-        description: Get vulnerabilities discovered by ZAP
-        when_to_use: To retrieve detailed vulnerability information after scanning
-        params:
-          target:
-            type: string
-            description: Filter alerts by target URL (optional)
-          risk:
-            type: string
-            description: 'Filter by risk level: High, Medium, Low, Informational'
-          limit:
-            type: integer
-            default: 100
-            description: Maximum number of alerts to return
-        returns:
-          alerts:
-            type: array
-            description: List of vulnerabilities with details
-      get_urls:
-        description: Get all URLs discovered by the spider
-        when_to_use: To see what pages were found during crawling
-        params:
-          target:
-            type: string
-            description: Filter URLs by base URL (optional)
-        returns:
-          urls:
-            type: array
-            description: List of discovered URLs
-      scan_status:
-        description: Get the status of all running and completed scans
-        when_to_use: To check progress of background scans or verify scan completion
+      zap_version:
+        description: Return the ZAP version string. Diagnostic — confirms the daemon is reachable and on the expected major
+          version.
+        when_to_use: First call when spinning up a session, or to verify the container is alive after suspected hangs.
         params: {}
         returns:
-          spider_scans:
-            type: array
-            description: List of spider scans with id, progress, state, urls_found
-          active_scans:
-            type: array
-            description: List of active scans with id, progress, state, alerts count
-          running_spiders:
-            type: integer
-            description: Number of currently running spider scans
-          running_scans:
-            type: integer
-            description: Number of currently running active scans
-      summary:
-        description: Get a summary of all findings by risk level
-        when_to_use: To get an overview of discovered vulnerabilities
-        params:
-          target:
+          version:
             type: string
-            description: Filter by target URL (optional)
+      zap_info:
+        description: Get high-level ZAP daemon information — version, mode (standard/safe/protect/attack), proxy address.
+        when_to_use: After zap_version, to confirm the daemon's operational mode and proxy bindings before starting scans.
+        params: {}
         returns:
-          total:
-            type: integer
-            description: Total number of issues
-          by_risk:
+          info:
             type: object
-            description: Issue counts by risk level
-      proxy_history:
-        description: Get HTTP messages captured by ZAP proxy
-        when_to_use: To review traffic that passed through the proxy
+      zap_create_context:
+        description: Create a named ZAP context bound to a URL pattern and optional include/exclude regexes. Contexts scope
+          scanners — without one, ZAP scans whatever the spider crawled (could over-spread).
+        when_to_use: Before any spider/active_scan if the engagement requires strict scope control. Most production scans
+          should use a context to prevent ZAP from chasing off-site links.
         params:
-          start:
-            type: integer
-            default: 0
-            description: Start index
-          count:
-            type: integer
-            default: 50
-            description: Number of messages to return
-          target:
+          name:
             type: string
-            description: Filter by target URL (optional)
-        returns:
-          messages:
-            type: array
-            description: List of HTTP request/response pairs
-      send_request:
-        description: Send an HTTP request through ZAP proxy and get the response (like Burp Repeater)
-        when_to_use: To manually send or replay HTTP requests for testing
-        params:
+            required: true
+            description: Context name, e.g. 'sau-engagement' or 'webapp-staging'
           url:
             type: string
             required: true
-            description: Full URL to request (e.g., http://target.com/path)
-          method:
-            type: string
-            default: GET
-            description: HTTP method (GET, POST, PUT, DELETE, etc.)
-          headers:
-            type: object
-            description: Custom headers as key-value pairs
-          body:
-            type: string
-            description: Request body for POST/PUT requests
-          follow_redirects:
-            type: boolean
-            default: true
-            description: Follow HTTP redirects
+            description: Top-level URL the context is bound to, e.g. 'http://10.10.10.5/'
+          include_regexes:
+            type: array
+            description: List of regex patterns to include in scope (URLs matching at least one are in scope)
+          exclude_regexes:
+            type: array
+            description: List of regex patterns to exclude (logout endpoints, admin, etc.)
         returns:
-          url:
+          context_id:
             type: string
-            description: Request URL
-          status_code:
-            type: integer
-            description: HTTP response status code
-          content_length:
-            type: integer
-            description: Response body length in bytes
-      proxy_info:
-        description: Get ZAP proxy connection info for routing Playwright traffic through ZAP
-        when_to_use: '- Before using Playwright to test JS-heavy applications
-
-          - When you need ZAP to capture and analyze browser traffic
-
-          - For combining Playwright automation with ZAP scanning
-
-          '
-        notes: 'RECOMMENDED APPROACH for JavaScript-heavy applications:
-
-
-          1. Call zap.proxy_info() to get proxy host:port
-
-          2. Launch Playwright browser with proxy settings
-
-          3. Use Playwright to navigate, login, interact with the app
-
-          4. ZAP captures all traffic via proxy_history
-
-          5. Run active_scan on captured URLs for vulnerability detection
-
-
-          This approach is more reliable than ajax_spider and gives full control
-
-          over browser interactions (auth flows, form filling, waiting for elements).
-
-          '
-        params: {}
-        returns:
-          port:
-            type: integer
-            description: Proxy port number
-          instructions:
-            type: string
-            description: Setup instructions
-      ajax_spider:
-        description: Crawl JavaScript-heavy applications using Chrome headless browser
-        when_to_use: '- Single Page Applications (React, Vue, Angular)
-
-          - Pages with dynamic content loading
-
-          - When traditional spider misses endpoints
-
-          - Automated JS app crawling without custom interaction logic
-
-          '
-        notes: 'Uses Chrome headless (more reliable than Firefox in Docker).
-
-          Automatically discovers endpoints by executing JavaScript and clicking links.
-
-
-          For CUSTOM interactions (specific login flows, complex forms), use Playwright+ZAP:
-
-          1. zap.proxy_info() - get proxy settings
-
-          2. playwright with proxy - custom browser automation
-
-          3. zap.proxy_history() - captured traffic
-
-          4. zap.active_scan() - vulnerability scanning
-
-          '
+      zap_start_spider:
+        description: Start a traditional (non-JS) spider crawl against a target URL. Returns a scan_id for polling. Crawls
+          follow links, forms, robots.txt, sitemap.xml — does NOT execute JavaScript.
+        when_to_use: First scanner step on most web apps. Discover the URL surface before active_scan. For SPAs / JS-rendered
+          pages, use start_ajax_spider (slower but JS-aware).
         params:
           target:
             type: string
             required: true
-            description: Target URL to crawl (e.g., http://target.com)
-          wait:
-            type: boolean
-            default: true
-            description: Wait for spider to complete
-          timeout:
-            type: integer
-            default: 300
-            description: Maximum seconds to wait for spider
-          subtree_only:
-            type: boolean
-            default: true
-            description: Only spider URLs under the target path
-          max_crawl_depth:
-            type: integer
-            default: 10
-            description: Maximum crawl depth
-          max_duration:
-            type: integer
-            default: 0
-            description: Maximum duration in minutes (0=unlimited)
+            description: Target URL e.g. 'http://10.10.10.5/' — should match a created context's URL
         returns:
-          urls:
-            type: array
-            description: List of discovered URLs
-          urls_count:
-            type: integer
-            description: Number of URLs discovered
-          partial:
-            type: boolean
-            description: True if scan timed out with partial results
+          scan_id:
+            type: string
+      zap_stop_spider:
+        description: Stop an in-progress spider scan.
+        when_to_use: When spider has been running too long, or when you have enough URL coverage and want to move to active_scan.
+        params:
+          scan_id:
+            type: string
+            required: true
+        returns: {}
+      zap_get_spider_status:
+        description: Poll spider scan progress. Returns percentage complete + state. Spider scans are typically fast (seconds
+          to a minute) on small targets.
+        when_to_use: Poll every ~10s after zap_start_spider until status reaches 100. Don't assume start_spider is synchronous.
+        params:
+          scan_id:
+            type: string
+            required: true
+        returns:
+          status:
+            type: object
+      zap_start_ajax_spider:
+        description: Start an AJAX-aware spider that drives a real browser (Selenium-based, headless Chrome/Firefox) to render
+          JavaScript and crawl SPAs.
+        when_to_use: After traditional spider on JS-heavy sites — AJAX spider catches routes that only appear after JS executes
+          (React Router, modals, lazy-loaded components). Significantly slower than traditional spider.
+        params:
+          target:
+            type: string
+            required: true
+        returns:
+          scan_id:
+            type: string
+      zap_stop_ajax_spider:
+        description: Stop an in-progress AJAX spider.
+        when_to_use: When AJAX spider has been running >10 min or you have sufficient JS-rendered surface coverage.
+        params:
+          scan_id:
+            type: string
+            required: true
+        returns: {}
+      zap_get_ajax_spider_status:
+        description: 'Poll AJAX spider state. Status is {state: ''running'' | ''stopped''} — no percentage (AJAX spider runs
+          until URL queue is exhausted).'
+        when_to_use: Periodic polling after start_ajax_spider. State 'stopped' = done.
+        params:
+          scan_id:
+            type: string
+            required: true
+        returns:
+          status:
+            type: object
+      zap_start_active_scan:
+        description: Start an ACTIVE vulnerability scan against URLs already known to ZAP (typically from a prior spider/ajax_spider).
+          Sends real attack payloads to test for SQLi, XSS, command injection, file inclusion, etc.
+        when_to_use: AFTER spider/ajax_spider has populated the URL set. Active scan only probes URLs ZAP knows about. Choose
+          policy based on engagement scope (default policy probes most rules; restrictive policies cut scan time).
+        params:
+          target:
+            type: string
+            required: true
+            description: Target URL
+          policy:
+            type: string
+            description: Optional ZAP scan policy name (e.g. 'Default Policy', 'API-Minimal'). Omit for default.
+        returns:
+          scan_id:
+            type: string
+      zap_stop_active_scan:
+        description: Stop an in-progress active scan.
+        when_to_use: When scan has been running too long, hit a brittle endpoint, or you've collected enough findings.
+        params:
+          scan_id:
+            type: string
+            required: true
+        returns: {}
+      zap_get_active_scan_status:
+        description: Poll active scan progress. Returns percentage + URL count + alerts found so far.
+        when_to_use: Poll every ~30s after start_active_scan. Active scans run for minutes to hours; long-running is normal.
+        params:
+          scan_id:
+            type: string
+            required: true
+        returns:
+          status:
+            type: object
+      zap_get_passive_scan_status:
+        description: Get passive scan engine status. ZAP runs passive analyzers continuously on all observed traffic — no
+          explicit start needed. This tool reports what's pending in the passive analysis queue.
+        when_to_use: After spider/ajax_spider but before generating the report — confirms passive scanners have processed
+          the discovered URLs (queue size 0 = done).
+        params: {}
+        returns:
+          status:
+            type: object
+      zap_generate_report:
+        description: Generate a vulnerability report from accumulated alerts. Supports multiple templates — HTML for humans,
+          JSON for machines, SARIF for CI integration, etc.
+        when_to_use: After all spiders and active scans complete + passive scan queue drains. Output is the deliverable artifact
+          for the engagement.
+        params:
+          file_path:
+            type: string
+            required: true
+            description: Output file path inside the container — write to /session/output/<name>.<ext> so opensploit can read
+              it
+          template:
+            type: string
+            required: true
+            description: 'Template name — common options: ''traditional-html'', ''traditional-md'', ''traditional-json'',
+              ''sarif-json'', ''risk-confidence-html'''
+          title:
+            type: string
+            description: Optional report title
+        returns:
+          report_path:
+            type: string
+    failure_signatures:
+    - signal: parameter is required
+      error_class: invalid_parameter
+      remediation: 'Add the missing parameter from the schema. zap_create_context requires both name and url; spider/active_scan
+        require target; status/stop verbs require scan_id. Live shape: ''The url parameter is required'' / ''The name parameter
+        is required'' etc.'
+    - signal: not found or was not started
+      error_class: invalid_parameter
+      remediation: 'The scan_id doesn''t match any scan started by the corresponding zap_start_* verb. Live shape: ''Scan
+        <id> not found or was not started via zap_start_spider''. Check you''re polling the same scan_id you got back from
+        start, and that you''re using the right status verb (spider vs ajax_spider vs active_scan).'
+    - signal: 'Unknown tool:'
+      error_class: tool_misconfigured
+      remediation: 'The agent called a method name the upstream MCP add-on doesn''t recognize. Note this is a JSON-RPC -32602
+        error (protocol level), NOT an isError=true tool result. Live shape: ''{"error":{"code":-32602,"message":"Unknown
+        tool: zap_does_not_exist"}}''. Check the method name against the 14 advertised in tools/list. If the method existed
+        in our retired Python wrapper but doesn''t exist upstream (e.g. send_request), there''s no replacement — route to
+        curl or wait for v0.0.2+.'
+    - signal: ZAP upstream unreachable
+      error_class: tool_misconfigured
+      remediation: Bridge couldn't reach ZAP on http://127.0.0.1:8282/. Either ZAP died (check docker logs) or the listener
+        hasn't bound yet (cold start ~30s). The bridge translates these into JSON-RPC -32000 frames so opensploit doesn't
+        see broken pipes.
+    - signal: HTTP 401
+      error_class: auth_failed
+      remediation: Bridge sent a wrong Authorization header. The container generates a random ZAP_MCP_KEY at startup and the
+        bridge reads it from env — if you see 401, the env var was wiped or the bridge isn't reading it. Restart the container.
+    - signal: HTTPS required
+      error_class: tool_misconfigured
+      remediation: ZAP MCP returned 403 'HTTPS required'. The entrypoint sets `mcp.secureOnly=false` so plain HTTP works;
+        if this fires, the config didn't apply. Check `docker logs <container>` for ZAP startup output to see if the -config
+        flag was honored.
+    - signal: Connection refused
+      error_class: tool_misconfigured
+      remediation: Same root cause as 'ZAP upstream unreachable' but at the OS level. ZAP daemon's HTTP listener on 127.0.0.1:8282
+        isn't up. Cold start is ~30s; if persistently down, ZAP's JVM probably crashed at startup.
+    gotchas:
+    - ALPHA upstream surface (mcp-v0.0.1, April 2026). Method names + parameter shapes can change between ZAP add-on versions;
+      this image pins to v0.0.1 explicitly. When upstream releases v0.0.2+, rebuild the image to pick up changes — and re-validate
+      scenarios.md.
+    - 14 tools, NOT 15. Reading the source dir at zap-extensions/addOns/mcp/src/main/java/.../tools/ shows 15 .java files
+      including ZapStartScanTool.java, but that's an ABSTRACT base class — only the concrete Start*Tool subclasses get registered.
+      Confirmed via inspection of ExtensionMcp.hook().
+    - No MCP session-id required. Unlike metasploit's msfmcpd which requires capturing the mcp-session-id header from initialize
+      and reusing it, ZAP's McpHttpMessageHandler is stateless — every POST is independently authenticated by the Authorization
+      header. The bridge sends no session-id at all. If a future ZAP version starts requiring one, the bridge will need an
+      explicit code change to capture and replay it.
+    - Authorization is the raw key, NOT 'Bearer <key>'. McpHttpMessageHandler does a constant-time byte compare against the
+      verbatim Authorization header value. Sending 'Bearer <key>' will return 401.
+    - mcp.secureOnly defaults to TRUE — must be explicitly set to false in the entrypoint or every plain-HTTP POST returns
+      403 'HTTPS required'. We set it via `-config mcp.secureOnly=false` at daemon launch. Don't remove this without also
+      setting up TLS.
+    - Cold start ~30s on this dev host (JVM start + add-on load + HTTP bind). ContainerManager idle_timeout is 7200s (2 hr)
+      — sized to outlast active scans which can run 1-2hr on large apps. If you see 'connection refused' on first call, the
+      container hasn't finished cold-starting yet — wait.
+    - 'STATE NON-PERSISTENCE: ZAP''s in-memory state (sites tree, alerts, scan IDs, history) does NOT survive container recycle.
+      If the container is reaped after the 2hr idle window (or by manual restart), the next ZAP call cold-starts a fresh daemon
+      with EMPTY state. ALWAYS call zap_generate_report (file_path under /session/output/) BEFORE walking away — the report
+      file persists; ZAP''s memory does not. Symptom of the trap: ''scan <N> not found'' from a get_*_status call.'
+    - 'Active scan IS INTRUSIVE — it sends real SQLi/XSS/cmd-injection payloads. The container is not silent: ZAP rules will
+      be loud in target logs/IDS. ALWAYS confirm engagement scope and target list before active_scan.'
+    - Spider only crawls what it can see (links, forms, robots.txt, sitemap.xml). For URLs not linked from anywhere, run ffuf
+      for content discovery first, then spider the discovered paths.
+    - AJAX spider is dramatically slower than traditional spider (drives a headless browser). On a SPA with 50 routes, expect
+      5-15 minutes. On a large SPA, longer. Always start with traditional spider; only add AJAX spider if traditional spider
+      returns suspiciously few URLs for a JS-heavy site.
+    - 'Reports written via zap_generate_report go to a path inside the container. Use `/session/output/<name>.<ext>` so opensploit
+      can read the artifact (the standard /session/ mount). Common templates: ''traditional-html'', ''traditional-md'', ''traditional-json'',
+      ''sarif-json''.'
+    - 'Resources + Prompts UNREACHABLE from opensploit today: ZAP MCP advertises 10 Resources (zap://alerts, zap://history,
+      etc.) + 2 Prompts beyond the 14 tools, but opensploit''s mcp_tool only dispatches tools/call. DO NOT attempt mcp.resources_read(uri=''zap://...'')
+      or mcp.prompts_get(...) — they fail with ''Method not found''. Substitute paths: findings → zap_generate_report(template=''sarif-json'',
+      file_path=''/session/output/findings.sarif'') then Read the file; scan progress → the four zap_get_*_status tools; HTTP
+      replay → curl with URL+payload extracted from SARIF.'
+    - 'Defense-in-depth — zap://alerts/{alertRef} resource has a known upstream truncation bug: response cuts off at exactly
+      8593 bytes for high-instance-count alerts (instanceCount > ~25), producing malformed JSON. Even after opensploit ships
+      resources/read dispatch, AVOID this URI; zap_generate_report (sarif-json) returns the same data without truncation.'
+    usage_patterns:
+    - name: Quick spider + active scan + report (most common)
+      description: Standard web-app scan flow — spider, wait, active scan, wait, report.
+      sequence:
+      - method: zap_create_context
+        args:
+          name: engagement
+          url: http://TARGET/
+          include_regexes:
+          - http://TARGET/.*
+      - method: zap_start_spider
+        args:
+          target: http://TARGET/
+      - method: zap_get_spider_status
+        args:
+          scan_id: <from-start>
+      - method: zap_start_active_scan
+        args:
+          target: http://TARGET/
+      - method: zap_get_active_scan_status
+        args:
+          scan_id: <from-start>
+      - method: zap_generate_report
+        args:
+          file_path: /session/output/zap.html
+          template: traditional-html
+          title: ENGAGEMENT
+    - name: JS-heavy SPA scan
+      description: When the target is React/Vue/Angular with client-routing — traditional spider misses most routes.
+      sequence:
+      - method: zap_create_context
+        args:
+          name: spa
+          url: http://TARGET/
+      - method: zap_start_spider
+        args:
+          target: http://TARGET/
+      - method: zap_get_spider_status
+      - method: zap_start_ajax_spider
+        args:
+          target: http://TARGET/
+      - method: zap_get_ajax_spider_status
+      - method: zap_start_active_scan
+      - method: zap_get_active_scan_status
+      - method: zap_generate_report
+    - name: Scope-narrowed scan with exclusions
+      description: Some endpoints (logout, admin self-destruct, billing) must NEVER be scanned. Use exclude_regexes.
+      sequence:
+      - method: zap_create_context
+        args:
+          name: scoped
+          url: https://app.example.com/
+          include_regexes:
+          - https://app\.example\.com/api/.*
+          exclude_regexes:
+          - /logout
+          - /admin/destroy
+          - /billing/.*
+      - method: zap_start_spider
+      - method: zap_start_active_scan
+    - name: Active scan + extract SARIF findings (canonical agent extract path)
+      description: After active scan finishes, persist findings as SARIF JSON in /session/. opensploit reads + triages from
+        the file. THIS is the only working path to programmatic ZAP findings — resources/read (zap://alerts, etc.) is NOT
+        dispatched by opensploit's mcp_tool today.
+      sequence:
+      - method: zap_start_active_scan
+        args:
+          target: http://TARGET/
+      - method: zap_get_active_scan_status
+        args:
+          scan_id: <from-start>
+        notes: poll until status == 100 (call repeatedly with the same scan_id)
+      - method: zap_generate_report
+        args:
+          file_path: /session/output/zap-findings.sarif
+          template: sarif-json
+          title: ENGAGEMENT
+        notes: SARIF JSON gives one rule entry per alert with location, message, severity, evidence — structured for grep/jq/Read
+    - name: Verify scan progress without launching new ones
+      description: Container survived a polling-interval gap; want to know what's still running.
+      sequence:
+      - method: zap_version
+      - method: zap_info
+      - method: zap_get_passive_scan_status
+    - name: Quick liveness probe
+      description: Just confirm ZAP MCP is alive after a long pause.
+      sequence:
+      - method: zap_version

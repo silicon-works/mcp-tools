@@ -1,6 +1,16 @@
 #!/bin/bash
 set -e
 
+# Pre-create the platform-convention output dir so Playwright file-output tools
+# (page.pdf, page.screenshot, page.video, tracing) can write directly to
+# /session/output/<name>.<ext> without each agent having to mkdir first.
+# This runs AFTER ContainerManager bind-mounts ${sessionDir}:/session:rw, so
+# the mkdir lands on the host-mapped filesystem (visible to opensploit).
+# page.pdf / page.screenshot do NOT auto-create parent dirs (verified live
+# 2026-05-08); without this, agents writing to /session/output/x.pdf get
+# ENOENT silently.
+mkdir -p /session/output 2>/dev/null || true
+
 export DISPLAY=:99
 
 # Start virtual framebuffer (1920x1080, 24-bit color)
@@ -61,4 +71,32 @@ fi
 
 # Playwright MCP server — communicates via stdio (stdin/stdout)
 # All background processes redirect to /dev/null to keep stdio clean for MCP
-exec npx @playwright/mcp --config "$CONFIG" --caps=testing,tracing,pdf,vision
+#
+# Caps in @playwright/mcp v0.0.75:
+#   vision   — mouse_*_xy primitives (browser_mouse_click_xy, _move_xy, _drag_xy)
+#   pdf      — browser_pdf_save
+#   devtools — browser_run_code_unsafe (raw JS in the page)
+#   testing  — browser_verify_* helpers (verify_element_visible / list_visible /
+#              text_visible / value, plus browser_generate_locator). Not in
+#              `--help` output (looks retired) but still honored by the runtime
+#              and unlocks 5 tools we want for assertion flows. Keep until
+#              proven gone.
+#   tracing  — was a pre-v0.0.75 cap; tracing tools (browser_start_tracing /
+#              stop_tracing) are now in the default surface, no flag needed.
+# Video tools (browser_start_video / stop_video / video_chapter) are also
+# default-enabled.
+# --allow-unrestricted-file-access: required so file-output tools
+# (browser_take_screenshot/pdf_save/start_video/start_tracing) can write
+# under /session/output/<name>.<ext>. By default Playwright sandboxes
+# output to its own workspace dir (/tmp/.playwright-mcp); without this
+# flag agents trying to write to /session/output/ get
+# 'File access denied: <path> is outside allowed roots' (verified live
+# 2026-05-08).
+# --timeout-navigation 30000: cap unreachable-URL hangs at 30s instead of upstream
+#   default 60s. browser_navigate has NO per-call timeout arg, and per-page
+#   page.setDefaultNavigationTimeout() set via run_code_unsafe is IGNORED — the
+#   MCP wrapper enforces its own outer timeout. Verified live 2026-05-08:
+#   navigate to http://10.99.99.99/ blocked exactly 60s with default; 30s caps
+#   the wasted-call cost on unreachable HTB boxes / VPN dropouts. Legitimate
+#   slow pages (heavy SPAs) load in <15s, so 30s leaves margin.
+exec npx @playwright/mcp --config "$CONFIG" --caps=vision,pdf,devtools,testing --allow-unrestricted-file-access --output-dir /session/output --timeout-navigation 30000
