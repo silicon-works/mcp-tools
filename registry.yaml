@@ -1,5 +1,5 @@
 version: '2.0'
-updated_at: '2026-05-08T12:17:40Z'
+updated_at: '2026-05-08T19:30:53Z'
 tools:
   amass:
     name: amass
@@ -9029,7 +9029,6 @@ tools:
       - DPAPI domain backup key retrieval (dpapi_backupkeys)
       never_use_for:
       - interactive SMB sessions across many commands — use shell-session
-      - NTLM relaying server (ntlmrelayx is stateful; treat as Tier B/MCP for now)
       - Kerberos username enumeration — use kerbrute (much faster, no creds needed)
       - password spraying — use kerbrute or netexec
       - SMB share content brute-forcing — use smbmap or netexec --shares --spider
@@ -9368,6 +9367,18 @@ tools:
     - 'Feature 28 dynamic recipes (RECIPE_DIR=/session/recipes/impacket — note: NOT /session/tool_recipes/impacket like other
       tools) are RETIRED for the kind:cli path; the LLM writes argv directly. Recipes still load if directory exists for legacy
       method calls but are a dead branch under run_cli (REQ-TR-016).'
+    - 'DAEMON BINARY OUTLIER — impacket-ntlmrelayx is the one binary in this 47-binary toolkit that''s daemon-shaped (listens
+      for inbound NTLM auth, doesn''t naturally exit). HARD CONVENTIONS when invoking it: (1) use `--no-multirelay` for fire-and-forget
+      single-shot — exits cleanly after the first successful relay; (2) ALWAYS pass `-l /session/output/relay-loot -of /session/output/relay-hashes`
+      so captured creds/certs/SAM dumps land on shared volume and survive SIGKILL on max_runtime; (3) for time-bounded multi-relay,
+      prefix with `timeout NN` OR rely on cli_in_container''s max_runtime_seconds (the docker-kill SIGKILL preserves the loot
+      files since they''re already on disk via -of/-l).'
+    - 'ntlmrelayx mid-flight peek — while a relay is running (one tool-runner spawn blocked on the listener), a SEPARATE tool-runner
+      spawn can read the partial captures by Read''ing `/session/output/relay-loot/` directory or `/session/output/relay-hashes_*.txt`.
+      Container mutex serializes calls within ONE container only; reading via the bash tool / Read primitive uses different
+      containers and is unblocked. Note: ntlmrelayx writes to disk only when relay attempts complete or hit milestones — pre-relay
+      listener-state stdout (e.g. ''[*] HTTP server started'') is NOT visible until the call exits unless you wrap with `script
+      -q /session/output/relay-stdout.log` or accept the file-only outcome view.'
     failure_signatures:
     - signal: STATUS_LOGON_FAILURE
       remediation: 'Wrong password or wrong username/domain. Verify creds and the [domain/] prefix. NTLM hash format: -hashes
@@ -13081,8 +13092,21 @@ tools:
     - port_checking
     - network_debugging
     see_also:
-    - shell-session
-    - curl
+    - tool: nc
+      reason: 'Use `nc` (kind:cli) for ONE-SHOT, CLIENT-SIDE port operations: TCP probe (`nc -z`), banner grab (`ncat --send-only`),
+        bind-shell connect, single UDP datagram send (`nc -u`), small file transfer over a known-up TCP connection. ALL stateless
+        — every invocation opens, talks, and closes within a single cli_in_container process. This `netcat` (kind:mcp) tool
+        is the SERVER-SIDE sibling — it owns every long-lived listener verb (TCP listen / HTTP server / UDP listen), captured-data
+        inspection (http_requests, listener_read/listener_write, udp_packets), and dynamic file serving (http_file). The two
+        tools share the same Debian package set (netcat-traditional / ncat / socat / iproute2) so binaries are byte-identical;
+        only the entrypoint differs. Mental model: nc = WE INITIATE, netcat = WE RECEIVE.'
+    - tool: shell-session
+      reason: Use `shell-session` for persistent SSH sessions (paramiko-backed) where you'll run multiple commands on the
+        same target. `netcat`'s reverse-shell handling (listen + listener_read/write) is for catching shells from RCE — not
+        for credentialed SSH workflows.
+    - tool: curl
+      reason: Use `curl` for outbound HTTP requests with custom encoding, complex auth flows, or specific protocol quirks.
+        `netcat`'s `http_listen` is for INBOUND HTTP capture (callbacks from the target), not for sending requests.
     routing:
       use_for:
       - catch reverse shell connection from target
@@ -13090,14 +13114,19 @@ tools:
       - host CSRF exploit page for admin bot to visit
       - capture HTTP requests with headers cookies and query params
       - listen for UDP packets for DNS exfiltration or SNMP
-      - connect to bind shell on target
-      - check if port is open and grab service banner
       - get attacker IP address for LHOST in reverse shells
       - serve exploit files over HTTP or HTTPS
+      - fake an HTTP response to a target (response template for SSRF callback)
       never_use_for:
       - persistent SSH sessions (use shell-session)
       - complex HTTP requests with custom encoding (use curl)
-      - port scanning (use nmap)
+      - port scanning at scale (use nmap)
+      - ONE-SHOT TCP port-open check — use `nc -z` via the `nc` (kind:cli) tool
+      - ONE-SHOT banner grab — use `ncat --send-only` via the `nc` (kind:cli) tool
+      - ONE-SHOT bind-shell connect (target already has a listener) — use `nc` (kind:cli)
+      - ONE-SHOT UDP datagram send — use `nc -u` via the `nc` (kind:cli) tool. The `udp_send` method on this tool is preserved
+        for backward compat but routing should prefer `nc`.
+      - small one-shot file transfer over a known-up TCP connection — use `nc` (kind:cli)
       triggers:
       - reverse shell
       - callback server
@@ -15752,220 +15781,6 @@ tools:
             required: true
             description: AWS secret access key.
         returns: {}
-  payload:
-    name: payload
-    version: '1.0'
-    description: 'Payload compiler and generator for reverse shells, SUID binaries, C compilation, and encoding. 6 methods:
-      compile_c (GCC cross-compilation for x64/x86/ARM, static/stripped), suid_shell (setuid(0)+execve shell binary), revshell
-      (one-liners in 8 languages: bash, python, nc, php, perl, ruby, powershell, socat with variants), list_shells (show all
-      available reverse shell types), encode (base64/URL/double-URL/hex/unicode), decode. Does NOT require network — runs
-      locally. For Metasploit msfvenom payloads, use metasploit generate_payload instead.'
-    image: ghcr.io/silicon-works/mcp-tools-payload:latest
-    image_size_mb: 400
-    timeout_seconds: 300
-    capabilities:
-    - binary_compilation
-    - reverse_shell_generation
-    - payload_encoding
-    - suid_binary_creation
-    phases:
-    - exploitation
-    - post-exploitation
-    requirements:
-      network: false
-      privileged: false
-    resources:
-      memory_mb: 512
-      cpu: 1.0
-    routing:
-      use_for:
-      - generate reverse shell one-liners in bash python php perl ruby powershell
-      - compile C exploit source code to ELF binary
-      - create SUID shell binary for privilege escalation
-      - encode payloads in base64 URL hex or unicode for delivery
-      - cross-compile C code for x86 ARM or x64 targets
-      never_use_for:
-      - vulnerability scanning
-      - port scanning
-      - brute-force attacks
-      triggers:
-      - reverse shell
-      - payload
-      - compile
-      - encode payload
-      - SUID binary
-      - shellcode
-      - revshell
-    methods:
-      compile_c:
-        description: Compile C source code to an ELF binary using GCC. Supports x64, x86, and ARM architectures. Options for
-          static linking (for targets without shared libraries) and symbol stripping (smaller binary, harder to reverse).
-          Returns the compiled binary as base64 or hex.
-        when_to_use: 'To compile kernel exploits, privilege escalation exploits, or custom C code for a target. Typical workflow:
-          get exploit source from searchsploit → compile_c with static=true for portability → upload to target via ssh upload_binary
-          → execute. Use arch=''x86'' for 32-bit targets, ''arm'' for embedded/IoT.'
-        params:
-          source:
-            type: string
-            required: true
-            description: C source code to compile
-          arch:
-            type: enum
-            values:
-            - x64
-            - x86
-            - arm
-            default: x64
-            description: Target architecture
-          static:
-            type: boolean
-            default: false
-            description: Compile statically linked binary
-          strip:
-            type: boolean
-            default: true
-            description: Strip symbols from binary
-          output_format:
-            type: enum
-            values:
-            - base64
-            - hex
-            default: base64
-            description: Output encoding format
-        returns:
-          binary:
-            type: string
-            description: Compiled binary in specified format
-          size_bytes:
-            type: integer
-            description: Binary size in bytes
-      suid_shell:
-        description: Generate a SUID shell binary
-        when_to_use: To create a binary that runs commands as root when SUID is set
-        params:
-          command:
-            type: string
-            default: /bin/bash
-            description: Command to execute
-          arch:
-            type: enum
-            values:
-            - x64
-            - x86
-            default: x64
-            description: Target architecture
-          output_format:
-            type: enum
-            values:
-            - base64
-            - hex
-            default: base64
-            description: Output encoding format
-        returns:
-          binary:
-            type: string
-            description: SUID shell binary in specified format
-          size_bytes:
-            type: integer
-            description: Binary size in bytes
-      revshell:
-        description: 'Generate a reverse shell one-liner in 8 languages: bash (tcp/pty/mkfifo variants), python, nc (traditional/mkfifo),
-          php, perl, ruby, powershell, socat. Supports encoding (base64, URL, double-URL) for delivery through injection points.'
-        when_to_use: 'When you have RCE and need a reverse shell payload in a specific language available on the target. Choose
-          based on what''s installed: bash (most Linux), python (if Python installed), php (PHP web servers), powershell (Windows).
-          Use encode=base64 to avoid special character issues in injection. Start a listener (netcat listen or metasploit
-          handler) BEFORE delivering the payload.'
-        params:
-          lhost:
-            type: string
-            required: true
-            description: Listener IP address
-          lport:
-            type: integer
-            required: true
-            description: Listener port
-          type:
-            type: enum
-            values:
-            - bash
-            - python
-            - nc
-            - php
-            - perl
-            - ruby
-            - powershell
-            - socat
-            default: bash
-            description: Reverse shell type
-          variant:
-            type: string
-            description: Variant of the shell type (e.g., 'tcp', 'pty', 'mkfifo')
-          encode:
-            type: enum
-            values:
-            - none
-            - base64
-            - url
-            - double-url
-            default: none
-            description: Encoding to apply
-        returns:
-          payload:
-            type: string
-            description: Reverse shell payload
-          raw_payload:
-            type: string
-            description: Unencoded payload (if encoding applied)
-      list_shells:
-        description: List available reverse shell types and variants
-        when_to_use: To see available reverse shell options
-        params: {}
-        returns:
-          shells:
-            type: object
-            description: Available shell types and their variants
-      encode:
-        description: Encode a payload
-        when_to_use: To encode payloads for evasion or transport
-        params:
-          payload:
-            type: string
-            required: true
-            description: Payload to encode
-          encoding:
-            type: enum
-            values:
-            - base64
-            - url
-            - double-url
-            - hex
-            - unicode
-            required: true
-            description: Encoding method
-        returns:
-          encoded:
-            type: string
-            description: Encoded payload
-      decode:
-        description: Decode an encoded payload
-        when_to_use: To decode payloads for analysis
-        params:
-          payload:
-            type: string
-            required: true
-            description: Payload to decode
-          encoding:
-            type: enum
-            values:
-            - base64
-            - url
-            - hex
-            required: true
-            description: Encoding to reverse
-        returns:
-          decoded:
-            type: string
-            description: Decoded payload
   phpggc:
     name: phpggc
     kind: cli
@@ -18772,9 +18587,6 @@ tools:
       - task: writing custom exploits
         use_instead: exploit-runner
         reason: searchsploit only finds public exploits; for custom-written exploits use exploit-runner
-      - task: payload generation (msfvenom-style shellcode)
-        use_instead: payload
-        reason: searchsploit retrieves existing exploits; payload tool generates new shellcodes / reverse shells
       - task: active vulnerability scanning
         use_instead: nuclei or nmap vuln scripts
         reason: searchsploit is offline DB lookup, NOT a vulnerability scanner — it does not probe targets

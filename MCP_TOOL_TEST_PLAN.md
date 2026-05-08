@@ -419,8 +419,7 @@ These are used in almost every engagement. They mostly work but haven't been sys
 | 26 | tunnel | 60 | 5 | 420 |
 | 27 | searchsploit | 35 | 12 | 291 |
 | 28 | cve-lookup | 25 | 9 | 496 |
-| 29 | payload | 3 | 3 | 448 |
-| 30 | hash-lookup | 11 | 5 | 427 |
+| 29 | hash-lookup | 11 | 5 | 427 |
 
 ### Tier 4: Low/No-Usage Tools
 
