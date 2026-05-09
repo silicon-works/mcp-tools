@@ -43,13 +43,24 @@ kind: cli
 # All seven legacy method handlers (exec, shell, copy_from, copy_to,
 # upload_binary, run_script, background) auto-inherit run_cli from
 # BaseMCPServer (mcp-common 0.3.0). kind:cli is the new default; the seven
-# methods are preserved as the legacy / rollback path per SKILL #21. Each
-# legacy method opens a FRESH ssh / scp connection per call (one-shot) — no
-# state is held between calls. Persistent multi-command sessions are NOT in
-# scope for this tool; use the separate `shell-session` (kind:mcp) tool for
-# that.
+# methods are preserved as the legacy / rollback path per SKILL #21.
+#
+# CONSOLIDATION (May 2026): this tool is the unified successor of the
+# legacy `shell-session` (kind:mcp) tool for SSH operations. The MCP
+# wrapper exposed 9 stateful methods (ssh_connect, exec, upload, download,
+# listen, shell_exec, list_sessions, close, upgrade_shell). Mapping:
+#   ssh_connect / exec / upload / download / list_sessions / close
+#     → THIS tool via OpenSSH ControlMaster pattern (-M / -S / -O)
+#       — persistent socket on disk at /session/output/sshctl/, separate
+#       tool-runner spawns reuse it without re-auth. Master container
+#       holds the connection for max_runtime_seconds.
+#   listen / shell_exec / upgrade_shell  (reverse-shell side)
+#     → covered by `nc` v2.0 (Tool 2, May 2026) — held-listener
+#       pipeline pattern, MARKER stability, PTY upgrade gotcha.
+# shell-session stays untouched during parallel period; deletion is
+# bundled with impacket-relay + netcat MCP retirements.
 
-version: "1.0"
+version: "2.0"
 description: >
   OpenSSH 10.x client + sshpass 1.10 for one-shot remote operations against
   a host where you already have credentials. Three sub-binaries:
@@ -75,11 +86,25 @@ description: >
     scp -i /session/output/id_rsa /session/output/payload.sh user@10.10.10.5:/tmp/payload.sh
     ssh -i /session/output/id_rsa user@10.10.10.5 'nohup /tmp/payload.sh >/dev/null 2>&1 &'
 
-  Stateful operations are OUT OF SCOPE for kind:cli: -L / -R / -D port
-  forwards (ssh tunnels — use the `tunnel` MCP tool); -N (no remote
-  command — only useful for tunnels); -W (forward to host). These are
-  rejected via `reject_flags`. Persistent multi-command shells are also
-  out of scope — use `shell-session` (kind:mcp).
+  Persistent multi-command sessions (formerly the `shell-session`
+  kind:mcp tool's domain) are NOW IN SCOPE via OpenSSH ControlMaster:
+
+    # tool-runner-A — open the persistent socket
+    bash -c 'mkdir -p /session/output/sshctl && \
+             sshpass -p PASS ssh -fN \
+               -o ControlMaster=yes -o ControlPersist=600 \
+               -o ControlPath=/session/output/sshctl/%h-%p-%r \
+               -o StrictHostKeyChecking=no -p 22 user@host'
+
+    # tool-runner-B / C / D — exec via the socket (no re-auth)
+    ssh -o ControlPath=/session/output/sshctl/%h-%p-%r -p 22 user@host 'whoami'
+    scp -o ControlPath=/session/output/sshctl/%h-%p-%r -P 22 file user@host:/tmp/
+
+    # cleanup
+    ssh -O exit -o ControlPath=/session/output/sshctl/%h-%p-%r user@host
+
+  Tunneling is OUT OF SCOPE: -L / -R / -D / -N / -W (port forwards / SOCKS)
+  remain rejected via `reject_flags`. Use the `tunnel` (kind:mcp) tool.
 
   Output is PURE TEXT on stdout: whatever the remote command emits. scp
   emits brief progress on stderr (often nothing under -q). sshpass adds
@@ -112,6 +137,9 @@ capabilities:
   - command_execution
   - file_transfer
   - credential_based_access
+  - persistent_ssh_session
+  - multi_command_remote_enumeration
+  - sftp_via_persistent_socket
 
 phases:
   - exploitation
@@ -135,13 +163,17 @@ routing:
     - "run a single sudo / suid / cron-related enumeration command on a target"
     - "kick off a detached process on the target (nohup / disown) that survives disconnect"
     - "execute a sequence of commands joined with && or ; in a single SSH invocation"
+    - "open a persistent SSH session for many sequential commands (ControlMaster)"
+    - "post-exploitation enumeration with multiple commands against same host"
+    - "SFTP/SCP file transfer over an existing persistent SSH session"
+    - "run SSH commands across multiple concurrent tool-runner spawns reusing one auth"
   never_use_for:
     - "SSH brute-force — use hydra ssh:// or netexec ssh"
-    - "interactive multi-command shells — use the shell-session (kind:mcp) tool"
     - "SSH tunneling / SOCKS proxy / port forwarding — use the tunnel (kind:mcp) tool"
     - "SSH-based key cracking — use john's ssh2john + john / hashcat"
     - "initial port discovery — use nmap"
-    - "TTY-required interactive tools (vi, less, htop) — kind:cli has no TTY"
+    - "TTY-required interactive tools (vi, less, htop) — kind:cli has no TTY (use ControlMaster + RequestTTY=force as a workaround if absolutely needed, but prefer non-TTY-requiring alternatives)"
+    - "raw-TCP held reverse shell from an exploit (no SSH creds) — use nc v2.0's held-listener pattern instead"
   triggers:
     - "ssh"
     - "scp"
@@ -158,11 +190,21 @@ routing:
     - "execute on target"
     - "post-exploitation"
     - "sudo -l via ssh"
-  prefer_over: []
+    - "ControlMaster"
+    - "ssh ControlMaster"
+    - "persistent SSH"
+    - "ssh session"
+    - "ssh_connect"
+    - "shell-session"
+    - "multiplex SSH"
+    - "ssh socket"
+    - "session reuse"
+  prefer_over:
+    - "shell-session"
 
 see_also:
-  - tool: shell-session
-    reason: "Use shell-session (kind:mcp) for PERSISTENT multi-command SSH sessions where state matters across commands (cd, env vars, set -x). This `ssh` tool opens a FRESH connection per call — every invocation starts from $HOME with no shell state. If the agent finds itself running 4+ ssh calls in a row against the same host with related state (cd into a dir, then ls, then cat, then mv), pivot to shell-session for one persistent session."
+  - tool: nc
+    reason: "Use `nc` (v2.0, May 2026) for raw-TCP REVERSE SHELL holding from an exploit — when there are no SSH credentials yet. This `ssh` tool requires known credentials. The `nc` tool's held-listener pipeline pattern (tail|ncat with cmd_log/out_log) covers shell-session's listen / shell_exec / upgrade_shell methods. Once a foothold yields SSH credentials, pivot from `nc` reverse-shell to `ssh` ControlMaster for a more stable persistent session."
   - tool: tunnel
     reason: "Use tunnel (kind:mcp) for SSH-based port forwarding (-L local, -R remote, -D dynamic / SOCKS) and stateful tunnels. The `-L`, `-R`, `-D`, and `-N` flags are REJECTED by this `ssh` tool's reject_flags because they require a long-running ssh process; cli_in_container's one-shot model can't keep them alive."
   - tool: hydra
@@ -202,27 +244,30 @@ target_extraction:
     group: 2
     parse_as: "raw"
 
-# Stateful flags that cannot work under cli_in_container (one-shot model;
-# no persistent ssh process to keep a tunnel alive). Routed to the `tunnel`
-# kind:mcp tool instead.
+# Tunnel flags that route to the `tunnel` (kind:mcp) tool. ControlMaster
+# flags (-M / -S / -O) were previously rejected; as of v2.0 (May 2026)
+# they are ALLOWED — see usage_patterns + gotchas for the persistent-
+# session pattern that replaces shell-session.
 reject_flags:
   - "-L"      # local port forward (ssh -L 8080:localhost:80 user@host)
   - "-R"      # remote port forward (ssh -R 8080:localhost:80 user@host)
   - "-D"      # dynamic SOCKS proxy (ssh -D 1080 user@host)
   - "-N"      # no remote command (only useful in conjunction with -L/-R/-D)
   - "-W"      # forward to host:port (ProxyJump-style; stateful)
-  - "-M"      # control master (sets up a persistent multiplex socket)
-  - "-S"      # control socket path (used with -M; persistent)
-  - "-O"      # control commands (check/exit/forward — only meaningful with -M)
 reject_flags_reason: >
-  ssh -L, -R, -D, -N, -W, -M, -S, -O are STATEFUL operations: they require
-  the ssh process to keep running for the duration of the tunnel / control
-  master. cli_in_container is one-shot — the process exits as soon as the
-  remote command returns, killing any tunnel. For persistent tunneling /
-  port forwarding / SOCKS, use the dedicated `tunnel` (kind:mcp) tool.
-  Note: scp's `-O` means "use legacy SCP protocol" (totally different from
-  ssh's `-O`); scp invocations are unaffected by this reject because the
-  reject_flags are scoped per-binary in the cli_in_container parser.
+  ssh -L, -R, -D, -N, -W are STATEFUL TUNNEL operations: they require the
+  ssh process to keep running for the duration of the tunnel / port
+  forward. For persistent tunneling / port forwarding / SOCKS, use the
+  dedicated `tunnel` (kind:mcp) tool.
+
+  ControlMaster flags (-M, -S, -O) are NOW ALLOWED (v2.0 consolidation,
+  May 2026). The previous restriction reflected a one-shot kind:cli model
+  that pre-dated the tool-runner architecture. Persistent SSH sessions
+  now run via ControlMaster + ControlPath pointed at
+  /session/output/sshctl/ — a master container holds the connection for
+  max_runtime_seconds; separate tool-runner spawns reuse the socket via
+  ControlPath without re-authenticating. See usage_patterns and gotchas
+  for the canonical recipes.
 
 # Per-tool value-taking flags whose values must NOT be confused with the
 # positional `[user@]host` argument. Verified against:
@@ -406,6 +451,43 @@ usage_patterns:
     command: "-V"
     when: "Print OpenSSH client version (e.g., 'OpenSSH_10.2p1 Debian-1, OpenSSL 3.0.x'). target=null. NB: -V output goes to STDERR, not stdout — capture stderr if parsing."
 
+  # ── ControlMaster patterns (consolidated from shell-session, May 2026) ──
+
+  - name: "ControlMaster — open persistent SSH session (replaces shell-session.ssh_connect)"
+    binary: "bash"
+    command: "-c 'mkdir -p /session/output/sshctl && sshpass -p \"<password>\" ssh -fN -o ControlMaster=yes -o ControlPersist=<seconds> -o ControlPath=/session/output/sshctl/%h-%p-%r -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -p <port> <user>@<host>'"
+    when: "Open a persistent SSH session for follow-up multi-command use. -fN forks the master to background inside the container and exits the foreground process; the master process keeps the TCP connection open and the ControlPath socket usable. Use ControlPersist=600 (10min) for typical engagement work. For key-auth, swap sshpass+\"-p PASS\" for \"-i /session/output/keys/<keyfile>\". The container that spawned this master holds the connection for cli_in_container's max_runtime_seconds — when killed (max_runtime fires OR `ssh -O exit` called), the socket is reaped. Verified empirically 2026-05-09 against rastasheep ssh-target with cross-spawn reuse."
+
+  - name: "ControlMaster — exec command via existing socket (replaces shell-session.exec)"
+    binary: "ssh"
+    command: "-o ControlPath=/session/output/sshctl/%h-%p-%r -p <port> <user>@<host> '<command>'"
+    when: "Execute a command on the host using the persistent ControlMaster socket from the previous pattern — no re-authentication, sub-second connect time. Each call is a fresh exec; shell state (cd / env vars / set -x) does NOT persist across calls. For multi-command stateful needs, chain inline (`cd /tmp && pwd && ls`) per call. The same ControlPath works from any tool-runner spawn (different containers, same /session/ mount)."
+
+  - name: "ControlMaster — upload file via existing socket (replaces shell-session.upload)"
+    binary: "bash"
+    command: "-c 'scp -o ControlPath=/session/output/sshctl/%h-%p-%r -P <port> <local_path> <user>@<host>:<remote_path>'"
+    when: "Upload a local file (typically /session/output/<file>) to the target via SCP, reusing the ControlMaster socket. -P uses CAPITAL P (scp) — ssh uses lowercase. Recursive upload: add -r for directories. Verified working 2026-05-09 (test_payload_data uploaded to /tmp/uploaded.txt then cat'd back via Pattern B). For content-as-string uploads (you have the file body, not a local path) see the next pattern."
+
+  - name: "ControlMaster — upload content (string body) via existing socket (replaces shell-session.upload with content+is_binary)"
+    binary: "bash"
+    command: "-c 'scp -o ControlPath=/session/output/sshctl/%h-%p-%r -P <port> <local_staged_path> <user>@<host>:<remote_path> && ssh -o ControlPath=/session/output/sshctl/%h-%p-%r -p <port> <user>@<host> \"chmod <mode> <remote_path>\"'"
+    when: "Upload content the agent has as a STRING (not a local file path). Pre-step: agent calls the Write tool to stage the content at <local_staged_path> = `/session/output/staged/<name>` BEFORE this scp call. For BINARY content (originally is_binary=true in shell-session.upload), agent first base64-decodes via the Write+`base64 -d` chain or uses Python: `python3 -c 'import base64; open(\"/session/output/staged/payload\", \"wb\").write(base64.b64decode(\"<B64>\"))'`. <mode> defaults to 0755 for executables (matches shell-session.upload default), 0644 for read-only. The trailing `chmod` step is necessary because scp preserves SOURCE perms (whatever the staged file got from Write — usually 0644), not target perms. Replaces all three of shell-session.upload's params: content (via Write), is_binary (via base64 -d staging), mode (via trailing chmod)."
+
+  - name: "ControlMaster — download file via existing socket (replaces shell-session.download)"
+    binary: "bash"
+    command: "-c 'scp -o ControlPath=/session/output/sshctl/%h-%p-%r -P <port> <user>@<host>:<remote_path> <local_path>'"
+    when: "Download a remote file to local /session/output/loot/. Same socket reuse as upload. For sftp-style batched ops, prefer multiple scp calls — each is sub-second over a warm ControlMaster."
+
+  - name: "ControlMaster — list active sessions (replaces shell-session.list_sessions)"
+    binary: "bash"
+    command: "-c 'ls -la /session/output/sshctl/ 2>/dev/null'"
+    when: "Enumerate active ControlMaster sockets. Each socket file is named host-port-user (via %h-%p-%r). Empty / missing dir = no active sessions. A stale socket whose master died will be auto-cleaned by ssh on next connect attempt. target=null."
+
+  - name: "ControlMaster — close session cleanly (replaces shell-session.close)"
+    binary: "ssh"
+    command: "-O exit -o ControlPath=/session/output/sshctl/%h-%p-%r -p <port> <user>@<host>"
+    when: "Tell the master to exit cleanly. Removes the ControlPath socket. CRITICAL: pass the SAME -p <port> AND <user>@<host> as Pattern A — the %h-%p-%r placeholders in ControlPath expand at command time using these values, so omitting -p makes ssh look for a different socket name (e.g., localhost-22-root instead of localhost-22221-root) and the close silently misses the master. Optional — master also exits when ControlPersist expires (default in our pattern: 600s after last client) or its container is killed by max_runtime_seconds. Use this when the agent wants to free resources earlier."
+
 output_formats:
   - flag: ""
     format: "text"
@@ -461,7 +543,7 @@ common_options:
 gotchas:
   - "MULTI-BINARY toolkit. Pick the right binary per task: `ssh` (one-shot remote command), `scp` (file copy), `sshpass` (wrap ssh/scp for password auth). Each usage_pattern declares `binary:` explicitly. cli_in_container forwards the chosen binary; there is NO top-level `binary:` field."
   - "`-p` MEANS THREE DIFFERENT THINGS across the three binaries. ssh -p = REMOTE PORT (integer); scp -p = PRESERVE PERMS (boolean); sshpass -p = PASSWORD (string). Same letter, totally different semantics. The cli_in_container parser is binary-scoped — at parse time the binary is fixed, so the same letter is unambiguous within scope. The HUMAN-side risk is typing -p for port in scp (you want -P) or for password in ssh (you want sshpass -p)."
-  - "STATEFUL FLAGS REJECTED: -L (local fwd), -R (remote fwd), -D (SOCKS), -N (no command), -W (forward host), -M (control master), -S (control socket), -O (control commands). These all need a long-running ssh process to be useful; cli_in_container's one-shot model can't keep them alive. Use the `tunnel` (kind:mcp) tool instead. NB: scp -O has a different meaning (legacy SCP protocol) and is unaffected — reject_flags are binary-scoped."
+  - "TUNNEL FLAGS REJECTED: -L (local fwd), -R (remote fwd), -D (SOCKS), -N (no command), -W (forward host). These need a long-running ssh process for the tunnel; route to the `tunnel` (kind:mcp) tool. ControlMaster flags (-M / -S / -O) are NOW ALLOWED (v2.0, May 2026) — see ControlMaster usage_patterns + gotchas for the persistent-session pattern that replaces shell-session. NB: scp -O has a different meaning (legacy SCP protocol) and is unaffected — reject_flags are binary-scoped."
   - "ALWAYS use `-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null` in HTB / lab engagements. Without these, ssh prompts on first connection ('The authenticity of host ... can't be established. Are you sure you want to continue connecting (yes/no)?'); cli_in_container has no TTY, so the call HANGS until idle_timeout. SAME for ssh's interactive password prompt — always pair credential auth with sshpass / -i + BatchMode=yes to avoid hangs."
   - "ALWAYS use `-T` to disable PTY allocation. cli_in_container has no TTY; without -T, ssh either complains ('Pseudo-terminal will not be allocated...') or, worse, succeeds but produces ANSI color codes / readline gibberish in stdout. -T forces non-interactive mode and produces clean stdout."
   - "PRIVATE KEY FILE PERMISSIONS. ssh refuses to use a key with permissions broader than 0600 ('WARNING: UNPROTECTED PRIVATE KEY FILE'). Two workarounds: (a) chmod 600 the key in /session/ before invoking ssh (cli_in_container should do this automatically when the write tool stages the key); (b) use `-o IdentitiesOnly=yes` which sometimes bypasses the check. If neither works, the key file's UID may not match the cli_in_container user — check with `ls -la`."
@@ -470,6 +552,13 @@ gotchas:
   - "BACKGROUND PROCESSES need `nohup ... &` AND `disown` AND output redirection. Without all three, the process dies when SSH closes the channel: nohup ignores SIGHUP; & runs in background; disown removes the job from the shell's job table; output redirection (`>file 2>&1` or `>/dev/null 2>&1`) detaches stdio. Echo a sentinel ('BACKGROUND_STARTED') so the agent confirms the launch happened. The legacy `background` method wrapped this; under run_cli the LLM constructs the chain."
   - "`ssh user@host 'echo data | base64 -d > /tmp/file'` for binary-via-stdin uploads has SIZE LIMITS. Most shells refuse argv > ~128KB (ARG_MAX). For larger binaries: use scp (preferred), or chunk the base64 (the legacy upload_binary method did 50KB chunks). cli_in_container's stdin support also lets you pipe the bytes via stdin without shell argv expansion."
   - "scp's `-O` (capital O) means LEGACY-SCP-PROTOCOL. OpenSSH 9+ defaults to SFTP-over-ssh for scp; old servers (Solaris, AIX, embedded) only speak the legacy SCP protocol and need -O explicitly. Symptom: 'subsystem request failed on channel 0' from the server, or 'sh: scp: not found' (when only `scp` legacy binary exists, no SFTP subsystem)."
+  - "CONTROLMASTER PATTERN is the v2.0 successor of shell-session. Pattern A opens a persistent socket; subsequent ssh / scp calls reuse it via ControlPath. Pre-flight verified the multi-spawn reuse pattern works (tool-runner-A spawns master, B/C/D reuse socket from separate containers — no extra auth). The master container holds the connection for cli_in_container's max_runtime_seconds (default 1h via tool.yaml; can be longer per call). Each reuse call is sub-second since auth is skipped."
+  - "CONTROLPATH NAMING CONVENTION. Use /session/output/sshctl/%h-%p-%r — placeholders expand to host-port-remote_user, making the socket name unique per (host, port, user) tuple. Multiple concurrent sessions to different hosts coexist without collision. Read `ls /session/output/sshctl/` to enumerate active sessions (replaces shell-session.list_sessions). Empty / missing dir = no active sessions."
+  - "CONTROLMASTER STATE NON-PERSISTENCE. ControlMaster persists the TCP CONNECTION, NOT shell state. `cd /tmp` in one ssh call followed by `pwd` in another returns `/root` — each exec is fresh. For multi-command stateful needs: chain inline (`cd /tmp && pwd && ls -la && cat foo`) per call, OR use the `nc` v2.0 held interactive shell pattern for raw-TCP foothold cases that need shell-state persistence. Verified empirically 2026-05-09."
+  - "CONTROLMASTER AUTHENTICATION. Master open requires successful auth ONCE. Methods supported: password (sshpass + `-p PASS`), private key (`-i /session/output/keys/<file>` — chmod 600 first), ssh-agent (`-A` flag, less common). For base64-encoded private keys (shell-session legacy feature), agent decodes via Write tool first then references the file: `printf '%s' BASE64 | base64 -d > /session/output/keys/id_rsa && chmod 600 /session/output/keys/id_rsa`. After Pattern A, every reuse skips auth — no need to repeat creds in Patterns B/C/D."
+  - "CONTROLMASTER CLEANUP. Three ways the master ends: (a) Pattern D's `ssh -O exit` (graceful, removes socket file); (b) ControlPersist timer expires after last client disconnects (we set 600s); (c) the master's container is killed by max_runtime_seconds. Stale socket files left behind by an unclean death are auto-cleaned by ssh on next connect attempt. Don't manually rm files in /session/output/sshctl/ — let ssh manage them."
+  - "CONTROLMASTER -fN ESCAPE HATCH. The Pattern A recipe uses `ssh -fN` which forks the master to background INSIDE the container and exits the foreground process. cli_in_container sees the foreground process exit and returns. The forked master keeps running in the same container until killed. If `-fN` is omitted, ssh runs FOREGROUND and cli_in_container's call blocks until the connection drops — works but burns one tool-runner spawn per session. Prefer `-fN` for cleaner spawn semantics."
+  - "REVERSE-SHELL HOLDING IS NOT THIS TOOL'S JOB. If the agent has a non-SSH foothold (raw bash reverse shell from an exploit, no creds), use `nc` v2.0's held-listener pipeline pattern instead. ControlMaster needs SSH credentials and an SSHd listening on the target. Pivot path: catch reverse shell with nc → enum / privesc → recover SSH creds → switch to ssh ControlMaster for stable persistent access."
   - "SSH ENV VAR PASSTHROUGH IS LIMITED. Most servers' /etc/ssh/sshd_config has `AcceptEnv LANG LC_*` and refuses arbitrary env. To pass an env var to the remote command, EITHER (a) inline it in the command string (`ssh host 'X=1 cmd'`), OR (b) request it via `-o SendEnv=X` AND ensure the server has `AcceptEnv X`. Don't assume `ENV=val ssh ...` reaches the remote process."
   - "`shell-session` (kind:mcp) IS THE RIGHT TOOL for PERSISTENT multi-command SSH sessions. This `ssh` tool opens a FRESH connection per call — every invocation starts from $HOME with no shell state (cd / env / set -x are reset). If the agent finds itself running 4+ ssh calls in a row against the same host with related state, pivot to shell-session for ONE persistent session. Each fresh connection also burns a few seconds on TCP+KEX+auth — slow for chatty workflows."
   - "TUNNELS ARE FORBIDDEN HERE. -L, -R, -D, -N, -W are rejected (see reject_flags). Use the `tunnel` (kind:mcp) tool for SSH-based port forwarding / SOCKS / dynamic forwards. cli_in_container can't host a long-running ssh process; the connection terminates as soon as run_cli returns, killing any tunnel."
@@ -481,6 +570,7 @@ gotchas:
   - "OPENSSH 10.x POST-QUANTUM HANDSHAKE WARNINGS pollute stderr. OpenSSH 10 emits banner-style warnings (lines starting `Warning:` or `** `) about post-quantum KEX during the handshake; the legacy mcp-server.py FILTERED these out of error reporting. Under run_cli they appear in stderr verbatim and may confuse failure-signature matching. Heuristic: when classifying an ssh failure, ignore stderr lines starting with `Warning:`, `Permanently added`, or `** ` — these are informational, not errors. The exit code is still authoritative."
   - "BINARY UPLOAD VIA SSH+ECHO+BASE64 NEEDS A 4-STEP CHAIN. The legacy `upload_binary` method did: (1) `rm -f /tmp/payload` to clear stale content, (2) per-chunk `echo CHUNK_B64 | base64 -d >> /tmp/payload` (50KB chunks before base64), (3) `chmod +x /tmp/payload` if executable, (4) verify with `ls -la /tmp/payload && file /tmp/payload`. Skipping step 1 corrupts when retrying after a partial failure; skipping step 4 hides truncation. Under run_cli, prefer scp; only fall back to chunked echo+base64 when scp is blocked (no SFTP subsystem, restricted shell, etc.)."
   - "BACKGROUND PROCESS PID CAPTURE has a TIMING GOTCHA. The legacy `background` method ran `nohup bash -c '...' >output 2>&1 & echo $! > /tmp/pid && disown && sleep 0.2 && cat /tmp/pid` — the `sleep 0.2` lets the shell write the PID file BEFORE the cat reads it (without it, races on slow targets). Use the same chain under run_cli when you need the PID. If you only need fire-and-forget, the simpler `nohup ... & disown && echo BACKGROUND_STARTED` (already in usage_patterns) is enough."
+  - "PTY-REQUIRING REMOTE COMMANDS — when to add `-tt -o RequestTTY=force`. Replaces shell-session.exec's `use_pty=true` parameter. WHO NEEDS A PTY: programs that read from /dev/tty directly (passwd, visudo, su without -, vipw, full-screen TUI tools), or that test isatty() and refuse otherwise. WHO DOES NOT: `sudo -S` reading password from stdin works fine WITHOUT a PTY (verified empirically — `echo PASS | ssh -o ControlPath=... user@host 'sudo -S whoami'` succeeds and prints `root`). Recipes: (a) PTY-needed: `ssh -tt -o RequestTTY=force -o ControlPath=/session/output/sshctl/%h-%p-%r -p <port> <user>@<host> 'visudo'`. (b) sudo with password: `echo 'PASSWORD' | ssh -o ControlPath=... user@host 'sudo -S whoami 2>&1'` — sudo's own -S flag handles stdin, no PTY needed. (c) NOPASSWD: `ssh -o ControlPath=... user@host 'sudo -n cmd'` — cleanest, no PTY, no password. CAVEAT: PTY mode pollutes stdout with carriage returns + terminal control codes — pipe through `tr -d '\\r'` or omit -tt when output cleanliness matters."
 
 failure_signatures:
   # Layer-diverse signals (SKILL #11) — at least 7 distinct verifiable layers:

