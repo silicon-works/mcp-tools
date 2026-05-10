@@ -1,178 +1,681 @@
 name: prowler
-version: "5.18.3"
-description: "Multi-cloud security auditing tool — Prowler v5.18 with 920+ security checks across 14 providers: AWS (572 checks, 84 services, 41 compliance frameworks), Azure (165 checks, 21 services), GCP (100 checks), Kubernetes (83 checks, 8 services), M365, GitHub, Cloudflare, Oracle Cloud, OpenStack, Alibaba Cloud, IaC, LLM, NHN, and MongoDB Atlas. Three methods: scan (full provider audit with severity/service/compliance/region filtering), list_checks (enumerate checks/services/compliance frameworks without credentials), scan_service (focused single-service audit for faster results). Outputs OCSF JSON findings with pass/fail status, severity, resource details, and compliance mapping. Requires cloud credentials via environment variables. For container/IaC scanning use trivy instead. For AWS post-exploitation enumeration use bash with AWS CLI or impacket."
+kind: mcp
+version: "0.5"
+description: "Multi-cloud security audit + attack-paths analysis via prowler-cloud/prowler's OFFICIAL MCP server (mcp_server subdir in main repo; PyPI package `prowler-mcp` v0.5.x — installed in this image from local source for version coherence). 41-tool surface across 3 namespaces: 10 prowler_hub_* tools (no-auth, fetches catalog from hub.prowler.com — 1000+ checks across 17 providers, 70+ compliance frameworks, fixer code), 2 prowler_docs_* tools (no-auth, full-text search of Prowler official docs), 29 prowler_app_* tools (auth-required, talks to a self-hosted Prowler App API for findings/scans/providers/attack-paths/mute-rules/compliance reporting). Bundled container ships the FULL self-hosted Prowler App stack (postgres-16 + redis-7 + dozerdb (Apache 2 Neo4j fork) + Django REST API + Celery worker + prowler-mcp stdio bridge) so the agent can connect a target's compromised cloud creds via prowler_app_connect_provider, trigger_scan, then graph-query the attack-paths via run_attack_paths_query — all without depending on Prowler's SaaS. Replaces the prior 406-LOC custom Python wrapper that exposed 3 methods (scan/list_checks/scan_service); the new surface is ~14x larger AND includes capabilities (attack-paths analysis, CloudTrail-events timeline via get_resource_events, persistent findings DB, compliance overview/drilldown) that no other tool in the registry replicates. Cold-start cost: 123s/2:03 on first boot (90+ Django migrations on a fresh DB), 93s/1:33 on warm restart with persistent volumes — bulk of warm time is JVM (dozerdb) + gunicorn boot which can't be cached (live-measured 2026-05-09); image ~3.9 GB; 4 GB RAM minimum (dozerdb heap is the heavy item). Offensive-tuned entrypoint kills upstream's APN_1826889 boto3 user_agent_extra fingerprint (visible in target CloudTrail) by setting PROWLER_AWS_BOTO3_USER_AGENT_EXTRA empty, kills Sentry telemetry via DJANGO_SENTRY_DSN empty, and randomizes every default secret (postgres/neo4j/auth) so the public defaults shipped in upstream's .env never reach a deployed container."
+source: https://github.com/prowler-cloud/prowler/tree/master/mcp_server
 image: "ghcr.io/silicon-works/mcp-tools-prowler:latest"
-image_size_mb: 1820
-timeout_seconds: 900
+image_size_mb: 3870
+timeout_seconds: 1800
+idle_timeout_seconds: 7200
+
+service: true
+service_name: "prowler"
 
 capabilities:
   - cloud_security_audit
   - compliance_scanning
   - misconfiguration_detection
+  - attack_paths_analysis
+  - cloudtrail_forensics
+  - findings_persistence
   - multi_cloud
-
-routing:
-  use_for:
-    - "audit an AWS account for security misconfigurations"
-    - "check Azure subscription security posture"
-    - "scan GCP project for security issues"
-    - "audit Kubernetes cluster security configuration"
-    - "run CIS benchmark compliance checks against AWS"
-    - "find IAM misconfigurations in cloud accounts"
-    - "check S3 bucket security and public access settings"
-    - "audit cloud security posture across multiple providers"
-    - "find security groups with overly permissive rules"
-    - "check cloud encryption settings and key management"
-    - "verify cloud logging and monitoring configuration"
-    - "run PCI DSS compliance audit on cloud infrastructure"
-    - "check for publicly exposed cloud resources"
-    - "audit Microsoft 365 tenant security configuration"
-    - "scan GitHub organization for security misconfigurations"
-  never_use_for:
-    - "container image vulnerability scanning (use trivy)"
-    - "IaC file misconfiguration scanning (use trivy)"
-    - "web application vulnerability scanning (use nuclei or nikto)"
-    - "network port scanning (use nmap)"
-    - "AWS post-exploitation enumeration (not supported — use bash with AWS CLI or impacket)"
-    - "CVE research and lookup (use cve-lookup)"
-  triggers:
-    - "prowler"
-    - "cloud audit"
-    - "cloud security"
-    - "AWS security"
-    - "Azure security"
-    - "GCP security"
-    - "CIS benchmark"
-    - "compliance scan"
-    - "cloud misconfiguration"
-    - "S3 security"
-    - "IAM audit"
-    - "M365 security"
-    - "Microsoft 365 audit"
-    - "GitHub security audit"
+  - security_knowledge_base
 
 phases:
   - enumeration
+  - exploitation
+  - post-exploitation
+  - reporting
 
 requirements:
   network: true
   privileged: false
 
-environment:
-  - name: AWS_ACCESS_KEY_ID
-    description: "AWS access key for authentication"
-    required: false
-  - name: AWS_SECRET_ACCESS_KEY
-    description: "AWS secret key for authentication"
-    required: false
-  - name: AWS_SESSION_TOKEN
-    description: "AWS session token for temporary credentials"
-    required: false
-  - name: AZURE_SUBSCRIPTION_ID
-    description: "Azure subscription ID"
-    required: false
-  - name: AZURE_TENANT_ID
-    description: "Azure tenant ID"
-    required: false
-  - name: GOOGLE_APPLICATION_CREDENTIALS
-    description: "Path to GCP service account JSON key file"
-    required: false
-
 resources:
-  memory_mb: 512
-  cpu: 1.0
+  memory_mb: 4096
+  cpu: 2.0
 
 see_also:
+  - tool: aws
+    reason: "Existing aws-cli wrapper (vendor-MCP wrap of awslabs/aws-api-mcp-server). Use aws for direct AWS API calls when you have creds + need raw output (e.g., describe-instances). Use prowler when you want SECURITY ANALYSIS (misconfigs, compliance, attack paths) across the same account — prowler runs hundreds of checks; aws runs one API call."
+  - tool: curl
+    reason: "Direct HTTPS to Prowler App API (http://127.0.0.1:8080/api/v1/) when an MCP tool is missing or you need raw response — useful for debugging the embedded Django API state."
   - tool: trivy
-    reason: "Use trivy for container image CVE scanning and IaC misconfiguration detection. Prowler audits live cloud accounts, trivy scans artifacts."
+    reason: "Container image + IaC + filesystem scanning. Prowler scans CLOUD CONTROL PLANE (IAM, S3 ACLs, etc.); trivy scans CONTAINERS / TERRAFORM. Complementary, not overlapping."
+  - tool: nuclei
+    reason: "Application-layer vuln templates. Prowler scans cloud config; nuclei scans deployed services. Run both for cloud + app coverage."
   - tool: nmap
-    reason: "After prowler finds exposed cloud resources with public IPs or open security groups, use nmap to scan those exposed endpoints."
-  - tool: cve-lookup
-    reason: "Use cve-lookup to research specific CVEs found in cloud audit findings."
+    reason: "Discover what's exposed first (which AWS-hosted services are internet-reachable), then prowler audits the cloud config of those services."
+
+warnings:
+  - "appName/UA fingerprint mitigation: Prowler stamps `APN_1826889` (AWS Partner Network ID) into every boto3 client's `user_agent_extra` by default. Defenders running `aws cloudtrail lookup-events` against the target see APN_1826889 in every event's userAgent — straight tell that Prowler is in use. This image's entrypoint sets PROWLER_AWS_BOTO3_USER_AGENT_EXTRA='' to kill the fingerprint. **CRITICAL OFFENSIVE PRACTICE:** if you rebuild the image differently or override that env var, restore the empty value before pointing at a target you don't own."
+  - "Self-hosted SaaS posture: this container runs the FULL Prowler App stack — postgres + neo4j + django + celery — locally inside the container. Provider credentials (target AWS keys) are stored ENCRYPTED AT REST in the local postgres via DJANGO_SECRETS_ENCRYPTION_KEY (Fernet). Encryption key is randomly generated per first-boot and persisted on `/var/lib/prowler/secrets/fernet_key`. Lose that volume = creds become unrecoverable. Backup the `secrets/` dir if you need to migrate state."
+  - "Cold start ~2-3 min on first boot (90+ Django migrations on a fresh postgres; live-measured 2026-05-09 against clean image build). Subsequent restarts (with persistent /var/lib/prowler + /var/lib/postgresql + /opt/dozerdb/data volumes) are ~30-60s. service: true makes the stack run once per opensploit session — first session pays the cold-start cost, subsequent calls within the session are sub-second."
+  - "Async scan model: trigger_scan returns immediately with a scan_id; the actual scan runs in the celery worker against the celery/scans/scan-reports/attack-paths-scans queues. Agent must poll get_scan until state=completed before search_security_findings will return populated results. Typical AWS scan completes in 5-15 minutes for a small account, longer for prod-sized estates."
+
+notes: |
+  ## Architecture
+
+  ```
+  opensploit ContainerManager (stdio MCP, service: true once per session)
+           │
+           │  docker run -i --rm --network=host
+           │    -v ${sessionDir}:/session:rw
+           │    ghcr.io/silicon-works/mcp-tools-prowler:latest
+           ▼
+  container's entrypoint.sh (~180 LOC, supervised shell)
+           │  1. generate-or-load secrets (RSA token-signing keypair, Fernet
+           │     encryption key, postgres/redis/neo4j passwords) on
+           │     /var/lib/prowler/secrets/ (persistent across restarts)
+           │  2. set offensive env: PROWLER_AWS_BOTO3_USER_AGENT_EXTRA='',
+           │     DJANGO_SENTRY_DSN='', DJANGO_DEBUG=False
+           │  3. start postgres-16 (Debian cluster, pg_ctlcluster) → wait healthy
+           │  4. start redis-server (valkey-API-compatible) → wait healthy
+           │  5. start dozerdb (Apache 2 neo4j fork) → wait healthy on 7474
+           │  6. django migrate --database=admin (90+ migrations on first boot)
+           │  7. bootstrap.py: create Tenant + admin User + TenantAPIKey via
+           │     Django ORM (RLS-aware via api.db_utils.rls_transaction);
+           │     prints pk_xxx key, entrypoint caches at
+           │     /var/lib/prowler/bootstrap/api_key
+           │  8. export PROWLER_APP_API_KEY=$(cat key); API_BASE_URL=http://127.0.0.1:8080/api/v1
+           │  9. start gunicorn (Django REST API on 127.0.0.1:8080) + celery worker
+           │ 10. wait for /api/v1/ to return 200
+           │ 11. exec prowler-mcp --transport stdio (foreground)
+           ▼
+  prowler-mcp v0.5.0 (FastMCP framework v2.14.0, identifies as 'prowler-mcp-server')
+           │  • prowler_hub_* tools → fetch from hub.prowler.com (no-auth)
+           │  • prowler_docs_* tools → fetch from docs.prowler.com (no-auth)
+           │  • prowler_app_* tools → httpx call to local Django API with
+           │                          Bearer pk_xxx (singleton ProwlerAPIClient)
+           ▼
+  Django API (gunicorn) → postgres-16 (state) + valkey/redis (Celery broker)
+           │
+           ▼
+  Celery worker (9 queues including attack-paths-scans)
+           │  • scans queue → spawns prowler library subprocess against the
+           │                 connected target's cloud creds (boto3 with empty
+           │                 user_agent_extra → no APN_1826889 fingerprint)
+           │  • attack-paths-scans queue → cartography pipeline pushes graph
+           │                              to dozerdb (neo4j-compat)
+           ▼
+  target cloud (AWS / Azure / GCP / K8s / M365 / GitHub)
+
+  CloudTrail / audit log of target shows the scan calls but with empty UA
+  (just generic Boto3/X.Y.Z Python/Y.Z) — not branded as Prowler.
+  ```
+
+  ## Tool surface (3 namespaces)
+
+  ```
+  prowler_hub_*   (10 tools, NO auth)  → catalog of checks/compliance/providers/services + check Python source
+  prowler_docs_*  (2  tools, NO auth)  → full-text search + fetch of Prowler's official docs
+  prowler_app_*   (29 tools, AUTH)     → providers + scans + findings + attack-paths + resources + mute-rules + compliance
+  ```
+
+  Verified live 2026-05-09 against the bundled stack: tools/list returns
+  exactly 41 tools (10/2/29 split). Server identifies as `prowler-mcp-server`
+  with version `2.14.0` (the FastMCP framework version, not the underlying
+  prowler-mcp package version which is 0.5.0).
+
+  ## Why a vendor-MCP swap (replaces 406-LOC custom Python wrapper)
+
+  The pre-2026 `tools/prowler/mcp-server.py` exposed 3 methods (scan,
+  list_checks, scan_service) wrapping the prowler CLI directly. It worked
+  but was a one-shot scan model: each call ran prowler against given creds,
+  returned OCSF JSON inline, no persistence.
+
+  This swap mirrors the metasploit/zap/playwright pattern — replace the
+  custom wrapper with the vendor's officially-maintained MCP server,
+  bundling the dependencies (Postgres + Redis + Neo4j + Django) into one
+  container. Net trade:
+    • PAY ~10× cold start (~7 min vs <2s) + ~16× RAM (4 GB vs 256 MB) +
+      ~2× image (3.9 GB vs 1.8 GB) + ~50 LOC custom bootstrap.py
+    • GAIN ~14× more methods + persistent findings DB + attack-paths graph
+      analysis (no other registry tool does this) + Hub catalog as
+      knowledge base + Docs full-text search + CloudTrail-events timeline
+      via get_resource_events + compliance overview/drilldown + mute rules
+      with audit trail + multi-provider tracking within one engagement.
+
+  ## Default-deny posture
+
+  We deliberately drop two services from upstream's docker-compose:
+    • UI (Next.js frontend) — pure human surface, agent can't see screens.
+      Every UI capability is reachable via the Django REST API the MCP
+      uses, so dropping UI is zero capability loss.
+    • worker-beat (Celery scheduler) — only useful for prowler_app_schedule_daily_scan
+      recurring scans. Offensive engagements do one-shot scans, not nightly
+      cron. If schedule_daily_scan is ever needed, re-add worker-beat.
+
+  Result: 7 long-running processes inside the container — postgres / redis
+  / dozerdb / gunicorn / celery worker / mcp-server / supervised shell.
+
+  ## Migration history
+
+  • Pre-2026: 406-LOC custom Python wrapper (prowler CLI subprocess, 3
+    methods). 0/79 production trajectory invocations — same engagement-
+    class pattern as scapy/payload (tool was available but engagements
+    didn't reach for cloud audit during the trajectory window).
+  • 2026-05-09: vendor-MCP swap to prowler-cloud/prowler's mcp_server.
+    Custom wrapper retired, full Prowler App stack bundled in one image,
+    standardization layer added (this tool.yaml + scenarios.md +
+    test_prowler_mcp.py). Live-verified Phase A (no Fortress needed):
+    container boots, 41 tools advertised, hub fetches GitHub catalog,
+    docs fetches docs.prowler.com, app tools authenticate to local Django
+    API via bootstrap-minted pk_xxx key.
+
+routing:
+  use_for:
+    - "comprehensive multi-cloud security audit (AWS / Azure / GCP / K8s / M365 / GitHub) with persistent findings"
+    - "trigger a Prowler scan against compromised cloud creds and search the resulting findings"
+    - "graph-based attack-paths analysis ('from this compromised IAM principal, what else can I reach?')"
+    - "lookup what a Prowler check does, its remediation, its Python source — without running anything (hub tools)"
+    - "search Prowler's official docs for setup/auth/troubleshooting guidance (docs tools)"
+    - "compliance reporting against frameworks (CIS / PCI-DSS / HIPAA / SOC2) for a connected cloud"
+    - "CloudTrail-style timeline of API actions on a specific resource (get_resource_events) — forensics"
+    - "asset inventory of a connected cloud (list_resources with filters by service/region/tag)"
+    - "muting rules with audit trail (create_mute_rule + reason) for known-accepted-risk noise"
+  never_use_for:
+    - task: "single AWS API call (describe-instances, get-caller-identity, etc.)"
+      use_instead: "aws"
+      reason: "prowler runs hundreds of checks; aws runs one API call. Use aws for surgical lookups."
+    - task: "container image / IaC / filesystem vulnerability scanning"
+      use_instead: "trivy"
+      reason: "Prowler scans CLOUD control plane (IAM, S3 ACLs); trivy scans CONTAINERS / TERRAFORM. Complementary tools."
+    - task: "application-layer vuln scanning (HTTP/SQL injection / XSS) on cloud-deployed services"
+      use_instead: "nuclei"
+      reason: "Prowler is config-side audit, not application-layer scanner."
+    - task: "raw cloud reconnaissance (which ports are open, what services run)"
+      use_instead: "nmap"
+      reason: "Prowler audits cloud CONFIGURATION, not runtime exposure. nmap discovers; prowler analyzes."
+    - task: "trigger Prowler scan via the Prowler Cloud SaaS"
+      use_instead: "n/a — set API_BASE_URL env override to point MCP at Prowler Cloud"
+      reason: "Default API_BASE_URL is the bundled local Django API. To use Prowler Cloud, override and provide a real pk_ key."
+  triggers:
+    - "prowler"
+    - "cloud security audit"
+    - "AWS security check"
+    - "CIS benchmark"
+    - "attack path"
+    - "cloud compliance"
+    - "IAM misconfig"
+    - "cloud findings"
+
+failure_signatures:
+  - signal: "Unexpected keyword argument"
+    error_class: "schema_validation"
+    remediation: "Pydantic schema mismatch — agent passed an arg the tool doesn't accept. Verified live 2026-05-09: prowler_hub_get_check_details rejects `provider_id` (only accepts `check_id`). Fix: re-check the tool's params block in this tool.yaml; only the listed properties are valid."
+  - signal: "Could not find a version that satisfies the requirement"
+    error_class: "build_dependency_missing"
+    remediation: "PyPI dep not found — likely a version mismatch in the build. The pip package name is `prowler-mcp` (NOT `prowler-mcp-server`). This image installs from local source (/opt/prowler-src/mcp_server) at build time to avoid PyPI version drift."
+  - signal: "ModuleNotFoundError: No module named 'config'"
+    error_class: "django_setup_pythonpath"
+    remediation: "bootstrap.py couldn't import Django config — PROWLER_API_DIR (/opt/prowler-src/api/src/backend) not on sys.path. Mitigation already in bootstrap.py: it inserts the dir into sys.path before django.setup(). Re-run bootstrap if you see this; otherwise verify the env var."
+  - signal: "Setting experimental.system-git-client does not exist"
+    error_class: "poetry_version_drift"
+    remediation: "Poetry 2.x removed the experimental.system-git-client config option that 1.x used to bypass dulwich for git deps. Image works around by sed-rewriting the prowler library dep from `prowler @ git+https://...` to `prowler @ file:///opt/prowler-src` (local path, no git fetch needed). If you bump poetry version, re-verify the lock regen."
+  - signal: "pyproject.toml changed significantly since poetry.lock"
+    error_class: "lock_stale"
+    remediation: "The image's sed-edit of pyproject.toml invalidates the shipped poetry.lock. Image runs `poetry lock --no-cache` before `poetry install` to regenerate. If you see this at runtime (not build time), re-build the image."
+  - signal: "FileAlreadyExistsException: /opt/dozerdb/data"
+    error_class: "dozerdb_symlink"
+    remediation: "DozerDB upstream image has logs→/logs and data→/data symlinks (volume mount points). Docker COPY from the dozerdb image into our runtime breaks them. Image fixes by `rm -rf /opt/dozerdb/{logs,data} && mkdir` after the COPY. If you see this in production, verify the Dockerfile's post-COPY cleanup ran."
+  - signal: "could not access the server configuration file"
+    error_class: "postgres_debian_layout"
+    remediation: "Debian's apt postgresql-16 stores config at /etc/postgresql/16/main/postgresql.conf, NOT in the data dir. Don't use bare pg_ctl; use Debian's pg_ctlcluster wrapper. Image already does this. If you see it, the entrypoint was modified."
+  - signal: "no relation"
+    error_class: "migrations_not_run"
+    remediation: "bootstrap.py ran before migrations completed. Entrypoint waits for migrations to finish (`manage.py migrate --database=admin --noinput`) before invoking bootstrap.py. If this appears at runtime, the migration step failed silently — check container logs around the 'running django migrations' line."
+  - signal: "Token generation failed due to invalid key configuration"
+    error_class: "rsa_keys_missing"
+    remediation: "Upstream bug #8897 (unresolved): fresh self-host can fail JWT token generation if RSA keys aren't pre-set. Mitigation: entrypoint pre-generates RSA keypair via openssl on first boot, persists at /home/prowler/.config/prowler-api/{signing_key.pem,verify_key.pem}. If you see this, the keypair generation step failed — re-run the container."
+  - signal: "Authentication failed"
+    error_class: "api_key_invalid"
+    remediation: "PROWLER_APP_API_KEY mismatch with what's in the postgres TenantAPIKey table. Either: (a) the cached /var/lib/prowler/bootstrap/api_key drifted from DB state (rare), or (b) you overrode PROWLER_APP_API_KEY env to something invalid. Fix: delete /var/lib/prowler/bootstrap/api_key and restart container — bootstrap.py mints a fresh key."
+  - signal: "Server selection timed out"
+    error_class: "service_not_ready"
+    remediation: "Postgres / valkey / dozerdb didn't reach healthy in time. Default wait is 60s for dozerdb (slowest cold start). Check container logs for the failed service's stderr. On first boot dozerdb can take 30-45s; subsequent boots <10s."
+  - signal: "ProviderConnectionError"
+    error_class: "provider_creds_invalid"
+    remediation: "connect_provider validated the supplied AWS/Azure/GCP creds via STS GetCallerIdentity (or equivalent) and they failed. Re-check the credentials are live + have the required scan permissions (SecurityAudit + ViewOnlyAccess + the prowler-additions inline policy)."
+  - signal: "TimeoutError: Timeout"
+    error_class: "scan_celery_stuck"
+    remediation: "trigger_scan returned a scan_id but get_scan stays in 'scheduled' or 'executing' too long. Likely the celery worker is stuck or the target's cloud is throttling Prowler's API calls. Check celery worker logs; for AWS, check CloudTrail for ThrottlingException."
+  - signal: "Tool .* not found"
+    error_class: "tool_name_mismatch"
+    remediation: "Agent called a tool that doesn't exist. Tool names are namespaced — prowler_hub_*, prowler_docs_*, prowler_app_*. The 41-tool list in this tool.yaml's methods block is canonical; verify spelling."
+
+gotchas:
+  - "Cold start ~2-3 minutes on first boot due to 90+ Django migrations on a fresh postgres (live-measured against clean image build; older docs said ~7 min based on early build-iteration data). service: true makes opensploit reuse the same container across MCP calls within a session, so this cost is paid once per session. If you see the agent waiting on tools/list, that's normal first-boot behavior."
+  - "Tool name has 3 namespaces: prowler_hub_* (10 tools, no auth), prowler_docs_* (2 tools, no auth), prowler_app_* (29 tools, auth required via bundled Django API). Hub + docs work even before any provider is connected — useful as a knowledge layer at engagement start."
+  - "App tools require connect_provider FIRST. Calling search_security_findings or trigger_scan before any provider is registered returns empty/error. Engagement flow: connect_provider → trigger_scan (returns scan_id) → poll get_scan until state=completed → search_security_findings."
+  - "Async scan model — trigger_scan does NOT block on scan completion. It returns scan_id immediately; agent must poll get_scan until state=completed. Typical AWS scan completes in 5-15 min for a small account."
+  - "Attack-paths analysis is a SEPARATE scan type. trigger_scan kicks off the regular scan; the attack-paths-scans queue is populated by a different mechanism (typically auto-triggered after a successful regular scan completes). Use list_attack_paths_scans + filter state=completed to find a graph to query, then list_attack_paths_queries + run_attack_paths_query."
+  - "Scan UA fingerprint is killed by entrypoint setting PROWLER_AWS_BOTO3_USER_AGENT_EXTRA=''. Defenders looking at CloudTrail's userAgent field see generic Boto3/X.Y.Z, not APN_1826889 (Prowler's AWS Partner ID). VERIFIED 2026-05-09 by reading prowler/providers/aws/config.py — the default value is `APN_1826889` overridable via the env var."
+  - "Provider credentials stored ENCRYPTED at rest in postgres via Fernet (DJANGO_SECRETS_ENCRYPTION_KEY). Encryption key is per-container, generated on first boot, persisted at /var/lib/prowler/secrets/fernet_key. If that volume is wiped, all stored credentials become unrecoverable — backup the secrets/ dir if you need state migration."
+  - "Default secrets in upstream's compose .env (POSTGRES_ADMIN_PASSWORD=postgres, AUTH_SECRET=public-string) are NEVER used by this image. Entrypoint randomizes all of them via `openssl rand -base64 32` on first boot. If you build a custom image without our entrypoint, you inherit the public defaults — security gotcha."
+  - "Server identifies as `prowler-mcp-server` v `2.14.0` in initialize response. The 2.14.0 is FastMCP's framework version, NOT the prowler-mcp product version. Product version is 0.5.0 (matches mcp_server/pyproject.toml in upstream master at build time). Smoke test asserts both are correct."
+  - "prowler_hub_* tools fetch live from hub.prowler.com on each call. Container needs outbound internet to hub.prowler.com + docs.prowler.com (NOT to api.prowler.com — we use the bundled local Django API for app tools). VERIFIED 2026-05-09: list_providers returned 17 providers fetched live."
+  - "prowler_app_get_check_details takes ONLY check_id (not provider_id). VERIFIED LIVE 2026-05-09: passing provider_id returns `Unexpected keyword argument`. Confused with prowler_hub_get_check_code/get_check_fixer which DO take both. Don't conflate."
+  - "Image is ~3.9 GB. Heaviest single contributor is the poetry install of all Prowler API deps (matplotlib + xmlsec + cryptography + cartography + pwntools-equivalents). Image contents: postgres-16 (~200 MB), redis (~10 MB), openjdk-17 (~250 MB), dozerdb (~500 MB), prowler API source + Python deps (~2.5 GB), MCP server + entrypoint (~50 MB)."
+  - "Self-hosted Prowler App is multi-tenant by design (RowLevelSecurity in postgres). bootstrap.py creates ONE tenant ('opensploit-engagement') + ONE admin user + ONE TenantAPIKey. The MCP only ever sees data from that one tenant. If you want multi-engagement isolation, run multiple containers (one per engagement)."
+  - "DozerDB (Apache 2 Neo4j fork) is used instead of vanilla Neo4j Community Edition to dodge Neo4j's Enterprise-features-restricted-to-paid-customers license. DozerDB has the same wire protocol; agent's Cypher queries are unchanged."
+  - "Drop-by-default services: UI (Next.js frontend, dropped — no agent value), worker-beat (Celery scheduler, dropped — recurring scans not used in offensive engagements). To enable schedule_daily_scan, re-enable worker-beat in entrypoint.sh."
+
+usage_patterns:
+  - name: "Knowledge-base lookup before engagement (no provider needed)"
+    description: "Agent doesn't need any provider connected to use hub + docs tools. Useful for pre-engagement reconnaissance: 'what does Prowler check for in S3?' / 'how do I configure GCP credentials?'"
+    sequence:
+      - method: prowler_hub_list_providers
+      - method: prowler_hub_get_provider_services
+        args: { provider_id: "aws" }
+      - method: prowler_hub_semantic_search_checks
+        args: { term: "publicly accessible S3 bucket" }
+      - method: prowler_hub_get_check_details
+        args: { check_id: "s3_bucket_public_access" }
+      - method: prowler_hub_get_check_code
+        args: { provider_id: "aws", check_id: "s3_bucket_public_access" }
+      - method: prowler_docs_search
+        args: { term: "S3 bucket public access remediation" }
+
+  - name: "Canonical AWS audit flow (compromised IAM keys → findings)"
+    description: "Agent has obtained AWS access key + secret (e.g., from a compromised app's env file). Connect them to Prowler, scan, retrieve findings, drill into critical ones."
+    sequence:
+      - method: prowler_app_connect_provider
+        args:
+          provider_uid: "{AWS_ACCOUNT_ID}"
+          provider_type: "aws"
+          alias: "engagement-target"
+          credentials:
+            aws_access_key_id: "{AWS_ACCESS_KEY_ID}"
+            aws_secret_access_key: "{AWS_SECRET_ACCESS_KEY}"
+            aws_session_token: "{AWS_SESSION_TOKEN_OPTIONAL}"
+      - method: prowler_app_search_providers
+      - method: prowler_app_trigger_scan
+        args: { provider_id: "{PROVIDER_UUID_FROM_CONNECT}" }
+      - method: prowler_app_get_scan
+        args: { scan_id: "{SCAN_ID_FROM_TRIGGER}" }
+      # Poll get_scan until state=completed (5-15 min for small AWS account)
+      - method: prowler_app_search_security_findings
+        args: { severity: "critical", status: "FAIL", page_size: 50 }
+      - method: prowler_app_get_finding_details
+        args: { finding_id: "{FINDING_UUID_FROM_SEARCH}" }
+
+  - name: "Attack-paths graph analysis (from compromised IAM principal to admin access)"
+    description: "Cloud lateral-movement primitive — graph reachability from a compromised IAM user/role to high-privilege resources. Requires a completed attack-paths-scans Celery job (typically auto-triggered after a regular scan)."
+    sequence:
+      - method: prowler_app_list_attack_paths_scans
+        args: { state: "completed", provider_type: "aws" }
+      - method: prowler_app_get_attack_paths_cartography_schema
+        args: { scan_id: "{ATTACK_PATHS_SCAN_ID}" }
+      - method: prowler_app_list_attack_paths_queries
+        args: { scan_id: "{ATTACK_PATHS_SCAN_ID}" }
+      - method: prowler_app_run_attack_paths_query
+        args:
+          scan_id: "{ATTACK_PATHS_SCAN_ID}"
+          query_id: "{QUERY_ID_FROM_LIST}"
+          parameters: { source_principal_arn: "arn:aws:iam::123456789012:user/compromised-user" }
+
+  - name: "CloudTrail forensics on a flagged resource (post-ex)"
+    description: "After a finding identifies a misconfigured resource, pull CloudTrail-style timeline of API actions on it — confirm whether it was actively abused, identify the principal that created/modified it."
+    sequence:
+      - method: prowler_app_search_security_findings
+        args: { severity: "critical", service: "iam" }
+      - method: prowler_app_get_finding_details
+        args: { finding_id: "{FINDING_UUID}" }
+      - method: prowler_app_get_resource
+        args: { resource_id: "{RESOURCE_UUID_FROM_FINDING}" }
+      - method: prowler_app_get_resource_events
+        args:
+          resource_id: "{RESOURCE_UUID}"
+          lookback_days: 30
+          include_read_events: false
+
+  - name: "Compliance-driven engagement reporting (CIS AWS benchmark)"
+    description: "Engagement scope framed in CIS AWS Foundations terms. Run scan, generate compliance overview, drill into framework-specific failures with per-requirement breakdown."
+    sequence:
+      - method: prowler_hub_list_compliances
+        args: { provider: "aws" }
+      - method: prowler_hub_get_compliance_details
+        args: { compliance_id: "cis_3.0_aws" }
+      # ... assume scan already complete ...
+      - method: prowler_app_get_compliance_overview
+      - method: prowler_app_get_compliance_framework_state_details
+        args: { compliance_id: "cis_3.0_aws" }
+
+  - name: "Pivoting between two compromised cloud accounts (multi-provider engagement)"
+    description: "Same engagement compromises both AWS prod + AWS staging. Connect both providers, run scans against each, then aggregate findings."
+    sequence:
+      - method: prowler_app_connect_provider
+        args: { provider_uid: "{ACCOUNT_PROD}", provider_type: "aws", alias: "prod-aws", credentials: { aws_access_key_id: "...", aws_secret_access_key: "..." } }
+      - method: prowler_app_connect_provider
+        args: { provider_uid: "{ACCOUNT_STAGING}", provider_type: "aws", alias: "staging-aws", credentials: { aws_access_key_id: "...", aws_secret_access_key: "..." } }
+      - method: prowler_app_search_providers
+      - method: prowler_app_trigger_scan
+        args: { provider_id: "{PROD_PROVIDER_UUID}" }
+      - method: prowler_app_trigger_scan
+        args: { provider_id: "{STAGING_PROVIDER_UUID}" }
+      # poll both scans to completion ...
+      - method: prowler_app_get_findings_overview
+      - method: prowler_app_search_security_findings
+        args: { provider_alias: "prod-aws", severity: "critical", status: "FAIL" }
 
 methods:
-  scan:
-    description: "Run a full Prowler security audit against a cloud provider. Executes `prowler <provider> --output-formats json-ocsf --output-directory /session/` with optional severity, service, compliance, and region filters. Returns OCSF findings parsed into structured format with pass/fail status, severity, resource details. Only failed findings returned to save context (pass findings are informational noise). Output files written to /session/ for reference."
-    when_to_use: "(1) Full cloud account security audit during enumeration phase — run with no filters first to get overview. (2) Compliance-specific audit — use compliance parameter with framework name (e.g., 'cis_3.0_aws', 'pci_3.2.1_aws'). (3) Targeted audit — combine service and severity filters for focused results (e.g., service='iam', severity='critical,high'). (4) Multi-region AWS audit — specify regions to limit scope. (5) After gaining cloud credentials in post-exploitation — audit what the compromised identity can see."
-    required_ports: []
+  prowler_hub_list_checks:
+    description: "List Prowler's catalog of cloud security checks with optional filtering by provider, service, severity, category, or compliance framework. Read-only knowledge lookup against the bundled hub."
+    when_to_use: "Pre-engagement reconnaissance of what Prowler can detect for a target cloud (e.g., 'show me all critical AWS IAM checks'). Works without any provider connected."
     params:
-      provider:
-        type: string
-        required: true
-        description: "Cloud provider: 'aws' (572 checks, 84 services), 'azure' (165 checks, 21 services), 'gcp' (100 checks), 'kubernetes' (83 checks, 8 services), 'm365', 'github', 'cloudflare', 'oraclecloud', 'openstack', 'alibabacloud', 'iac', 'llm', 'nhn', or 'mongodbatlas'. Credentials must be set via environment variables before scan."
-      severity:
-        type: string
-        description: "Comma-separated severity filter (e.g., 'critical,high'). Options: critical, high, medium, low, informational. Omit for all severities."
-      service:
-        type: string
-        description: "Comma-separated services to scan (e.g., 's3,iam,ec2'). Omit for all services. Use list_checks with list_type='services' to see available services for the provider."
-      compliance:
-        type: string
-        description: "Compliance framework name (e.g., 'cis_3.0_aws', 'pci_3.2.1_aws', 'hipaa_aws'). Use list_checks with list_type='compliance' to see available frameworks."
-      region:
-        type: string
-        description: "Comma-separated AWS regions (e.g., 'us-east-1,eu-west-1'). AWS only. Omit for all regions."
-    returns:
-      findings:
-        type: array
-        description: "Failed findings (capped at 100). Each: {check_id, check_title, severity, status, status_detail, resource, service, region}."
-      total_findings:
-        type: integer
-        description: "Total findings (pass + fail + manual)."
-      total_failed:
-        type: integer
-        description: "Count of failed checks."
-      summary:
-        type: object
-        description: "Breakdown: {total, by_status: {PASS, FAIL, MANUAL, MUTED}, by_severity: {CRITICAL, HIGH, ...}, failed_by_service: {service: count}}."
-      output_directory:
-        type: string
-        description: "Path to /session/ subdirectory containing full OCSF JSON output files."
+      categories: { type: array, description: "Filter by check categories (e.g., ['encryption','logging']). Empty = all." }
+      compliances: { type: array, description: "Filter by compliance framework IDs (e.g., ['cis_3.0_aws']). Use prowler_hub_list_compliances to enumerate." }
+      providers: { type: array, description: "Filter by provider IDs (e.g., ['aws','azure','gcp','kubernetes']). Use prowler_hub_list_providers." }
+      services: { type: array, description: "Filter by service IDs (e.g., ['s3','ec2','iam']). Use prowler_hub_get_provider_services." }
+      severities: { type: array, description: "Filter by severity (critical/high/medium/low/informational)." }
 
-  list_checks:
-    description: "List available Prowler checks, services, or compliance frameworks for a provider. Runs `prowler <provider> --list-checks-json` (checks), `--list-services` (services), or `--list-compliance` (compliance). Does NOT require cloud credentials."
-    when_to_use: "(1) Before scanning — discover what checks are available for the target provider. (2) Find service names to use with scan_service. (3) Discover compliance frameworks available for targeted audits."
-    required_ports: []
+  prowler_hub_semantic_search_checks:
+    description: "Free-text semantic search across all check metadata (name, description, risk, remediation). Returns ranked check IDs."
+    when_to_use: "When you have a finding/concept in natural language ('public S3 bucket', 'unencrypted RDS') and need to find which Prowler check covers it. Faster than scrolling list_checks."
     params:
-      provider:
-        type: string
-        required: true
-        description: "Cloud provider: 'aws', 'azure', 'gcp', 'kubernetes', 'm365', 'github', 'cloudflare', 'oraclecloud', 'openstack', 'alibabacloud', 'iac', 'llm', 'nhn', or 'mongodbatlas'."
-      list_type:
-        type: string
-        default: "checks"
-        description: "'checks' (all security checks with IDs, titles, severity), 'services' (scannable service names), or 'compliance' (compliance framework names)."
-    returns:
-      checks:
-        type: array
-        description: "For list_type='checks': array of {id, title, service, severity}. Capped at 200."
-      items:
-        type: array
-        description: "For list_type='services' or 'compliance': array of item names."
-      total:
-        type: integer
-        description: "Total count of items."
+      term: { type: string, required: true, description: "Free-text query (e.g., 'overly permissive IAM trust policy')." }
 
-  scan_service:
-    description: "Scan a specific cloud service — wrapper around scan with service pre-set. Faster than full scan because it only runs checks for one service."
-    when_to_use: "(1) Quick targeted audit of a specific service (e.g., 's3' for bucket security, 'iam' for identity misconfigs). (2) When full scan is too slow — focus on high-value services first. (3) After discovering a service in enumeration — deep-dive into its security posture."
-    required_ports: []
+  prowler_hub_get_check_details:
+    description: "Return the full metadata for one check: description, risk, remediation guidance, references, severity, related compliance controls."
+    when_to_use: "After a finding pops up, fetch the check's risk/remediation rationale to enrich the engagement report or decide whether the finding is exploitable."
     params:
-      provider:
-        type: string
-        required: true
-        description: "Cloud provider."
-      service:
-        type: string
-        required: true
-        description: "Service to audit (e.g., 's3', 'iam', 'ec2', 'rds', 'lambda', 'cloudtrail'). Use list_checks with list_type='services' to see available services."
-      severity:
-        type: string
-        description: "Comma-separated severity filter."
-    returns:
-      findings:
-        type: array
-        description: "Failed findings for the specified service."
-      summary:
-        type: object
-        description: "Status and severity breakdown for the service."
+      check_id: { type: string, required: true, description: "Check identifier (e.g., 's3_bucket_public_access'). NOTE: this tool takes ONLY check_id — passing provider_id returns Unexpected keyword argument (verified live 2026-05-09)." }
+
+  prowler_hub_get_check_code:
+    description: "Fetch the actual Python source of a Prowler check implementation."
+    when_to_use: "Reverse-engineer detection logic before an engagement to understand exactly what the check looks at — useful for crafting evasive configurations or for building a custom variant."
+    params:
+      provider_id: { type: string, required: true, description: "Provider ID (aws/azure/gcp/kubernetes/m365/github)." }
+      check_id: { type: string, required: true, description: "Check identifier as returned by list_checks." }
+
+  prowler_hub_get_check_fixer:
+    description: "Fetch the Python auto-remediation (fixer) code for a check, if one exists."
+    when_to_use: "When advising blue-team remediation in the report, or to understand the inverse of an exploit primitive — what 'fixed' looks like, so you can spot misconfigured fixes."
+    params:
+      provider_id: { type: string, required: true, description: "Provider ID (aws/azure/gcp/kubernetes/m365/github)." }
+      check_id: { type: string, required: true, description: "Check identifier." }
+
+  prowler_hub_list_compliances:
+    description: "List the compliance frameworks Prowler supports (CIS, PCI-DSS, HIPAA, SOC2, etc.), optionally narrowed to a single provider."
+    when_to_use: "When the engagement scope is framed in compliance terms ('show CIS AWS gaps') and you need to map findings to controls."
+    params:
+      provider: { type: string, description: "Optional provider ID to filter (aws/azure/gcp/kubernetes/m365/github). Omit for all." }
+
+  prowler_hub_semantic_search_compliances:
+    description: "Free-text semantic search across compliance framework metadata."
+    when_to_use: "When the user names a regulation casually ('payment card stuff', 'HIPAA') and you need the canonical framework ID for downstream calls."
+    params:
+      term: { type: string, required: true, description: "Free-text query (e.g., 'european data protection')." }
+
+  prowler_hub_get_compliance_details:
+    description: "Return full requirement breakdown of a compliance framework — sections, controls, and which Prowler checks satisfy each."
+    when_to_use: "Building a compliance-mapped report or scoping which checks to enable for a framework-driven engagement."
+    params:
+      compliance_id: { type: string, required: true, description: "Compliance framework ID (e.g., 'cis_3.0_aws')." }
+
+  prowler_hub_list_providers:
+    description: "List all cloud/SaaS providers Prowler can scan (aws, azure, gcp, kubernetes, m365, github, ...)."
+    when_to_use: "First call when you don't know the canonical provider IDs — feeds into list_checks/get_provider_services/connect_provider."
+    params: {}
+
+  prowler_hub_get_provider_services:
+    description: "Get all service IDs (e.g., s3, ec2, iam for AWS) covered by Prowler for a given provider."
+    when_to_use: "Use to enumerate which services have checks before scoping a scan or filtering findings by service."
+    params:
+      provider_id: { type: string, required: true, description: "Provider ID (aws/azure/gcp/kubernetes/m365/github)." }
+
+  prowler_app_get_attack_paths_cartography_schema:
+    description: "Retrieve the Cartography (Neo4j) graph schema — node labels, relationship types, properties — populated by a completed attack-paths scan."
+    when_to_use: "Before writing a custom Cypher query via run_attack_paths_query, fetch the schema so you know which node/edge types exist for this provider's graph."
+    params:
+      scan_id: { type: string, required: true, description: "ID of a completed attack-paths-scans Celery job (state=completed)." }
+
+  prowler_app_list_attack_paths_queries:
+    description: "List the prebuilt Cypher queries available for a completed attack-paths scan (e.g., 'find paths from public IP to admin role')."
+    when_to_use: "Quickest way to surface lateral-movement / privilege-escalation chains in a connected cloud — pick a query, then run it via run_attack_paths_query."
+    params:
+      scan_id: { type: string, required: true, description: "ID of a completed attack-paths scan." }
+
+  prowler_app_list_attack_paths_scans:
+    description: "List attack-paths scans (the graph-population Celery jobs) with filtering by provider and state."
+    when_to_use: "Find a completed attack-paths scan_id to feed into the queries/schema/run tools. If none completed, you must trigger one via trigger_scan first."
+    params:
+      page_number: { type: integer, description: "Pagination page (1-based)." }
+      page_size: { type: integer, description: "Results per page." }
+      provider_id: { type: string, description: "Filter by registered provider ID." }
+      provider_type: { type: string, description: "Filter by provider type (aws/azure/gcp/kubernetes/m365/github)." }
+      state: { type: string, description: "Filter by scan state (available/scheduled/executing/completed/failed/cancelled)." }
+
+  prowler_app_run_attack_paths_query:
+    description: "Execute a Cypher query against the Neo4j attack-paths graph and return rows. The graph must already be populated by a completed attack-paths scan."
+    when_to_use: "Core offensive primitive for cloud lateral movement — surface chains like 'public S3 -> Lambda role -> admin'. Use list_attack_paths_queries to pick prebuilt ones, or pass your own query_id with parameters."
+    params:
+      scan_id: { type: string, required: true, description: "Completed attack-paths scan ID." }
+      query_id: { type: string, required: true, description: "Query ID from list_attack_paths_queries." }
+      parameters: { type: object, description: "Cypher query parameters as a key/value map (depends on the chosen query)." }
+
+  prowler_app_get_compliance_framework_state_details:
+    description: "Per-requirement pass/fail breakdown for one compliance framework against a scan's findings."
+    when_to_use: "Compliance-driven reporting — show exactly which controls failed and which findings caused the failure."
+    params:
+      compliance_id: { type: string, required: true, description: "Compliance framework ID (e.g., 'cis_3.0_aws')." }
+      provider_id: { type: string, description: "Optional provider filter (registered provider ID)." }
+      scan_id: { type: string, description: "Optional scan ID. Omit to use the latest scan per provider." }
+
+  prowler_app_get_compliance_overview:
+    description: "High-level compliance posture across all frameworks for a scan — pass rates per framework."
+    when_to_use: "Executive-summary section of a cloud-security report; quick triage before drilling into framework_state_details."
+    params:
+      provider_id: { type: string, description: "Optional registered provider ID filter." }
+      scan_id: { type: string, description: "Optional scan ID. Omit for latest." }
+
+  prowler_app_get_finding_details:
+    description: "Return full details for one finding: resource, check, status, severity, evidence, remediation, compliance mappings."
+    when_to_use: "After search_security_findings narrows down a candidate, pull full context to decide if it's exploitable and worth pivoting on."
+    params:
+      finding_id: { type: string, required: true, description: "Finding UUID from search_security_findings." }
+
+  prowler_app_get_findings_overview:
+    description: "Aggregate stats and trends across all findings rendered as a markdown report (totals by severity/service/status)."
+    when_to_use: "First post-scan call to get a dashboard-style overview before deciding which severities/services to drill into."
+    params:
+      provider_type: { type: string, description: "Optional filter by provider type (aws/azure/gcp/kubernetes/m365/github)." }
+
+  prowler_app_search_security_findings:
+    description: "Filter and paginate findings across all connected providers — by severity, status, service, region, check, date, free-text, etc."
+    when_to_use: "Primary triage tool after a scan completes. Filter to status=[FAIL] + severity=[critical,high] to find immediately actionable misconfigurations."
+    params:
+      check_id: { type: array, items: { type: string }, description: "Filter to one-or-more Prowler check IDs. Vendor expects list[str]." }
+      date_from: { type: string, description: "ISO date lower bound for finding inserted_at." }
+      date_to: { type: string, description: "ISO date upper bound." }
+      delta: { type: array, items: { type: string }, description: "Filter by finding delta (subset of [new, changed]). Vendor expects list[Literal]." }
+      muted: { type: boolean, description: "Include muted findings (true) or exclude (false)." }
+      page_number: { type: integer, description: "Pagination page (1-based)." }
+      page_size: { type: integer, description: "Results per page." }
+      provider_alias: { type: string, description: "Filter by the human alias set at connect_provider time." }
+      provider_type: { type: array, items: { type: string }, description: "Filter by one-or-more provider types (subset of [aws, azure, gcp, kubernetes, m365, github]). Vendor expects list[Literal]." }
+      region: { type: array, items: { type: string }, description: "Filter by one-or-more cloud regions (e.g., ['us-east-1','eu-west-1']). Vendor expects list[str]." }
+      resource_type: { type: array, items: { type: string }, description: "Filter by one-or-more resource types (e.g., ['AwsS3Bucket']). Vendor expects list[str]." }
+      search: { type: string, description: "Free-text search across finding fields." }
+      service: { type: array, items: { type: string }, description: "Filter by one-or-more service IDs (e.g., ['s3','iam']). Vendor expects list[str]." }
+      severity: { type: array, items: { type: string }, description: "Filter by one-or-more severities (subset of [critical, high, medium, low, informational]). Vendor expects list[Literal]." }
+      status: { type: array, items: { type: string }, description: "Filter by one-or-more statuses (subset of [FAIL, PASS, MANUAL]). Vendor expects list[Literal[FAIL,PASS,MANUAL]]. **Default is ['FAIL']** — pass [] explicitly to get all statuses including PASS/MANUAL." }
+
+  prowler_app_create_mute_rule:
+    description: "Create a documented mute rule that suppresses a list of specific findings, with a name and reason for the audit trail."
+    when_to_use: "During engagements rarely; mostly for blue-team workflows. As pentester, use sparingly to silence known-accepted-risk noise that's polluting triage."
+    params:
+      name: { type: string, required: true, description: "Human-readable rule name." }
+      reason: { type: string, required: true, description: "Justification recorded in the audit trail (why these findings are being muted)." }
+      finding_ids: { type: array, required: true, description: "Array of finding UUIDs to mute." }
+
+  prowler_app_delete_mute_rule:
+    description: "Delete a mute rule by ID, un-suppressing the findings it covered."
+    when_to_use: "Cleanup of temporary mute rules created during an engagement, or to surface previously-suppressed findings for re-triage."
+    params:
+      rule_id: { type: string, required: true, description: "Mute rule UUID." }
+
+  prowler_app_delete_mutelist:
+    description: "Wipe the tenant's pattern-based mutelist configuration entirely."
+    when_to_use: "Rare — to start mutelist config from scratch. Destructive; confirm with operator before invoking."
+    params: {}
+
+  prowler_app_get_mute_rule:
+    description: "Retrieve full details of one mute rule (name, reason, finding IDs, enabled state)."
+    when_to_use: "Audit which findings a particular rule is hiding before deciding whether to disable/delete it."
+    params:
+      rule_id: { type: string, required: true, description: "Mute rule UUID." }
+
+  prowler_app_get_mutelist:
+    description: "Retrieve the tenant's current pattern-based mutelist YAML/JSON configuration."
+    when_to_use: "Inspect bulk-muting patterns to understand what classes of findings are being suppressed tenant-wide — important for blind-spot analysis."
+    params: {}
+
+  prowler_app_list_mute_rules:
+    description: "List and filter mute rules with pagination."
+    when_to_use: "Audit pass over mute rules — find rules that may be hiding exploitable findings (look for 'temporary', stale, or vague reasons)."
+    params:
+      enabled: { type: boolean, description: "Filter by enabled status." }
+      name: { type: string, description: "Filter by exact name." }
+      page_number: { type: integer, description: "Pagination page (1-based)." }
+      page_size: { type: integer, description: "Results per page." }
+      search: { type: string, description: "Free-text search across rule fields." }
+
+  prowler_app_set_mutelist:
+    description: "Create or replace the tenant's pattern-based mutelist (bulk muting by check_id/resource/region patterns)."
+    when_to_use: "Rarely needed in offensive engagements. Mostly a blue-team primitive; use only if explicitly asked to demo mutelist evasion or noise reduction."
+    params:
+      configuration: { type: object, required: true, description: "Mutelist configuration object (Prowler mutelist YAML schema as JSON)." }
+
+  prowler_app_update_mute_rule:
+    description: "Update a mute rule's name, reason, or enabled flag."
+    when_to_use: "Toggle a rule off temporarily to expose hidden findings during triage, or correct rule metadata."
+    params:
+      rule_id: { type: string, required: true, description: "Mute rule UUID." }
+      enabled: { type: boolean, description: "Enable/disable the rule." }
+      name: { type: string, description: "New rule name." }
+      reason: { type: string, description: "Updated justification text." }
+
+  prowler_app_connect_provider:
+    description: "Register a cloud provider (AWS account, Azure sub, GCP project, K8s cluster, M365 tenant, GitHub org) with credentials so Prowler can scan it."
+    when_to_use: "Mandatory first step before any app scan/findings work. Have the operator supply credentials out-of-band — never invent them."
+    params:
+      provider_uid: { type: string, required: true, description: "Cloud-native provider UID (AWS account ID, Azure subscription ID, GCP project ID, K8s context, etc.)." }
+      provider_type: { type: string, required: true, description: "One of aws/azure/gcp/kubernetes/m365/github." }
+      alias: { type: string, description: "Human-readable label (e.g., 'prod-aws-payments')." }
+      credentials: { type: object, description: "Credentials object — shape varies by provider_type (AWS access key/secret/session, Azure SP, GCP SA JSON, kubeconfig, etc.). Operator-supplied." }
+
+  prowler_app_delete_provider:
+    description: "Permanently remove a registered provider and its scan history from Prowler."
+    when_to_use: "End-of-engagement cleanup, or when rotating credentials. Destructive — confirm before calling."
+    params:
+      provider_id: { type: string, required: true, description: "Registered provider UUID (not the cloud-native UID)." }
+
+  prowler_app_search_providers:
+    description: "Search/filter the providers configured in this Prowler tenant."
+    when_to_use: "Discover what's already wired up before connecting new providers; resolve provider_id values needed for trigger_scan and friends."
+    params:
+      alias: { type: string, description: "Filter by exact alias." }
+      connected: { type: boolean, description: "Filter by connection health (true=credentials valid)." }
+      page_number: { type: integer, description: "Pagination page (1-based)." }
+      page_size: { type: integer, description: "Results per page." }
+      provider_id: { type: string, description: "Filter by Prowler provider UUID." }
+      provider_type: { type: string, description: "Filter by provider type (aws/azure/gcp/kubernetes/m365/github)." }
+      provider_uid: { type: string, description: "Filter by cloud-native UID (account ID/sub/etc.)." }
+
+  prowler_app_get_resource:
+    description: "Retrieve full details of one cloud resource Prowler has indexed (config, tags, region, associated findings)."
+    when_to_use: "Pivot from a finding to its resource to map the blast radius — what tags/region/owner this asset has."
+    params:
+      resource_id: { type: string, required: true, description: "Resource UUID." }
+
+  prowler_app_get_resource_events:
+    description: "CloudTrail-style timeline of API actions performed on a resource — who did what when. Pulled from the cloud's audit log."
+    when_to_use: "Forensics / post-exploitation context — confirm whether a misconfiguration has been actively abused, identify the principal that created/modified the resource, or build a timeline for the report."
+    params:
+      resource_id: { type: string, required: true, description: "Resource UUID." }
+      include_read_events: { type: boolean, description: "Include read-only API calls (more noise but catches recon)." }
+      lookback_days: { type: integer, description: "How many days back to fetch events." }
+      page_size: { type: integer, description: "Events per page." }
+
+  prowler_app_get_resources_overview:
+    description: "Markdown overview of indexed resources — counts by service/region/provider with optional date filtering."
+    when_to_use: "Scoping the cloud footprint before drilling in — answers 'how big is this AWS estate, where do they run?'."
+    params:
+      date_from: { type: string, description: "ISO date lower bound." }
+      date_to: { type: string, description: "ISO date upper bound." }
+      provider_alias: { type: string, description: "Filter by provider alias." }
+      provider_type: { type: string, description: "Filter by provider type." }
+      provider_uid: { type: string, description: "Filter by cloud-native UID." }
+
+  prowler_app_list_resources:
+    description: "Paginated, filterable list of all resources Prowler has indexed across providers."
+    when_to_use: "Asset inventory queries — 'all public-facing S3 buckets in us-east-1', 'all EC2 with tag env=prod'. Often paired with search_security_findings."
+    params:
+      date_from: { type: string, description: "ISO date lower bound." }
+      date_to: { type: string, description: "ISO date upper bound." }
+      page_number: { type: integer, description: "Pagination page (1-based)." }
+      page_size: { type: integer, description: "Results per page." }
+      provider_alias: { type: string, description: "Filter by provider alias." }
+      provider_type: { type: array, items: { type: string }, description: "Filter by one-or-more provider types. Vendor expects list[str]." }
+      provider_uid: { type: string, description: "Filter by cloud-native UID." }
+      region: { type: array, items: { type: string }, description: "Filter by one-or-more cloud regions. Vendor expects list[str]." }
+      resource_name: { type: string, description: "Filter by resource name (exact)." }
+      resource_type: { type: array, items: { type: string }, description: "Filter by one-or-more resource types (e.g., ['AwsS3Bucket']). Vendor expects list[str]." }
+      search: { type: string, description: "Free-text search across resource fields." }
+      service: { type: array, items: { type: string }, description: "Filter by one-or-more service IDs (e.g., ['s3']). Vendor expects list[str]." }
+      tag_key: { type: string, description: "Filter resources carrying this tag key." }
+      tag_value: { type: string, description: "Filter resources carrying this tag value (combine with tag_key)." }
+
+  prowler_app_get_scan:
+    description: "Retrieve full details of one scan — state, progress, started_at, finished_at, provider, error if failed."
+    when_to_use: "Polling loop after trigger_scan to wait for state=completed before searching findings."
+    params:
+      scan_id: { type: string, required: true, description: "Scan UUID returned by trigger_scan." }
+
+  prowler_app_list_scans:
+    description: "List and filter security scans across providers with pagination."
+    when_to_use: "Find recent scan IDs to compare engagements over time, or locate a specific scan by name/trigger/state."
+    params:
+      name: { type: string, description: "Filter by scan name." }
+      page_number: { type: integer, description: "Pagination page (1-based)." }
+      page_size: { type: integer, description: "Results per page." }
+      provider_alias: { type: string, description: "Filter by provider alias." }
+      provider_id: { type: array, items: { type: string }, description: "Filter by one-or-more registered provider UUIDs. Vendor expects list[str]." }
+      provider_type: { type: array, items: { type: string }, description: "Filter by one-or-more provider types. Vendor expects list[str]." }
+      state: { type: array, items: { type: string }, description: "Filter by one-or-more scan states (subset of [available, scheduled, executing, completed, failed, cancelled]). Vendor expects list[Literal]." }
+      trigger: { type: string, description: "Filter by trigger source (single value: manual or scheduled). Vendor uses Literal, not list." }
+
+  prowler_app_schedule_daily_scan:
+    description: "Enable a daily automated scan for a registered provider."
+    when_to_use: "Long-running engagement / red-team retainer where you want continuous baseline scans. Skip for one-shot assessments. NOTE: this image drops the worker-beat scheduler service by default — re-enable in entrypoint.sh if you need recurring scans."
+    params:
+      provider_id: { type: string, required: true, description: "Registered provider UUID." }
+
+  prowler_app_trigger_scan:
+    description: "Kick off a manual security scan for a registered provider. Returns a scan_id to poll with get_scan."
+    when_to_use: "Core scan flow: connect_provider -> trigger_scan -> poll get_scan until completed -> search_security_findings."
+    params:
+      provider_id: { type: string, required: true, description: "Registered provider UUID." }
+      name: { type: string, description: "Optional human-readable scan name." }
+
+  prowler_app_update_scan:
+    description: "Rename an existing scan."
+    when_to_use: "Cosmetic — tag scans with an engagement codename for later filtering. Not on the critical path."
+    params:
+      scan_id: { type: string, required: true, description: "Scan UUID." }
+      name: { type: string, required: true, description: "New scan name." }
+
+  prowler_docs_search:
+    description: "Full-text search across Prowler's official documentation."
+    when_to_use: "Quick reference — answer setup, auth, provider-credential, troubleshooting questions without leaving the agent. Works without any provider connected."
+    params:
+      term: { type: string, required: true, description: "Free-text search query." }
+      page_size: { type: integer, description: "Number of results to return." }
+
+  prowler_docs_get_document:
+    description: "Fetch the full raw content of one Prowler documentation file by path."
+    when_to_use: "After docs_search returns a hit, pull the full doc to read step-by-step instructions (e.g., 'how to configure GCP credentials')."
+    params:
+      doc_path: { type: string, required: true, description: "Doc file path as returned by prowler_docs_search (e.g., 'tutorials/aws/authentication.md')." }
