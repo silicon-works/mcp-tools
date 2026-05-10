@@ -581,3 +581,347 @@ argparse-spelling, scp-protocol, sshpass-specific.
   mcp-server.py, requirements.txt, tool.yaml, scenarios.md.
 
 Authored: 2026-04-25.
+
+---
+
+# Appendix A — v2.0: shell-session retirement, ControlMaster pattern (May 2026)
+
+The legacy `shell-session` (kind:mcp) tool was retired and 6 of its 9 SSH
+methods (ssh_connect, exec, upload, download, list_sessions, close)
+absorbed here via OpenSSH ControlMaster. The remaining 3 reverse-shell
+methods (listen, shell_exec, upgrade_shell) went to nc kind:cli's
+held-listener pipeline pattern. shell-session deleted.
+
+Architecture:
+```
+tool-runner-A spawns a "master" container that opens a persistent
+SSH connection via `ssh -fN -o ControlMaster=auto -o ControlPath=
+/session/output/sshctl/%h-%p-%r ...`. The master detaches inside the
+container; cli_in_container's call returns when the foreground
+process exits. Master container holds for max_runtime_seconds (24h
+default).
+
+tool-runner-B/C/D spawn SEPARATE containers that reuse the SAME
+ControlPath socket via `ssh -o ControlPath=... user@host 'cmd'`.
+No re-authentication. Each call is sub-second (TCP+KEX skipped,
+direct multiplex over existing connection).
+```
+
+7 stress tests verified empirically 2026-05-09:
+
+## A.1 — open ControlMaster (replaces shell-session.ssh_connect)
+
+Recipe (Pattern A):
+```
+docker run -d --name ssh-master --network host -v /tmp/ssh-pf:/session \
+  --entrypoint bash ghcr.io/silicon-works/mcp-tools-ssh:latest \
+  -c 'mkdir -p /session/output/sshctl && \
+      sshpass -p root ssh -fN \
+        -o ControlMaster=yes -o ControlPersist=600 \
+        -o ControlPath=/session/output/sshctl/%h-%p-%r \
+        -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+        -p 22221 root@localhost; sleep 600'
+# socket file appears: /tmp/ssh-pf/output/sshctl/localhost-22221-root
+```
+
+Result: ✓ socket created, master alive, container holds.
+
+## A.2 — exec via existing socket (sub-second, replaces shell-session.exec)
+
+Recipe (Pattern B):
+```
+docker run --rm --network host -v /tmp/ssh-pf:/session \
+  --entrypoint ssh ghcr.io/silicon-works/mcp-tools-ssh:latest \
+  -o ControlPath=/session/output/sshctl/%h-%p-%r \
+  -p 22221 root@localhost \
+  'echo TEST_OUT; whoami; hostname; pwd'
+# elapsed: 863ms (sub-second confirms master reuse)
+```
+
+Result: ✓ separate container, same socket, no re-auth.
+
+## A.3 — concurrent reuse (3 spawns simultaneously)
+
+```
+for tag in B C D; do
+  (docker run --rm --network host -v /tmp/ssh-pf:/session ...
+   -o ControlPath=... -p 22221 root@localhost \
+   "echo SPAWN_${tag}; sleep 1; echo SPAWN_${tag}_DONE") &
+done
+wait
+# all 3 SPAWN_X_DONE markers appeared in their respective logs
+```
+
+Result: ✓ 3/3 concurrent spawns completed cleanly. No mutex / deadlock.
+
+## A.4 — scp upload via existing socket (replaces shell-session.upload)
+
+Recipe (Pattern C):
+```
+echo "test_payload_$(date +%N)" > /tmp/ssh-pf/payload.txt
+docker run --rm --network host -v /tmp/ssh-pf:/session \
+  --entrypoint bash ghcr.io/silicon-works/mcp-tools-ssh:latest \
+  -c 'scp -o ControlPath=/session/output/sshctl/%h-%p-%r \
+       -P 22221 \
+       /session/payload.txt root@localhost:/tmp/uploaded.txt'
+# read back via Pattern B confirms content matches → roundtrip works
+```
+
+Result: ✓ payload uploaded, byte-for-byte roundtrip verified.
+
+Companion: content-as-string upload (replaces shell-session.upload's
+`content` + `is_binary` params): agent uses Write tool to stage
+`/session/output/staged/<file>` (text or base64-decoded binary), then
+Pattern C scps it + ssh -o ControlPath...chmod 0755 the destination.
+Verified for both text and binary: 64-byte ELF header roundtripped
+byte-for-byte (`7f 45 4c 46 02 01 01 00 ...`). ✓
+
+## A.5 — download via existing socket (replaces shell-session.download)
+
+Recipe (Pattern C reverse):
+```
+docker run --rm --network host -v /tmp/ssh-pf:/session \
+  --entrypoint bash ghcr.io/silicon-works/mcp-tools-ssh:latest \
+  -c 'scp -o ControlPath=/session/output/sshctl/%h-%p-%r \
+       -P 22221 \
+       root@localhost:/tmp/loot.txt /session/output/loot.txt'
+```
+
+Result: ✓ remote file pulled to /session/output/.
+
+## A.6 — state non-persistence (gotcha #4 verification)
+
+```
+ssh -o ControlPath=... user@host 'cd /tmp; pwd'  # → /tmp
+ssh -o ControlPath=... user@host 'pwd'           # → /root  (NOT /tmp)
+```
+
+Result: ✓ each exec is fresh; cd does NOT persist across calls.
+Documents that ControlMaster persists the CONNECTION, not shell
+state. For multi-command stateful needs: chain inline (`cd /tmp &&
+ls && cat foo`) per call, OR use nc held-listener pattern.
+
+## A.7 — clean -O exit (replaces shell-session.close)
+
+Recipe (Pattern D):
+```
+docker run --rm --network host -v /tmp/ssh-pf:/session \
+  --entrypoint ssh ghcr.io/silicon-works/mcp-tools-ssh:latest \
+  -O exit -o ControlPath=/session/output/sshctl/%h-%p-%r \
+  -p 22221 root@localhost
+# → "Exit request sent."
+# socket file removed; reuse attempt now fails as expected
+```
+
+Doc bug found + fixed during testing: the original Pattern D recipe
+omitted `-p <port>` after the ControlPath placeholder. Without -p,
+ssh expanded `%h-%p-%r` against the default port 22 → looked for
+`localhost-22-root` socket → silently missed the actual master at
+`localhost-22221-root`. Pattern D now requires `-p <port>` and the
+gotcha explicitly warns. ✓
+
+## A.8 — Surprise empirical finding: sudo + PTY (Gap 1)
+
+Initial gotcha draft claimed `sudo -S` needed PTY (-tt). Empirically:
+```
+echo "testpass" | ssh -o ControlPath=... user@host 'sudo -S whoami'
+# → "[sudo] password for testuser:" + "root" — WORKS WITHOUT PTY
+```
+
+`sudo -S` reads password from stdin via its own -S flag — the PTY
+prompt is informational, not blocking. PTY (-tt + RequestTTY=force)
+is needed only for programs that read /dev/tty directly (visudo,
+passwd, vipw, full-screen TUI tools). Gotcha corrected. ✓
+
+---
+
+# Appendix B — v3.0: tunnel retirement (May 2026)
+
+The legacy `tunnel` (kind:mcp) tool's 5 methods (forward, socks, list,
+close, close_all) were absorbed here via the same ControlMaster
+infrastructure. Tunnel flags (-L, -R, -D, -N, -W) lifted from
+reject_flags. tunnel deleted.
+
+Key architectural property: tunnels live within ControlMaster
+connections. Open Pattern A first, then add tunnels via `ssh -O
+forward -L LPORT:RHOST:RPORT -o ControlPath=... user@host` — sub-second
+since auth is already done. Per-tunnel close via `ssh -O cancel`,
+master-and-all-tunnels close via `ssh -O exit`.
+
+5 stress tests verified empirically 2026-05-09 against rastasheep
+ssh-target with a localhost-only python3 -m http.server on the target's
+:8000 (verified externally inaccessible — `nc -zv` to target:8000
+returns "Connection refused"):
+
+## B.1 — local port forward (Pattern T1, replaces tunnel.forward)
+
+Recipe:
+```
+docker run -d --name t4-tunnel --network host -v /tmp/t4-stress:/session \
+  --entrypoint bash ghcr.io/silicon-works/mcp-tools-ssh:latest \
+  -c 'mkdir -p /session/output/sshctl && \
+      sshpass -p root ssh -fN \
+        -L 19090:127.0.0.1:8000 \
+        -o ControlMaster=auto -o ControlPersist=600 \
+        -o ControlPath=/session/output/sshctl/%h-%p-%r \
+        -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+        -p 22221 root@localhost; sleep 600'
+
+# separate spawn fetches via tunnel localhost:19090
+curl -s --max-time 5 http://localhost:19090/index.html
+# → returns target's localhost-only http.server content
+```
+
+Result: ✓ tunnel carries HTTP traffic from agent's container to
+target's localhost-only :8000 service. Plugin's --network=host default
+makes :19090 reachable from sibling tool-runner spawn containers.
+
+## B.2 — SOCKS5 dynamic proxy (Pattern T2, replaces tunnel.socks)
+
+Recipe:
+```
+docker exec t4-tunnel bash -c 'sshpass -p root ssh -fN -D 11080 \
+  -o ControlMaster=auto \
+  -o ControlPath=/session/output/sshctl/%h-%p-%r \
+  -p 22221 root@localhost'
+
+# fetch through SOCKS proxy
+curl -s --max-time 5 --socks5 127.0.0.1:11080 http://127.0.0.1:8000/index.html
+# → same target localhost service via SOCKS
+```
+
+Result: ✓ SOCKS5 proxy works end-to-end, full network pivot capability.
+
+## B.3 — multi-tunnel through ONE master (ssh -O forward)
+
+Recipe:
+```
+docker exec t4-tunnel bash -c 'ssh -O forward -L 19091:127.0.0.1:8000 \
+  -o ControlPath=/session/output/sshctl/%h-%p-%r \
+  -p 22221 root@localhost'
+
+curl -s --max-time 5 http://localhost:19091/index.html
+# → second tunnel works alongside first
+```
+
+Result: ✓ adds tunnels dynamically via existing master, no new SSH
+connection. Sub-second turnaround.
+
+## B.4 — per-tunnel cancel (ssh -O cancel)
+
+Recipe:
+```
+docker exec t4-tunnel bash -c 'ssh -O cancel -L 19091:127.0.0.1:8000 \
+  -o ControlPath=/session/output/sshctl/%h-%p-%r \
+  -p 22221 root@localhost'
+
+# verify only 19091 closed, 19090 still works:
+curl -o /dev/null -w "19091 → %{http_code}\n" --max-time 3 http://localhost:19091/index.html
+# → 19091: code=000 (refused)
+curl -o /dev/null -w "19090 → %{http_code}\n" --max-time 3 http://localhost:19090/index.html
+# → 19090: code=200
+```
+
+Result: ✓ granular per-tunnel teardown without affecting the master
+or other tunnels. Replaces tunnel.close (single-tunnel close).
+
+## B.5 — master close kills all (ssh -O exit)
+
+Recipe:
+```
+docker exec t4-tunnel bash -c 'ssh -O exit \
+  -o ControlPath=/session/output/sshctl/%h-%p-%r \
+  -p 22221 root@localhost'
+# → "Exit request sent."
+
+# verify both forward + SOCKS now refused:
+curl -o /dev/null -w "19090 → %{http_code}\n" --max-time 3 http://localhost:19090/...
+# → 19090: code=000
+curl -o /dev/null -w "11080-socks → %{http_code}\n" --max-time 3 --socks5 127.0.0.1:11080 ...
+# → 11080-socks: code=000
+```
+
+Result: ✓ master exit kills all tunnels + SOCKS proxy at once.
+Replaces tunnel.close_all.
+
+Authored: 2026-05-09 (Phase 0.3 + Phase A.1, daemon-wrapper retirement series).
+
+---
+
+# Appendix C — HTB Lame live verification + ancient-sshd compatibility note (May 2026)
+
+Attempted to validate Pattern A.1-A.7 (ControlMaster) against HTB Lame
+(10.129.189.252 — Ubuntu 8.04 Server LTS with OpenSSH 4.7p1, ~2007 era).
+Mixed results — finding documented for production agents.
+
+## C.1 — Modern algorithm flags required
+
+OpenSSH 10 dropped legacy crypto by default. To talk to Lame at all:
+
+```
+ssh -o HostKeyAlgorithms=+ssh-rsa \
+    -o KexAlgorithms=+diffie-hellman-group1-sha1 \
+    -o PubkeyAcceptedKeyTypes=+ssh-rsa \
+    -o Ciphers=+aes128-cbc \
+    user@target
+```
+
+These flags are also documented in the existing failure_signature
+"Unable to negotiate ... no matching key exchange". Without them, modern
+ssh 10 client refuses to connect to OpenSSH 4.7. Document.
+
+## C.2 — Basic SSH + scp work fine
+
+`ssh root@10.129.189.252 'echo SSH_OK; uname -a'` works (with the legacy
+algo flags). One-shot exec is fully functional.
+
+## C.3 — ControlMaster compatibility issue
+
+`ssh -fN -o ControlMaster=yes -o ControlPath=... user@target` setup
+EXITS during userauth phase against Lame's OpenSSH 4.7p1, before the
+control socket is created. Exact failure mode (verified with -vvv 2026-05-10):
+
+```
+debug3: send packet: type 50  (auth password packet)
+... ssh exits silently before muxserver_listen creates socket ...
+```
+
+Container's ssh process is gone, no socket file appears. Same recipe
+that works on rastasheep/ubuntu-sshd:18.04 (OpenSSH 7.6p1) — verified
+in Tool 3 stress test 2026-05-09 with 3 concurrent reuse spawns + scp.
+
+**Hypothesis (not confirmed):** OpenSSH 10's `-fN` ControlMaster
+initialization handshake assumes server-side behavior that diverged
+between OpenSSH 4.x and 6.x. Lame's sshd is from 2007 (pre-ControlPersist
+entirely — that's a 5.6 client feature, but server-side behavior may also
+matter). Modern engagement targets (any AD environment 2010+, any
+modern Linux) run OpenSSH 7+ where ControlMaster works cleanly.
+
+## C.4 — Practical implication
+
+| Target SSH version | ControlMaster pattern | Tested |
+|---|---|---|
+| OpenSSH 7.x+ (modern Linux, AD, BSD) | ✓ works | rastasheep + plenty of others |
+| OpenSSH 4.7 (Ubuntu 8.04) | ⚠ -fN setup fails | Lame 2026-05-10 |
+| OpenSSH 5.x-6.x (CentOS 6, Ubuntu 10-12) | ? untested | likely works |
+
+For production agents:
+- Modern targets: ControlMaster patterns A.1-A.7 work as documented.
+- Pre-2010 targets: fall back to one-shot ssh per-call (slower but works).
+  Detection: ssh banner like `OpenSSH_4.x` → skip ControlMaster, do
+  one-shot exec instead.
+
+## C.5 — gotcha-worthy
+
+Add to ssh tool.yaml gotchas:
+
+> "CONTROLMASTER + ANCIENT SSHD (pre-OpenSSH 5.6, pre-2010): the -fN
+> ControlMaster pattern may exit during userauth before creating the
+> socket file. Symptom: container shows ssh process exited cleanly,
+> /session/output/sshctl/ is empty. Root cause likely OpenSSH 10
+> behavior differences with very old sshd. Fall back to per-call
+> one-shot ssh for these targets — modern engagement targets
+> (OpenSSH 7+) are unaffected. Verified failure mode against Lame
+> (Ubuntu 8.04, OpenSSH 4.7p1) 2026-05-10."
+
+Authored: 2026-05-10 (HTB Lame live verification, daemon-wrapper retirement series).

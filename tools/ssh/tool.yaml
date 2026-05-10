@@ -45,22 +45,23 @@ kind: cli
 # BaseMCPServer (mcp-common 0.3.0). kind:cli is the new default; the seven
 # methods are preserved as the legacy / rollback path per SKILL #21.
 #
-# CONSOLIDATION (May 2026): this tool is the unified successor of the
-# legacy `shell-session` (kind:mcp) tool for SSH operations. The MCP
-# wrapper exposed 9 stateful methods (ssh_connect, exec, upload, download,
-# listen, shell_exec, list_sessions, close, upgrade_shell). Mapping:
-#   ssh_connect / exec / upload / download / list_sessions / close
-#     → THIS tool via OpenSSH ControlMaster pattern (-M / -S / -O)
-#       — persistent socket on disk at /session/output/sshctl/, separate
-#       tool-runner spawns reuse it without re-auth. Master container
-#       holds the connection for max_runtime_seconds.
-#   listen / shell_exec / upgrade_shell  (reverse-shell side)
-#     → covered by `nc` v2.0 (Tool 2, May 2026) — held-listener
-#       pipeline pattern, MARKER stability, PTY upgrade gotcha.
-# shell-session stays untouched during parallel period; deletion is
-# bundled with impacket-relay + netcat MCP retirements.
+# CONSOLIDATION HISTORY:
+#
+# v2.0 (May 2026, Tool 3): absorbed `shell-session` (kind:mcp) tool's
+# 9 stateful methods. Mapping: ssh_connect / exec / upload / download /
+# list_sessions / close → ControlMaster pattern (-M / -S / -O lifted)
+# at /session/output/sshctl/. listen / shell_exec / upgrade_shell →
+# nc v2.0's held-listener pipeline pattern. shell-session deleted.
+#
+# v3.0 (May 2026, Phase A.1): absorbed `tunnel` (kind:mcp) tool's
+# 5 methods (forward, socks, list, close, close_all). Tunnel flags
+# (-L, -R, -D, -N, -W) lifted from reject_flags. Tunnels live within
+# ControlMaster connections — agent uses Pattern T1 / T2 / T3 with
+# the same /session/output/sshctl/ socket. Multiple tunnels through
+# one master via ssh -O forward. Per-tunnel close via ssh -O cancel.
+# tunnel deleted.
 
-version: "2.0"
+version: "3.0"
 description: >
   OpenSSH 10.x client + sshpass 1.10 for one-shot remote operations against
   a host where you already have credentials. Three sub-binaries:
@@ -167,9 +168,11 @@ routing:
     - "post-exploitation enumeration with multiple commands against same host"
     - "SFTP/SCP file transfer over an existing persistent SSH session"
     - "run SSH commands across multiple concurrent tool-runner spawns reusing one auth"
+    - "open SSH local-port-forward tunnel (-L) — access a service on remote SSH host's localhost"
+    - "create SSH dynamic SOCKS5 proxy (-D) for pivoting through SSH host's network"
+    - "open SSH remote-port-forward (-R) for callbacks from internal hosts to agent"
   never_use_for:
     - "SSH brute-force — use hydra ssh:// or netexec ssh"
-    - "SSH tunneling / SOCKS proxy / port forwarding — use the tunnel (kind:mcp) tool"
     - "SSH-based key cracking — use john's ssh2john + john / hashcat"
     - "initial port discovery — use nmap"
     - "TTY-required interactive tools (vi, less, htop) — kind:cli has no TTY (use ControlMaster + RequestTTY=force as a workaround if absolutely needed, but prefer non-TTY-requiring alternatives)"
@@ -199,14 +202,27 @@ routing:
     - "multiplex SSH"
     - "ssh socket"
     - "session reuse"
+    - "ssh tunnel"
+    - "ssh -L"
+    - "ssh -D"
+    - "ssh -R"
+    - "port forward"
+    - "local port forward"
+    - "remote port forward"
+    - "SOCKS proxy"
+    - "SOCKS5"
+    - "pivot via SSH"
+    - "tunnel"
+    - "ssh socks"
   prefer_over:
     - "shell-session"
+    - "tunnel"
 
 see_also:
   - tool: nc
     reason: "Use `nc` (v2.0, May 2026) for raw-TCP REVERSE SHELL holding from an exploit — when there are no SSH credentials yet. This `ssh` tool requires known credentials. The `nc` tool's held-listener pipeline pattern (tail|ncat with cmd_log/out_log) covers shell-session's listen / shell_exec / upgrade_shell methods. Once a foothold yields SSH credentials, pivot from `nc` reverse-shell to `ssh` ControlMaster for a more stable persistent session."
-  - tool: tunnel
-    reason: "Use tunnel (kind:mcp) for SSH-based port forwarding (-L local, -R remote, -D dynamic / SOCKS) and stateful tunnels. The `-L`, `-R`, `-D`, and `-N` flags are REJECTED by this `ssh` tool's reject_flags because they require a long-running ssh process; cli_in_container's one-shot model can't keep them alive."
+  - tool: chisel
+    reason: "Use `chisel` (kind:mcp) for HTTP-based tunneling when SSH is blocked / unavailable but HTTP is open. ssh-based tunneling (now lifted from reject_flags as of v3.0, May 2026) is in scope HERE via Patterns T1/T2/T3; use chisel as the SSH-unavailable fallback. The legacy `tunnel` (kind:mcp) tool was retired May 2026 — its 5 SSH-tunneling methods now live in this tool."
   - tool: hydra
     reason: "Use hydra ssh://host for credential brute-forcing or password spraying. This `ssh` tool requires KNOWN credentials (key or password); hydra discovers them. Once hydra surfaces a working pair, hand them to ssh / scp for one-shot exec or sshpass for password-auth file copy."
   - tool: netexec
@@ -248,26 +264,29 @@ target_extraction:
 # flags (-M / -S / -O) were previously rejected; as of v2.0 (May 2026)
 # they are ALLOWED — see usage_patterns + gotchas for the persistent-
 # session pattern that replaces shell-session.
-reject_flags:
-  - "-L"      # local port forward (ssh -L 8080:localhost:80 user@host)
-  - "-R"      # remote port forward (ssh -R 8080:localhost:80 user@host)
-  - "-D"      # dynamic SOCKS proxy (ssh -D 1080 user@host)
-  - "-N"      # no remote command (only useful in conjunction with -L/-R/-D)
-  - "-W"      # forward to host:port (ProxyJump-style; stateful)
+reject_flags: []
+# Tunnel flags (-L, -R, -D, -N, -W) and ControlMaster flags (-M, -S, -O)
+# were both formerly rejected as stateful. ControlMaster lifted in v2.0
+# (Tool 3, May 2026). Tunnel flags lifted in v3.0 (Phase A, May 2026)
+# — see reject_flags_reason. ssh's -e (escape char) and -c (cipher)
+# are NOT the same as netcat's backdoor exec flags; no rejections needed.
 reject_flags_reason: >
-  ssh -L, -R, -D, -N, -W are STATEFUL TUNNEL operations: they require the
-  ssh process to keep running for the duration of the tunnel / port
-  forward. For persistent tunneling / port forwarding / SOCKS, use the
-  dedicated `tunnel` (kind:mcp) tool.
+  TUNNEL FLAGS (-L, -R, -D, -N, -W) lifted in v3.0 (Phase A, May 2026).
+  Previously rejected as stateful and routed to the `tunnel` (kind:mcp)
+  tool — but the ControlMaster pattern (introduced in v2.0 / Tool 3)
+  makes them work cleanly. The master container holds the SSH connection
+  for max_runtime_seconds; tunnels established within that connection
+  ride the same socket and are reachable from other tool-runner spawns
+  (plugin defaults to --network=host per src/container/manager.ts:382).
+  See usage_patterns T1/T2/T3 + tunnel gotchas.
 
-  ControlMaster flags (-M, -S, -O) are NOW ALLOWED (v2.0 consolidation,
-  May 2026). The previous restriction reflected a one-shot kind:cli model
-  that pre-dated the tool-runner architecture. Persistent SSH sessions
-  now run via ControlMaster + ControlPath pointed at
-  /session/output/sshctl/ — a master container holds the connection for
-  max_runtime_seconds; separate tool-runner spawns reuse the socket via
-  ControlPath without re-authenticating. See usage_patterns and gotchas
-  for the canonical recipes.
+  CONTROLMASTER FLAGS (-M, -S, -O) lifted in v2.0 (Tool 3, May 2026).
+  Previously rejected as stateful — see ControlMaster usage_patterns +
+  gotchas for the persistent-session pattern.
+
+  Both retired tools (`tunnel` kind:mcp + `shell-session` kind:mcp)
+  had their methods absorbed here; both directories were deleted in
+  the retirement commits.
 
 # Per-tool value-taking flags whose values must NOT be confused with the
 # positional `[user@]host` argument. Verified against:
@@ -488,6 +507,23 @@ usage_patterns:
     command: "-O exit -o ControlPath=/session/output/sshctl/%h-%p-%r -p <port> <user>@<host>"
     when: "Tell the master to exit cleanly. Removes the ControlPath socket. CRITICAL: pass the SAME -p <port> AND <user>@<host> as Pattern A — the %h-%p-%r placeholders in ControlPath expand at command time using these values, so omitting -p makes ssh look for a different socket name (e.g., localhost-22-root instead of localhost-22221-root) and the close silently misses the master. Optional — master also exits when ControlPersist expires (default in our pattern: 600s after last client) or its container is killed by max_runtime_seconds. Use this when the agent wants to free resources earlier."
 
+  # ── Tunnel patterns (consolidated from `tunnel` kind:mcp, May 2026) ──
+
+  - name: "Tunnel — local port forward (replaces tunnel.forward)"
+    binary: "bash"
+    command: "-c 'mkdir -p /session/output/sshctl && sshpass -p \"<password>\" ssh -fN -L <local_port>:<remote_host>:<remote_port> -o ControlMaster=auto -o ControlPersist=<seconds> -o ControlPath=/session/output/sshctl/%h-%p-%r -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -p <ssh_port> <ssh_user>@<ssh_host>'"
+    when: "Open an SSH local-port-forward tunnel: traffic to <local_port> on the agent's container is forwarded through the SSH host to <remote_host>:<remote_port>. <remote_host>='127.0.0.1' = SSH host's localhost (most common for accessing localhost-only services like MySQL on 127.0.0.1:3306). For internal-network pivoting, set <remote_host> to an internal IP the SSH host can reach. -fN forks the master + tunnel to background and exits the foreground process so cli_in_container returns. Plugin defaults to --network=host so <local_port> is reachable from other tool-runner spawn containers. Use <local_port>=0 for OS-assigned ephemeral port (capture from -v stderr). For key auth, swap sshpass+\"-p PASS\" for \"-i /session/output/keys/<keyfile>\". Verified empirically 2026-05-09 (Test C series)."
+
+  - name: "Tunnel — dynamic SOCKS5 proxy (replaces tunnel.socks)"
+    binary: "bash"
+    command: "-c 'mkdir -p /session/output/sshctl && sshpass -p \"<password>\" ssh -fN -D <local_port> -o ControlMaster=auto -o ControlPersist=<seconds> -o ControlPath=/session/output/sshctl/%h-%p-%r -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -p <ssh_port> <ssh_user>@<ssh_host>'"
+    when: "Open an SSH dynamic SOCKS5 proxy on <local_port> (default 1080). All traffic through the proxy is tunneled to the SSH host and exits from there. Use for full-network pivoting — any tool that supports SOCKS5 reaches any host the SSH host can reach. Tools that consume the proxy: `proxychains -f /tmp/pc.conf nmap ...` with `socks5 127.0.0.1 <local_port>` in pc.conf, or `curl --socks5 127.0.0.1:<local_port> ...`, or sqlmap's `--proxy=socks5://127.0.0.1:<local_port>`. Plugin --network=host makes <local_port> reachable from other tool-runner containers."
+
+  - name: "Tunnel — remote port forward (replaces tunnel implicit -R)"
+    binary: "bash"
+    command: "-c 'sshpass -p \"<password>\" ssh -fN -R <remote_port>:<local_host>:<local_port> -o ControlMaster=auto -o ControlPath=/session/output/sshctl/%h-%p-%r -o StrictHostKeyChecking=no -p <ssh_port> <ssh_user>@<ssh_host>'"
+    when: "Reverse tunnel — opens <remote_port> on the SSH server side, forwarding incoming connections to <local_host>:<local_port> (relative to the agent's container). Useful when an internal host can reach the SSH server but not the agent directly: open the reverse tunnel, then point the internal host at SSHHOST:<remote_port>. NOTE: the SSH server's sshd_config must have GatewayPorts=yes for the remote_port to bind to non-localhost (otherwise bound only to SSH server's loopback)."
+
 output_formats:
   - flag: ""
     format: "text"
@@ -571,6 +607,11 @@ gotchas:
   - "BINARY UPLOAD VIA SSH+ECHO+BASE64 NEEDS A 4-STEP CHAIN. The legacy `upload_binary` method did: (1) `rm -f /tmp/payload` to clear stale content, (2) per-chunk `echo CHUNK_B64 | base64 -d >> /tmp/payload` (50KB chunks before base64), (3) `chmod +x /tmp/payload` if executable, (4) verify with `ls -la /tmp/payload && file /tmp/payload`. Skipping step 1 corrupts when retrying after a partial failure; skipping step 4 hides truncation. Under run_cli, prefer scp; only fall back to chunked echo+base64 when scp is blocked (no SFTP subsystem, restricted shell, etc.)."
   - "BACKGROUND PROCESS PID CAPTURE has a TIMING GOTCHA. The legacy `background` method ran `nohup bash -c '...' >output 2>&1 & echo $! > /tmp/pid && disown && sleep 0.2 && cat /tmp/pid` — the `sleep 0.2` lets the shell write the PID file BEFORE the cat reads it (without it, races on slow targets). Use the same chain under run_cli when you need the PID. If you only need fire-and-forget, the simpler `nohup ... & disown && echo BACKGROUND_STARTED` (already in usage_patterns) is enough."
   - "PTY-REQUIRING REMOTE COMMANDS — when to add `-tt -o RequestTTY=force`. Replaces shell-session.exec's `use_pty=true` parameter. WHO NEEDS A PTY: programs that read from /dev/tty directly (passwd, visudo, su without -, vipw, full-screen TUI tools), or that test isatty() and refuse otherwise. WHO DOES NOT: `sudo -S` reading password from stdin works fine WITHOUT a PTY (verified empirically — `echo PASS | ssh -o ControlPath=... user@host 'sudo -S whoami'` succeeds and prints `root`). Recipes: (a) PTY-needed: `ssh -tt -o RequestTTY=force -o ControlPath=/session/output/sshctl/%h-%p-%r -p <port> <user>@<host> 'visudo'`. (b) sudo with password: `echo 'PASSWORD' | ssh -o ControlPath=... user@host 'sudo -S whoami 2>&1'` — sudo's own -S flag handles stdin, no PTY needed. (c) NOPASSWD: `ssh -o ControlPath=... user@host 'sudo -n cmd'` — cleanest, no PTY, no password. CAVEAT: PTY mode pollutes stdout with carriage returns + terminal control codes — pipe through `tr -d '\\r'` or omit -tt when output cleanliness matters."
+  - "TUNNEL FLAGS now in scope (v3.0, May 2026) — -L, -R, -D, -N, -W formerly rejected as stateful (routed to retired `tunnel` (kind:mcp) tool). The ControlMaster pattern (introduced in v2.0 / Tool 3) makes them work cleanly: the master container holds the SSH connection and the tunnel for max_runtime_seconds, separate tool-runner spawns reuse the socket via ControlPath. WARNING: `-fN` (fork to background, no command) is the preferred form — the master detaches inside the container and the foreground process exits, allowing cli_in_container to return. Without `-fN`, the call blocks for the full ControlPersist duration. Verified against legacy `tunnel` tool's behavior."
+  - "SOCKS PROXY portability — port 1080 (default for Pattern T2) on the agent's container is reachable from OTHER tool-runner spawn containers IFF plugin uses --network=host (which is the default per src/container/manager.ts:382). For proxychains: agent in container B does `proxychains -f /tmp/pc.conf nmap ...` where pc.conf has `socks5 127.0.0.1 1080`. Verify with `nc -zv localhost 1080` from a separate spawn before trusting the route. SAME applies to local-port-forward (Pattern T1): the forwarded port is reachable from sibling spawns under host networking."
+  - "TUNNEL TEARDOWN granularity — closing the master via Pattern D (`ssh -O exit`) kills the master AND ALL of its tunnels at once. For per-tunnel teardown without dropping the SSH connection: `ssh -O cancel -L <local_port>:<remote_host>:<remote_port> -o ControlPath=/session/output/sshctl/%h-%p-%r -p <port> <user>@<host>` removes ONE specific forward. For SOCKS/dynamic: `ssh -O cancel -D <local_port> -o ControlPath=... -p <port> <user>@<host>`. Replaces the tunnel.close vs tunnel.close_all distinction — `-O cancel` is per-tunnel close, `-O exit` is close_all."
+  - "MULTIPLE TUNNELS via ONE master — once the ControlMaster Pattern A has run, additional tunnel calls through the same ControlPath ride the existing connection. To add a tunnel mid-session: `ssh -O forward -L <lport>:<rhost>:<rport> -o ControlPath=/session/output/sshctl/%h-%p-%r -p <port> <user>@<host>`. Adds the forward without opening a new SSH connection — sub-second. Useful for incremental tunnel discovery during pivoting (find a service, open a forward; find another, add another forward)."
+  - "CONTROLMASTER + ANCIENT SSHD (pre-OpenSSH 5.6, pre-2010 targets): the -fN ControlMaster pattern may exit during userauth before creating the socket file. Symptom: container shows ssh process exited cleanly, /session/output/sshctl/ remains empty. Root cause likely OpenSSH 10 client behavior differences with very old sshd implementations. Verified failure against HTB Lame (Ubuntu 8.04, OpenSSH 4.7p1) 2026-05-10 — the -fN ssh exits silently after sending password packet. Fall back to per-call one-shot ssh for these targets: `ssh -o HostKeyAlgorithms=+ssh-rsa -o KexAlgorithms=+diffie-hellman-group1-sha1 -o PubkeyAcceptedKeyTypes=+ssh-rsa -o Ciphers=+aes128-cbc user@target 'cmd'`. One-shot exec works fine even on 2007-era sshd. Detection heuristic: ssh banner like `OpenSSH_4.x` → skip ControlMaster, do per-call ssh. Modern targets (OpenSSH 7+) unaffected."
 
 failure_signatures:
   # Layer-diverse signals (SKILL #11) — at least 7 distinct verifiable layers:

