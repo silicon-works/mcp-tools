@@ -465,9 +465,10 @@ These are integration boundaries the May 2026 swap did NOT exercise.
   connect (workaround applied), --loggers eats following flag (workaround
   applied), connect/switch-connection is dynamic, untrusted-user-data
   wrapping mitigates prompt injection.
-- **Cross-tool routing:** see_also points at mssql, elasticsearch (other
-  DB tools), hydra (for cred brute), nmap (for discovery), curl (for
-  Atlas API direct).
+- **Cross-tool routing:** see_also points at mssql (other DB tool),
+  hydra (for cred brute), nmap (for discovery), curl (for Atlas API
+  direct + for REST-API databases like Elasticsearch that don't have
+  their own MCP tool).
 
 ## 10. Manual re-verification (2026-05-09)
 
