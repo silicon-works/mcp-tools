@@ -393,8 +393,8 @@ object` post-dump when packs are incomplete.
 7. **Auth flow** — there's no --basic-auth / --bearer flag. The agent
    must construct `-H 'Authorization: Bearer xxx'` or
    `-H 'Authorization: Basic <base64>'` manually. Document a pattern
-   for the LLM to follow. Capture tokens via web-session for non-trivial
-   auth flows.
+   for the LLM to follow. Capture tokens via a curl or playwright login
+   for non-trivial auth flows.
 
 8. **Recovery commands post-dump** — after a successful dump, the agent
    typically wants to run `git log --all`, `git checkout <branch>`,

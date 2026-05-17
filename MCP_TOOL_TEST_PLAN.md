@@ -415,7 +415,6 @@ These are used in almost every engagement. They mostly work but haven't been sys
 | 22 | hashcat | 39 | 3 | 682 |
 | 23 | web-fingerprint | 52 | 11 | 676 |
 | 24 | scapy | 45 | 10 | 829 |
-| 25 | web-session | 47 | 7 | 571 |
 | 26 | tunnel | 60 | 5 | 420 |
 | 27 | searchsploit | 35 | 12 | 291 |
 | 28 | cve-lookup | 25 | 9 | 496 |

