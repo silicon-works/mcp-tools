@@ -1,0 +1,363 @@
+#!/usr/bin/env python3
+"""
+winrm-exec — WinRM/PSRP remote command execution + file transfer CLI.
+
+kind:cli "binary" for the evil-winrm tool. Wraps pypsrp (PowerShell Remoting
+Protocol). Uses the PowerShell plugin URI directly (Microsoft.PowerShell),
+which works for non-admin WinRM users on Windows Server 2025 where the CMD
+WinRS Invoke URI is restricted.
+
+Distinct from `netexec winrm` — netexec winrm is NTLM-only; this supports
+NTLM password, NTLM pass-the-hash, AND Kerberos via ccache.
+
+Output: a single JSON object on stdout (success / data / error / error_class
+/ retryable / suggestions). On any classified failure, a structured line is
+ALSO written to stderr: `[winrm-exec] error_class=<c> retryable=<b>` followed
+by suggestion lines — so the agent gets the classification even if the
+registry-side failure_signature matching is unavailable.
+
+Exit codes: 0 = success, 1 = command-level failure (PS errors / non-zero rc),
+2 = connection/auth failure, 3 = argument error.
+"""
+import argparse
+import json
+import ntpath
+import os
+import re
+import sys
+
+CONFIG_DIR = "/session/config"
+DEFAULT_DOWNLOAD_DIR = "/session/output"
+
+
+# --------------------------------------------------------------------------
+# Error classification (ported verbatim from the retired 402-LOC mcp-server.py
+# _classify_winrm_error — the irreplaceable engagement knowledge). Also
+# mirrored in tool.yaml failure_signatures for registry discoverability.
+# --------------------------------------------------------------------------
+def classify_winrm_error(error_str):
+    """Return (error_class, retryable, suggestions)."""
+    err = str(error_str)
+
+    # --- Authentication failures ---
+    if "Failed to authenticate" in err:
+        suggestions = ["Verify credentials (password or NTLM hash)"]
+        if "ntlm" in err.lower():
+            suggestions.append("If NTLM is disabled, try --auth kerberos with a ccache file")
+        return ("auth", False, suggestions)
+
+    if re.search(r"STATUS_LOGON_FAILURE|Logon failure", err, re.IGNORECASE):
+        return ("auth", False, [
+            "Verify username and password/hash are correct",
+            "Check if account is locked out",
+        ])
+
+    # --- Kerberos errors ---
+    # NOTE: the macro-name patterns (KDC_ERR_*, KRB_AP_ERR_SKEW) are kept as
+    # defense-in-depth (MIT krb5 CLI tools emit them) but python-krb5 /
+    # pyspnego — what this tool actually uses — emit HUMAN-READABLE strings.
+    # The human patterns below are matched FIRST and were verified against
+    # real strings captured live on Forest 2026-05-17 (the macro-only
+    # version was provably blind to all of them).
+
+    # "Clock skew" / explicit skew macro. On Forest the skew actually
+    # surfaced as "Pre-authentication failed: Input/output error" (handled
+    # below) — keep this for krb5 builds that DO say it plainly.
+    if "KRB_AP_ERR_SKEW" in err or re.search(r"[Cc]lock skew", err):
+        return ("config", True, [
+            "Kerberos clock skew — container clock differs from the DC by >5min.",
+            "Pass FAKETIME via the cli_in_container env arg (plugin hoists "
+            "FAKETIME -> ContainerOptions.clockOffset -> libfaketime). e.g. FAKETIME='+7m'.",
+        ])
+
+    # Real string for wrong-realm / unknown-principal (verified live:
+    # "Client 'svc-alfresco@ATHENA.MIT.EDU' not found in Kerberos database").
+    # Most common real cause: krb5.conf realm not applied so the principal
+    # gets the MIT default realm ATHENA.MIT.EDU. Second cause: genuinely
+    # wrong principal.
+    if re.search(r"not found in Kerberos database|KDC_ERR_C_PRINCIPAL_UNKNOWN"
+                 r"|Server not found in Kerberos database", err, re.IGNORECASE):
+        return ("config", True, [
+            "Kerberos principal/realm not found. Most common cause: krb5.conf "
+            "realm not applied (principal falls back to MIT default "
+            "ATHENA.MIT.EDU). Provide a krb5.conf with the correct [realms] "
+            "via /session/config/krb5.conf or the KRB5_CONFIG env arg.",
+            "Use the host FQDN (not the IP) as --target — Kerberos is name-sensitive.",
+            "Confirm the ccache principal/realm matches the target domain "
+            "(klist -c <ccache>).",
+        ])
+
+    # Real string for pre-auth failure (verified live: "Pre-authentication
+    # failed: Input/output error"). Causes: (1) ccache-less Kerberos with a
+    # wrong password; (2) clock skew (Forest surfaced skew this way, NOT as
+    # KRB_AP_ERR_SKEW); (3) a stale/expired or not-picked-up ccache.
+    if re.search(r"Pre-authentication failed|KDC_ERR_PREAUTH_FAILED", err, re.IGNORECASE):
+        return ("auth", True, [
+            "Kerberos pre-authentication failed.",
+            "If using --password (ccache-less): the password/hash is wrong.",
+            "If the credential is correct: this is most often CLOCK SKEW — "
+            "pass FAKETIME via the cli_in_container env arg (e.g. FAKETIME='+7m') "
+            "to sync to DC time, then retry.",
+            "If using --ccache: ensure the ticket is valid and not expired "
+            "(klist -c), and that the ccache realm matches the target.",
+        ])
+
+    # --- Network / connection errors ---
+    if re.search(r"ConnectTimeout|connect timeout|connection timed out", err, re.IGNORECASE):
+        return ("network", True, [
+            "WinRM connection timed out. Target may be down or port 5985/5986 filtered.",
+            "Verify target is reachable and the WinRM service is running.",
+        ])
+
+    if re.search(r"Connection refused|ConnectionRefusedError", err, re.IGNORECASE):
+        return ("network", True, [
+            "Connection refused. WinRM service may not be running on target.",
+            "Check if port 5985 (HTTP) or 5986 (HTTPS) is open.",
+        ])
+
+    if re.search(r"No route to host|Network is unreachable", err, re.IGNORECASE):
+        return ("network", False, [
+            "Target is unreachable. Check VPN connection and routing (tun0).",
+        ])
+
+    # --- Permission / access denied ---
+    if re.search(r"WSManFault.*Code:\s*5|Access\s+(?:is|to the path is)\s+denied|E_ACCESSDENIED",
+                 err, re.IGNORECASE):
+        return ("permission", False, [
+            "Access denied. User may not be in 'Remote Management Users' or 'Administrators'.",
+            "Try a different account, or use `netexec winrm` for credential validation first.",
+        ])
+
+    if "ConstrainedLanguage" in err or "language mode" in err.lower():
+        return ("permission", False, [
+            "PowerShell Constrained Language Mode active. Re-run with --shell cmd for basic commands.",
+            "Or use simpler PowerShell that doesn't invoke restricted .NET APIs.",
+        ])
+
+    # --- Elevation / privilege required ---
+    if re.search(r"requires elevation|requires other privileges|Cannot open Service Control Manager",
+                 err, re.IGNORECASE):
+        return ("permission", False, [
+            "Operation requires elevated privileges. The current user is not an administrator.",
+            "Use an admin-level account or a privilege escalation technique.",
+        ])
+
+    # --- Session / remoting failures ---
+    if re.search(r"logon session does not exist|specified logon session", err, re.IGNORECASE):
+        return ("auth", True, [
+            "WinRM session expired or Kerberos ticket invalidated.",
+            "Re-authenticate or obtain a fresh TGT (impacket-getTGT) and retry.",
+        ])
+
+    if re.search(r"Connecting to remote server.*failed", err, re.IGNORECASE):
+        return ("network", True, [
+            "PowerShell remoting to a secondary host failed.",
+            "Verify the remote host is reachable from the WinRM target and PS remoting is enabled.",
+        ])
+
+    # --- HTTP / service layer ---
+    if re.search(r"Service Unavailable|HTTP Error 503", err, re.IGNORECASE):
+        return ("network", True, [
+            "WinRM HTTP service returned 503. Service may be restarting or overloaded. Retry.",
+        ])
+
+    # --- Server-side command timeout ---
+    if re.search(r"Operation timed out|timed out|TimeoutError", err, re.IGNORECASE):
+        return ("timeout", True, [
+            "Command execution timed out. Try a simpler/faster command.",
+        ])
+
+    return ("unknown", False, [])
+
+
+def emit(result, exit_code):
+    """Write JSON to stdout; structured classification to stderr on failure."""
+    print(json.dumps(result))
+    if not result.get("success"):
+        ec = result.get("error_class")
+        if ec:
+            sys.stderr.write(
+                f"[winrm-exec] error_class={ec} retryable={result.get('retryable')}\n"
+            )
+            for s in result.get("suggestions") or []:
+                sys.stderr.write(f"[winrm-exec] suggestion: {s}\n")
+    sys.exit(exit_code)
+
+
+def get_client(args, auth_user):
+    """Construct a pypsrp Client. NTLM (hash > password) or Kerberos (ccache)."""
+    from pypsrp.client import Client
+
+    actual_port = args.port or (5986 if args.ssl else 5985)
+
+    if args.auth == "kerberos":
+        if args.ccache:
+            os.environ["KRB5CCNAME"] = args.ccache
+        # Realm resolution: the krb5 library reads /etc/krb5.conf by default,
+        # but debian-slim ships a stub /etc/krb5.conf with NO realm (falls
+        # back to the hardcoded ATHENA.MIT.EDU and fails with "Client not
+        # found in Kerberos database"). KRB5_CONFIG env is the canonical
+        # override and wins over /etc/krb5.conf regardless of whether it
+        # exists. Precedence: caller-set KRB5_CONFIG > /session/config/
+        # krb5.conf (winrm-exec convenience) > shipped /etc default.
+        if not os.environ.get("KRB5_CONFIG"):
+            shared_krb5 = os.path.join(CONFIG_DIR, "krb5.conf")
+            if os.path.exists(shared_krb5):
+                os.environ["KRB5_CONFIG"] = shared_krb5
+        if args.ccache:
+            # Use the EXISTING TGT from the ccache. pyspnego picks up the
+            # default credential from KRB5CCNAME only when username/password
+            # are NOT supplied. Passing the principal makes spnego attempt a
+            # fresh AS-REQ (kinit-equivalent) which fails pre-auth on the
+            # empty password ("Pre-authentication failed"). This was a
+            # latent bug carried verbatim from the retired 402-LOC kind:mcp
+            # wrapper — its Kerberos path was never live-validated (caught
+            # on Forest 2026-05-17).
+            return Client(
+                args.target, username=None, password=None,
+                port=actual_port, ssl=args.ssl, auth="kerberos",
+                cert_validation=False, connection_timeout=30,
+            )
+        # Kerberos WITHOUT a ccache: fresh AS-REQ (kinit) with principal +
+        # password — spnego acquires a new TGT.
+        return Client(
+            args.target, username=auth_user, password=args.password or "",
+            port=actual_port, ssl=args.ssl, auth="kerberos",
+            cert_validation=False, connection_timeout=30,
+        )
+
+    # NTLM: hash takes priority over password
+    if args.hash:
+        auth_pass = args.hash if ":" in args.hash else f"{'0'*32}:{args.hash}"
+    else:
+        auth_pass = args.password or ""
+    return Client(
+        args.target, username=auth_user, password=auth_pass,
+        port=actual_port, ssl=args.ssl, auth="ntlm",
+        cert_validation=False, connection_timeout=30,
+    )
+
+
+def do_exec(args, auth_user):
+    client = get_client(args, auth_user)
+    if args.shell == "cmd":
+        stdout, stderr, rc = client.execute_cmd(args.command)
+    else:
+        stdout, streams, had_errors = client.execute_ps(args.command)
+        stderr = "\n".join(str(e) for e in streams.error) if streams.error else ""
+        rc = 1 if had_errors else 0
+
+    if rc != 0 and stderr:
+        ec, retry, sug = classify_winrm_error(stderr)
+    else:
+        ec, retry, sug = (None, False, [])
+
+    return {
+        "success": rc == 0,
+        "data": {
+            "output": stdout.strip() if stdout else "",
+            "stderr": stderr.strip() if stderr and stderr.strip() else None,
+            "exit_code": rc,
+            "shell": "CMD" if args.shell == "cmd" else "PowerShell",
+        },
+        "error": stderr.strip() if rc != 0 and stderr and stderr.strip() else None,
+        "error_class": ec, "retryable": retry, "suggestions": sug,
+    }, (0 if rc == 0 else 1)
+
+
+def do_upload(args, auth_user):
+    local, _, remote = args.upload.partition(":")
+    if not remote:
+        return {"success": False, "error": "--upload requires LOCAL:REMOTE",
+                "error_class": "params", "retryable": False,
+                "suggestions": ["Format: --upload /session/x.exe:C:\\Windows\\Temp\\x.exe"]}, 3
+    if not os.path.isfile(local):
+        return {"success": False, "error": f"Local file not found: {local}",
+                "error_class": "params", "retryable": False,
+                "suggestions": ["Check the local path exists; files should be under /session/."]}, 3
+    client = get_client(args, auth_user)
+    size = os.path.getsize(local)
+    client.copy(local, remote)
+    return {"success": True,
+            "data": {"local_path": local, "remote_path": remote, "size": size},
+            "error": None, "error_class": None, "retryable": False, "suggestions": []}, 0
+
+
+def do_download(args, auth_user):
+    # REMOTE is a Windows path that ALWAYS contains a drive-letter colon
+    # (C:\...), so a naive partition(":") splits on the drive colon and
+    # tries to fetch just "C" (caught live on Forest 2026-05-17). The
+    # optional :LOCAL separator is the FIRST colon at index >= 2 (past a
+    # potential drive letter at index 1). UNC \\srv\share paths have no
+    # drive colon so the first colon found is the separator. LOCAL is a
+    # container path with no colon.
+    spec = args.download
+    sep = spec.find(":", 2)
+    if sep != -1:
+        remote, local = spec[:sep], spec[sep + 1:]
+    else:
+        remote, local = spec, ""
+    if not local:
+        # ntpath.basename correctly splits a Windows path on Linux
+        # (os.path.basename uses '/' and would return the whole string).
+        local = os.path.join(DEFAULT_DOWNLOAD_DIR, ntpath.basename(remote))
+    client = get_client(args, auth_user)
+    local_dir = os.path.dirname(local)
+    if local_dir:  # bare-filename LOCAL has no dir -> os.makedirs("") would raise
+        os.makedirs(local_dir, exist_ok=True)
+    client.fetch(remote, local)
+    size = os.path.getsize(local)
+    return {"success": True,
+            "data": {"remote_path": remote, "local_path": local, "size": size},
+            "error": None, "error_class": None, "retryable": False, "suggestions": []}, 0
+
+
+def main():
+    p = argparse.ArgumentParser(
+        prog="winrm-exec",
+        description="WinRM/PSRP remote exec + file transfer (NTLM pw/PtH + Kerberos ccache).",
+    )
+    p.add_argument("--target", required=True, help="Target IP or hostname")
+    p.add_argument("--username", required=True,
+                   help="Username (for kerberos, principal without DOMAIN\\ prefix)")
+    p.add_argument("--password", help="Password")
+    p.add_argument("--hash", help="NTLM hash (bare NT, or LM:NT) for pass-the-hash")
+    p.add_argument("--ccache", help="Kerberos ccache path (implies --auth kerberos)")
+    p.add_argument("--auth", choices=["ntlm", "kerberos"], default="ntlm")
+    p.add_argument("--domain", help="AD domain (prefixed DOMAIN\\username for NTLM)")
+    p.add_argument("--ssl", action="store_true", help="Use HTTPS/5986")
+    p.add_argument("--port", type=int, help="Custom port (default 5985, or 5986 w/ --ssl)")
+    p.add_argument("--shell", choices=["powershell", "cmd"], default="powershell")
+    g = p.add_mutually_exclusive_group(required=True)
+    g.add_argument("--command", help="Command to execute")
+    g.add_argument("--upload", metavar="LOCAL:REMOTE", help="Upload a file (native PSRP copy)")
+    g.add_argument("--download", metavar="REMOTE[:LOCAL]", help="Download a file (native PSRP fetch)")
+    args = p.parse_args()
+
+    if args.ccache and args.auth != "kerberos":
+        args.auth = "kerberos"
+
+    # DOMAIN\username for NTLM; bare username for kerberos
+    auth_user = (f"{args.domain}\\{args.username}"
+                 if args.domain and args.auth != "kerberos" else args.username)
+
+    try:
+        if args.command is not None:
+            result, code = do_exec(args, auth_user)
+        elif args.upload is not None:
+            result, code = do_upload(args, auth_user)
+        else:
+            result, code = do_download(args, auth_user)
+        emit(result, code)
+    except Exception as e:
+        ec, retry, sug = classify_winrm_error(str(e))
+        emit({
+            "success": False,
+            "error": f"WinRM operation failed: {e}",
+            "data": {"error": str(e)},
+            "error_class": ec, "retryable": retry, "suggestions": sug,
+        }, 2)
+
+
+if __name__ == "__main__":
+    main()

@@ -1,10 +1,13 @@
 name: evil-winrm
-version: "2.0.0"
-description: "WinRM shell for Windows remote management using pypsrp v0.8+ (Python PowerShell Remoting Protocol). 3 methods: exec (native PowerShell via PSRP plugin URI, or CMD via WinRS), upload (native PSRP copy), download (native PSRP fetch). pypsrp uses the PowerShell plugin URI directly — works for non-admin WinRM users on Windows Server 2025 where CMD Invoke is restricted. Supports NTLM pass-the-hash via pyspnego auto-detection of LM:NT hash format — bare NT hashes auto-prefixed with 32 zero bytes. Connects via HTTP (5985) or HTTPS (5986) using NTLM transport. WinRM requires membership in 'Remote Management Users' or 'Administrators' group."
+kind: cli
+binary: winrm-exec
+version: "3.0.0"
+description: "WinRM/PSRP remote command execution + file transfer via the `winrm-exec` CLI (pypsrp-backed). kind:cli flip May 2026 from a 402-LOC kind:mcp wrapper. Three actions on one invocation: `--command` (exec via PowerShell PSRP plugin URI, or `--shell cmd` via WinRS), `--upload LOCAL:REMOTE` (native PSRP copy), `--download REMOTE[:LOCAL]` (native PSRP fetch). Auth: `--password` (NTLM), `--hash` (NTLM pass-the-hash; bare NT auto-prefixed with 32 zero bytes, or full LM:NT), or `--ccache` (Kerberos via ccache). **Distinct from `netexec winrm` which is NTLM-only — this is the only tool in the registry that does Kerberos-authenticated WinRM**, the common case in hardened/NTLM-disabled AD. pypsrp uses the PowerShell plugin URI directly, so it works for non-admin WinRM users on Windows Server 2025 where the CMD WinRS Invoke URI is restricted. WinRM requires the principal be in 'Remote Management Users' or 'Administrators'. Single JSON object on stdout; classified error + suggestions also on stderr."
 image: "ghcr.io/silicon-works/mcp-tools-evil-winrm:latest"
-image_size_mb: 300
-timeout_seconds: 300
-idle_timeout: 1800
+image_size_mb: 464
+idle_timeout_seconds: 600
+max_runtime_seconds: 600
+timeout_seconds: 600
 
 capabilities:
   - winrm_shell
@@ -12,6 +15,7 @@ capabilities:
   - powershell_execution
   - cmd_execution
   - pass_the_hash
+  - kerberos_winrm
 
 phases:
   - exploitation
@@ -27,184 +31,139 @@ resources:
 
 routing:
   use_for:
-    - "WinRM command execution with PowerShell or CMD"
-    - "Windows remote PowerShell script execution via WinRM"
-    - "file upload to Windows target via WinRM base64 chunking"
-    - "file download from Windows target via WinRM base64 encoding"
-    - "pass-the-hash remote execution via WinRM NTLM"
-    - "evil-winrm alternative for non-interactive command execution"
-    - "post-exploitation command execution when WinRM (5985) is open"
+    - "WinRM command execution (PowerShell PSRP, or CMD via WinRS)"
+    - "Windows remote PowerShell execution via WinRM on a single target"
+    - "Kerberos-authenticated WinRM (NTLM disabled / hardened AD) — the unique capability vs netexec winrm"
+    - "file upload to a Windows target via native PSRP copy"
+    - "file download / loot retrieval from a Windows target via native PSRP fetch"
+    - "pass-the-hash remote execution over WinRM"
+    - "non-admin WinRM on Windows Server 2025 (PSRP plugin URI, not CMD WinRS)"
+    - "post-exploitation command execution when WinRM (5985/5986) is open"
   never_use_for:
-    - "Linux targets (WinRM is Windows-only)"
+    - "Linux targets (WinRM is Windows-only — use ssh)"
     - "port scanning (use nmap)"
     - "vulnerability scanning (use nuclei)"
-    - "credential spraying across multiple targets (use netexec winrm)"
-    - "SMB operations (use netexec smb or impacket)"
+    - "credential spraying across many targets / a CIDR (use netexec winrm — built for multi-target, NTLM-only)"
+    - "SMB / WMI / DCOM / scheduled-task remote exec (use impacket wmiexec/psexec/smbexec/atexec/dcomexec)"
+    - "SAM/LSA/DPAPI credential dumping (use netexec winrm modules or impacket secretsdump)"
   triggers:
     - "evil-winrm"
     - "winrm shell"
     - "winrm exec"
     - "winrm upload"
     - "winrm download"
-    - "winrm file transfer"
-  prefer_over: []
+    - "winrm kerberos"
+    - "winrm pass-the-hash"
+  prefer_over:
+    - netexec  # for Kerberos WinRM specifically — netexec winrm is NTLM-only
+
+target_extraction:
+  # winrm-exec's network target is the flag value of --target. There are no
+  # positional arguments and no target-list / CIDR flag (single host only;
+  # multi-target spraying is netexec's job, see never_use_for).
+  - rule: "flag_value"
+    flag: "--target"
+    parse_as: "raw"
+
+value_flags:
+  # --domain is an AD domain / Kerberos realm (e.g. `htb.local`). It parses
+  # host-shaped but is NOT a network target — it's metadata prefixed onto
+  # the username for NTLM (DOMAIN\\user) or used for the Kerberos realm.
+  # Listed here so the scope DSL skips it; no target_extraction rule
+  # references --domain.
+  - "--domain"
+
+reject_flags: []
+reject_flags_reason: "winrm-exec takes exactly one --target (single host). No list/CIDR/file-of-targets flag exists — multi-target credential spraying is delegated to netexec winrm (see routing.never_use_for). Nothing to reject."
+
+allowed_env:
+  - KRB5CCNAME      # Kerberos ccache path for --auth kerberos / --ccache
+  - KRB5_CONFIG     # path to krb5.conf (realm / KDC config)
+  - FAKETIME        # Kerberos clock-skew workaround; plugin hoists -> ContainerOptions.clockOffset -> libfaketime LD_PRELOAD
 
 see_also:
-  - tool: impacket
-    reason: "wmiexec/psexec/smbexec for non-WinRM remote execution via SMB/WMI/DCOM"
   - tool: netexec
-    reason: "Multi-protocol credential validation and WinRM command execution across multiple targets simultaneously"
+    reason: "netexec winrm does multi-target credential spraying + SAM/LSA dumping but is NTLM-ONLY. Use netexec winrm to validate creds across a subnet; switch to evil-winrm when you need an actual shell, file transfer, OR Kerberos-authenticated WinRM (netexec winrm cannot do Kerberos)."
+  - tool: impacket
+    reason: "impacket wmiexec/psexec/smbexec/atexec/dcomexec are the sibling remote-exec protocols (WMI / SMB+service / DCOM / scheduled task). Use those when WinRM (5985) is closed but SMB/RPC is open; use evil-winrm when WinRM is the open vector."
+  - tool: ssh
+    reason: "ssh is the equivalent remote-exec/file-transfer tool for Linux and modern Windows OpenSSH. evil-winrm is Windows-WinRM-only."
+  - tool: kerbrute
+    reason: "Enumerate valid AD usernames without creds before attempting WinRM; feed confirmed user into evil-winrm."
 
-methods:
-  exec:
-    required_ports: [5985]
-    description: "Execute a command on a remote Windows host via WinRM using pypsrp. Two shell modes: PowerShell (default) uses native PSRP plugin URI (http://schemas.microsoft.com/powershell/Microsoft.PowerShell) — works for non-admin users on Windows Server 2025. CMD uses WinRS CMD shell URI. Authentication via NTLM transport — supports password or NTLM hash (pass-the-hash via pyspnego LM:NT auto-detection). Domain prefix auto-applied as DOMAIN\\username format. Returns stdout, stderr, exit code, and shell type used."
-    when_to_use: "When you have valid Windows credentials (password or NTLM hash) and WinRM port 5985 is open. Preferred over netexec winrm when you need: (1) Reliable single-command execution with clean stdout/stderr separation, (2) PowerShell script execution with proper error handling, (3) CMD commands that don't work well in PowerShell (e.g., 'dir /s', 'type', 'reg query'), (4) Pass-the-hash execution when only WinRM is available. For multi-target credential spraying, use netexec winrm instead. For credential dumping (SAM/LSA/DPAPI), use netexec winrm which has built-in dump methods."
-    params:
-      target:
-        type: string
-        required: true
-        description: "Target IP address or hostname. Single target only (not CIDR). Must have WinRM service running on port 5985 (HTTP) or 5986 (HTTPS)."
-      username:
-        type: string
-        required: true
-        description: "Username for NTLM authentication. Domain prefix auto-applied if domain parameter set (becomes DOMAIN\\username)."
-      password:
-        type: string
-        description: "Password for authentication. Provide either password or hash, not both. If neither is provided, empty password is used."
-      hash:
-        type: string
-        description: "NTLM hash for pass-the-hash. Accepts bare NT hash (32 hex chars, auto-converted to 00000000000000000000000000000000:HASH) or full LM:NT format. pyspnego auto-detects LM:NT format for NTLM auth."
-      domain:
-        type: string
-        description: "Active Directory domain. Prepended to username as DOMAIN\\username for NTLM authentication. Omit for local account authentication."
-      command:
-        type: string
-        required: true
-        description: "Command to execute on the target. For PowerShell shell: PowerShell cmdlets and scripts (e.g., 'Get-Process', 'whoami /all', 'Get-ChildItem C:\\'). For CMD shell: native CMD commands (e.g., 'dir C:\\', 'type C:\\flag.txt', 'net user')."
-      shell:
-        type: string
-        enum: [powershell, cmd]
-        default: powershell
-        description: "Shell to use. 'powershell' (default) uses run_ps() — supports PowerShell cmdlets, scripts, and pipelines. 'cmd' uses run_cmd() — for native CMD commands, batch files, and commands that fail in PowerShell context."
-      ssl:
-        type: boolean
-        default: false
-        description: "Use HTTPS/SSL transport (port 5986). Default: false (HTTP on port 5985). Enable when target requires encrypted WinRM connections."
-      port:
-        type: integer
-        description: "Custom WinRM port. Default: 5985 (HTTP) or 5986 (HTTPS when ssl=true). Override for non-standard WinRM configurations."
-      auth:
-        type: enum
-        values: [ntlm, kerberos]
-        default: ntlm
-        description: "Auth method. Use 'kerberos' when NTLM is disabled on the target."
-      ccache_path:
-        type: string
-        description: "Path to Kerberos ccache file (e.g., /session/output/credentials/auditor.ccache)"
-    returns:
-      output:
-        type: string
-        description: "Command stdout output (decoded UTF-8)."
-      shell:
-        type: string
-        description: "Shell used for execution: 'PowerShell' or 'CMD'."
+usage_patterns:
+  - name: "S1 — NTLM password exec"
+    command: "--target {ip} --username {user} --password {pw} --command {ps_command}"
+    when: "You have a cleartext Windows credential and WinRM (5985) is open. Default shell is PowerShell (PSRP plugin URI). Add `--domain {DOM}` for a domain account (prefixed DOM\\user). Output is a JSON object on stdout: success/data.output/data.exit_code; on failure error_class + suggestions also go to stderr as `[winrm-exec] error_class=...`."
+    example: "winrm-exec --target 10.129.252.9 --username svc-alfresco --password s3rvice --command 'whoami /all'"
 
-  upload:
-    required_ports: [5985]
-    description: "Upload a local file to the target Windows machine via WinRM using native PSRP copy. Uses pypsrp's built-in copy() which handles chunking and transfer natively over the PSRP protocol — faster and more reliable than base64 chunking over PowerShell commands. Supports password and NTLM hash authentication."
-    when_to_use: "To transfer tools, scripts, exploits, or payloads to the target Windows machine when only WinRM is available. Use for: (1) Upload compiled exploits to C:\\Windows\\Temp for privilege escalation, (2) Upload enumeration scripts (PowerUp, Seatbelt, winPEAS) for post-exploitation, (3) Upload reverse shell payloads for persistent access. Files in /session/ directory are shared with the container."
-    params:
-      target:
-        type: string
-        required: true
-        description: "Target IP address or hostname with WinRM service running."
-      username:
-        type: string
-        required: true
-        description: "Username for NTLM authentication."
-      password:
-        type: string
-        description: "Password for authentication. Provide either password or hash, not both."
-      hash:
-        type: string
-        description: "NTLM hash for pass-the-hash. Bare NT hash or LM:NT format."
-      domain:
-        type: string
-        description: "Active Directory domain. Prepended to username as DOMAIN\\username."
-      local_path:
-        type: string
-        required: true
-        description: "Local file path to upload. Use /session/ prefix for files in the shared session directory (e.g., '/session/output/artifacts/exploit.exe'). File must exist and be readable."
-      remote_path:
-        type: string
-        required: true
-        description: "Destination path on the target Windows machine. Use writable directories: C:\\Windows\\Temp\\, C:\\Users\\<user>\\Desktop\\, or share paths."
-      ssl:
-        type: boolean
-        default: false
-        description: "Use HTTPS/SSL transport (port 5986)."
-      port:
-        type: integer
-        description: "Custom WinRM port (default: 5985 HTTP, 5986 HTTPS)."
-      auth:
-        type: enum
-        values: [ntlm, kerberos]
-        default: ntlm
-        description: "Auth method. Use 'kerberos' when NTLM is disabled on the target."
-      ccache_path:
-        type: string
-        description: "Path to Kerberos ccache file (e.g., /session/output/credentials/auditor.ccache)"
-    returns:
-      success:
-        type: boolean
-        description: "Whether upload completed successfully."
+  - name: "S2 — NTLM pass-the-hash exec"
+    command: "--target {ip} --username {user} --hash {nthash} --command {ps_command}"
+    when: "You recovered an NT hash (secretsdump / lsass) but not the cleartext. Pass a bare 32-hex NT hash (auto-prefixed with 32 zero bytes for the LM half) OR a full LM:NT. NTLM transport; no Kerberos needed."
+    example: "winrm-exec --target 10.129.252.9 --username Administrator --hash 32196b56ffe6f45e294117b91a83bf38 --command 'hostname'"
 
-  download:
-    required_ports: [5985]
-    description: "Download a file from the target Windows machine via WinRM using native PSRP fetch. Uses pypsrp's built-in fetch() which handles transfer natively over the PSRP protocol — faster and more reliable than base64 encoding over PowerShell commands. Supports password and NTLM hash authentication."
-    when_to_use: "To retrieve files, flags, evidence, or loot from the target Windows machine. Use for: (1) Download CTF flags (user.txt, root.txt), (2) Retrieve configuration files with credentials, (3) Download SAM/SYSTEM/SECURITY hive files for offline cracking, (4) Collect evidence files for reporting. Default save location: /session/output/artifacts/."
-    params:
-      target:
-        type: string
-        required: true
-        description: "Target IP address or hostname with WinRM service running."
-      username:
-        type: string
-        required: true
-        description: "Username for NTLM authentication."
-      password:
-        type: string
-        description: "Password for authentication. Provide either password or hash, not both."
-      hash:
-        type: string
-        description: "NTLM hash for pass-the-hash. Bare NT hash or LM:NT format."
-      domain:
-        type: string
-        description: "Active Directory domain. Prepended to username as DOMAIN\\username."
-      remote_path:
-        type: string
-        required: true
-        description: "Path on the target to download. Use full Windows paths: 'C:\\Users\\Administrator\\Desktop\\root.txt', 'C:\\Windows\\System32\\config\\SAM'."
-      local_path:
-        type: string
-        description: "Local destination path. Default: /session/output/artifacts/<filename>. Use /session/ prefix to ensure file is accessible to other tools and agents."
-      ssl:
-        type: boolean
-        default: false
-        description: "Use HTTPS/SSL transport (port 5986)."
-      port:
-        type: integer
-        description: "Custom WinRM port (default: 5985 HTTP, 5986 HTTPS)."
-      auth:
-        type: enum
-        values: [ntlm, kerberos]
-        default: ntlm
-        description: "Auth method. Use 'kerberos' when NTLM is disabled on the target."
-      ccache_path:
-        type: string
-        description: "Path to Kerberos ccache file (e.g., /session/output/credentials/auditor.ccache)"
-    returns:
-      content:
-        type: string
-        description: "File content (if text) or path where binary file was saved."
+  - name: "S3 — Kerberos-ccache exec (the unique capability)"
+    command: "--target {fqdn} --username {user} --ccache {path} --auth kerberos --command {ps_command}"
+    when: "NTLM is disabled on the target / hardened AD, OR you only have a Kerberos TGT. Get a ccache first (impacket-getTGT in the impacket tool → /session/output/credentials/{user}.ccache), then pass `--ccache` (implies --auth kerberos). **netexec winrm CANNOT do this** — it is the reason this tool is not retired. Target should be the host FQDN (Kerberos is name-sensitive); ensure /session/config/krb5.conf exists (winrm-exec copies it to /etc/krb5.conf) or pass KRB5_CONFIG. For clock skew vs the DC, pass FAKETIME via the cli_in_container env arg."
+    example: "winrm-exec --target FOREST.htb.local --username svc-alfresco --ccache /session/output/credentials/svc-alfresco.ccache --auth kerberos --command whoami"
+
+  - name: "S4 — Upload (native PSRP copy)"
+    command: "--target {ip} --username {user} --password {pw} --upload {local}:{remote}"
+    when: "Stage a binary/script/payload on the target. Uses pypsrp's native copy() (not base64-over-PowerShell — faster, no size cliff). Local path should be under /session/ (e.g. /session/exploits/x.exe). Remote path is a Windows path; escape backslashes for the shell (C:\\\\Windows\\\\Temp\\\\x.exe). Auth flags are interchangeable with S1/S2/S3 (works with --hash and --ccache too)."
+    example: "winrm-exec --target 10.129.252.9 --username svc-alfresco --password s3rvice --upload /session/exploits/nc.exe:C:\\\\Windows\\\\Temp\\\\nc.exe"
+
+  - name: "S5 — Download / loot retrieval (native PSRP fetch)"
+    command: "--target {ip} --username {user} --password {pw} --download {remote}[:{local}]"
+    when: "Pull flags / hive files / loot. Uses native PSRP fetch(). If LOCAL is omitted it defaults to /session/output/<basename>. Use for user.txt/root.txt, C:\\Windows\\System32\\config\\SAM+SYSTEM (for offline secretsdump), config files with creds."
+    example: "winrm-exec --target 10.129.252.9 --username svc-alfresco --password s3rvice --download 'C:\\\\Users\\\\svc-alfresco\\\\Desktop\\\\user.txt:/session/output/user.txt'"
+
+  - name: "S6 — CMD-shell fallback for ConstrainedLanguage"
+    command: "--target {ip} --username {user} --password {pw} --shell cmd --command {cmd_command}"
+    when: "PowerShell exec returned a ConstrainedLanguage-mode error (error_class=permission, see failure_signatures). Re-run with `--shell cmd` to use the WinRS CMD shell instead — runs native cmd.exe commands (dir, type, reg query, whoami) that don't invoke restricted .NET APIs. Note CMD-shell WinRS may itself be restricted for non-admins on Win Server 2025 (that is precisely why the PowerShell PSRP plugin URI is the default)."
+    example: "winrm-exec --target 10.129.252.9 --username svc-alfresco --password s3rvice --shell cmd --command 'type C:\\\\Users\\\\svc-alfresco\\\\Desktop\\\\user.txt'"
+
+gotchas:
+  - "JSON-ON-STDOUT, CLASSIFIED-ERROR-ON-STDERR. winrm-exec prints one JSON object to stdout: {success, data, error, error_class, retryable, suggestions}. On any classified failure it ALSO writes `[winrm-exec] error_class=<c> retryable=<b>` + `[winrm-exec] suggestion: ...` lines to stderr. Read BOTH — the stderr classification is the actionable bit (it survives even if the registry-side failure_signature matching is unavailable; that is deliberate redundancy given the known kind:cli warning-blindness issue). Exit codes: 0 success, 1 command-level failure (PS errors / non-zero rc — stdout JSON still valid), 2 connection/auth failure, 3 argument error."
+  - "KERBEROS IS THE REASON THIS TOOL EXISTS. `netexec winrm` is NTLM-only (verified in nxc/protocols/winrm.py: 'nxc winrm only support NTLM currently'). For NTLM-disabled / hardened AD, evil-winrm `--ccache X --auth kerberos` is the ONLY registry path to an authenticated WinRM shell. Workflow: impacket-getTGT (impacket tool) → ccache at /session/output/credentials/<user>.ccache → winrm-exec --ccache that path. Use the host FQDN as --target (Kerberos is name-sensitive, not IP)."
+  - "PSRP PLUGIN URI vs CMD WINRS URI. Default (--shell powershell) uses pypsrp's PowerShell plugin URI (http://schemas.microsoft.com/powershell/Microsoft.PowerShell) — works for non-admin 'Remote Management Users' on Windows Server 2025 where the CMD WinRS Invoke URI is restricted. --shell cmd uses the WinRS CMD shell URI (may be blocked for non-admins on Server 2025). Prefer the default PowerShell shell unless ConstrainedLanguage forces the CMD fallback (S6)."
+  - "NT HASH FORMAT. --hash accepts a bare 32-hex NT hash (winrm-exec auto-prefixes 32 zero bytes for the LM half) OR a full `LM:NT`. Do NOT pass the `aad3b...:NT` blank-LM form with the real aad3b string — just give the bare NT (preferred) and let winrm-exec build the `00...0:NT` pair."
+  - "FAKETIME FOR KERBEROS CLOCK SKEW. KRB_AP_ERR_SKEW (error_class=config) means the container clock differs from the DC by >5min. Pass FAKETIME via the cli_in_container env arg (e.g. FAKETIME='+5h'); the plugin hoists it to ContainerOptions.clockOffset and the entrypoint LD_PRELOADs libfaketime. Common on HTB AD boxes where the DC time drifts."
+  - "FILE TRANSFER IS NATIVE PSRP, NOT BASE64 CHUNKING. --upload uses pypsrp copy(), --download uses fetch(). No PowerShell base64 size cliff (the old kind:mcp docs wrongly claimed base64 chunking — corrected here). Still, multi-MB transfers over HTB-VPN latency can approach the 600s max_runtime — chunk very large files or stage via SMB instead."
+  - "DOWNLOAD DEFAULT PATH is /session/output/<basename> when LOCAL is omitted in --download REMOTE[:LOCAL]. Other tools (offline secretsdump on a downloaded SAM/SYSTEM, john on a recovered hash) read from /session/output/. The container only persists /session/* to the host."
+  - "SINGLE TARGET ONLY. winrm-exec takes one --target. For credential spraying across a subnet, that is netexec winrm's job (NTLM-only but built for multi-target). evil-winrm is the post-foothold single-host shell + Kerberos + file-transfer tool."
+  - "kind:cli FLIP (May 2026). Was a 402-LOC kind:mcp server. Now: winrm-exec CLI (the binary) + a 22-LOC RunCliServer stub. Image dieted ~300MB→~120MB (dropped the Kali base + the never-used Ruby evil-winrm apt package — we drive pypsrp, not the Ruby REPL). The 100-LOC error classifier moved verbatim into winrm-exec and is mirrored in failure_signatures below."
+
+failure_signatures:
+  - signal: "Failed to authenticate|STATUS_LOGON_FAILURE|Logon failure"
+    error_class: "auth"
+    remediation: "Wrong username/password/hash, or account locked out. Verify the credential. If NTLM is disabled on the target ('Failed to authenticate' with ntlm), switch to --ccache + --auth kerberos. winrm-exec also emits this classification on stderr as error_class=auth."
+  - signal: "KRB_AP_ERR_SKEW|Clock skew"
+    error_class: "config"
+    remediation: "Kerberos clock skew >5min vs the DC. Pass FAKETIME via the cli_in_container env arg (e.g. FAKETIME='+7m') — plugin hoists to ContainerOptions.clockOffset -> libfaketime. Retryable after sync. NOTE: python-krb5 often does NOT say 'KRB_AP_ERR_SKEW' — on HTB Forest the skew surfaced as 'Pre-authentication failed: Input/output error' (next signature), so FAKETIME is also the first thing to try on a pre-auth failure with a known-good credential."
+  - signal: "Pre-authentication failed|KDC_ERR_PREAUTH_FAILED"
+    error_class: "auth"
+    remediation: "Kerberos pre-auth failed. (1) ccache-less --password: the password/hash is wrong. (2) credential is known-good: this is almost always CLOCK SKEW — pass FAKETIME (e.g. '+7m') and retry (verified live on Forest — skew presents as this, not KRB_AP_ERR_SKEW). (3) --ccache: the ticket is stale/expired or for the wrong realm — re-mint with impacket-getTGT and klist -c to check. Retryable. winrm-exec emits this as error_class=auth retryable=True with all three suggestions on stderr."
+  - signal: "not found in Kerberos database|Server not found in Kerberos database|KDC_ERR_C_PRINCIPAL_UNKNOWN"
+    error_class: "config"
+    remediation: "Kerberos principal/realm not found. Most common real cause (verified live on Forest): krb5.conf realm not applied, so the principal falls back to the MIT default realm ATHENA.MIT.EDU ('Client user@ATHENA.MIT.EDU not found'). Provide a krb5.conf with the correct [realms] via /session/config/krb5.conf or the KRB5_CONFIG env arg, use the host FQDN (not IP) as --target, and confirm the ccache principal/realm matches (klist -c). Second cause: a genuinely wrong principal. winrm-exec emits this as error_class=config retryable=True."
+  - signal: "ConstrainedLanguage|language mode"
+    error_class: "permission"
+    remediation: "PowerShell Constrained Language Mode active. Re-run with --shell cmd (usage_pattern S6) for basic cmd.exe commands, or use PowerShell that avoids restricted .NET APIs."
+  - signal: "WSManFault.*Code:\\s*5|Access (is|to the path is) denied|E_ACCESSDENIED"
+    error_class: "permission"
+    remediation: "Access denied — the principal is likely not in 'Remote Management Users' or 'Administrators'. Validate the account with `netexec winrm` first, or pivot to a different account."
+  - signal: "requires elevation|requires other privileges|Cannot open Service Control Manager"
+    error_class: "permission"
+    remediation: "Operation needs admin. The current user is non-admin — use an admin account or escalate privileges first."
+  - signal: "ConnectTimeout|connection timed out|Connection refused|ConnectionRefusedError"
+    error_class: "network"
+    remediation: "WinRM service unreachable. Confirm port 5985 (HTTP) / 5986 (HTTPS) is open (nmap -p5985,5986), the target is up, and the WinRM service is running. Retryable."
+  - signal: "No route to host|Network is unreachable"
+    error_class: "network"
+    remediation: "Target unreachable — check VPN (tun0) and routing. Not retryable until connectivity restored."
+  - signal: "logon session does not exist|specified logon session"
+    error_class: "auth"
+    remediation: "WinRM session expired or Kerberos ticket invalidated. Re-authenticate; for Kerberos, mint a fresh TGT (impacket-getTGT) and retry."
+  - signal: "Operation timed out|TimeoutError"
+    error_class: "timeout"
+    remediation: "Server-side command execution timed out. Use a simpler/faster command, or for large file transfer chunk it / stage via SMB."
