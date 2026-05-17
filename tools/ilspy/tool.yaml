@@ -2,7 +2,7 @@ name: ilspy
 kind: cli
 binary: ilspycmd
 version: "9.1.0"
-description: ".NET assembly decompilation to readable C# source code via ILSpy CLI (ilspycmd 9.1.0). Operates ENTIRELY OFFLINE on local .NET assemblies (.dll, .exe, .winmd, .netmodule) inside the container — there is no network target. The positional argument is the ASSEMBLY PATH (e.g., `/session/output/ClientsBackup.dll`); flags like `-o`, `-t`, `--project`, `--ilcode`, `-l`, `-r` control output format, type filtering, project layout, and reference resolution. Native CLI; the LLM constructs the full ilspycmd invocation. Produces clean C# source code far superior to Ghidra's .NET output. For native binary analysis use ghidra. For .NET deserialization payloads use ysoserial."
+description: ".NET assembly decompilation to readable C# source code via ILSpy CLI (ilspycmd 9.1.0). Operates ENTIRELY OFFLINE on local .NET assemblies (.dll, .exe, .winmd, .netmodule) inside the container — there is no network target. The positional argument is the ASSEMBLY PATH (e.g., `/session/output/ClientsBackup.dll`); flags like `-o`, `-t`, `--project`, `--ilcode`, `-l`, `-r` control output format, type filtering, project layout, and reference resolution. Native CLI; the LLM constructs the full ilspycmd invocation. Produces clean C# source code for managed assemblies. For native binary analysis use objdump/strings/radare2 via exploit-runner. For .NET deserialization payloads use ysoserial."
 image: "ghcr.io/silicon-works/mcp-tools-ilspy:latest"
 image_size_mb: 500
 # Dual-clock model:
@@ -39,7 +39,7 @@ routing:
     - "produce a compilable .csproj from a .NET binary for offline study and modification"
     - "extract raw IL (intermediate language) from a .NET assembly"
   never_use_for:
-    - "native binary analysis (x86/ARM ELF/PE — use ghidra)"
+    - "native binary analysis (x86/ARM ELF/PE — use exploit-runner with objdump/strings/radare2)"
     - task: "generating .NET deserialization payloads"
       use_instead: "ysoserial"
       reason: "ilspy READS .NET binaries to recover source; it does not generate exploit payloads. After decompiling with ilspy to identify which formatter/gadget the target uses, hand off to ysoserial for payload generation."
@@ -63,8 +63,7 @@ routing:
     - "CLR assembly"
     - "MSIL"
     - "managed assembly"
-  prefer_over:
-    - ghidra  # For .NET assemblies specifically — ILSpy produces far better C# than Ghidra
+  prefer_over: []
 
 requirements:
   network: false
@@ -75,14 +74,12 @@ resources:
   cpu: 0.5
 
 see_also:
-  - tool: ghidra
-    reason: "Use ghidra for native binary analysis (ELF, PE x86/ARM). Use ilspy for .NET assemblies — it produces clean C# source code superior to Ghidra's .NET output."
   - tool: ysoserial
     reason: "After decompiling with ilspy to understand which formatter/gadget the target uses, run ysoserial to generate the deserialization payload."
   - tool: mssql
     reason: "Use mssql extract_assembly to retrieve .NET DLLs from MSSQL CLR assemblies, then decompile with ilspy to recover source and find credentials / logic flaws."
   - tool: exploit-runner
-    reason: "For Java decompilation use exploit-runner with jadx or procyon; for native binaries pair with ghidra. ilspy handles only .NET assemblies."
+    reason: "For Java decompilation use exploit-runner with jadx or procyon; for native binaries use exploit-runner with objdump/strings/radare2. ilspy handles only .NET assemblies."
 
 # ── kind:cli specific sections ──────────────────────────────────────
 
@@ -251,7 +248,7 @@ gotchas:
   - "`-l` is OVERLOADED in ilspycmd: in the language role it accepts `csharp` / `il` / `csharp-2010`, but it ALSO doubles as a TYPE-LIST flag where the value is a single concatenated entity-kind string (NO COMMAS): `c`=class, `i`=interface, `s`=struct, `d`=delegate, `e`=enum. Pass `cisde` for ALL kinds. Example: `ilspycmd /session/output/sample.dll -l cisde` lists every type in the assembly. This is the canonical type-enumeration pattern (the legacy mcp-server.py used it under `list_types`). Do NOT pass `c,i,s,d,e` — ilspycmd parses this as one literal token and rejects it."
   - "Embedded-resource enumeration is a TWO-STEP recipe (no dedicated flag): (1) `ilspycmd /session/output/sample.dll --ilcode > /session/<dump>.il` (or capture via run_cli output_path), (2) grep the IL for lines starting with `.mresource` — each line names one embedded resource. Pattern: `\\.mresource\\s+(?:public|private)?\\s*'?([^']+)'?`. The legacy mcp-server.py inlined this; under kind:cli the agent assembles the two calls."
   - "Obfuscated assemblies often defeat the C# decompiler — output may be syntactically valid but semantically wrong, missing methods, or full of `goto` labels. Fall back to `--ilcode` to inspect raw IL when C# output looks suspect."
-  - "ilspy is .NET-ONLY. For Java (.jar/.class) use jadx or procyon (via exploit-runner). For native binaries (ELF, PE x86/ARM) use ghidra. Trying to decompile a non-.NET file emits 'BadImageFormatException' or 'not a valid PE file' — see failure_signatures."
+  - "ilspy is .NET-ONLY. For Java (.jar/.class) use jadx or procyon (via exploit-runner). For native binaries (ELF, PE x86/ARM) use objdump/strings/radare2 via exploit-runner. Trying to decompile a non-.NET file emits 'BadImageFormatException' or 'not a valid PE file' — see failure_signatures."
   - "Output is STATIC C# — re-compiling it does NOT necessarily produce a bit-identical assembly (some decompiler output is approximate, especially for compiler-generated state machines, anonymous types, and lambdas). Treat the output as a READ-ONLY analysis artifact unless you explicitly need a working rebuild."
 
 failure_signatures:
@@ -267,9 +264,9 @@ failure_signatures:
   - signal: "not found"
     remediation: "Generic file-not-found message (often combined with the offending path). Same root cause as 'Could not find file' — verify the path with `ls -l /session/<name>`."
   - signal: "not a valid PE file"
-    remediation: "Input file is not a Portable Executable (.dll / .exe / .winmd / .netmodule). ilspy only handles .NET assemblies. Confirm the file type with `file /session/<name>` — for Java use jadx, for native binaries use ghidra."
+    remediation: "Input file is not a Portable Executable (.dll / .exe / .winmd / .netmodule). ilspy only handles .NET assemblies. Confirm the file type with `file /session/<name>` — for Java use jadx, for native binaries use objdump/strings/radare2 via exploit-runner."
   - signal: "BadImageFormatException"
-    remediation: "PE-loader exception — the file looks like a PE but isn't a valid managed (.NET) assembly. Could be a native PE (use ghidra), a corrupted file, or a 32-vs-64-bit mismatch. Confirm with `file <path>` and check whether the file actually is .NET (managed assemblies usually have `.NET assembly` in the file output, or a CLI Header in the PE)."
+    remediation: "PE-loader exception — the file looks like a PE but isn't a valid managed (.NET) assembly. Could be a native PE (use objdump/strings/radare2 via exploit-runner), a corrupted file, or a 32-vs-64-bit mismatch. Confirm with `file <path>` and check whether the file actually is .NET (managed assemblies usually have `.NET assembly` in the file output, or a CLI Header in the PE)."
   - signal: "Could not resolve assembly"
     remediation: "Decompile referenced an external assembly that's not in the same directory and not in the bundled .NET reference assemblies. Stage the missing references alongside the input or pass `-r /path/to/refs/` (repeatable). Run `--help` to see -r usage."
   - signal: "Reference not found"
@@ -289,7 +286,7 @@ failure_signatures:
   - signal: "Permission denied"
     remediation: "File or directory permission error — typically on the input file (read) or `-o` output dir (write). Verify with `ls -l <path>`. /session/ should always be readable and writable."
   - signal: "is not a valid managed image"
-    remediation: "Variant of 'BadImageFormatException' / 'not a valid PE file' — the file is not a managed (.NET) assembly. Same fix: confirm the file type with `file <path>`; route to ghidra (native) or jadx (Java)."
+    remediation: "Variant of 'BadImageFormatException' / 'not a valid PE file' — the file is not a managed (.NET) assembly. Same fix: confirm the file type with `file <path>`; route to objdump/strings/radare2 via exploit-runner (native) or jadx (Java)."
 
 help_commands:
   - command: "ilspycmd --help"

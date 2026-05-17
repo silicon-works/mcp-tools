@@ -148,7 +148,7 @@ Decompile /session/nonexistent.dll.
 I copied a JPEG to /session/notreal.dll by mistake. Try decompiling it.
 ```
 
-**Watch:** Agent emits `ilspycmd /session/notreal.dll`. target=`null`. ilspycmd exits non-zero with stderr/stdout containing `not a valid PE file` or `BadImageFormatException`. Remediation: confirm the file type with `file <path>`. For Java use jadx; for native binaries use ghidra.
+**Watch:** Agent emits `ilspycmd /session/notreal.dll`. target=`null`. ilspycmd exits non-zero with stderr/stdout containing `not a valid PE file` or `BadImageFormatException`. Remediation: confirm the file type with `file <path>`. For Java use jadx; for native binaries use objdump/strings/radare2 via exploit-runner.
 
 ### S10 — failure: type not found
 
