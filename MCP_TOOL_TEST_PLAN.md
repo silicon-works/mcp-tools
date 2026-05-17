@@ -427,7 +427,7 @@ These are used in almost every engagement. They mostly work but haven't been sys
 
 amass, aws, cloudfox, dns, embedding, forensics, git-dumper, ike-scan, ilspy, mongodb, mssql, mysql, nikto, pacu, phpggc, prowler, pygpoabuse, s3scanner, smtp, snmp, sqlite, ssrfmap, ssti, target-tracker, theharvester, trivy, trufflehog, volatility, wpscan, ysoserial
 
-Note: chisel (5 calls, Pirate), lfi-rfi (4 calls, Pterodactyl+Facts), ftp (1 call, WingData), nuclei (2 calls, Cobblestone+Facts), zap (3 calls, Facts) have minimal real usage — they belong in Tier 3.
+Note: chisel (5 calls, Pirate), ftp (1 call, WingData), nuclei (2 calls, Cobblestone+Facts), zap (3 calls, Facts) have minimal real usage — they belong in Tier 3.
 
 ### Cross-Tool Integration Tests
 
