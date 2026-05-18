@@ -74,8 +74,6 @@ resources:
 see_also:
   - tool: nmap
     reason: "Run nmap first to enumerate open ports and services; feed identified web services into nuclei for template-based vulnerability scanning"
-  - tool: web-fingerprint
-    reason: "Faster signature-based tech detection — try web-fingerprint first; fall back to nuclei -tags tech for templates covering more technologies"
   - tool: ffuf
     reason: "For directory and parameter discovery — once ffuf finds endpoints, scan them with nuclei for known vulnerabilities"
   - tool: curl
@@ -250,15 +248,15 @@ value_flags:
 usage_patterns:
   - name: "Critical-only quick scan (single URL)"
     command: "nuclei -u {url} -severity critical -jsonl -o /session/output/nuclei-crit.jsonl -no-stdin -disable-update-check"
-    when: "Fast initial pass for the highest-impact findings only. Pairs with web-fingerprint or nmap output. -severity critical strips ~99% of templates so the scan finishes quickly. Always set -no-stdin in container runs (prevents nuclei from blocking on closed stdin) and -disable-update-check for reproducible runs."
+    when: "Fast initial pass for the highest-impact findings only. Pairs with nmap output or an initial -as/-tags tech fingerprint pass. -severity critical strips ~99% of templates so the scan finishes quickly. Always set -no-stdin in container runs (prevents nuclei from blocking on closed stdin) and -disable-update-check for reproducible runs."
 
   - name: "Tag-filtered CVE + exposure scan"
     command: "nuclei -u {url} -tags cve,exposure -severity high,critical -jsonl -o /session/output/nuclei-cve.jsonl -no-stdin -disable-update-check"
-    when: "Scoped scan for known CVEs and information-disclosure exposures at high+critical severity. Use after web-fingerprint identifies the technology stack. -tags is comma-separated; combine cve / rce / exposure / misconfig / default-login as the situation calls for."
+    when: "Scoped scan for known CVEs and information-disclosure exposures at high+critical severity. Use after an -as/-tags tech pass (or nmap) identifies the technology stack. -tags is comma-separated; combine cve / rce / exposure / misconfig / default-login as the situation calls for."
 
   - name: "Targeted single-CVE check by template ID"
     command: "nuclei -u {url} -id {cve_id} -jsonl -o /session/output/nuclei-{cve_id}.jsonl -no-stdin -disable-update-check"
-    when: "Verify a specific CVE without running the full set. Example: -id CVE-2021-44228 (Log4Shell). -id is a precise filter (template ID match), so the scan completes in seconds. Use when nmap or web-fingerprint identified a vulnerable software version and you want to confirm the exploit path."
+    when: "Verify a specific CVE without running the full set. Example: -id CVE-2021-44228 (Log4Shell). -id is a precise filter (template ID match), so the scan completes in seconds. Use when nmap or a -tags tech pass identified a vulnerable software version and you want to confirm the exploit path."
 
   - name: "Workflow-driven scan"
     command: "nuclei -u {url} -w {workflow_path} -jsonl -o /session/output/nuclei-workflow.jsonl -no-stdin -disable-update-check"
@@ -278,7 +276,7 @@ usage_patterns:
 
   - name: "Tech-detection only (template-based fingerprinting)"
     command: "nuclei -u {url} -tags tech -jsonl -o /session/output/nuclei-tech.jsonl -no-stdin -disable-update-check"
-    when: "Use nuclei's ~810 tech-tagged templates to identify CMS, framework, server software. Slower than web-fingerprint's signature matching but covers more technologies. Good fallback when web-fingerprint returns sparse results."
+    when: "PRIMARY technology-fingerprint method (replaces the retired web-fingerprint tool). Use nuclei's ~810 tech-tagged templates to identify CMS, framework, JS libs, server software — far broader than web-fingerprint's ~40 hand-rolled signatures. Pair with `-as` for Wappalyzer-style auto-detect; for raw header/version disclosure use `curl -D -`; for the Shodan favicon-hash pivot use exploit-runner's favicon-mmh3 pattern."
 
   - name: "Stealth-tuned scan (low rate, throttled)"
     command: "nuclei -u {url} -tags cve -severity critical -rate-limit 20 -c 5 -timeout 15 -jsonl -o /session/output/nuclei-stealth.jsonl -no-stdin -disable-update-check"
