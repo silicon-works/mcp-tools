@@ -346,7 +346,7 @@ KNOWN LIMITATIONS (architectural, not bugs):
   exploit-runner / bloodhound migration patterns.
 - **tool.yaml:** rewritten with 7 usage_patterns + 14 gotchas + 6
   failure_signatures + 3 help_commands + see_also pointing at
-  ssh / nc / mongodb / exploit-runner / hash-lookup.
+  ssh / nc / mongodb / exploit-runner / curl.
 - **mcp-server.py:** 621-LOC bespoke wrapper → 29-LOC RunCliServer stub
   (close enough to chisel's 28 / responder's 22 baseline).
 - **Dockerfile:** + `apt-get install -y sqlite3` (~+1 MB delta,

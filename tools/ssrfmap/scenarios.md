@@ -266,8 +266,8 @@ KNOWN LIMITATIONS (architectural, not bugs):
   wrapper was a complete re-implementation that never invoked the
   real binary — kind:cli flip is a true upgrade in capability.
 - **tool.yaml:** rewritten with 6 usage_patterns + 18 gotchas + 6
-  failure_signatures + 3 help_commands + 6 see_also (curl, nuclei,
-  nc, responder, aws, hash-lookup). Gotcha count grew from initial
+  failure_signatures + 3 help_commands + 5 see_also (curl, nuclei,
+  nc, responder, aws). Gotcha count grew from initial
   15 → 18 after live HTB findings (Forge): WAF-bypass arsenal gap
   (--level 5 is IP-encoding-only, no case-variant), captured-files
   directory naming quirk (host/ vs host_port/), Forge-style targets
