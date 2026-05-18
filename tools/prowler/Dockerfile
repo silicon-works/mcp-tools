@@ -20,7 +20,11 @@
 # the prowler ecosystem requires.
 
 # Top-level ARGs available to ALL FROM lines below
-ARG PROWLER_REPO_REF=master
+# Pin to a stable upstream RELEASE TAG, not `master`: master is a moving target
+# (5.27.0-dev) where prowler-api's poetry deps (prowler vs cartography) periodically
+# fail `poetry lock` version-solving. 5.26.1 is the latest stable release tag.
+# `git clone --depth 1 --branch` accepts a tag; do NOT set this to a raw commit SHA.
+ARG PROWLER_REPO_REF=5.26.1
 ARG DOZERDB_VERSION=5.26.3.0
 
 # ── Stage 1: pull dozerdb from the official docker.io image ──────────────
@@ -36,7 +40,7 @@ FROM graphstack/dozerdb:${DOZERDB_VERSION} AS dozerdb-source
 FROM python:3.12-bookworm
 
 # Redeclare ARGs needed in this stage (ARGs don't cross FROM boundaries)
-ARG PROWLER_REPO_REF=master
+ARG PROWLER_REPO_REF=5.26.1
 
 LABEL org.opencontainers.image.source="https://github.com/silicon-works/mcp-tools"
 LABEL org.opencontainers.image.description="prowler (self-hosted Prowler App + vendor MCP, offensive-tuned) for OpenSploit"
@@ -117,7 +121,7 @@ ENV PATH="$NEO4J_HOME/bin:$PATH"
 #     pip's local installer (no dulwich, no git fetch).
 RUN git clone --depth 1 --branch ${PROWLER_REPO_REF} \
         https://github.com/prowler-cloud/prowler.git /opt/prowler-src && \
-    sed -i 's|"prowler @ git+https://github.com/prowler-cloud/prowler.git@master"|"prowler @ file:///opt/prowler-src"|' \
+    sed -i -E 's|"prowler @ git\+https://github.com/prowler-cloud/prowler\.git@[^"]*"|"prowler @ file:///opt/prowler-src"|' \
         /opt/prowler-src/api/pyproject.toml
 
 # Install API dependencies via poetry 2.3.4 (matches upstream's API Dockerfile).
