@@ -355,7 +355,7 @@ tool.yaml.
    first OpenSploit tool that operates on cloud accounts via real
    credentials (not network targets). The credential lifecycle questions
    are NOT cloudfox-specific — they apply to all cloud tools (aws CLI,
-   pacu, prowler, az, gcloud, kubectl):
+   prowler, az, gcloud, kubectl):
    - WHERE do captured AWS creds live? Per-engagement
      `/session/.aws/credentials` with HOME=/session is one option;
      env-var injection from engagement state is another.

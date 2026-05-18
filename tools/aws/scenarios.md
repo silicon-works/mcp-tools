@@ -344,8 +344,7 @@ These are real behaviors of `awslabs.aws-api-mcp-server` v1.3.x + the wrapper:
 - **Known upstream alpha quirks:** see §7. Most notable: isError-false-on-error
   (parse content JSON), default 2-tool surface, suggest_aws_commands OPSEC
   leak, --region * vendor extension, MAX_BATCH_COMMANDS=20.
-- **Cross-tool routing:** see_also points at pacu (offensive AWS exploitation
-  modules), cloudfox (read-only attack-path correlation), prowler (compliance
+- **Cross-tool routing:** see_also points at cloudfox (read-only attack-path correlation), prowler (compliance
   audit), s3scanner (bucket discovery from outside), trufflehog (secret
   scanning in S3 contents).
 
