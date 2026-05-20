@@ -10,9 +10,12 @@ import json
 import logging
 import os
 import re
+import signal as _signal
 import subprocess
 import sys
+import time
 from abc import ABC, abstractmethod
+from contextlib import ExitStack
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional
 
@@ -116,6 +119,13 @@ class BaseMCPServer(ABC):
         self.logger = logging.getLogger(f"mcp.{name}")
         self._server: Optional[Server] = None
 
+        # Detached process registry: PID → metadata. Populated by
+        # run_cli_detached, queried by status_detached, drained by
+        # _cleanup_detached on server shutdown. In-memory because
+        # detached children die with the container anyway; persistent
+        # disk tracking would just record dead PIDs.
+        self._detached: Dict[int, Dict[str, Any]] = {}
+
         # Register test-only methods when MCP_TEST_MODE is set
         if os.environ.get("MCP_TEST_MODE"):
             self.register_method(
@@ -168,6 +178,109 @@ class BaseMCPServer(ABC):
                 },
             },
             handler=self.run_cli,
+        )
+
+        # Auto-register the detach trio. These let a tool spawn a long-lived
+        # child that survives the cli call returning — the proper mechanism
+        # for held listeners, ControlMaster sockets, time-bounded daemons,
+        # etc. Replaces the bash `& disown && echo PID=$!` gymnastics that
+        # tool.yaml usage_patterns previously had to encode by hand.
+        self.register_method(
+            name="run_cli_detached",
+            description=(
+                "Spawn a detached child process and return immediately. "
+                "The child runs in a new session (survives the cli call). "
+                "Stdout/stderr go to caller-specified files on /session/; "
+                "optional stdin_from path is opened and piped to the child. "
+                "Returns {pid, stdout_to, stdin_from, stderr_to} so the "
+                "caller can resume / poll / kill later."
+            ),
+            params={
+                "binary": {
+                    "type": "string",
+                    "description": "Binary to execute; same semantics as run_cli.",
+                    "required": True,
+                },
+                "args": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Argv list.",
+                    "required": True,
+                },
+                "stdout_to": {
+                    "type": "string",
+                    "description": (
+                        "Absolute path under /session/ to capture stdout. "
+                        "Opened in truncate mode; parent dirs created if missing."
+                    ),
+                    "required": True,
+                },
+                "stdin_from": {
+                    "type": "string",
+                    "description": (
+                        "Optional absolute path; opened with O_RDONLY and piped to the "
+                        "child's stdin. Use this for feeding a regular file into stdin "
+                        "(child reads to EOF and stdin closes). Do NOT pass a FIFO/named "
+                        "pipe here — open() on a FIFO blocks until a writer opens the "
+                        "other end, which would deadlock this method. For bidirectional "
+                        "shells where the agent needs to push commands into a held "
+                        "process's stdin, use a bash wrapper: binary='bash', args=['-c', "
+                        "'tail -f $DIR/cmd | <held-binary> ... > $DIR/out 2>&1'] (the "
+                        "bash pipeline expresses the stdin-streaming shape internally)."
+                    ),
+                    "required": False,
+                },
+                "stderr_to": {
+                    "type": "string",
+                    "description": "Absolute path for stderr. Defaults to stdout_to (merged).",
+                    "required": False,
+                },
+                "env": {
+                    "type": "object",
+                    "description": "Env vars merged with os.environ. Same allowlist semantics as run_cli.",
+                    "required": False,
+                    "additionalProperties": {"type": "string"},
+                },
+            },
+            handler=self.run_cli_detached,
+        )
+        self.register_method(
+            name="status_detached",
+            description=(
+                "Check whether a previously-detached PID is still alive. "
+                "Returns {alive, since, stdout_to, stdout_bytes, tracked}. "
+                "Caller's normal way to verify a held resource handle on resume."
+            ),
+            params={
+                "pid": {
+                    "type": "integer",
+                    "description": "PID returned by run_cli_detached.",
+                    "required": True,
+                },
+            },
+            handler=self.status_detached,
+        )
+        self.register_method(
+            name="kill_detached",
+            description=(
+                "Terminate a detached child. TERM with 2s grace then KILL; "
+                "pass signal='KILL' to skip grace. Returns {killed, signal, pid}."
+            ),
+            params={
+                "pid": {
+                    "type": "integer",
+                    "description": "PID returned by run_cli_detached.",
+                    "required": True,
+                },
+                "signal": {
+                    "type": "string",
+                    "description": "TERM (graceful, 2s grace then KILL) or KILL (immediate).",
+                    "required": False,
+                    "default": "TERM",
+                    "enum": ["TERM", "KILL"],
+                },
+            },
+            handler=self.kill_detached,
         )
 
     async def run_cli(
@@ -250,6 +363,418 @@ class BaseMCPServer(ABC):
                 "completed": True,
             },
         )
+
+    async def run_cli_detached(
+        self,
+        binary: str,
+        args: List[str],
+        stdout_to: str,
+        stdin_from: Optional[str] = None,
+        stderr_to: Optional[str] = None,
+        env: Optional[Dict[str, str]] = None,
+    ) -> "ToolResult":
+        """Spawn a detached child process and return immediately.
+
+        See ``run_cli`` for the synchronous foreground equivalent. Where
+        ``run_cli`` blocks until the child exits, this method:
+
+          * Opens ``stdout_to`` / ``stderr_to`` for writing (truncate mode).
+          * Opens ``stdin_from`` for reading if provided; else stdin = DEVNULL.
+          * Spawns the child with ``start_new_session=True`` so it gets its
+            own process session — it survives this MCP call's lifecycle and
+            is reaped by the OS at container teardown (or by kill_detached).
+          * Records the PID in ``self._detached`` so status/kill can find it.
+          * Returns immediately with the PID and file paths.
+
+        The child runs as a sibling of the MCP server. The container's idle
+        reaper still applies; callers should touch the container (via any
+        subsequent cli call) within the idle window or bump the per-tool
+        idle config.
+
+        For bidirectional shells where the agent needs to push commands
+        into the held process's stdin (e.g., ``tail -f cmd | ncat -lvnp P``),
+        the caller passes the bash pipeline as the command:
+            binary="bash", args=["-c", "tail -f $DIR/cmd | ncat -lvnp $P > $DIR/out 2>&1"]
+        with ``detach: true``. The pipeline expresses the stdin-streaming
+        shape; ``stdin_from`` is for the simpler case of feeding a static
+        file's contents to the child once.
+        """
+        # --- param validation (same shape as run_cli) ---
+        if not binary or not isinstance(binary, str):
+            return ToolResult(
+                success=False,
+                error="run_cli_detached requires non-empty 'binary'",
+                error_class="params",
+            )
+        if not isinstance(args, list) or not all(isinstance(a, str) for a in args):
+            return ToolResult(
+                success=False,
+                error="run_cli_detached requires 'args' as List[str]",
+                error_class="params",
+            )
+        # Path validation: absolute-only. The /session/ convention is a
+        # client-side concern (cli_in_container enforces it before sending);
+        # we just require absolute paths so file ops don't surprise us.
+        if not stdout_to or not isinstance(stdout_to, str) or not os.path.isabs(stdout_to):
+            return ToolResult(
+                success=False,
+                error="run_cli_detached requires 'stdout_to' as an absolute path",
+                error_class="params",
+            )
+        if stdin_from is not None and (
+            not isinstance(stdin_from, str) or not os.path.isabs(stdin_from)
+        ):
+            return ToolResult(
+                success=False,
+                error="'stdin_from' must be an absolute path",
+                error_class="params",
+            )
+        if stderr_to is not None and (
+            not isinstance(stderr_to, str) or not os.path.isabs(stderr_to)
+        ):
+            return ToolResult(
+                success=False,
+                error="'stderr_to' must be an absolute path",
+                error_class="params",
+            )
+        if env is not None and (
+            not isinstance(env, dict)
+            or not all(isinstance(k, str) and isinstance(v, str) for k, v in env.items())
+        ):
+            return ToolResult(
+                success=False,
+                error="'env' must be a Dict[str, str]",
+                error_class="params",
+            )
+
+        # --- ensure dirs exist; open files for stdio redirection ---
+        # Truncate mode — each detach run starts with a fresh capture file.
+        # ExitStack closes everything we open on exit, regardless of which
+        # step fails (file open / subprocess spawn). After successful spawn
+        # the child has dup'd the fds and is unaffected by our close.
+        stderr_path = stderr_to or stdout_to
+        merged_env = {**os.environ, **env} if env else None
+        cmd = [binary, *args]
+
+        with ExitStack() as stack:
+            try:
+                os.makedirs(os.path.dirname(stdout_to), exist_ok=True)
+                if stderr_path != stdout_to:
+                    os.makedirs(os.path.dirname(stderr_path), exist_ok=True)
+                stdout_fp = stack.enter_context(open(stdout_to, "wb", buffering=0))
+                stderr_fp = (
+                    stdout_fp if stderr_path == stdout_to
+                    else stack.enter_context(open(stderr_path, "wb", buffering=0))
+                )
+                stdin_fp: Any = (
+                    stack.enter_context(open(stdin_from, "rb"))
+                    if stdin_from else asyncio.subprocess.DEVNULL
+                )
+            except OSError as e:
+                return ToolResult(
+                    success=False,
+                    error=f"file open failed: {e}",
+                    error_class="config",
+                )
+
+            try:
+                proc = await asyncio.create_subprocess_exec(
+                    *cmd,
+                    stdin=stdin_fp,
+                    stdout=stdout_fp,
+                    stderr=stderr_fp,
+                    env=merged_env,
+                    start_new_session=True,  # detach from MCP server's session
+                )
+            except FileNotFoundError:
+                return ToolResult(
+                    success=False,
+                    error=f"binary not found: {binary}",
+                    error_class="config",
+                )
+            except OSError as e:
+                # PermissionError (non-executable binary), resource exhaustion, etc.
+                return ToolResult(
+                    success=False,
+                    error=f"spawn failed: {e}",
+                    error_class="config",
+                )
+        # ExitStack closed our parent-side fds here. Child holds its dup'd copies.
+
+        self._detached[proc.pid] = {
+            "binary": binary,
+            "args": args,
+            "stdout_to": stdout_to,
+            "stdin_from": stdin_from,
+            "stderr_to": stderr_path,
+            "started_at": time.time(),
+            "proc": proc,  # asyncio Process handle; used for returncode checks
+        }
+
+        self.logger.info(
+            f"run_cli_detached: spawned pid={proc.pid} cmd={' '.join(cmd)[:120]} "
+            f"stdout_to={stdout_to}"
+        )
+
+        return ToolResult(
+            success=True,
+            data={
+                "pid": proc.pid,
+                "stdout_to": stdout_to,
+                "stdin_from": stdin_from,
+                "stderr_to": stderr_path,
+                "binary": binary,
+                "args": args,
+            },
+        )
+
+    def _is_alive(self, pid: int) -> bool:
+        """Untracked-PID liveness fallback via os.kill(pid, 0).
+
+        For tracked PIDs use proc.returncode directly (SIGCHLD-driven,
+        race-free); this helper is for the rare case where the caller
+        holds a PID we don't have a Process handle for. Caveat: cannot
+        distinguish zombies or PID-reuse — best effort only.
+        """
+        try:
+            os.kill(pid, 0)
+            return True
+        except ProcessLookupError:
+            return False
+        except PermissionError:
+            # exists but not ours — treat as alive
+            return True
+
+    async def status_detached(self, pid: int) -> "ToolResult":
+        """Check whether a previously-detached PID is still alive.
+
+        For tracked PIDs uses proc.returncode (SIGCHLD-driven, race-free).
+        For untracked PIDs (e.g. a PID from a previous server lifetime)
+        falls back to os.kill(pid, 0) — best-effort with the known caveat
+        that it can't distinguish zombies or PID reuse.
+        """
+        if not isinstance(pid, int):
+            return ToolResult(success=False, error="'pid' must be int", error_class="params")
+
+        meta = self._detached.get(pid)
+        if meta is not None:
+            proc = meta["proc"]
+            alive = proc.returncode is None
+            exit_code = proc.returncode
+            stdout_path = meta["stdout_to"]
+            since = meta["started_at"]
+        else:
+            alive = self._is_alive(pid)
+            exit_code = None
+            stdout_path = None
+            since = None
+
+        stdout_bytes: Optional[int] = None
+        if stdout_path:
+            try:
+                stdout_bytes = os.path.getsize(stdout_path)
+            except OSError:
+                stdout_bytes = None
+
+        return ToolResult(
+            success=True,
+            data={
+                "pid": pid,
+                "alive": alive,
+                "since": since,
+                "stdout_to": stdout_path,
+                "stdout_bytes": stdout_bytes,
+                "exit_code": exit_code,
+                "tracked": meta is not None,
+            },
+        )
+
+    async def kill_detached(self, pid: int, signal: str = "TERM") -> "ToolResult":
+        """Terminate a detached child AND its entire process group.
+
+        TERM = graceful (2s grace then KILL); KILL = immediate.
+
+        IMPORTANT: signals the PROCESS GROUP (via os.killpg / os.kill(-pid)),
+        not just the single PID. This matters for bash-pipeline detached
+        spawns where the spawned process has children (e.g.,
+        `bash -c 'tail -f cmd | ncat -lvnp PORT'` spawns bash which forks
+        tail and ncat as children in the same process group). Signaling
+        only the leader would orphan tail and ncat to init, leaving the
+        port bound after the "kill" — verified failure mode on the
+        Helix-pathology smoke 2026-05-20. The `start_new_session=True`
+        flag at spawn time makes the leader a process-group leader of
+        a fresh group containing all descendants, so killpg reaches them
+        all in one signal.
+
+        For tracked PIDs (the common case — pid came from run_cli_detached),
+        we still use proc.wait() to await termination — that's SIGCHLD-driven
+        on the leader and tells us when the group leader has exited. The
+        children's deaths trigger SIGCHLD on the leader's parent too, but
+        we only care that the leader (the one we have a Process handle for)
+        is reaped.
+
+        For untracked PIDs (rare — e.g. caller has a PID from a previous
+        server lifetime), falls back to os.killpg + a brief polling window
+        since we have no Process handle to await on.
+        """
+        if not isinstance(pid, int):
+            return ToolResult(success=False, error="'pid' must be int", error_class="params")
+        if signal not in ("TERM", "KILL"):
+            return ToolResult(
+                success=False, error="'signal' must be 'TERM' or 'KILL'", error_class="params"
+            )
+
+        meta = self._detached.get(pid)
+        proc = meta.get("proc") if meta else None
+
+        if proc is not None:
+            # --- Tracked path: signal the process group, await the leader ---
+            if proc.returncode is not None:
+                self._detached.pop(pid, None)
+                return ToolResult(
+                    success=True,
+                    data={
+                        "killed": False, "reason": "already exited",
+                        "pid": pid, "exit_code": proc.returncode,
+                    },
+                )
+
+            try:
+                if signal == "TERM":
+                    os.killpg(proc.pid, _signal.SIGTERM)  # whole group, not just leader
+                    try:
+                        await asyncio.wait_for(proc.wait(), timeout=2.0)
+                        self._detached.pop(pid, None)
+                        return ToolResult(
+                            success=True,
+                            data={
+                                "killed": True, "signal": "TERM",
+                                "pid": pid, "exit_code": proc.returncode,
+                            },
+                        )
+                    except asyncio.TimeoutError:
+                        # grace expired — escalate the whole group to KILL
+                        os.killpg(proc.pid, _signal.SIGKILL)
+                        actual_signal = "KILL (after TERM grace)"
+                else:
+                    os.killpg(proc.pid, _signal.SIGKILL)
+                    actual_signal = "KILL"
+            except ProcessLookupError:
+                self._detached.pop(pid, None)
+                return ToolResult(
+                    success=True,
+                    data={"killed": False, "reason": "already exited", "pid": pid},
+                )
+
+            try:
+                await asyncio.wait_for(proc.wait(), timeout=1.0)
+                self._detached.pop(pid, None)
+                return ToolResult(
+                    success=True,
+                    data={
+                        "killed": True, "signal": actual_signal,
+                        "pid": pid, "exit_code": proc.returncode,
+                    },
+                )
+            except asyncio.TimeoutError:
+                return ToolResult(
+                    success=False,
+                    error=f"pid {pid} still alive 1s after KILL (zombie or escaped?)",
+                    error_class="config",
+                )
+
+        # --- Untracked path: fall back to os.killpg + polling ---
+        # No proc handle to await on; can't use asyncio idioms cleanly.
+        # This case is rare — caller has a PID from a previous server.
+        # We still target the process group (assumes the original spawn used
+        # start_new_session=True, which it did under run_cli_detached); if
+        # the caller's PID isn't a group leader, killpg returns EPERM and
+        # we fall back to os.kill on the bare PID as a best-effort.
+        sig = _signal.SIGTERM if signal == "TERM" else _signal.SIGKILL
+        try:
+            os.killpg(pid, sig)
+        except ProcessLookupError:
+            return ToolResult(
+                success=True, data={"killed": False, "reason": "already exited", "pid": pid}
+            )
+        except PermissionError:
+            # killpg failed because pid isn't a process group leader.
+            # Fall back to single-PID signal — won't cascade to children
+            # but is better than nothing for untracked PIDs.
+            try:
+                os.kill(pid, sig)
+            except ProcessLookupError:
+                return ToolResult(
+                    success=True, data={"killed": False, "reason": "already exited", "pid": pid}
+                )
+            except PermissionError as e:
+                return ToolResult(
+                    success=False, error=f"cannot signal pid {pid}: {e}", error_class="permission"
+                )
+        if signal == "TERM":
+            for _ in range(20):  # 2s grace
+                if not self._is_alive(pid):
+                    return ToolResult(
+                        success=True, data={"killed": True, "signal": "TERM", "pid": pid}
+                    )
+                await asyncio.sleep(0.1)
+            try: os.killpg(pid, _signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):
+                try: os.kill(pid, _signal.SIGKILL)
+                except ProcessLookupError: pass
+        for _ in range(10):  # 1s confirmation
+            if not self._is_alive(pid):
+                return ToolResult(
+                    success=True, data={"killed": True, "signal": signal, "pid": pid}
+                )
+            await asyncio.sleep(0.1)
+        return ToolResult(
+            success=False,
+            error=f"pid {pid} still alive after KILL (zombie or escaped?)",
+            error_class="config",
+        )
+
+    async def _cleanup_detached(self) -> None:
+        """Reap all tracked detached children AND their process groups.
+
+        Called from run()'s finally block. Sends SIGTERM to every still-alive
+        child's process group concurrently (same group-signaling logic as
+        kill_detached — see that method's docstring for the why; bash-pipeline
+        spawns have child processes that would orphan if we only signaled the
+        leader). Waits up to 1s for graceful exits (shorter than kill_detached's
+        2s — cleanup is a fire-drill), then SIGKILLs any holdouts' groups.
+        Returns when all are reaped or kill has been issued.
+        """
+        if not self._detached:
+            return
+        procs = [
+            m["proc"] for m in self._detached.values()
+            if m.get("proc") is not None and m["proc"].returncode is None
+        ]
+        self.logger.info(
+            f"cleanup_detached: reaping {len(procs)} tracked children "
+            f"(of {len(self._detached)} tracked entries)"
+        )
+
+        # Send TERM to all process groups simultaneously
+        for proc in procs:
+            try: os.killpg(proc.pid, _signal.SIGTERM)
+            except ProcessLookupError: pass
+
+        # Wait up to 1s for graceful exits (in parallel)
+        if procs:
+            await asyncio.gather(
+                *[asyncio.wait_for(p.wait(), timeout=1.0) for p in procs],
+                return_exceptions=True,  # swallow TimeoutError; KILL holdouts next
+            )
+
+        # KILL any group whose leader is still alive
+        for proc in procs:
+            if proc.returncode is None:
+                try: os.killpg(proc.pid, _signal.SIGKILL)
+                except ProcessLookupError: pass
+
+        self._detached.clear()
 
     async def _verify_clock(self) -> "ToolResult":
         """Return the container's current time and FAKETIME configuration.
@@ -792,12 +1317,24 @@ class BaseMCPServer(ABC):
 
         self.logger.info(f"Starting {self.name} MCP server v{self.version}")
 
-        async with stdio_server() as (read_stream, write_stream):
-            await self._server.run(
-                read_stream,
-                write_stream,
-                self._server.create_initialization_options(),
-            )
+        try:
+            async with stdio_server() as (read_stream, write_stream):
+                await self._server.run(
+                    read_stream,
+                    write_stream,
+                    self._server.create_initialization_options(),
+                )
+        finally:
+            # Reap tracked detached children on clean exits (stdio closed
+            # by client; programmatic stop). On the docker-stop path,
+            # SIGTERM kills this Python process before finally can run
+            # without a signal handler — but the container teardown that
+            # follows reaps detached children as siblings under PID 1
+            # directly, so they don't leak. This hook is therefore the
+            # narrower case of "the server stopped but the container
+            # survives." Adding a SIGTERM handler to extend coverage is
+            # possible but not needed given the docker teardown path.
+            await self._cleanup_detached()
 
     @classmethod
     def main(cls) -> None:
